@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
+  "enable_format": true,
+  "enable_hover": true,
+  "enable_document_symbols": true,
+  "enable_semantic_tokens": true,
+  "enable_snippets": true,
+  "enable_references": true,
+  "enable_document_highlights": true,
+  "enable_inlay_hints_params": true,
+  "enable_inlay_hints_default_params": false,
+  "enable_inlay_hints_implicit_return": true,
+  "enable_procedure_snippet": true,
+  "enable_auto_import": true,
+  "enable_completion_matching": true,
+  "enable_document_links": true,
+  "enable_fake_methods": false,
+  "checker_args": "-vet -strict-style",
+  "verbose": false,
+  "collections": [
+    {
+      "name": "src",
+      "path": "src"
+    }
+  ]
+}
