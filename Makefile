@@ -6,7 +6,9 @@ ODIN          := odin
 COLLECTIONS   := -collection:src=$(SRC_DIR)
 DEBUG_FLAGS   := -debug -o:none
 RELEASE_FLAGS := -o:speed -no-bounds-check
+TEST_FLAGS    := -debug -o:none
 SOURCES       := $(wildcard $(SRC_DIR)/*.odin)
+TEST_DIR      := tests
 
 .PHONY: all build run release vet check clean rebuild help
 all: build
@@ -36,6 +38,14 @@ check:
 clean:
 	@echo "Cleaning build directory..."
 	@rm -rf $(BUILD_DIR)
+
+test:
+	@echo "Running tests..."
+	$(ODIN) test $(TEST_DIR) $(COLLECTIONS) $(TEST_FLAGS)
+
+test-verbose:
+	@echo "Running tests (verbose)..."
+	$(ODIN) test $(TEST_DIR) $(COLLECTIONS) $(TEST_FLAGS) -define:ODIN_TEST_FANCY=false
 
 rebuild: clean build
 
