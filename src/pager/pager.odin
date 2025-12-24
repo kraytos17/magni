@@ -56,9 +56,11 @@ page_mark_clean :: proc(page: ^Page) {
 	}
 }
 
-// Pager manages page-level access to the database file
-// Thread-safe with internal mutex protection
-// NOTE: Pages must be allocated sequentially - sparse page allocation not supported
+/*
+Pager manages page-level access to the database file
+Thread-safe with internal mutex protection
+NOTE: Pages must be allocated sequentially - sparse page allocation not supported
+*/
 Pager :: struct {
 	file:            ^os.File,
 	file_len:        i64,
@@ -78,7 +80,6 @@ pager_open :: proc(path: string) -> (^Pager, os.Error) {
 	pager.page_size = types.PAGE_SIZE
 	pager.max_cache_pages = 256
 	pager.page_cache = make(map[u32]^Page, int(pager.max_cache_pages))
-
 	flags := os.O_RDWR | os.O_CREATE
 	file, open_err := os.open(path, flags)
 	if open_err != nil {
@@ -95,7 +96,6 @@ pager_open :: proc(path: string) -> (^Pager, os.Error) {
 		free(pager)
 		return nil, size_err
 	}
-
 	pager.file_len = file_size
 	return pager, nil
 }
@@ -138,7 +138,6 @@ pager_get_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
 	if page_num >= num_pages {
 		return nil, .Not_Exist
 	}
-
 	if page_num > (1 << 30) {
 		return nil, .Invalid_Argument
 	}
@@ -155,7 +154,6 @@ pager_get_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
 		page_destroy(page)
 		return nil, read_err
 	}
-
 	if bytes_read < int(pager.page_size) {
 		page_destroy(page)
 		return nil, .Unexpected_EOF
@@ -235,7 +233,6 @@ pager_flush_page_unsafe :: proc(pager: ^Pager, page_num: u32) -> os.Error {
 	if bytes_written != len(page.data) {
 		return .Short_Write
 	}
-
 	page_mark_clean(page)
 	return nil
 }

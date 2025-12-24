@@ -128,7 +128,6 @@ execute_select :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 		return false
 	}
 
-	// defer schema.schema_table_free(table)
 	display_all := len(stmt.select_columns) == 0
 	col_indices := make([dynamic]int, context.temp_allocator)
 	if !display_all {
@@ -214,7 +213,6 @@ execute_update :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 		return false
 	}
 
-	defer schema.schema_table_free(table)
 	update_indices := make([dynamic]int, context.temp_allocator)
 	for col_name in stmt.update_columns {
 		idx, ok := schema.schema_find_column_index(table.columns, col_name)
@@ -304,7 +302,6 @@ execute_delete :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 		return false
 	}
 
-	defer schema.schema_table_free(table)
 	rowids_to_delete := make([dynamic]types.Row_ID, context.temp_allocator)
 	cursor := btree.btree_cursor_start(table.root_page, context.temp_allocator)
 	for !cursor.end_of_table {
@@ -329,6 +326,7 @@ execute_delete :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 				continue
 			}
 		}
+		
 		append(&rowids_to_delete, rowid)
 		btree.btree_cell_ref_destroy(&cell_ref)
 		btree.btree_cursor_advance(p, &cursor)
@@ -382,6 +380,7 @@ evaluate_where_clause :: proc(
 			append(&results, false)
 			continue
 		}
+		
 		result := evaluate_condition(cond, values[col_idx])
 		append(&results, result)
 	}

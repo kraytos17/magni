@@ -72,7 +72,7 @@ Condition :: struct {
 }
 
 // WHERE clause
-// NOTE: limitation - only supports uniform AND or uniform OR, not mixed (e.g., "a=1 AND b=2 OR c=3" not supported)
+// NOTE: only supports uniform AND or uniform OR, not mixed (e.g., "a=1 AND b=2 OR c=3" not supported)
 // Use parentheses or multiple queries for complex conditions
 Where_Clause :: struct {
 	conditions: []Condition,
@@ -456,7 +456,6 @@ parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, 
 			return stmt, false
 		}
 	}
-
 	stmt.insert_values = values[:]
 	return stmt, true
 }
@@ -732,7 +731,6 @@ parse_where_clause :: proc(p: ^Parser, allocator := context.allocator) -> Maybe(
 			break
 		}
 	}
-
 	clause.conditions = conditions[:]
 	return clause
 }
@@ -784,6 +782,7 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) 
 statement_free :: proc(stmt: Statement) {
 	delete(stmt.table_name)
 	delete(stmt.from_table)
+	
 	for col in stmt.columns {
 		delete(col.name)
 	}

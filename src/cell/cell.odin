@@ -14,13 +14,6 @@ Cell :: struct {
 	allocator: mem.Allocator,
 }
 
-// Cell_Builder is used for constructing cells with explicit allocator control
-Cell_Builder :: struct {
-	rowid:     types.Row_ID,
-	values:    [dynamic]types.Value,
-	allocator: mem.Allocator,
-}
-
 // Serialization options for fine-grained control
 Serialize_Options :: struct {
 	temp_allocator: mem.Allocator,
@@ -30,34 +23,6 @@ Serialize_Options :: struct {
 Deserialize_Options :: struct {
 	allocator: mem.Allocator,
 	zero_copy: bool,
-}
-
-cell_builder_init :: proc(allocator := context.allocator) -> Cell_Builder {
-	return Cell_Builder{values = make([dynamic]types.Value, allocator), allocator = allocator}
-}
-
-cell_builder_set_rowid :: proc(builder: ^Cell_Builder, rowid: types.Row_ID) {
-	builder.rowid = rowid
-}
-
-cell_builder_add_value :: proc(builder: ^Cell_Builder, value: types.Value) {
-	append(&builder.values, value)
-}
-
-cell_builder_build :: proc(builder: ^Cell_Builder) -> Cell {
-	cell := Cell {
-		rowid     = builder.rowid,
-		values    = builder.values[:],
-		allocator = builder.allocator,
-	}
-	builder.values = nil
-	return cell
-}
-
-cell_builder_destroy :: proc(builder: ^Cell_Builder) {
-	if builder.values != nil {
-		delete(builder.values)
-	}
 }
 
 cell_create :: proc(
@@ -105,8 +70,6 @@ cell_destroy :: proc(cell: ^Cell) {
 cell_calculate_size :: proc(rowid: types.Row_ID, values: []types.Value) -> int {
 	context.allocator = context.temp_allocator
 	serial_types := make([dynamic]u64, 0, len(values))
-	// defer delete(serial_types)
-
 	payload_size := 0
 	for val in values {
 		serial := utils.serial_type_for_value(val)
@@ -149,8 +112,6 @@ cell_serialize :: proc(
 
 	context.allocator = temp_alloc
 	serial_types := make([dynamic]u64, 0, len(values))
-	// defer delete(serial_types)
-
 	payload_size := 0
 	for val in values {
 		serial := utils.serial_type_for_value(val)
@@ -310,7 +271,7 @@ cell_deserialize :: proc(
 				text_str := string(text_bytes)
 				append(&values, types.value_text(text_str))
 			} else {
-				text_str := strings.clone_from_bytes(text_bytes, result_allocator)
+				text_str := strings.clone_from(text_bytes, result_allocator)
 				append(&values, types.value_text(text_str))
 			}
 			pos += text_len

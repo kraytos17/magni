@@ -102,6 +102,7 @@ schema_table_from_values :: proc(
 		append(&columns, col)
 		idx += 3
 	}
+	
 	table.columns = columns[:]
 	success = true
 	return table, true
@@ -121,18 +122,6 @@ schema_add_table :: proc(
 	}
 
 	values := schema_table_to_values(table, context.temp_allocator)
-	// defer {
-	// 	for val in values {
-	// 		#partial switch v in val {
-	// 		case string:
-	// 			delete(v, context.temp_allocator)
-	// 		case []u8:
-	// 			delete(v, context.temp_allocator)
-	// 		}
-	// 	}
-	// 	delete(values, context.temp_allocator)
-	// }
-
 	rowid := types.Row_ID(hash_string(table_name))
 	err := btree.btree_insert_cell(p, SCHEMA_PAGE, rowid, values)
 	if err != .None {
@@ -258,7 +247,7 @@ schema_table_exists :: proc(p: ^pager.Pager, table_name: string) -> bool {
 	return found
 }
 
-// Free table memory (Wrapper for consistent API)
+// Free table memory
 schema_table_free :: proc(table: types.Table) {
 	delete(table.name)
 	for col in table.columns {
@@ -334,9 +323,9 @@ schema_debug_print_entry :: proc(table: types.Table) {
 	fmt.println("Columns:")
 	for col, i in table.columns {
 		flags := make([dynamic]string, context.temp_allocator)
-
 		if col.pk do append(&flags, "PRIMARY KEY")
 		if col.not_null do append(&flags, "NOT NULL")
+		
 		flags_str := strings.join(flags[:], ", ", context.temp_allocator)
 		type_str: string
 		switch col.type {
