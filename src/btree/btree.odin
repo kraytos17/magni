@@ -39,12 +39,6 @@ BTree_Error :: enum {
 	Serialization_Failed,
 }
 
-// Result type for operations that can fail
-BTree_Result :: union($T: typeid) {
-	T,
-	BTree_Error,
-}
-
 // B-tree cursor with memory management
 BTree_Cursor :: struct {
 	page_num:     u32,
@@ -258,7 +252,11 @@ btree_insert_cell :: proc(
 
 	header.cell_count += 1
 	header.cell_content_offset = u16(new_content_offset)
-	return btree_write_header(page.data, header)
+	write_error := btree_write_header(page.data, header)
+	if write_error == .None {
+		pager.pager_mark_dirty(p, page_num)
+	}
+	return write_error
 }
 
 // Create cursor at start of table
@@ -550,7 +548,12 @@ btree_delete_cell :: proc(p: ^pager.Pager, page_num: u32, target_rowid: types.Ro
 	if cell_size > 0 && cell_size < 256 {
 		header.fragmented_bytes += u8(cell_size)
 	}
-	return btree_write_header(page.data, header)
+
+	write_err := btree_write_header(page.data, header)
+	if write_err == .None {
+		pager.pager_mark_dirty(p, page_num)
+	}
+	return write_err
 }
 
 // Debug: Print all cells in a page with proper cleanup
