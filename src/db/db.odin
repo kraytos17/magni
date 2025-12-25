@@ -13,23 +13,36 @@ import "src:utils"
 
 // Database handle
 Database :: struct {
-	path:   string,
-	pager:  ^pager.Pager,
-	is_new: bool,
+	path:   string, // File path to the database
+	pager:  ^pager.Pager, // Page manager for disk I/O (owned pointer)
+	is_new: bool, // Tells if database was just created
 }
 
-// Database header stored at the beginning of page 0
+// Database_Header is the fixed-size metadata stored at the start of page 0.
+//
+// Layout:
+// - magic[13]:       Identifies this as a MAGNI_DB file
+// - page_size[4]:    Size of each page in bytes (must match types.PAGE_SIZE)
+// - page_count[4]:   Number of pages allocated in the file
+// - schema_version[4]: Schema evolution version (currently always 1)
+// - reserved[75]:    Reserved for future extensions
 Database_Header :: struct #packed {
 	magic:          [13]u8,
-	page_size:      u32,
-	page_count:     u32,
-	schema_version: u32,
-	reserved:       [75]u8, // Reserved for future use
+	page_size:      u32, // Must equal types.PAGE_SIZE
+	page_count:     u32, // Total pages allocated in the file
+	schema_version: u32, // Schema version
+	reserved:       [75]u8, // Padding for future use (must be zero)
 }
 
 MAGIC_STRING :: "MAGNI_DB_v1.0"
 
-// Open or create a database
+// Opens an existing database or creates a new one at the specified path.
+// Arguments:
+// - path: File system path to the database file (created if it doesn't exist)
+//
+// Returns:
+// - ^Database: A valid database handle (must be freed with db_close)
+// - bool: True if successful, false on error
 db_open :: proc(path: string) -> (^Database, bool) {
 	db := new(Database)
 	if db == nil {
@@ -64,7 +77,15 @@ db_open :: proc(path: string) -> (^Database, bool) {
 	return db, true
 }
 
-// Initialize a new database
+// Initializes a brand new database file.
+// This procedure is called automatically by db_open() when opening a new/empty file.
+// It should NOT be called directly by user code.
+//
+// Arguments:
+// - db: Database handle (must have a valid pager)
+//
+// Returns:
+// - bool: True if initialization succeeded, false on error
 db_initialize :: proc(db: ^Database) -> bool {
 	page, err := pager.pager_allocate_page(db.pager)
 	if err != nil {
@@ -98,7 +119,16 @@ db_initialize :: proc(db: ^Database) -> bool {
 	return true
 }
 
-// Verify database header
+// Verifies that the database file has a valid header.
+//
+// Arguments:
+// - db: Database handle (must have a valid pager)
+//
+// Returns:
+// - bool: True if the header is valid, false otherwise
+//
+// This is called automatically during db_open() for existing databases.
+// If this returns false, the database is considered corrupted or incompatible.
 db_verify_header :: proc(db: ^Database) -> bool {
 	page, err := pager.pager_get_page(db.pager, 0)
 	if err != nil {
@@ -124,7 +154,21 @@ db_verify_header :: proc(db: ^Database) -> bool {
 	return true
 }
 
-/// Read database header
+// Deserializes a Database_Header from raw page data.
+// The header is stored in little-endian format at the start of page 0.
+//
+// Arguments:
+// - page_data: Raw bytes from page 0 (must be at least size_of(Database_Header))
+//
+// Returns:
+// - Database_Header: The parsed header (zero-initialized if page_data is too small)
+//
+// Layout:
+// - Bytes 0-12:   magic string
+// - Bytes 13-16:  page_size (u32, little-endian)
+// - Bytes 17-20:  page_count (u32, little-endian)
+// - Bytes 21-24:  schema_version (u32, little-endian)
+// - Bytes 25-99:  reserved (unused)
 db_read_header :: proc(page_data: []u8) -> Database_Header {
 	header: Database_Header
 	if len(page_data) < size_of(Database_Header) {
@@ -149,7 +193,15 @@ db_read_header :: proc(page_data: []u8) -> Database_Header {
 	return header
 }
 
-// Write database header
+// Serializes a Database_Header into raw page data.
+// Writes the header to the start of page 0 in little-endian format.
+//
+// Arguments:
+// - page_data: Buffer to write into (must be at least size_of(Database_Header))
+// - header: The header to serialize
+//
+// If page_data is too small, this is a no-op (returns silently).
+// This is called during db_initialize() to write the initial header.
 db_write_header :: proc(page_data: []u8, header: Database_Header) {
 	if len(page_data) < size_of(Database_Header) {
 		return
@@ -171,7 +223,13 @@ db_write_header :: proc(page_data: []u8, header: Database_Header) {
 	offset += 4
 }
 
-// Close database
+// Closes the database and frees all associated resources.
+//
+// Arguments:
+// - db: Database handle (can be nil, in which case this is a no-op)
+//
+// After calling db_close(), the database handle becomes invalid and must not be used.
+// Always pair db_open() with db_close() using defer
 db_close :: proc(db: ^Database) {
 	if db == nil {
 		return
@@ -183,7 +241,21 @@ db_close :: proc(db: ^Database) {
 	free(db)
 }
 
-// Execute a SQL string
+// Executes a SQL statement on the database.
+//
+// This is the primary interface for running SQL commands like:
+// - CREATE TABLE
+// - INSERT INTO
+// - SELECT
+// - UPDATE
+// - DELETE
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
+// - sql: SQL statement string (e.g., "INSERT INTO users VALUES (1, 'Alice')")
+//
+// Returns:
+// - bool: True if the statement executed successfully, false on error
 db_execute :: proc(db: ^Database, sql: string) -> bool {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -200,7 +272,15 @@ db_execute :: proc(db: ^Database, sql: string) -> bool {
 	return executor.execute_statement(db.pager, stmt)
 }
 
-// List all tables in the database
+// Prints a list of all tables in the database to stdout.
+//
+// This is a debugging/introspection utility that displays:
+// - Table names
+// - Column definitions
+// - Root page numbers
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
 db_list_tables :: proc(db: ^Database) {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -209,7 +289,20 @@ db_list_tables :: proc(db: ^Database) {
 	schema.schema_debug_print_all(db.pager)
 }
 
-// Get table information
+// Displays detailed information about a specific table.
+//
+// Shows:
+// - Table name
+// - Column names and types
+// - NOT NULL constraints
+// - Root page number
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
+// - table_name: Name of the table to describe
+//
+// Returns:
+// - bool: True if the table was found and described, false otherwise
 db_describe_table :: proc(db: ^Database, table_name: string) -> bool {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -225,7 +318,19 @@ db_describe_table :: proc(db: ^Database, table_name: string) -> bool {
 	return true
 }
 
-// Get database statistics
+// Prints database statistics to stdout.
+//
+// Statistics include:
+// - Database file path
+// - Page size
+// - Total number of pages
+// - Total database size in bytes and KB
+// - Number of tables
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
+//
+// This is useful for monitoring database growth and understanding storage usage.
 db_stats :: proc(db: ^Database) {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -249,7 +354,19 @@ db_stats :: proc(db: ^Database) {
 	fmt.println("===========================")
 }
 
-// Vacuum database (compact and reclaim space)
+// Compacts the database and reclaims unused space.
+//
+// CURRENT STATUS: NOT IMPLEMENTED
+//
+// Planned operations:
+// - Defragment pages to reduce fragmentation
+// - Reclaim space from deleted rows
+// - Rebuild indexes for better performance
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
+//
+// This is a placeholder for future implementation.
 db_vacuum :: proc(db: ^Database) {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -263,7 +380,17 @@ db_vacuum :: proc(db: ^Database) {
 	fmt.println("  - Rebuild indexes")
 }
 
-// Checkpoint/flush all dirty pages to disk
+// Flushes all dirty (modified) pages to disk immediately.
+//
+// This ensures that all changes made so far are persisted to the database file.
+// Normally, dirty pages are flushed automatically when the page cache is full
+// or when the database is closed.
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
+//
+// Returns:
+// - bool: True if the checkpoint succeeded, false on error
 db_checkpoint :: proc(db: ^Database) -> bool {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -275,7 +402,23 @@ db_checkpoint :: proc(db: ^Database) -> bool {
 	return true
 }
 
-// Begin transaction (just a marker, no actual transaction support yet)
+// Begins a database transaction.
+//
+// CURRENT STATUS: NOT IMPLEMENTED
+//
+// This is a placeholder for future ACID transaction support.
+// Currently, this just prints a message and returns true.
+//
+// Arguments:
+// - db: Database handle
+//
+// Returns:
+// - bool: Always true in MVP
+//
+// Planned behavior:
+// - Create a transaction context
+// - Enable rollback capability
+// - Isolate changes until commit
 db_begin :: proc(db: ^Database) -> bool {
 	if db == nil {
 		return false
@@ -284,7 +427,21 @@ db_begin :: proc(db: ^Database) -> bool {
 	return true
 }
 
-// Commit transaction (just flush all pages)
+// Commits the current transaction.
+//
+// CURRENT STATUS: Partial implementation (flushes pages, no rollback protection)
+//
+// In the MVP, this simply flushes all dirty pages to disk via db_checkpoint().
+// In a full implementation, this would:
+// - Mark the transaction as committed
+// - Make all changes visible to other connections
+// - Release locks
+//
+// Arguments:
+// - db: Database handle
+//
+// Returns:
+// - bool: True if the commit (flush) succeeded, false on error
 db_commit :: proc(db: ^Database) -> bool {
 	if db == nil {
 		return false
@@ -293,7 +450,22 @@ db_commit :: proc(db: ^Database) -> bool {
 	return db_checkpoint(db)
 }
 
-// Rollback transaction (not supported)
+// Rolls back the current transaction.
+//
+// CURRENT STATUS: NOT IMPLEMENTED IN MVP
+//
+// This is a placeholder for future rollback support.
+// Currently, this just prints a message and returns false.
+//
+// Arguments:
+// - db: Database handle
+//
+// Returns:
+// - bool: Always false in MVP (not supported)
+//
+// Planned behavior:
+// - Undo all changes made since db_begin()
+// - Restore the database to its pre-transaction state
 db_rollback :: proc(db: ^Database) -> bool {
 	if db == nil {
 		return false
@@ -302,7 +474,23 @@ db_rollback :: proc(db: ^Database) -> bool {
 	return false
 }
 
-// Integrity check
+// Performs an integrity check on the database.
+//
+// Verifications performed:
+// 1. Database header validity (magic string and page size)
+// 2. Schema page accessibility
+// 3. All table root pages are accessible
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
+//
+// Returns:
+// - bool: True if all checks passed, false if corruption detected
+//
+// Note: This is a basic check. A full check would also verify:
+// - B-tree structure validity
+// - Foreign key constraints
+// - Index consistency
 db_integrity_check :: proc(db: ^Database) -> bool {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -340,7 +528,21 @@ db_integrity_check :: proc(db: ^Database) -> bool {
 	return true
 }
 
-// Export database to SQL dump
+// Exports the database schema and data to a SQL dump file.
+//
+// CURRENT STATUS: NOT IMPLEMENTED
+//
+// Planned behavior:
+// - Generate CREATE TABLE statements for all tables
+// - Generate INSERT statements for all rows
+// - Write to the specified output file
+//
+// Arguments:
+// - db: Database handle
+// - output_path: File path to write the SQL dump
+//
+// Returns:
+// - bool: Always false in MVP (not implemented)
 db_export_sql :: proc(db: ^Database, output_path: string) -> bool {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -352,7 +554,21 @@ db_export_sql :: proc(db: ^Database, output_path: string) -> bool {
 	return false
 }
 
-// Import SQL dump
+// Imports database schema and data from a SQL dump file.
+//
+// CURRENT STATUS: NOT IMPLEMENTED
+//
+// Planned behavior:
+// - Parse SQL dump file
+// - Execute CREATE TABLE statements
+// - Execute INSERT statements
+//
+// Arguments:
+// - db: Database handle
+// - input_path: File path to read the SQL dump from
+//
+// Returns:
+// - bool: Always false in MVP (not implemented)
 db_import_sql :: proc(db: ^Database, input_path: string) -> bool {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
@@ -364,8 +580,20 @@ db_import_sql :: proc(db: ^Database, input_path: string) -> bool {
 	return false
 }
 
-// Debug: Dump all content of a specific table to stdout
-db_debug_dump_table :: proc(db: ^Database, table_name: string) {
+// Dumps all rows from a table to stdout for debugging purposes.
+//
+// This prints:
+// - Table name and root page number
+// - Each row with its RowID and column values
+// - Total row count
+//
+// Arguments:
+// - db: Database handle (must be valid and non-nil)
+// - table_name: Name of the table to dump
+//
+// This is a debugging utility and should not be used in production code.
+// For large tables, this will produce a lot of output.
+db_dump_table :: proc(db: ^Database, table_name: string) {
 	if db == nil || db.pager == nil {
 		fmt.println("Error: Invalid database handle")
 		return

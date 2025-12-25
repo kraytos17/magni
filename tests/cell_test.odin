@@ -187,7 +187,7 @@ test_cell_deserialize_zero_copy :: proc(t: ^testing.T) {
 
 	c, _, ok := cell.cell_deserialize(buffer, 0, opts)
 	defer delete(c.values)
-	
+
 	testing.expect(t, ok, "Deserialization failed")
 	text := c.values[1].(string)
 	testing.expect(t, text == "shared", "Text mismatch")

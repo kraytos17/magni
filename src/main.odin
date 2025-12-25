@@ -67,7 +67,7 @@ main :: proc() {
 					parts := strings.split(line, " ")
 					if len(parts) == 2 {
 						table_name := parts[1]
-						db.db_debug_dump_table(database, table_name)
+						db.db_dump_table(database, table_name)
 					} else {
 						fmt.println("Usage: .dump <table_name>")
 					}

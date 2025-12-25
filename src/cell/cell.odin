@@ -6,25 +6,58 @@ import "core:strings"
 import "src:types"
 import "src:utils"
 
-// Cell represents a serialized row in a B-tree leaf node
-// Cell owns all memory in its values array
+// Cell represents a serialized row (Record) in a B-tree leaf node.
+//
+// MEMORY OWNERSHIP:
+// The Cell struct OWNS the memory for the `values` slice and the data within it
+// (unless zero_copy was used during deserialization).
+//
+// IMPORTANT: You MUST call `cell_destroy()` to free this memory when the Cell
+// is no longer needed, EXCEPT when the Cell was created with zero_copy=true
 Cell :: struct {
-	rowid:     types.Row_ID,
-	values:    []types.Value,
-	allocator: mem.Allocator,
+	rowid:     types.Row_ID, // The unique 64-bit integer key for this row
+	values:    []types.Value, // Array of column values (dynamically allocated)
+	allocator: mem.Allocator, // The allocator used to create `values`
 }
 
-// Serialization options for fine-grained control
+// Configuration options for serialization.
 Serialize_Options :: struct {
+	// Temporary allocator used for intermediate arrays (e.g., serial types).
+	// Defaults to context.temp_allocator if nil.
 	temp_allocator: mem.Allocator,
 }
 
-// Deserialization options
+// Configuration options for deserialization.
 Deserialize_Options :: struct {
+	// The allocator used for the `values` array and any deep-copied strings/blobs.
+	// Defaults to context.allocator if nil.
 	allocator: mem.Allocator,
+
+	// If true, Text and Blob values will point directly into the source buffer.
+	//
+	// Note for zero_copy=true:
+	// 1. The Cell CANNOT outlive the source buffer - accessing the Cell after
+	//    the source buffer is freed/modified results in undefined behavior.
+	// 2. You MUST NOT call cell_destroy() on zero-copy Cells, as the strings
+	//    and blobs were never allocated and cannot be freed. Calling cell_destroy()
+	//    will cause a "bad free" instance.
+	// 3. Only the `values` slice itself should be freed (via `delete(cell.values)`).
+	//
+	// If false (default), Text and Blob values are deeply copied/cloned (safer).
+	// This is the recommended default for most use cases.
 	zero_copy: bool,
 }
 
+// Creates a new Cell from raw values, performing a DEEP COPY of all data.
+//
+// Arguments:
+// - rowid: The unique key.
+// - values: The values to store.
+// - allocator: Allocator for the new Cell's internal storage.
+//
+// Returns:
+// - Cell: The new cell (Must be freed via cell_destroy).
+// - Allocator_Error: If memory allocation fails.
 cell_create :: proc(
 	rowid: types.Row_ID,
 	values: []types.Value,
@@ -50,6 +83,18 @@ cell_create :: proc(
 	return Cell{rowid = rowid, values = values_copy, allocator = allocator}, nil
 }
 
+// Frees all heap memory associated with a Cell.
+//
+// Behavior:
+// 1. Iterates through `cell.values` and frees every string/blob allocated.
+// 2. Frees the `cell.values` slice itself.
+// 3. Resets `cell.values` to nil to prevent double-free bugs.
+//
+// DO NOT call this on Cells deserialized with zero_copy=true!
+// Zero-copy Cells do not own their string/blob data, so freeing them causes
+// a "bad free" error. For zero-copy Cells, only free the values array:
+//     delete(cell.values)
+// `Note`: Safe to call on a zero-initialized Cell.
 cell_destroy :: proc(cell: ^Cell) {
 	if cell.values == nil {
 		return
@@ -67,6 +112,10 @@ cell_destroy :: proc(cell: ^Cell) {
 	cell.values = nil
 }
 
+// Calculates exactly how many bytes are needed to store this Cell on disk.
+// Includes overhead for Varints, Headers, and Serial Types.
+//
+// Optimization: Uses context.temp_allocator for intermediate calculations.
 cell_calculate_size :: proc(rowid: types.Row_ID, values: []types.Value) -> int {
 	context.allocator = context.temp_allocator
 	serial_types := make([dynamic]u64, 0, len(values))
@@ -94,6 +143,16 @@ cell_calculate_size :: proc(rowid: types.Row_ID, values: []types.Value) -> int {
 	return total_size
 }
 
+// Writes the Cell data into a byte buffer.
+//
+// Inputs:
+// - dest: The target buffer (Must be large enough, see cell_calculate_size).
+// - rowid: Key.
+// - values: Data.
+//
+// Returns:
+// - bytes_written: Actual number of bytes written.
+// - ok: False if dest is too small.
 cell_serialize :: proc(
 	dest: []u8,
 	rowid: types.Row_ID,
@@ -174,6 +233,22 @@ cell_serialize :: proc(
 	return offset, true
 }
 
+// Reads a Cell from a byte buffer.
+//
+// Inputs:
+// - src: Buffer containing the serialized cell.
+// - offset: Where to start reading in the buffer.
+// - options: Allocator choice and Zero-Copy preference.
+//
+// MEMORY BEHAVIOR:
+// 1. The `cell.values` array is ALWAYS allocated using `options.allocator`.
+//    You MUST free it later (usually via cell_destroy).
+// 2. If `options.zero_copy` is TRUE:
+//    - Strings and Blobs in the cell point directly to memory in `src`.
+//    - The Cell becomes invalid if `src` is freed or modified.
+// 3. If `options.zero_copy` is FALSE (default):
+//    - Strings and Blobs are allocated and copied into `options.allocator`.
+//    - The Cell is independent of `src`.
 cell_deserialize :: proc(
 	src: []u8,
 	offset := 0,
@@ -303,6 +378,7 @@ cell_deserialize :: proc(
 	return cell, bytes_consumed, true
 }
 
+// Reads only the RowID from a serialized cell.
 cell_get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	if offset >= len(src) {
 		return 0, false
@@ -322,6 +398,7 @@ cell_get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	return types.Row_ID(rowid), true
 }
 
+// Returns the total size in bytes of the cell at the given offset.
 cell_get_size :: proc(src: []u8, offset := 0) -> (int, bool) {
 	if offset >= len(src) {
 		return 0, false
@@ -335,6 +412,7 @@ cell_get_size :: proc(src: []u8, offset := 0) -> (int, bool) {
 	return total, true
 }
 
+// Prints the cell content to stdout for debugging purposes.
 cell_debug_print :: proc(cell: Cell) {
 	fmt.printf("Cell(rowid=%d, values=[", cell.rowid)
 	for val, i in cell.values {
@@ -346,6 +424,8 @@ cell_debug_print :: proc(cell: Cell) {
 	fmt.println("])")
 }
 
+// Validates that the cell's values match the expected table schema (Columns).
+// Checks for type mismatches and Not-Null constraints.
 cell_validate_types :: proc(values: []types.Value, columns: []types.Column) -> bool {
 	if len(values) != len(columns) {
 		return false
@@ -379,6 +459,7 @@ cell_validate_types :: proc(values: []types.Value, columns: []types.Column) -> b
 	return true
 }
 
+// Creates a deep copy of an existing Cell.
 cell_clone :: proc(cell: Cell, allocator := context.allocator) -> (Cell, mem.Allocator_Error) {
 	return cell_create(cell.rowid, cell.values, allocator)
 }
