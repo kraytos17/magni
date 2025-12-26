@@ -6,6 +6,18 @@ import os "core:os/os2"
 import "core:sync"
 import "src:types"
 
+/*
+ Page Structure
+
+ Represents a single fixed-size block of memory (typically 4KB) that mirrors
+ a block in the database file.
+
+ Fields:
+ - data:     The raw byte buffer containing the page content.
+ - dirty:    True if the page has been modified in memory and differs from disk. Dirty pages must be flushed back to disk before eviction.
+ - pinned:   True if the page is currently being used by an operation. Pinned pages are immune to eviction.
+ - page_num: The index of this page in the database file (0-indexed).
+ */
 Page :: struct {
 	data:     []u8,
 	dirty:    bool,
@@ -13,7 +25,9 @@ Page :: struct {
 	page_num: u32,
 }
 
-// Create a new page
+// Create a new page instance in memory.
+//
+// Note: This does not read from disk; it allocates the container.
 page_new :: proc(page_num: u32, page_size: u32) -> ^Page {
 	page := new(Page)
 	if page == nil {
@@ -57,10 +71,23 @@ page_mark_clean :: proc(page: ^Page) {
 }
 
 /*
-Pager manages page-level access to the database file
-Thread-safe with internal mutex protection
-NOTE: Pages must be allocated sequentially - sparse page allocation not supported
-*/
+ Pager
+
+ The Pager acts as the intermediary between the persistent storage (Disk) and
+ the volatile memory (RAM). It manages a cache of pages to minimize expensive
+ file I/O operations.
+
+ Responsibilities:
+ 1. Reading pages from the file handle into memory.
+ 2. Writing dirty pages from memory back to the file handle.
+ 3. Managing a fixed-size cache (evicting old pages to make room for new ones).
+ 4. Ensuring thread safety for page access.
+
+ Edge Case:
+ This Pager assumes a dense file structure. Page allocation is purely sequential
+ (appending to the end of the file). Sparse files or "holes" in page numbering
+ are not supported.
+ */
 Pager :: struct {
 	file:            ^os.File,
 	file_len:        i64,
@@ -70,7 +97,14 @@ Pager :: struct {
 	mutex:           sync.Mutex,
 }
 
-// Open a database file and initialize pager
+/*
+ Opens the database file at the given path. If the file does not exist,
+ it is created.
+
+ Returns:
+ - ^Pager: Pointer to the initialized pager.
+ - os.Error: Error code if file permissions fail or allocation fails.
+ */
 pager_open :: proc(path: string) -> (^Pager, os.Error) {
 	pager := new(Pager)
 	if pager == nil {
@@ -100,7 +134,9 @@ pager_open :: proc(path: string) -> (^Pager, os.Error) {
 	return pager, nil
 }
 
-// Close pager and flush all cached pages
+/*
+ Flushes all dirty pages to disk, syncs the file, closes the file, and frees all memory associated with the cache.
+ */
 pager_close :: proc(pager: ^Pager) {
 	if pager == nil {
 		return
@@ -164,8 +200,10 @@ pager_get_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
 	return page, nil
 }
 
-// Allocate a new page at the end of the file (thread-safe)
-// Returns the newly allocated page
+// Allocate a new page at the end of the file and returns the newly allocated page
+//
+// Note: The new page is marked `dirty` immediately so it will be written to disk
+// on the next flush/eviction.
 pager_allocate_page :: proc(pager: ^Pager) -> (^Page, os.Error) {
 	sync.lock(&pager.mutex)
 	defer sync.unlock(&pager.mutex)
@@ -187,7 +225,8 @@ pager_allocate_page :: proc(pager: ^Pager) -> (^Page, os.Error) {
 	return page, nil
 }
 
-// Get existing page or allocate new one (thread-safe)
+// Get existing page or allocate new one
+//
 // NOTE: Only works for sequential allocation - page_num must equal current page count
 pager_get_or_allocate_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
 	page, err := pager_get_page(pager, page_num)
@@ -214,7 +253,8 @@ pager_mark_dirty :: proc(pager: ^Pager, page_num: u32) {
 	}
 }
 
-// Flush a single page to disk (UNSAFE - caller must hold mutex)
+// Internal: Flush a specific page to disk.
+// Requires caller to hold the mutex.
 @(private = "file")
 pager_flush_page_unsafe :: proc(pager: ^Pager, page_num: u32) -> os.Error {
 	page, found := pager.page_cache[page_num]
@@ -245,7 +285,7 @@ pager_flush_all :: proc(pager: ^Pager) {
 	pager_flush_all_unsafe(pager)
 }
 
-// Flush all dirty pages to disk (UNSAFE - caller must hold mutex)
+// Internal: Iterates all cached pages and flushes dirty ones.
 @(private = "file")
 pager_flush_all_unsafe :: proc(pager: ^Pager) {
 	for page_num, page in pager.page_cache {
@@ -257,7 +297,7 @@ pager_flush_all_unsafe :: proc(pager: ^Pager) {
 	}
 }
 
-// Flush a specific page to disk (Thread-safe)
+// Flush a specific page to disk
 pager_flush_page :: proc(pager: ^Pager, page_num: u32) -> os.Error {
 	sync.lock(&pager.mutex)
 	defer sync.unlock(&pager.mutex)
@@ -265,7 +305,7 @@ pager_flush_page :: proc(pager: ^Pager, page_num: u32) -> os.Error {
 	return pager_flush_page_unsafe(pager, page_num)
 }
 
-// Sync all data to disk (flush + fsync) - thread-safe
+// Sync all data to disk (flush + fsync)
 pager_sync :: proc(pager: ^Pager) -> os.Error {
 	pager_flush_all(pager)
 
@@ -304,7 +344,7 @@ pager_evict_if_needed_unsafe :: proc(pager: ^Pager) {
 	fmt.eprintln("Warning: All cached pages are pinned, cannot evict")
 }
 
-// Get current page count (thread-safe)
+// Get current page count
 pager_page_count :: proc(pager: ^Pager) -> u32 {
 	sync.lock(&pager.mutex)
 	defer sync.unlock(&pager.mutex)
@@ -312,7 +352,7 @@ pager_page_count :: proc(pager: ^Pager) -> u32 {
 	return u32(pager.file_len / i64(pager.page_size))
 }
 
-// Pin a page (prevent eviction) - thread-safe
+// Pin a page (prevent eviction)
 pager_pin_page :: proc(pager: ^Pager, page_num: u32) {
 	sync.lock(&pager.mutex)
 	defer sync.unlock(&pager.mutex)
@@ -322,7 +362,7 @@ pager_pin_page :: proc(pager: ^Pager, page_num: u32) {
 	}
 }
 
-// Unpin a page (allow eviction) - thread-safe
+// Unpin a page (allow eviction)
 pager_unpin_page :: proc(pager: ^Pager, page_num: u32) {
 	sync.lock(&pager.mutex)
 	defer sync.unlock(&pager.mutex)

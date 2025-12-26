@@ -21,7 +21,16 @@ schema_init :: proc(p: ^pager.Pager) -> bool {
 	}
 
 	init_err := btree.btree_init_leaf_page(page.data)
-	return init_err == .None
+	if init_err != .None {
+		return false
+	}
+
+	flush_err := pager.pager_flush_page(p, page.page_num)
+	if flush_err != nil {
+		fmt.println("Critical Error: Failed to flush schema page to disk")
+		return false
+	}
+	return true
 }
 
 // Serialize a table definition into values for storage
@@ -102,7 +111,7 @@ schema_table_from_values :: proc(
 		append(&columns, col)
 		idx += 3
 	}
-	
+
 	table.columns = columns[:]
 	success = true
 	return table, true
@@ -325,7 +334,7 @@ schema_debug_print_entry :: proc(table: types.Table) {
 		flags := make([dynamic]string, context.temp_allocator)
 		if col.pk do append(&flags, "PRIMARY KEY")
 		if col.not_null do append(&flags, "NOT NULL")
-		
+
 		flags_str := strings.join(flags[:], ", ", context.temp_allocator)
 		type_str: string
 		switch col.type {

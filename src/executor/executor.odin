@@ -10,6 +10,12 @@ import "src:schema"
 import "src:types"
 
 // Deep copy values to ensure they survive beyond the source cell's lifetime
+//
+// Parameters:
+// values: The source slice of values (usually from a B-Tree cell).
+//
+// Returns:
+// A new slice of Values with deep-copied strings and blobs.
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	new_values := make([]types.Value, len(values), context.temp_allocator)
 	for v, i in values {
@@ -62,6 +68,16 @@ execute_create_table :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 	if err != nil {
 		fmt.eprintln("Error: Failed to allocate page for table")
 		return false
+	}
+
+	for root_page.page_num <= schema.SCHEMA_PAGE {
+		pager.pager_mark_dirty(p, root_page.page_num)
+		pager.pager_flush_page(p, root_page.page_num)
+		root_page, err = pager.pager_allocate_page(p)
+		if err != nil {
+			fmt.eprintln("Error: Failed to allocate valid page")
+			return false
+		}
 	}
 
 	init_err := btree.btree_init_leaf_page(root_page.data)
@@ -326,7 +342,7 @@ execute_delete :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 				continue
 			}
 		}
-		
+
 		append(&rowids_to_delete, rowid)
 		btree.btree_cell_ref_destroy(&cell_ref)
 		btree.btree_cursor_advance(p, &cursor)
@@ -380,7 +396,7 @@ evaluate_where_clause :: proc(
 			append(&results, false)
 			continue
 		}
-		
+
 		result := evaluate_condition(cond, values[col_idx])
 		append(&results, result)
 	}

@@ -48,13 +48,19 @@ Token_Type :: enum {
 	GREATER_EQUAL,
 }
 
+// Token represents a single unit of SQL code.
+//
+// Fields :-
+// type - The category of the token
+// lexeme - The actual string representation of the token
+// line - Line number in source code
 Token :: struct {
 	type:   Token_Type,
 	lexeme: string,
 	line:   int,
 }
 
-// Statement types
+// Statement Types correspond to the top-level SQL commands supported.
 Statement_Type :: enum {
 	CREATE_TABLE,
 	INSERT,
@@ -64,22 +70,38 @@ Statement_Type :: enum {
 	DROP_TABLE,
 }
 
-// WHERE clause condition
+// Represents a single comparison in a WHERE clause.
 Condition :: struct {
 	column:   string,
 	operator: Token_Type,
 	value:    types.Value,
 }
 
-// WHERE clause
-// NOTE: only supports uniform AND or uniform OR, not mixed (e.g., "a=1 AND b=2 OR c=3" not supported)
-// Use parentheses or multiple queries for complex conditions
+/*
+ Where Clause
+
+ Encapsulates filtering logic.
+
+ LIMITATION: This parser currently only supports "Uniform Logic".
+ You can have all ANDs or all ORs, but not a mix (e.g., `A AND B OR C` is invalid).
+
+ Fields:
+ - conditions: List of individual comparisons.
+ - is_and:     If true, all conditions are joined by AND. If false, joined by OR.
+ */
 Where_Clause :: struct {
 	conditions: []Condition,
-	is_and:     bool, // true = all conditions joined with AND, false = all with OR
+	is_and:     bool,
 }
 
-// Parsed statement
+/*
+ The Abstract Syntax Tree (AST) node representing a complete SQL command.
+ Not all fields are used for all statement types (i.e. "fat node" design).
+
+ Note:
+ String fields (table_name, columns names) are allocated using the provided allocator
+ and must be freed using `statement_free`.
+ */
 Statement :: struct {
 	type:           Statement_Type,
 	table_name:     string,
@@ -98,6 +120,7 @@ Parser :: struct {
 	current: int,
 }
 
+// Helper: Maps string literals to their corresponding keyword Token_Type.
 get_keyword_type :: proc(ident: string) -> Token_Type {
 	switch ident {
 	case "CREATE":
@@ -148,7 +171,13 @@ get_keyword_type :: proc(ident: string) -> Token_Type {
 	return .IDENTIFIER
 }
 
-// Tokenize SQL string
+/*
+Converts raw SQL source string into a list of Tokens.
+
+Returns:
+- []Token: Dynamic array of tokens.
+- bool: Success status (false if illegal character or unterminated string).
+ */
 tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
 	tokens := make([dynamic]Token, allocator)
 	i := 0
@@ -281,6 +310,7 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 	return tokens[:], true
 }
 
+// Return current token without consuming it.
 peek :: proc(p: ^Parser) -> Token {
 	if p.current >= len(p.tokens) {
 		return Token{.EOF, "", 0}
@@ -288,6 +318,7 @@ peek :: proc(p: ^Parser) -> Token {
 	return p.tokens[p.current]
 }
 
+// Return current token and advance cursor.
 advance :: proc(p: ^Parser) -> Token {
 	if p.current >= len(p.tokens) {
 		return Token{.EOF, "", 0}
@@ -297,6 +328,7 @@ advance :: proc(p: ^Parser) -> Token {
 	return token
 }
 
+// Check if current token matches any of the given types.
 match :: proc(p: ^Parser, types: ..Token_Type) -> bool {
 	for t in types {
 		if peek(p).type == t {
@@ -307,6 +339,7 @@ match :: proc(p: ^Parser, types: ..Token_Type) -> bool {
 	return false
 }
 
+// Require the next token to be of a specific type.
 expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 	token := peek(p)
 	if token.type != type {
@@ -712,7 +745,7 @@ parse_where_clause :: proc(p: ^Parser, allocator := context.allocator) -> Maybe(
 				clause.is_and = true
 				first_logical_op_seen = true
 			} else if !clause.is_and {
-				// Error: mixing AND and OR not supported for now
+				// Error: mixing AND and OR not supported
 				cleanup_where_conditions(conditions)
 				return nil
 			}
@@ -722,7 +755,7 @@ parse_where_clause :: proc(p: ^Parser, allocator := context.allocator) -> Maybe(
 				clause.is_and = false
 				first_logical_op_seen = true
 			} else if clause.is_and {
-				// Error: mixing AND and OR not supported for now
+				// Error: mixing AND and OR not supported
 				cleanup_where_conditions(conditions)
 				return nil
 			}
@@ -735,6 +768,19 @@ parse_where_clause :: proc(p: ^Parser, allocator := context.allocator) -> Maybe(
 	return clause
 }
 
+/*
+ Main function to take an SQL string and return a parsed AST.
+
+ Parameters:
+ - sql: The raw SQL string.
+ - allocator: The allocator for the AST nodes (strings, arrays).
+
+ Returns:
+ - Statement: The parsed AST.
+ - bool: Success flag.
+
+ Note: Uses context.temp_allocator for the intermediate token list.
+ */
 parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) {
 	tokens, ok := tokenize(sql, context.temp_allocator)
 	if !ok {
@@ -779,10 +825,11 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) 
 	return stmt, true
 }
 
+// Recursively frees all memory associated with a Statement AST.
 statement_free :: proc(stmt: Statement) {
 	delete(stmt.table_name)
 	delete(stmt.from_table)
-	
+
 	for col in stmt.columns {
 		delete(col.name)
 	}
