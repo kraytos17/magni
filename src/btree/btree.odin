@@ -5,7 +5,6 @@ import "core:mem"
 import "src:cell"
 import "src:pager"
 import "src:types"
-import "src:utils"
 
 // Page types identifying the content structure of a B-Tree page.
 // These values typically align with SQLite's file format specifications.
@@ -16,25 +15,24 @@ Page_Type :: enum u8 {
 
 // Represents the raw header found at the start of every B-Tree page.
 // The header occupies the first 8 bytes of the page buffer.
-BTree_Page_Header :: struct {
+Page_Header :: struct #packed {
 	page_type:           Page_Type, // Byte 0: The type of page
-	first_freeblock:     u16, // Bytes 1-2: Offset to the first block of free space
-	cell_count:          u16, // Bytes 3-4: Number of cells currently stored
-	cell_content_offset: u16, // Bytes 5-6: Offset where cell content area begins (grows downwards)
+	first_freeblock:     u16le, // Bytes 1-2: Offset to the first block of free space
+	cell_count:          u16le, // Bytes 3-4: Number of cells currently stored
+	cell_content_offset: u16le, // Bytes 5-6: Offset where cell content area begins (grows downwards)
 	fragmented_bytes:    u8, // Byte 7: Number of fragmented free bytes within the cell area
 }
 
-// The fixed size of the B-Tree Page Header in bytes.
-BTREE_HEADER_SIZE :: 8
+#assert(size_of(Page_Header) == 8)
 
 // A cell pointer is a 2-byte integer offset into the page.
-Cell_Pointer :: u16
+Cell_Pointer :: u16le
 
 // Error types representing specific failure modes in B-Tree operations.
-BTree_Error :: enum {
+Error :: enum {
 	None,
 	Page_Read_Failed, // Underlying pager failed to retrieve the page
-	Invalid_Header, // Page data does not match expected B-Tree header format
+	Invalid_Page_Header, // Page data does not match expected B-Tree header format
 	Invalid_Cell_Pointer, // Cell pointer offset is out of bounds
 	Cell_Deserialize_Failed, // Raw bytes could not be converted to a Cell struct
 	Page_Full, // Not enough contiguous space to insert new cell
@@ -48,27 +46,27 @@ BTree_Error :: enum {
 //
 // MEMORY SAFETY:
 // This struct OWNS the heap memory associated with `cell.values`.
-// The caller is responsible for calling `btree_cell_ref_destroy` when done.
+// The caller is responsible for calling `cell_ref_destroy` when done.
 // Failing to do so will result in a memory leak.
-BTree_Cell_Ref :: struct {
+Cell_Ref :: struct {
 	cell:      cell.Cell,
 	allocator: mem.Allocator,
 }
 
-// Releases the memory owned by a BTree_Cell_Ref.
-// Must be called exactly once for every BTree_Cell_Ref obtained.
-btree_cell_ref_destroy :: proc(ref: ^BTree_Cell_Ref) {
-	cell.cell_destroy(&ref.cell)
+// Releases the memory owned by a Cell_Ref.
+// Must be called exactly once for every Cell_Ref obtained.
+cell_ref_destroy :: proc(ref: ^Cell_Ref) {
+	cell.destroy(&ref.cell)
 }
 
 // Configuration for B-tree operations.
-BTree_Config :: struct {
+Config :: struct {
 	allocator:        mem.Allocator, // Allocator for cell deserialization
 	zero_copy:        bool, // If true, strings/blobs point directly to page buffer (unsafe if page is freed)
 	check_duplicates: bool, // If true, insert verifies uniqueness (expensive)
 }
 
-DEFAULT_CONFIG := BTree_Config {
+DEFAULT_CONFIG := Config {
 	allocator        = {}, // Will default to context.allocator or cursor allocator if nil
 	zero_copy        = false, // Default to safe copies
 	check_duplicates = true, // Default to safety over speed
@@ -76,115 +74,80 @@ DEFAULT_CONFIG := BTree_Config {
 
 // Iterator for traversing B-Tree pages sequentially.
 // Maintains state to track position across multiple calls.
-BTree_Cursor :: struct {
+Cursor :: struct {
 	page_num:     u32, // The physical page number being iterated
 	cell_index:   int, // Current index into the cell pointer array
 	end_of_table: bool, // Flag indicating if iteration is complete
 	allocator:    mem.Allocator, // Allocator used for operations involving this cursor
 }
 
-// Parses the first 8 bytes of raw page data into a struct.
-// Returns Invalid_Header if the buffer is too small or values are corrupt.
-btree_parse_header :: proc(page_data: []u8) -> (BTree_Page_Header, BTree_Error) {
-	if len(page_data) < BTREE_HEADER_SIZE {
-		return BTree_Page_Header{}, .Invalid_Header
+// Casts the raw page buffer directly to a Page_Header struct pointer.
+// Returns nil if the buffer is too small.
+get_header :: proc(page_data: []u8) -> ^Page_Header {
+	if len(page_data) < size_of(Page_Header) {
+		return nil
 	}
-
-	header: BTree_Page_Header
-	header.page_type = Page_Type(page_data[0])
-	first_freeblock, ok1 := utils.read_u16_le(page_data, 1)
-	if !ok1 {
-		return BTree_Page_Header{}, .Invalid_Header
-	}
-
-	header.first_freeblock = first_freeblock
-	cell_count, ok2 := utils.read_u16_le(page_data, 3)
-	if !ok2 {
-		return BTree_Page_Header{}, .Invalid_Header
-	}
-
-	header.cell_count = cell_count
-	cell_content_offset, ok3 := utils.read_u16_le(page_data, 5)
-	if !ok3 {
-		return BTree_Page_Header{}, .Invalid_Header
-	}
-
-	header.cell_content_offset = cell_content_offset
-	header.fragmented_bytes = page_data[7]
-	if int(header.cell_content_offset) > len(page_data) {
-		return BTree_Page_Header{}, .Invalid_Header
-	}
-	return header, .None
+	return (^Page_Header)(raw_data(page_data))
 }
 
-// Serializes the header struct back into the raw page buffer.
-btree_write_header :: proc(page_data: []u8, header: BTree_Page_Header) -> BTree_Error {
-	if len(page_data) < BTREE_HEADER_SIZE {
-		return .Invalid_Bounds
+// Returns a slice view of the active cell pointers.
+get_pointers :: proc(page_data: []u8) -> []Cell_Pointer {
+	header := get_header(page_data)
+	if header == nil {
+		return nil
 	}
-
-	page_data[0] = u8(header.page_type)
-	utils.write_u16_le(page_data, 1, header.first_freeblock)
-	utils.write_u16_le(page_data, 3, header.cell_count)
-	utils.write_u16_le(page_data, 5, header.cell_content_offset)
-	page_data[7] = header.fragmented_bytes
-	return .None
+	ptr_start := raw_data(page_data[size_of(Page_Header):])
+	return ([^]Cell_Pointer)(ptr_start)[:header.cell_count]
 }
 
-// Initializes a raw byte buffer as a fresh B-Tree Leaf Page.
-// Sets cell count to 0 and content offset to the end of the page.
-btree_init_leaf_page :: proc(page_data: []u8) -> BTree_Error {
-	if len(page_data) < BTREE_HEADER_SIZE {
+// Returns a slice view allowing access to "potential" pointers beyond cell_count.
+// Used during insertion to shift memory.
+get_raw_pointers :: proc(page_data: []u8) -> []Cell_Pointer {
+	max_ptrs := (len(page_data) - size_of(Page_Header)) / size_of(Cell_Pointer)
+	ptr_start := raw_data(page_data[size_of(Page_Header):])
+	return ([^]Cell_Pointer)(ptr_start)[:max_ptrs]
+}
+
+init_leaf_page :: proc(page_data: []u8) -> Error {
+	if len(page_data) < size_of(Page_Header) {
 		return .Invalid_Bounds
 	}
 
 	mem.zero_slice(page_data)
-	header := BTree_Page_Header {
-		page_type           = .LEAF_TABLE,
-		first_freeblock     = 0,
-		cell_count          = 0,
-		cell_content_offset = u16(len(page_data)),
-		fragmented_bytes    = 0,
-	}
-	return btree_write_header(page_data, header)
-}
+	header := get_header(page_data)
+	header.page_type = .LEAF_TABLE
+	header.first_freeblock = 0
+	header.cell_count = 0
+	header.cell_content_offset = u16le(len(page_data))
+	header.fragmented_bytes = 0
 
-// Calculates the byte offset of a specific cell pointer in the header array.
-// Formula: Header Size + (Index * 2 bytes)
-btree_cell_pointer_offset :: proc(cell_index: int) -> int {
-	return BTREE_HEADER_SIZE + cell_index * 2
-}
-
-// Reads the offset location of a cell from the pointer array.
-btree_read_cell_pointer :: proc(page_data: []u8, cell_index: int) -> (u16, BTree_Error) {
-	offset := btree_cell_pointer_offset(cell_index)
-	if offset + 2 > len(page_data) {
-		return 0, .Invalid_Cell_Pointer
-	}
-	x, _ := utils.read_u16_le(page_data, offset)
-	return x, .None
-}
-
-// Writes a new cell offset into the pointer array.
-btree_write_cell_pointer :: proc(page_data: []u8, cell_index: int, cell_offset: u16) -> BTree_Error {
-	offset := btree_cell_pointer_offset(cell_index)
-	if offset + 2 > len(page_data) {
-		return .Invalid_Bounds
-	}
-	utils.write_u16_le(page_data, offset, cell_offset)
 	return .None
 }
 
-// Checks if a rowid exists in the page by iterating all cells.
-// Note: This is O(N). Binary search is preferred for large pages.
-btree_rowid_exists :: proc(page_data: []u8, header: BTree_Page_Header, target_rowid: types.Row_ID) -> bool {
-	for i in 0 ..< int(header.cell_count) {
-		cell_ptr, err := btree_read_cell_pointer(page_data, i)
-		if err != .None {
-			continue
+find_insert_index :: proc(page_data: []u8, header: ^Page_Header, target_rowid: types.Row_ID) -> int {
+	left := 0
+	right := int(header.cell_count)
+	pointers := get_pointers(page_data)
+	for left < right {
+		mid := left + (right - left) / 2
+		cell_ptr := pointers[mid]
+		rowid, ok := cell.get_rowid(page_data, int(cell_ptr))
+		if !ok {
+			return left
 		}
+		if rowid < target_rowid {
+			left = mid + 1
+		} else {
+			right = mid
+		}
+	}
+	return left
+}
 
-		rowid, ok := cell.cell_get_rowid(page_data, int(cell_ptr))
+rowid_exists :: proc(page_data: []u8, header: ^Page_Header, target_rowid: types.Row_ID) -> bool {
+	pointers := get_pointers(page_data)
+	for ptr in pointers {
+		rowid, ok := cell.get_rowid(page_data, int(ptr))
 		if ok && rowid == target_rowid {
 			return true
 		}
@@ -201,115 +164,68 @@ btree_rowid_exists :: proc(page_data: []u8, header: BTree_Page_Header, target_ro
 // 4. Updates header stats.
 //
 // Returns .Page_Full if the page must be split.
-btree_insert_cell :: proc(
+insert_cell :: proc(
 	p: ^pager.Pager,
 	page_num: u32,
 	rowid: types.Row_ID,
 	values: []types.Value,
 	config := DEFAULT_CONFIG,
-) -> BTree_Error {
-	page, err := pager.pager_get_page(p, page_num)
-	if err != nil {
-		return .Page_Read_Failed
-	}
+) -> Error {
+	page, err := pager.get_page(p, page_num)
+	if err != nil { return .Page_Read_Failed }
 
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		return parse_err
-	}
-	if config.check_duplicates && btree_rowid_exists(page.data, header, rowid) {
+	header := get_header(page.data)
+	if config.check_duplicates && rowid_exists(page.data, header, rowid) {
 		return .Duplicate_Rowid
 	}
 
-	cell_size := cell.cell_calculate_size(rowid, values)
-	fmt.printfln(
-		"DEBUG INSERT: page=%d, rowid=%d, cell_size=%d, current_offset=%d, new_offset=%d",
-		page_num,
-		rowid,
-		cell_size,
-		header.cell_content_offset,
-		int(header.cell_content_offset) - cell_size,
-	)
-
-	cell_pointer_area_end := BTREE_HEADER_SIZE + int(header.cell_count + 1) * 2
-	if cell_pointer_area_end >= int(header.cell_content_offset) {
+	cell_size := cell.calculate_size(rowid, values)
+	ptr_area_end := size_of(Page_Header) + int(header.cell_count + 1) * size_of(Cell_Pointer)
+	if ptr_area_end >= int(header.cell_content_offset) {
 		return .Page_Full
 	}
 
-	available_space := int(header.cell_content_offset) - cell_pointer_area_end
+	available_space := int(header.cell_content_offset) - ptr_area_end
 	if cell_size > available_space {
 		return .Page_Full
 	}
-	if cell_size > int(header.cell_content_offset) {
-		return .Invalid_Bounds
-	}
 
-	new_content_offset := int(header.cell_content_offset) - cell_size
-	if new_content_offset < cell_pointer_area_end {
-		return .Page_Full
-	}
-
-	bytes_written, serialize_ok := cell.cell_serialize(page.data[new_content_offset:], rowid, values)
-	if !serialize_ok || bytes_written != cell_size {
+	new_offset := int(header.cell_content_offset) - cell_size
+	bytes_written, ok := cell.serialize(page.data[new_offset:], rowid, values)
+	if !ok || bytes_written != cell_size {
 		return .Serialization_Failed
 	}
 
-	insert_index := btree_find_insert_index(page.data, header, rowid)
+	insert_index := find_insert_index(page.data, header, rowid)
+	raw_ptrs := get_raw_pointers(page.data)
 	if insert_index < int(header.cell_count) {
-		src_offset := btree_cell_pointer_offset(insert_index)
-		dst_offset := btree_cell_pointer_offset(insert_index + 1)
-		bytes_to_move := int(header.cell_count - u16(insert_index)) * 2
-		if dst_offset + bytes_to_move > len(page.data) {
-			return .Invalid_Bounds
-		}
-
-		copy(
-			page.data[dst_offset:dst_offset + bytes_to_move],
-			page.data[src_offset:src_offset + bytes_to_move],
-		)
+		copy(raw_ptrs[insert_index + 1:], raw_ptrs[insert_index:header.cell_count])
 	}
 
-	write_err := btree_write_cell_pointer(page.data, insert_index, u16(new_content_offset))
-	if write_err != .None {
-		return write_err
-	}
-
+	raw_ptrs[insert_index] = Cell_Pointer(new_offset)
 	header.cell_count += 1
-	header.cell_content_offset = u16(new_content_offset)
-	write_error := btree_write_header(page.data, header)
-	if write_error == .None {
-		pager.pager_mark_dirty(p, page_num)
-	}
-	return write_error
+	header.cell_content_offset = u16le(new_offset)
+	pager.mark_dirty(p, page_num)
+	return .None
 }
 
-// Initializes a cursor at the very beginning of a page.
-btree_cursor_start :: proc(page_num: u32, allocator := context.allocator) -> BTree_Cursor {
-	return BTree_Cursor{page_num = page_num, cell_index = 0, end_of_table = false, allocator = allocator}
+cursor_start :: proc(page_num: u32, allocator := context.allocator) -> Cursor {
+	return Cursor{page_num = page_num, cell_index = 0, end_of_table = false, allocator = allocator}
 }
 
-// Initializes a cursor at the end of a page (useful for append operations).
-btree_cursor_end :: proc(
-	p: ^pager.Pager,
-	page_num: u32,
-	allocator := context.allocator,
-) -> (
-	BTree_Cursor,
-	BTree_Error,
-) {
-	page, err := pager.pager_get_page(p, page_num)
-	if err != nil {
-		return BTree_Cursor{page_num = page_num, cell_index = 0, end_of_table = true, allocator = allocator},
-			.Page_Read_Failed
+// Initializes a cursor at the end of a page
+cursor_end :: proc(p: ^pager.Pager, page_num: u32, allocator := context.allocator) -> (Cursor, Error) {
+	page, p_err := pager.get_page(p, page_num)
+	if p_err != nil {
+		return Cursor{}, .Page_Read_Failed
 	}
 
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		return BTree_Cursor{page_num = page_num, cell_index = 0, end_of_table = true, allocator = allocator},
-			parse_err
+	header := get_header(page.data)
+	if header == nil {
+		return Cursor{}, .Invalid_Page_Header
 	}
 
-	return BTree_Cursor {
+	return Cursor {
 			page_num = page_num,
 			cell_index = int(header.cell_count),
 			end_of_table = true,
@@ -318,117 +234,81 @@ btree_cursor_end :: proc(
 		.None
 }
 
-// Advances the cursor to the next cell.
-// Sets end_of_table = true if the end is reached.
-btree_cursor_advance :: proc(p: ^pager.Pager, cursor: ^BTree_Cursor) -> BTree_Error {
-	page, err := pager.pager_get_page(p, cursor.page_num)
-	if err != nil {
-		cursor.end_of_table = true
+cursor_advance :: proc(p: ^pager.Pager, cursor: ^Cursor) -> Error {
+	page, p_err := pager.get_page(p, cursor.page_num)
+	if p_err != nil {
 		return .Page_Read_Failed
 	}
 
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		cursor.end_of_table = true
-		return parse_err
-	}
-
+	header := get_header(page.data)
 	cursor.cell_index += 1
 	if cursor.cell_index >= int(header.cell_count) {
 		cursor.end_of_table = true
 	}
-
 	return .None
 }
 
-// Retrieves the cell at the current cursor position.
-//
-// MEMORY SAFETY:
-// Returns a BTree_Cell_Ref that MUST be destroyed by the caller.
-// If config.zero_copy is true, the data is tied to the Pager's buffer.
-btree_cursor_get_cell :: proc(
-	p: ^pager.Pager,
-	cursor: ^BTree_Cursor,
-	config := DEFAULT_CONFIG,
-) -> (
-	BTree_Cell_Ref,
-	BTree_Error,
-) {
+cursor_get_cell :: proc(p: ^pager.Pager, cursor: ^Cursor, config := DEFAULT_CONFIG) -> (Cell_Ref, Error) {
 	if cursor.end_of_table {
-		return BTree_Cell_Ref{}, .Cell_Not_Found
+		return Cell_Ref{}, .Cell_Not_Found
 	}
 
-	page, err := pager.pager_get_page(p, cursor.page_num)
-	if err != nil {
-		return BTree_Cell_Ref{}, .Page_Read_Failed
+	page, p_err := pager.get_page(p, cursor.page_num)
+	if p_err != nil {
+		return Cell_Ref{}, .Page_Read_Failed
 	}
 
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		return BTree_Cell_Ref{}, parse_err
-	}
-	if cursor.cell_index >= int(header.cell_count) {
-		return BTree_Cell_Ref{}, .Cell_Not_Found
+	pointers := get_pointers(page.data)
+	if cursor.cell_index >= len(pointers) {
+		return Cell_Ref{}, .Cell_Not_Found
 	}
 
-	cell_ptr, ptr_err := btree_read_cell_pointer(page.data, cursor.cell_index)
-	if ptr_err != .None {
-		return BTree_Cell_Ref{}, ptr_err
-	}
-
+	cell_ptr := pointers[cursor.cell_index]
 	alloc := config.allocator
 	if alloc.procedure == nil {
 		alloc = cursor.allocator
 	}
 
-	deserialize_opts := cell.Deserialize_Options {
+	cell_cfg := cell.Config {
 		allocator = alloc,
 		zero_copy = config.zero_copy,
 	}
 
-	c, _, ok := cell.cell_deserialize(page.data, int(cell_ptr), deserialize_opts)
+	c, _, ok := cell.deserialize(page.data, int(cell_ptr), cell_cfg)
 	if !ok {
-		return BTree_Cell_Ref{}, .Cell_Deserialize_Failed
+		return Cell_Ref{}, .Cell_Deserialize_Failed
 	}
-	return BTree_Cell_Ref{cell = c, allocator = alloc}, .None
+	return Cell_Ref{cell = c, allocator = alloc}, .None
 }
 
-// Performs a binary search to find a cell by its Row ID.
-// Returns a Cell Ref which MUST be destroyed by the caller.
-btree_find_by_rowid :: proc(
+find_by_rowid :: proc(
 	p: ^pager.Pager,
 	page_num: u32,
 	target_rowid: types.Row_ID,
 	config := DEFAULT_CONFIG,
 ) -> (
-	BTree_Cell_Ref,
-	BTree_Error,
+	Cell_Ref,
+	Error,
 ) {
-	page, err := pager.pager_get_page(p, page_num)
-	if err != nil {
-		return BTree_Cell_Ref{}, .Page_Read_Failed
+	page, p_err := pager.get_page(p, page_num)
+	if p_err != nil {
+		return Cell_Ref{}, .Page_Read_Failed
 	}
 
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		return BTree_Cell_Ref{}, parse_err
-	}
+	header := get_header(page.data)
 	if header.cell_count == 0 {
-		return BTree_Cell_Ref{}, .Cell_Not_Found
+		return Cell_Ref{}, .Cell_Not_Found
 	}
 
 	left := 0
 	right := int(header.cell_count) - 1
+	pointers := get_pointers(page.data)
 	for left <= right {
 		mid := left + (right - left) / 2
-		cell_ptr, ptr_err := btree_read_cell_pointer(page.data, mid)
-		if ptr_err != .None {
-			return BTree_Cell_Ref{}, ptr_err
-		}
-
-		rowid, ok := cell.cell_get_rowid(page.data, int(cell_ptr))
+		cell_ptr := pointers[mid]
+		rowid, ok := cell.get_rowid(page.data, int(cell_ptr))
 		if !ok {
-			return BTree_Cell_Ref{}, .Invalid_Cell_Pointer
+			return Cell_Ref{}, .Invalid_Cell_Pointer
 		}
 		if rowid == target_rowid {
 			alloc := config.allocator
@@ -436,72 +316,40 @@ btree_find_by_rowid :: proc(
 				alloc = context.allocator
 			}
 
-			deserialize_opts := cell.Deserialize_Options {
+			cell_cfg := cell.Config {
 				allocator = alloc,
 				zero_copy = config.zero_copy,
 			}
 
-			c, _, deserialize_ok := cell.cell_deserialize(page.data, int(cell_ptr), deserialize_opts)
+			c, _, deserialize_ok := cell.deserialize(page.data, int(cell_ptr), cell_cfg)
 			if !deserialize_ok {
-				return BTree_Cell_Ref{}, .Cell_Deserialize_Failed
+				return Cell_Ref{}, .Cell_Deserialize_Failed
 			}
-			return BTree_Cell_Ref{cell = c, allocator = alloc}, .None
+			return Cell_Ref{cell = c, allocator = alloc}, .None
 		} else if rowid < target_rowid {
 			left = mid + 1
 		} else {
 			right = mid - 1
 		}
 	}
-	return BTree_Cell_Ref{}, .Cell_Not_Found
-}
-
-// Helper: Returns the index where a rowid *should* be inserted to maintain order.
-btree_find_insert_index :: proc(
-	page_data: []u8,
-	header: BTree_Page_Header,
-	target_rowid: types.Row_ID,
-) -> int {
-	left := 0
-	right := int(header.cell_count)
-	for left < right {
-		mid := left + (right - left) / 2
-		cell_ptr, err := btree_read_cell_pointer(page_data, mid)
-		if err != .None {
-			return left
-		}
-
-		rowid, ok := cell.cell_get_rowid(page_data, int(cell_ptr))
-		if !ok {
-			return left
-		}
-		if rowid < target_rowid {
-			left = mid + 1
-		} else {
-			right = mid
-		}
-	}
-	return left
+	return Cell_Ref{}, .Cell_Not_Found
 }
 
 // Suggests the next available RowID by looking at the last item in the table.
-btree_get_next_rowid :: proc(p: ^pager.Pager, page_num: u32) -> (types.Row_ID, BTree_Error) {
-	page, err := pager.pager_get_page(p, page_num)
-	if err != nil {
+get_next_rowid :: proc(p: ^pager.Pager, page_num: u32) -> (types.Row_ID, Error) {
+	page, p_err := pager.get_page(p, page_num)
+	if p_err != nil {
 		return 1, .Page_Read_Failed
 	}
 
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None || header.cell_count == 0 {
-		return 1, parse_err
+	header := get_header(page.data)
+	if header.cell_count == 0 {
+		return 1, .None
 	}
 
-	last_index := int(header.cell_count) - 1
-	cell_ptr, ptr_err := btree_read_cell_pointer(page.data, last_index)
-	if ptr_err != .None {
-		return 1, ptr_err
-	}
-
-	last_rowid, ok := cell.cell_get_rowid(page.data, int(cell_ptr))
+	pointers := get_pointers(page.data)
+	last_ptr := pointers[header.cell_count - 1]
+	last_rowid, ok := cell.get_rowid(page.data, int(last_ptr))
 	if !ok {
 		return 1, .Invalid_Cell_Pointer
 	}
@@ -509,49 +357,35 @@ btree_get_next_rowid :: proc(p: ^pager.Pager, page_num: u32) -> (types.Row_ID, B
 }
 
 // Counts total rows in a page.
-btree_count_rows :: proc(p: ^pager.Pager, page_num: u32) -> (int, BTree_Error) {
-	page, err := pager.pager_get_page(p, page_num)
-	if err != nil {
+count_rows :: proc(p: ^pager.Pager, page_num: u32) -> (int, Error) {
+	page, p_err := pager.get_page(p, page_num)
+	if p_err != nil {
 		return 0, .Page_Read_Failed
 	}
-
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		return 0, parse_err
-	}
+	header := get_header(page.data)
 	return int(header.cell_count), .None
 }
 
-// Removes a cell from the page.
-// Does NOT compact the free space (creates fragmentation).
-btree_delete_cell :: proc(p: ^pager.Pager, page_num: u32, target_rowid: types.Row_ID) -> BTree_Error {
-	page, err := pager.pager_get_page(p, page_num)
-	if err != nil {
+delete_cell :: proc(p: ^pager.Pager, page_num: u32, target_rowid: types.Row_ID) -> Error {
+	page, p_err := pager.get_page(p, page_num)
+	if p_err != nil {
 		return .Page_Read_Failed
 	}
-
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		return parse_err
-	}
-
+	
+	header := get_header(page.data)
+	pointers := get_raw_pointers(page.data)
+	active_pointers := pointers[:header.cell_count]
 	delete_index := -1
-	cell_offset := u16(0)
 	cell_size := 0
 	for i in 0 ..< int(header.cell_count) {
-		cell_ptr, ptr_err := btree_read_cell_pointer(page.data, i)
-		if ptr_err != .None {
-			return ptr_err
-		}
-
-		rowid, ok := cell.cell_get_rowid(page.data, int(cell_ptr))
+		cell_ptr := active_pointers[i]
+		rowid, ok := cell.get_rowid(page.data, int(cell_ptr))
 		if !ok {
 			return .Invalid_Cell_Pointer
 		}
 		if rowid == target_rowid {
 			delete_index = i
-			cell_offset = cell_ptr
-			size, ok2 := cell.cell_get_size(page.data, int(cell_ptr))
+			size, ok2 := cell.get_size(page.data, int(cell_ptr))
 			if ok2 {
 				cell_size = size
 			}
@@ -563,14 +397,7 @@ btree_delete_cell :: proc(p: ^pager.Pager, page_num: u32, target_rowid: types.Ro
 		return .Cell_Not_Found
 	}
 	if delete_index < int(header.cell_count) - 1 {
-		src_offset := btree_cell_pointer_offset(delete_index + 1)
-		dst_offset := btree_cell_pointer_offset(delete_index)
-		bytes_to_move := (int(header.cell_count) - delete_index - 1) * 2
-
-		copy(
-			page.data[dst_offset:dst_offset + bytes_to_move],
-			page.data[src_offset:src_offset + bytes_to_move],
-		)
+		copy(pointers[delete_index:], pointers[delete_index + 1:header.cell_count])
 	}
 
 	header.cell_count -= 1
@@ -578,27 +405,19 @@ btree_delete_cell :: proc(p: ^pager.Pager, page_num: u32, target_rowid: types.Ro
 		header.fragmented_bytes += u8(cell_size)
 	}
 
-	write_err := btree_write_header(page.data, header)
-	if write_err == .None {
-		pager.pager_mark_dirty(p, page_num)
-	}
-	return write_err
+	pager.mark_dirty(p, page_num)
+	return .None
 }
 
-// Prints all cells in a page. Uses temp_allocator to avoid memory leaks.
-btree_debug_print_page :: proc(p: ^pager.Pager, page_num: u32, allocator := context.temp_allocator) {
-	page, err := pager.pager_get_page(p, page_num)
+debug_print_page :: proc(p: ^pager.Pager, page_num: u32, allocator := context.temp_allocator) {
+	page, err := pager.get_page(p, page_num)
 	if err != nil {
 		fmt.printf("Error reading page %d\n", page_num)
 		return
 	}
 
-	header, parse_err := btree_parse_header(page.data)
-	if parse_err != .None {
-		fmt.println("Error parsing page header")
-		return
-	}
-
+	header := get_header(page.data)
+	pointers := get_pointers(page.data)
 	fmt.printf(
 		"Page %d (type=%v, cells=%d, content_offset=%d, fragmented=%d)\n",
 		page_num,
@@ -608,52 +427,40 @@ btree_debug_print_page :: proc(p: ^pager.Pager, page_num: u32, allocator := cont
 		header.fragmented_bytes,
 	)
 
-	for i in 0 ..< int(header.cell_count) {
-		cell_ptr, ptr_err := btree_read_cell_pointer(page.data, i)
-		if ptr_err != .None {
-			fmt.printf("  Cell %d: Error reading pointer\n", i)
-			continue
-		}
-
-		deserialize_opts := cell.Deserialize_Options {
+	for ptr, i in pointers {
+		cell_cfg := cell.Config {
 			allocator = allocator,
 			zero_copy = false,
 		}
 
-		c, _, ok := cell.cell_deserialize(page.data, int(cell_ptr), deserialize_opts)
+		c, _, ok := cell.deserialize(page.data, int(ptr), cell_cfg)
 		if !ok {
 			fmt.printf("  Cell %d: Error deserializing\n", i)
 			continue
 		}
 
 		fmt.printf("  Cell %d: ", i)
-		cell.cell_debug_print(c)
-		cell.cell_destroy(&c)
+		cell.debug_print(c)
+		cell.destroy(&c)
 	}
 }
 
-// Iterates through all cells in a page, managing memory automatically.
-// The callback receives a temporary pointer to a Cell.
-//
-// MEMORY BEHAVIOR:
-// Uses `free_all(context.temp_allocator)` on every iteration.
-// Do NOT store pointers from the cell outside the callback scope.
-btree_foreach_cell :: proc(
+foreach_cell :: proc(
 	p: ^pager.Pager,
 	page_num: u32,
 	callback: proc(c: ^cell.Cell, user_data: rawptr) -> bool,
 	user_data: rawptr = nil,
-) -> BTree_Error {
-	cursor := btree_cursor_start(page_num, context.temp_allocator)
+) -> Error {
+	cursor := cursor_start(page_num, context.temp_allocator)
 	for !cursor.end_of_table {
 		free_all(context.temp_allocator)
-		config := BTree_Config {
+		config := Config {
 			allocator        = context.temp_allocator,
 			zero_copy        = false,
 			check_duplicates = false,
 		}
 
-		cell_ref, err := btree_cursor_get_cell(p, &cursor, config)
+		cell_ref, err := cursor_get_cell(p, &cursor, config)
 		if err != .None {
 			return err
 		}
@@ -662,11 +469,7 @@ btree_foreach_cell :: proc(
 		if !should_continue {
 			break
 		}
-
-		advance_err := btree_cursor_advance(p, &cursor)
-		if advance_err != .None {
-			return advance_err
-		}
+		cursor_advance(p, &cursor) or_return
 	}
 	return .None
 }

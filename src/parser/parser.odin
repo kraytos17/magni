@@ -5,7 +5,6 @@ import "core:strings"
 import "core:unicode"
 import "src:types"
 
-// Token types
 Token_Type :: enum {
 	EOF,
 	IDENTIFIER,
@@ -48,19 +47,12 @@ Token_Type :: enum {
 	GREATER_EQUAL,
 }
 
-// Token represents a single unit of SQL code.
-//
-// Fields :-
-// type - The category of the token
-// lexeme - The actual string representation of the token
-// line - Line number in source code
 Token :: struct {
 	type:   Token_Type,
 	lexeme: string,
 	line:   int,
 }
 
-// Statement Types correspond to the top-level SQL commands supported.
 Statement_Type :: enum {
 	CREATE_TABLE,
 	INSERT,
@@ -70,52 +62,31 @@ Statement_Type :: enum {
 	DROP_TABLE,
 }
 
-// Represents a single comparison in a WHERE clause.
 Condition :: struct {
 	column:   string,
 	operator: Token_Type,
 	value:    types.Value,
 }
 
-/*
- Where Clause
-
- Encapsulates filtering logic.
-
- LIMITATION: This parser currently only supports "Uniform Logic".
- You can have all ANDs or all ORs, but not a mix (e.g., `A AND B OR C` is invalid).
-
- Fields:
- - conditions: List of individual comparisons.
- - is_and:     If true, all conditions are joined by AND. If false, joined by OR.
- */
 Where_Clause :: struct {
 	conditions: []Condition,
 	is_and:     bool,
 }
 
-/*
- The Abstract Syntax Tree (AST) node representing a complete SQL command.
- Not all fields are used for all statement types (i.e. "fat node" design).
-
- Note:
- String fields (table_name, columns names) are allocated using the provided allocator
- and must be freed using `statement_free`.
- */
+// Statement is a "Fat Node" AST representing any SQL command.
 Statement :: struct {
 	type:           Statement_Type,
-	table_name:     string,
-	columns:        []types.Column,
-	insert_values:  []types.Value,
-	select_columns: []string,
-	where_clause:   Maybe(Where_Clause),
-	update_columns: []string,
-	update_values:  []types.Value,
-	from_table:     string,
 	original_sql:   string,
+	table_name:     string, // CREATE, INSERT, DROP
+	from_table:     string, // SELECT, UPDATE, DELETE
+	columns:        []types.Column, // CREATE
+	insert_values:  []types.Value, // INSERT
+	select_columns: []string, // SELECT
+	update_columns: []string, // UPDATE
+	update_values:  []types.Value, // UPDATE
+	where_clause:   Maybe(Where_Clause),
 }
 
-// Parser state
 Parser :: struct {
 	tokens:  []Token,
 	current: int,
@@ -201,13 +172,11 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			i += 1
 			for i < len(sql) {
 				if sql[i] == '\'' {
-					// Check for escaped quote ''
 					if i + 1 < len(sql) && sql[i + 1] == '\'' {
-						i += 2 // Skip both quotes
+						i += 2 // Escaped quote
 						continue
-					} else {
-						break // End of string
 					}
+					break
 				}
 				i += 1
 			}
@@ -215,6 +184,7 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 				delete(tokens)
 				return nil, false // Unterminated string
 			}
+
 			str_val := sql[start:i]
 			append(&tokens, Token{.STRING, str_val, line})
 			i += 1
@@ -223,7 +193,6 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 		if unicode.is_digit(c) || (c == '-' && i + 1 < len(sql) && unicode.is_digit(rune(sql[i + 1]))) {
 			start := i
 			if c == '-' do i += 1
-
 			has_dot := false
 			for i < len(sql) {
 				ch := sql[i]
@@ -236,9 +205,7 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 					break
 				}
 			}
-
-			num_str := sql[start:i]
-			append(&tokens, Token{.NUMBER, num_str, line})
+			append(&tokens, Token{.NUMBER, sql[start:i], line})
 			continue
 		}
 		if unicode.is_alpha(c) || c == '_' {
@@ -299,10 +266,9 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 				i += 2
 			} else {
 				delete(tokens)
-				return nil, false // Unexpected character
+				return nil, false
 			}
 		case:
-			// Unknown character
 			delete(tokens)
 			return nil, false
 		}
@@ -351,32 +317,19 @@ expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 }
 
 // Parse CREATE TABLE statement
-parse_create_table :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, bool) {
-	stmt := Statement {
-		type = .CREATE_TABLE,
-	}
-	if !match(p, .TABLE) {
-		return stmt, false
-	}
+parse_create_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+	stmt.type = .CREATE_TABLE
+	if !match(p, .TABLE) do return stmt, false
 
-	name_token, ok := expect(p, .IDENTIFIER)
-	if !ok {
-		return stmt, false
-	}
-
+	name_token := expect(p, .IDENTIFIER) or_return
 	stmt.table_name = strings.clone(name_token.lexeme, allocator)
-	if !match(p, .LPAREN) {
-		return stmt, false
-	}
+	if !match(p, .LPAREN) do return stmt, false
 
 	columns := make([dynamic]types.Column, allocator)
-	for {
-		col_name_token, ok2 := expect(p, .IDENTIFIER)
-		if !ok2 {
-			delete(columns)
-			return stmt, false
-		}
+	defer if !ok do delete(columns)
 
+	for {
+		col_name_token := expect(p, .IDENTIFIER) or_return
 		col := types.Column {
 			name = strings.clone(col_name_token.lexeme, allocator),
 		}
@@ -384,34 +337,23 @@ parse_create_table :: proc(p: ^Parser, allocator := context.allocator) -> (State
 		type_token := peek(p)
 		#partial switch type_token.type {
 		case .INTEGER:
-			col.type = .INTEGER
-			advance(p)
+			col.type = .INTEGER; advance(p)
 		case .TEXT:
-			col.type = .TEXT
-			advance(p)
+			col.type = .TEXT; advance(p)
 		case .REAL:
-			col.type = .REAL
-			advance(p)
+			col.type = .REAL; advance(p)
 		case .BLOB:
-			col.type = .BLOB
-			advance(p)
+			col.type = .BLOB; advance(p)
 		case:
-			delete(columns)
 			return stmt, false
 		}
 
 		for {
 			if match(p, .PRIMARY) {
-				if !match(p, .KEY) {
-					delete(columns)
-					return stmt, false
-				}
+				if !match(p, .KEY) do return stmt, false
 				col.pk = true
 			} else if match(p, .NOT) {
-				if !match(p, .NULL) {
-					delete(columns)
-					return stmt, false
-				}
+				if !match(p, .NULL) do return stmt, false
 				col.not_null = true
 			} else {
 				break
@@ -422,7 +364,6 @@ parse_create_table :: proc(p: ^Parser, allocator := context.allocator) -> (State
 		if match(p, .RPAREN) {
 			break
 		} else if !match(p, .COMMA) {
-			delete(columns)
 			return stmt, false
 		}
 	}
@@ -432,61 +373,42 @@ parse_create_table :: proc(p: ^Parser, allocator := context.allocator) -> (State
 }
 
 // Parse INSERT statement
-parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, bool) {
-	stmt := Statement {
-		type = .INSERT,
-	}
-	if !match(p, .INTO) {
-		return stmt, false
-	}
+parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+	stmt.type = .INSERT
+	if !match(p, .INTO) do return stmt, false
 
-	name_token, ok := expect(p, .IDENTIFIER)
-	if !ok {
-		return stmt, false
-	}
-
+	name_token := expect(p, .IDENTIFIER) or_return
 	stmt.table_name = strings.clone(name_token.lexeme, allocator)
-	if !match(p, .VALUES) {
-		return stmt, false
-	}
-	if !match(p, .LPAREN) {
-		return stmt, false
-	}
+	if !match(p, .VALUES) do return stmt, false
+	if !match(p, .LPAREN) do return stmt, false
 
 	values := make([dynamic]types.Value, allocator)
+	defer if !ok do delete(values)
 	for {
 		token := peek(p)
-		if token.type == .NUMBER {
+		#partial switch token.type {
+		case .NUMBER:
 			advance(p)
 			if strings.contains(token.lexeme, ".") {
-				val, ok2 := strconv.parse_f64(token.lexeme)
-				if !ok2 {
-					delete(values)
-					return stmt, false
-				}
+				val := strconv.parse_f64(token.lexeme) or_return
 				append(&values, types.value_real(val))
 			} else {
-				val, ok2 := strconv.parse_i64(token.lexeme)
-				if !ok2 {
-					delete(values)
-					return stmt, false
-				}
+				val := strconv.parse_i64(token.lexeme) or_return
 				append(&values, types.value_int(val))
 			}
-		} else if token.type == .STRING {
+		case .STRING:
 			advance(p)
 			append(&values, types.value_text(strings.clone(token.lexeme, allocator)))
-		} else if match(p, .NULL) {
+		case .NULL:
+			advance(p)
 			append(&values, types.value_null())
-		} else {
-			delete(values)
+		case:
 			return stmt, false
 		}
 
 		if match(p, .RPAREN) {
 			break
 		} else if !match(p, .COMMA) {
-			delete(values)
 			return stmt, false
 		}
 	}
@@ -495,172 +417,105 @@ parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, 
 }
 
 // Parse SELECT statement
-parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, bool) {
-	stmt := Statement {
-		type = .SELECT,
-	}
-
+parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+	stmt.type = .SELECT
 	columns := make([dynamic]string, allocator)
+	defer if !ok do delete(columns)
+
 	if match(p, .ASTERISK) {
 	} else {
 		for {
-			col_token, ok := expect(p, .IDENTIFIER)
-			if !ok {
-				delete(columns)
-				return stmt, false
-			}
+			col_token := expect(p, .IDENTIFIER) or_return
 			append(&columns, strings.clone(col_token.lexeme, allocator))
-			if !match(p, .COMMA) {
-				break
-			}
+			if !match(p, .COMMA) do break
 		}
 	}
 
 	stmt.select_columns = columns[:]
-	if !match(p, .FROM) {
-		return stmt, false
-	}
+	if !match(p, .FROM) do return stmt, false
 
-	table_token, ok := expect(p, .IDENTIFIER)
-	if !ok {
-		return stmt, false
-	}
-
+	table_token := expect(p, .IDENTIFIER) or_return
 	stmt.from_table = strings.clone(table_token.lexeme, allocator)
 	if match(p, .WHERE) {
-		where_clause_val := parse_where_clause(p, allocator)
-		if where_clause_val == nil {
-			return stmt, false
-		}
-		stmt.where_clause = where_clause_val
+		stmt.where_clause = parse_where_clause(p, allocator) or_return
 	}
 	return stmt, true
 }
 
 // Parse UPDATE statement
-parse_update :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, bool) {
-	stmt := Statement {
-		type = .UPDATE,
-	}
-
-	table_token, ok := expect(p, .IDENTIFIER)
-	if !ok {
-		return stmt, false
-	}
-
+parse_update :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+	stmt.type = .UPDATE
+	table_token := expect(p, .IDENTIFIER) or_return
 	stmt.from_table = strings.clone(table_token.lexeme, allocator)
-	if !match(p, .SET) {
-		return stmt, false
-	}
+	if !match(p, .SET) do return stmt, false
 
 	columns := make([dynamic]string, allocator)
 	values := make([dynamic]types.Value, allocator)
-	for {
-		col_token, ok2 := expect(p, .IDENTIFIER)
-		if !ok2 {
-			delete(columns)
-			delete(values)
-			return stmt, false
-		}
+	defer if !ok {
+		delete(columns)
+		delete(values)
+	}
 
+	for {
+		col_token := expect(p, .IDENTIFIER) or_return
 		append(&columns, strings.clone(col_token.lexeme, allocator))
-		if !match(p, .EQUALS) {
-			delete(columns)
-			delete(values)
-			return stmt, false
-		}
+		if !match(p, .EQUALS) do return stmt, false
 
 		token := peek(p)
-		if token.type == .NUMBER {
+		#partial switch token.type {
+		case .NUMBER:
 			advance(p)
 			if strings.contains(token.lexeme, ".") {
-				val, ok3 := strconv.parse_f64(token.lexeme)
-				if !ok3 {
-					delete(columns)
-					delete(values)
-					return stmt, false
-				}
+				val := strconv.parse_f64(token.lexeme) or_return
 				append(&values, types.value_real(val))
 			} else {
-				val, ok3 := strconv.parse_i64(token.lexeme)
-				if !ok3 {
-					delete(columns)
-					delete(values)
-					return stmt, false
-				}
+				val := strconv.parse_i64(token.lexeme) or_return
 				append(&values, types.value_int(val))
 			}
-		} else if token.type == .STRING {
+		case .STRING:
 			advance(p)
 			append(&values, types.value_text(strings.clone(token.lexeme, allocator)))
-		} else if match(p, .NULL) {
+		case .NULL:
+			advance(p)
 			append(&values, types.value_null())
-		} else {
-			delete(columns)
-			delete(values)
+		case:
 			return stmt, false
 		}
-
-		if !match(p, .COMMA) {
-			break
-		}
+		if !match(p, .COMMA) do break
 	}
 
 	stmt.update_columns = columns[:]
 	stmt.update_values = values[:]
 	if match(p, .WHERE) {
-		clause := parse_where_clause(p, allocator)
-		if clause == nil {
-			return stmt, false
-		}
-		stmt.where_clause = clause
+		stmt.where_clause = parse_where_clause(p, allocator) or_return
 	}
 	return stmt, true
 }
 
 // Parse DELETE statement
-parse_delete :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, bool) {
-	stmt := Statement {
-		type = .DELETE,
-	}
-	if !match(p, .FROM) {
-		return stmt, false
-	}
+parse_delete :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+	stmt.type = .DELETE
+	if !match(p, .FROM) do return stmt, false
 
-	table_token, ok := expect(p, .IDENTIFIER)
-	if !ok {
-		return stmt, false
-	}
-
+	table_token := expect(p, .IDENTIFIER) or_return
 	stmt.from_table = strings.clone(table_token.lexeme, allocator)
 	if match(p, .WHERE) {
-		clause := parse_where_clause(p, allocator)
-		if clause == nil {
-			return stmt, false
-		}
-		stmt.where_clause = clause
+		stmt.where_clause = parse_where_clause(p, allocator) or_return
 	}
 	return stmt, true
 }
 
 // Parse DROP TABLE statement
-parse_drop_table :: proc(p: ^Parser, allocator := context.allocator) -> (Statement, bool) {
-	stmt := Statement {
-		type = .DROP_TABLE,
-	}
-	if !match(p, .TABLE) {
-		return stmt, false
-	}
+parse_drop_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+	stmt.type = .DROP_TABLE
+	if !match(p, .TABLE) do return stmt, false
 
-	table_token, ok := expect(p, .IDENTIFIER)
-	if !ok {
-		return stmt, false
-	}
-
+	table_token := expect(p, .IDENTIFIER) or_return
 	stmt.table_name = strings.clone(table_token.lexeme, allocator)
 	return stmt, true
 }
 
+@(private = "file")
 cleanup_where_conditions :: proc(conditions: [dynamic]Condition) {
 	for cond in conditions {
 		delete(cond.column)
@@ -675,25 +530,30 @@ cleanup_where_conditions :: proc(conditions: [dynamic]Condition) {
 }
 
 // Parse WHERE clause
+//
 // LIMITATION: Only supports uniform AND or uniform OR connectives
+//
 // Examples:
 //   Valid:   WHERE a=1 AND b=2 AND c=3
 //   Valid:   WHERE a=1 OR b=2 OR c=3
 //   Invalid: WHERE a=1 AND b=2 OR c=3 (mixing AND/OR not supported)
-parse_where_clause :: proc(p: ^Parser, allocator := context.allocator) -> Maybe(Where_Clause) {
-	clause := Where_Clause {
+parse_where_clause :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	clause: Maybe(Where_Clause),
+	ok: bool,
+) {
+	w := Where_Clause {
 		is_and = true,
 	}
 
 	conditions := make([dynamic]Condition, allocator)
+	defer if !ok do cleanup_where_conditions(conditions)
+
 	first_logical_op_seen := false
 	for {
-		col_token, ok := expect(p, .IDENTIFIER)
-		if !ok {
-			cleanup_where_conditions(conditions)
-			return nil
-		}
-
+		col_token := expect(p, .IDENTIFIER) or_return
 		cond := Condition {
 			column = strings.clone(col_token.lexeme, allocator),
 		}
@@ -705,68 +565,52 @@ parse_where_clause :: proc(p: ^Parser, allocator := context.allocator) -> Maybe(
 			advance(p)
 		case:
 			delete(cond.column)
-			cleanup_where_conditions(conditions)
-			return nil
+			return nil, false
 		}
 
 		val_token := peek(p)
-		if val_token.type == .NUMBER {
+		#partial switch val_token.type {
+		case .NUMBER:
 			advance(p)
 			if strings.contains(val_token.lexeme, ".") {
-				val, ok2 := strconv.parse_f64(val_token.lexeme)
-				if !ok2 {
-					delete(cond.column)
-					cleanup_where_conditions(conditions)
-					return nil
-				}
+				val := strconv.parse_f64(val_token.lexeme) or_return
 				cond.value = types.value_real(val)
 			} else {
-				val, ok2 := strconv.parse_i64(val_token.lexeme)
-				if !ok2 {
-					delete(cond.column)
-					cleanup_where_conditions(conditions)
-					return nil
-				}
+				val := strconv.parse_i64(val_token.lexeme) or_return
 				cond.value = types.value_int(val)
 			}
-		} else if val_token.type == .STRING {
+		case .STRING:
 			advance(p)
 			cond.value = types.value_text(strings.clone(val_token.lexeme, allocator))
-		} else if match(p, .NULL) {
+		case .NULL:
+			advance(p)
 			cond.value = types.value_null()
-		} else {
+		case:
 			delete(cond.column)
-			cleanup_where_conditions(conditions)
-			return nil
+			return nil, false
 		}
 
 		append(&conditions, cond)
 		if match(p, .AND) {
 			if !first_logical_op_seen {
-				clause.is_and = true
+				w.is_and = true
 				first_logical_op_seen = true
-			} else if !clause.is_and {
-				// Error: mixing AND and OR not supported
-				cleanup_where_conditions(conditions)
-				return nil
+			} else if !w.is_and {
+				return nil, false
 			}
-			continue
 		} else if match(p, .OR) {
 			if !first_logical_op_seen {
-				clause.is_and = false
+				w.is_and = false
 				first_logical_op_seen = true
-			} else if clause.is_and {
-				// Error: mixing AND and OR not supported
-				cleanup_where_conditions(conditions)
-				return nil
+			} else if w.is_and {
+				return nil, false
 			}
-			continue
 		} else {
 			break
 		}
 	}
-	clause.conditions = conditions[:]
-	return clause
+	w.conditions = conditions[:]
+	return w, true
 }
 
 /*
@@ -839,10 +683,11 @@ statement_free :: proc(stmt: Statement) {
 
 	delete(stmt.columns)
 	for val in stmt.insert_values {
-		if text, ok := val.(string); ok {
-			delete(text)
-		} else if blob, ok := val.([]u8); ok {
-			delete(blob)
+		#partial switch v in val {
+		case string:
+			delete(v)
+		case []u8:
+			delete(v)
 		}
 	}
 
@@ -858,10 +703,11 @@ statement_free :: proc(stmt: Statement) {
 
 	delete(stmt.update_columns)
 	for val in stmt.update_values {
-		if text, ok := val.(string); ok {
-			delete(text)
-		} else if blob, ok := val.([]u8); ok {
-			delete(blob)
+		#partial switch v in val {
+		case string:
+			delete(v)
+		case []u8:
+			delete(v)
 		}
 	}
 
@@ -869,10 +715,11 @@ statement_free :: proc(stmt: Statement) {
 	if clause, has_where := stmt.where_clause.?; has_where {
 		for cond in clause.conditions {
 			delete(cond.column)
-			if text, ok := cond.value.(string); ok {
-				delete(text)
-			} else if blob, ok := cond.value.([]u8); ok {
-				delete(blob)
+			#partial switch v in cond.value {
+			case string:
+				delete(v)
+			case []u8:
+				delete(v)
 			}
 		}
 		delete(clause.conditions)

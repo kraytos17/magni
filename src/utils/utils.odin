@@ -39,8 +39,7 @@ varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: in
 	value = 0
 	shift: u32 = 0
 	pos := offset
-	bytes_read = 0
-	for shift < 64 && bytes_read < 9 {
+	for shift < 64 {
 		if pos >= len(src) {
 			return 0, 0, false
 		}
@@ -53,145 +52,116 @@ varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: in
 			return value, bytes_read, true
 		}
 		shift += 7
+		if bytes_read >= 9 {
+			return 0, 0, false
+		}
 	}
 	return 0, 0, false
 }
 
 // Calculate varint size for a given value
 varint_size :: proc(v: u64) -> int {
-	if v < (1 << 7) do return 1
-	if v < (1 << 14) do return 2
-	if v < (1 << 21) do return 3
-	if v < (1 << 28) do return 4
-	if v < (1 << 35) do return 5
-	if v < (1 << 42) do return 6
-	if v < (1 << 49) do return 7
-	if v < (1 << 56) do return 8
-	return 9
+	switch {
+	case v < (1 << 7):
+		return 1
+	case v < (1 << 14):
+		return 2
+	case v < (1 << 21):
+		return 3
+	case v < (1 << 28):
+		return 4
+	case v < (1 << 35):
+		return 5
+	case v < (1 << 42):
+		return 6
+	case v < (1 << 49):
+		return 7
+	case v < (1 << 56):
+		return 8
+	case:
+		return 9
+	}
 }
 
-read_u16_le :: proc(data: []u8, offset: int) -> (u16, bool) {
-	if offset + 2 > len(data) {
-		return 0, false
-	}
-	val, _ := endian.get_u16(data[offset:], .Little)
-	return val, true
+read_u16_le :: proc(data: []u8, offset: int) -> (val: u16, ok: bool) {
+	if offset >= len(data) do return 0, false
+	return endian.get_u16(data[offset:], .Little)
 }
 
-read_u32_le :: proc(data: []u8, offset: int) -> (u32, bool) {
-	if offset + 4 > len(data) {
-		return 0, false
-	}
-	val, _ := endian.get_u32(data[offset:], .Little)
-	return val, true
+read_u32_le :: proc(data: []u8, offset: int) -> (val: u32, ok: bool) {
+	if offset >= len(data) do return 0, false
+	return endian.get_u32(data[offset:], .Little)
 }
 
-read_u64_le :: proc(data: []u8, offset: int) -> (u64, bool) {
-	if offset + 8 > len(data) {
-		return 0, false
-	}
-	val, _ := endian.get_u64(data[offset:], .Little)
-	return val, true
+read_u64_le :: proc(data: []u8, offset: int) -> (val: u64, ok: bool) {
+	if offset >= len(data) do return 0, false
+	return endian.get_u64(data[offset:], .Little)
+}
+
+read_f64_be :: proc(data: []u8, offset: int) -> (val: f64, ok: bool) {
+	if offset >= len(data) do return 0, false
+	return endian.get_f64(data[offset:], .Big)
 }
 
 write_u16_le :: proc(dest: []u8, offset: int, value: u16) -> bool {
-	if offset + 2 > len(dest) {
-		return false
-	}
+	if offset + 2 > len(dest) do return false
 	endian.put_u16(dest[offset:], .Little, value)
 	return true
 }
 
 write_u32_le :: proc(dest: []u8, offset: int, value: u32) -> bool {
-	if offset + 4 > len(dest) {
-		return false
-	}
+	if offset + 4 > len(dest) do return false
 	endian.put_u32(dest[offset:], .Little, value)
 	return true
 }
 
 write_u64_le :: proc(dest: []u8, offset: int, value: u64) -> bool {
-	if offset + 8 > len(dest) {
-		return false
-	}
+	if offset + 8 > len(dest) do return false
 	endian.put_u64(dest[offset:], .Little, value)
 	return true
 }
 
 write_f64_be :: proc(dest: []u8, offset: int, value: f64) -> bool {
-	if offset + 8 > len(dest) {
-		return false
-	}
+	if offset + 8 > len(dest) do return false
 	endian.put_f64(dest[offset:], .Big, value)
 	return true
 }
 
-read_f64_be :: proc(data: []u8, offset: int) -> (f64, bool) {
-	if offset + 8 > len(data) {
-		return 0, false
-	}
-	val, _ := endian.get_f64(data[offset:], .Big)
-	return val, true
-}
-
 // Read integer based on serial type size
-read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (i64, bool) {
+read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
 	if offset + size > len(data) {
 		return 0, false
 	}
 
 	switch size {
 	case 1:
-		val := i8(data[offset])
-		return i64(val), true
+		return i64(i8(data[offset])), true
 	case 2:
-		raw, ok := read_u16_le(data, offset)
-		if !ok do return 0, false
-		return i64(i16(raw)), true
+		v := endian.get_u16(data[offset:], .Little) or_return
+		return i64(i16(v)), true
 	case 3:
-		// 24-bit signed integer
-		if offset + 3 > len(data) {
-			return 0, false
+		b0 := i64(data[offset])
+		b1 := i64(data[offset + 1])
+		b2 := i64(data[offset + 2])
+		v := b0 | (b1 << 8) | (b2 << 16)
+		if v & 0x800000 != 0 {
+			v |= ~i64(0xFFFFFF)
 		}
-
-		low_raw, ok1 := read_u16_le(data, offset)
-		if !ok1 do return 0, false
-
-		low := u32(low_raw)
-		high := u32(data[offset + 2])
-		val := low | (high << 16)
-
-		// Sign extend from 24-bit to 32-bit, then to 64-bit
-		if val & 0x800000 != 0 {
-			val |= 0xFF000000
-		}
-		return i64(i32(val)), true
+		return v, true
 	case 4:
-		raw, ok := read_u32_le(data, offset)
-		if !ok do return 0, false
-		return i64(i32(raw)), true
+		v := endian.get_u32(data[offset:], .Little) or_return
+		return i64(i32(v)), true
 	case 6:
-		// 48-bit signed integer
-		if offset + 6 > len(data) {
-			return 0, false
+		lo := endian.get_u32(data[offset:], .Little) or_return
+		hi := endian.get_u16(data[offset + 4:], .Little) or_return
+		v := i64(lo) | (i64(hi) << 32)
+		if v & 0x8000_0000_0000 != 0 {
+			v |= ~i64(0xFFFF_FFFF_FFFF)
 		}
-		lo_raw, ok1 := read_u32_le(data, offset)
-		hi_raw, ok2 := read_u16_le(data, offset + 4)
-		if !ok1 || !ok2 do return 0, false
-
-		lo := u64(lo_raw)
-		hi := u64(hi_raw)
-		val := lo | (hi << 32)
-
-		// Sign extend from 48-bit to 64-bit
-		if val & 0x800000000000 != 0 {
-			val |= 0xFFFF000000000000
-		}
-		return i64(val), true
+		return v, true
 	case 8:
-		raw, ok := read_u64_le(data, offset)
-		if !ok do return 0, false
-		return i64(raw), true
+		v := endian.get_u64(data[offset:], .Little) or_return
+		return i64(v), true
 	}
 	return 0, false
 }
@@ -209,18 +179,15 @@ write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> boo
 	case 2:
 		return write_u16_le(dest, offset, u16(value))
 	case 3:
-		// Write 24-bit integer as 16-bit + 8-bit
-		ok := write_u16_le(dest, offset, u16(value))
-		if !ok do return false
+		write_u16_le(dest, offset, u16(value))
 		dest[offset + 2] = u8(value >> 16)
 		return true
 	case 4:
 		return write_u32_le(dest, offset, u32(value))
 	case 6:
-		// Write 48-bit integer as 32-bit + 16-bit
-		ok1 := write_u32_le(dest, offset, u32(value))
-		ok2 := write_u16_le(dest, offset + 4, u16(value >> 32))
-		return ok1 && ok2
+		write_u32_le(dest, offset, u32(value))
+		write_u16_le(dest, offset + 4, u16(value >> 32))
+		return true
 	case 8:
 		return write_u64_le(dest, offset, u64(value))
 	}
@@ -233,40 +200,36 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 	case types.Null:
 		return u64(types.Serial_Type.NULL)
 	case i64:
-		if val == 0 {
+		switch {
+		case val == 0:
 			return u64(types.Serial_Type.ZERO)
-		}
-		if val == 1 {
+		case val == 1:
 			return u64(types.Serial_Type.ONE)
 		}
 
 		abs_val := abs(val)
-		if abs_val < (1 << 7) {
+		switch {
+		case abs_val < (1 << 7):
 			return u64(types.Serial_Type.INT8)
-		}
-		if abs_val < (1 << 15) {
+		case abs_val < (1 << 15):
 			return u64(types.Serial_Type.INT16)
-		}
-		if abs_val < (1 << 23) {
+		case abs_val < (1 << 23):
 			return u64(types.Serial_Type.INT24)
-		}
-		if abs_val < (1 << 31) {
+		case abs_val < (1 << 31):
 			return u64(types.Serial_Type.INT32)
-		}
-		if abs_val < (1 << 47) {
+		case abs_val < (1 << 47):
 			return u64(types.Serial_Type.INT48)
+		case:
+			return u64(types.Serial_Type.INT64)
 		}
-		return u64(types.Serial_Type.INT64)
 	case f64:
 		return u64(types.Serial_Type.FLOAT64)
 	case string:
-		// TEXT: serial type = 13 + 2*N where N is string length
-		n := len(val) * 2 + 13
-		return u64(n)
+		// TEXT: 13 + 2*N
+		return u64(len(val) * 2 + 13)
 	case []u8:
-		// BLOB: serial type = 12 + 2*N where N is blob length
-		n := len(val) * 2 + 12
-		return u64(n)
+		// BLOB: 12 + 2*N
+		return u64(len(val) * 2 + 12)
 	}
 	unreachable()
 }
@@ -274,35 +237,31 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 // Get content length from serial type
 content_length_from_serial :: proc(serial: u64) -> int {
 	if serial >= 12 {
-		if serial % 2 == 0 {
-			// BLOB (even): length = (serial - 12) / 2
-			return int((serial - 12) / 2)
-		} else {
-			// TEXT (odd): length = (serial - 13) / 2
-			return int((serial - 13) / 2)
-		}
+		// BLOB (even) or TEXT (odd)
+		// BLOB: (N-12)/2, TEXT: (N-13)/2
+		sub := u64(12) if serial % 2 == 0 else u64(13)
+		return int((serial - sub) / 2)
 	}
 	return 0
 }
 
-// Check if serial type represents TEXT
 is_text_serial :: proc(serial: u64) -> bool {
-	return serial >= 13 && serial & 1 == 1
+	return serial >= 13 && (serial % 2 != 0)
 }
 
-// Check if serial type represents BLOB
 is_blob_serial :: proc(serial: u64) -> bool {
-	return serial >= 12 && serial & 1 == 0
+	return serial >= 12 && (serial % 2 == 0)
 }
 
 // Debug helper to print bytes
-debug_print_bytes :: proc(label: string, data: []u8, max: int = 64) {
+debug_print_bytes :: proc(label: string, data: []u8, max_len: int = 64) {
 	fmt.printf("%s (%d bytes): ", label, len(data))
-	limit := min(max, len(data))
+	limit := min(max_len, len(data))
 	for i in 0 ..< limit {
 		fmt.printf("%02X ", data[i])
 	}
-	if len(data) > max {
+
+	if len(data) > max_len {
 		fmt.print("...")
 	}
 	fmt.println()

@@ -93,16 +93,9 @@ value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string
 // Returns (size, valid) - size is 0 if invalid
 serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
 	if serial >= 12 {
-		if serial % 2 == 0 {
-			// BLOB (even): length = (N-12)/2
-			return int((serial - 12) / 2), true
-		} else {
-			// TEXT (odd): length = (N-13)/2
-			return int((serial - 13) / 2), true
-		}
-	}
-	if serial == 10 || serial == 11 {
-		return 0, false
+		// BLOB (even): length = (N-12)/2
+		// TEXT (odd):  length = (N-13)/2
+		return int((serial - 12) / 2) if serial % 2 == 0 else int((serial - 13) / 2), true
 	}
 
 	switch Serial_Type(serial) {
@@ -118,12 +111,11 @@ serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
 		return 4, true
 	case .INT48:
 		return 6, true
-	case .INT64:
+	case .INT64, .FLOAT64:
 		return 8, true
-	case .FLOAT64:
-		return 8, true
+	case:
+		return 0, false
 	}
-	return 0, false
 }
 
 // Row ID type
@@ -149,7 +141,7 @@ Result_Row :: []Value
 Result_Set :: []Result_Row
 
 // Error types
-DB_Error :: enum {
+Error :: enum {
 	None,
 	Invalid_Type,
 	Invalid_Serial_Type,

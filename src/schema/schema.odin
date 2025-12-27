@@ -10,24 +10,19 @@ import "src:utils"
 SCHEMA_PAGE :: 1
 
 // Initialize schema page
-schema_init :: proc(p: ^pager.Pager) -> bool {
-	page, err := pager.pager_allocate_page(p)
+init :: proc(p: ^pager.Pager) -> bool {
+	page, err := pager.allocate_page(p)
 	if err != nil {
 		return false
 	}
 	if page.page_num != SCHEMA_PAGE {
-		pager.page_destroy(page)
 		fmt.println("Critical Error: Schema page allocated at wrong index:", page.page_num)
 		return false
 	}
-
-	init_err := btree.btree_init_leaf_page(page.data)
-	if init_err != .None {
+	if btree.init_leaf_page(page.data) != .None {
 		return false
 	}
-
-	flush_err := pager.pager_flush_page(p, page.page_num)
-	if flush_err != nil {
+	if pager.flush_page(p, page.page_num) != nil {
 		fmt.println("Critical Error: Failed to flush schema page to disk")
 		return false
 	}
@@ -35,13 +30,7 @@ schema_init :: proc(p: ^pager.Pager) -> bool {
 }
 
 // Deserialize values back into a Table struct
-schema_table_from_values :: proc(
-	values: []types.Value,
-	allocator := context.allocator,
-) -> (
-	types.Table,
-	bool,
-) {
+table_from_values :: proc(values: []types.Value, allocator := context.allocator) -> (types.Table, bool) {
 	if len(values) != 6 {
 		return types.Table{}, false
 	}
@@ -58,12 +47,14 @@ schema_table_from_values :: proc(
 	table.name = strings.clone(name_str, allocator)
 	table.root_page = u32(root_page_i64)
 	table.sql = strings.clone(sql_stmt, allocator)
-	table.columns = deserialize_columns_from_blob(blob, allocator)
-	if table.columns == nil {
+	cols := deserialize_columns_from_blob(blob, allocator)
+	if cols == nil {
 		delete(table.name, allocator)
 		delete(table.sql, allocator)
 		return types.Table{}, false
 	}
+
+	table.columns = cols
 	return table, true
 }
 
@@ -76,8 +67,10 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 
 	blob := make([]u8, total_size, allocator)
 	offset := 0
+
 	utils.write_u32_le(blob, offset, u32(len(columns)))
 	offset += 4
+
 	for col in columns {
 		utils.write_u32_le(blob, offset, u32(len(col.name)))
 		offset += 4
@@ -90,6 +83,7 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 		flags: u8 = 0
 		if col.not_null do flags |= 1
 		if col.pk do flags |= 2
+
 		blob[offset] = flags
 		offset += 1
 	}
@@ -105,19 +99,21 @@ deserialize_columns_from_blob :: proc(blob: []u8, allocator := context.allocator
 
 	offset += 4
 	columns := make([dynamic]types.Column, 0, count, allocator)
+	success := false
+	defer if !success do delete(columns)
+
 	for _ in 0 ..< count {
 		name_len, ok_len := utils.read_u32_le(blob, offset)
 		if !ok_len do return nil
+
 		offset += 4
 		if offset + int(name_len) > len(blob) {
-			delete(columns)
 			return nil
 		}
 
 		name_str := string(blob[offset:offset + int(name_len)])
 		offset += int(name_len)
 		if offset + 2 > len(blob) {
-			delete(columns)
 			return nil
 		}
 
@@ -135,11 +131,12 @@ deserialize_columns_from_blob :: proc(blob: []u8, allocator := context.allocator
 			},
 		)
 	}
+	success = true
 	return columns[:]
 }
 
 // Add a table to the schema
-schema_add_table :: proc(
+add_table :: proc(
 	p: ^pager.Pager,
 	table_name: string,
 	columns: []types.Column,
@@ -157,17 +154,16 @@ schema_add_table :: proc(
 	}
 
 	rowid := types.Row_ID(hash_string(table_name))
-	err := btree.btree_insert_cell(p, SCHEMA_PAGE, rowid, values)
-	if err != .None {
+	if btree.insert_cell(p, SCHEMA_PAGE, rowid, values) != .None {
 		return false
 	}
 
-	pager.pager_flush_page(p, SCHEMA_PAGE)
+	pager.flush_page(p, SCHEMA_PAGE)
 	return true
 }
 
 // Find a table in the schema by name
-schema_find_table :: proc(
+find_table :: proc(
 	p: ^pager.Pager,
 	table_name: string,
 	allocator := context.allocator,
@@ -176,56 +172,53 @@ schema_find_table :: proc(
 	bool,
 ) {
 	rowid := types.Row_ID(hash_string(table_name))
-	config := btree.BTree_Config {
+	config := btree.Config {
 		allocator = context.temp_allocator,
 		zero_copy = false,
 	}
 
-	cell_ref, err := btree.btree_find_by_rowid(p, SCHEMA_PAGE, rowid, config)
+	cell_ref, err := btree.find_by_rowid(p, SCHEMA_PAGE, rowid, config)
 	if err != .None {
 		return types.Table{}, false
 	}
 
-	defer btree.btree_cell_ref_destroy(&cell_ref)
-	table, ok := schema_table_from_values(cell_ref.cell.values, allocator)
+	defer btree.cell_ref_destroy(&cell_ref)
+	table, ok := table_from_values(cell_ref.cell.values, allocator)
 	if !ok {
 		return types.Table{}, false
 	}
 	if table.name != table_name {
-		schema_table_free(table)
+		table_free(table)
 		return types.Table{}, false
 	}
 	return table, true
 }
 
 // List all tables in the schema
-schema_list_tables :: proc(p: ^pager.Pager, allocator := context.allocator) -> []types.Table {
+list_tables :: proc(p: ^pager.Pager, allocator := context.allocator) -> []types.Table {
 	tables := make([dynamic]types.Table, allocator)
-	cursor := btree.btree_cursor_start(SCHEMA_PAGE, context.temp_allocator)
+	cursor := btree.cursor_start(SCHEMA_PAGE, context.temp_allocator)
 	for !cursor.end_of_table {
-		config := btree.BTree_Config {
+		config := btree.Config {
 			allocator        = context.temp_allocator,
 			zero_copy        = false,
 			check_duplicates = false,
 		}
 
-		cell_ref, err := btree.btree_cursor_get_cell(p, &cursor, config)
+		cell_ref, err := btree.cursor_get_cell(p, &cursor, config)
 		if err != .None {
-			advance_err := btree.btree_cursor_advance(p, &cursor)
-			if advance_err != .None {
+			if btree.cursor_advance(p, &cursor) != .None {
 				break
 			}
 			continue
 		}
 
-		table, ok := schema_table_from_values(cell_ref.cell.values, allocator)
-		btree.btree_cell_ref_destroy(&cell_ref)
+		table, ok := table_from_values(cell_ref.cell.values, allocator)
+		btree.cell_ref_destroy(&cell_ref)
 		if ok {
 			append(&tables, table)
 		}
-
-		advance_err := btree.btree_cursor_advance(p, &cursor)
-		if advance_err != .None {
+		if btree.cursor_advance(p, &cursor) != .None {
 			break
 		}
 	}
@@ -233,19 +226,18 @@ schema_list_tables :: proc(p: ^pager.Pager, allocator := context.allocator) -> [
 }
 
 // Drop a table from the schema
-schema_drop_table :: proc(p: ^pager.Pager, table_name: string) -> bool {
+drop_table :: proc(p: ^pager.Pager, table_name: string) -> bool {
 	rowid := types.Row_ID(hash_string(table_name))
-	err := btree.btree_delete_cell(p, SCHEMA_PAGE, rowid)
-	if err != .None {
+	if btree.delete_cell(p, SCHEMA_PAGE, rowid) != .None {
 		return false
 	}
-	pager.pager_flush_page(p, SCHEMA_PAGE)
+	pager.flush_page(p, SCHEMA_PAGE)
 	return true
 }
 
 // Get table metadata (columns, root page)
 // Returns a deep copy of the table in the provided allocator
-schema_get_table :: proc(
+get_table :: proc(
 	p: ^pager.Pager,
 	table_name: string,
 	allocator := context.allocator,
@@ -253,7 +245,7 @@ schema_get_table :: proc(
 	types.Table,
 	bool,
 ) {
-	temp_table, found := schema_find_table(p, table_name, context.temp_allocator)
+	temp_table, found := find_table(p, table_name, context.temp_allocator)
 	if !found {
 		return types.Table{}, false
 	}
@@ -276,13 +268,13 @@ schema_get_table :: proc(
 }
 
 // Check if a table exists
-schema_table_exists :: proc(p: ^pager.Pager, table_name: string) -> bool {
-	table, found := schema_find_table(p, table_name, context.temp_allocator)
+table_exists :: proc(p: ^pager.Pager, table_name: string) -> bool {
+	_, found := find_table(p, table_name, context.temp_allocator)
 	return found
 }
 
 // Free table memory
-schema_table_free :: proc(table: types.Table) {
+table_free :: proc(table: types.Table) {
 	delete(table.name)
 	delete(table.sql)
 	for col in table.columns {
@@ -297,15 +289,15 @@ hash_string :: proc(s: string) -> u64 {
 	PRIME :: 0x100000001b3
 
 	h: u64 = OFFSET_BASIS
-	for i in 0 ..< len(s) {
-		h = h ~ u64(s[i])
+	for c in s {
+		h = h ~ u64(c)
 		h = h * PRIME
 	}
 	return h & 0x7FFFFFFFFFFFFFFF
 }
 
 // Validate column definitions
-schema_validate_columns :: proc(columns: []types.Column) -> (bool, string) {
+validate_columns :: proc(columns: []types.Column) -> (bool, string) {
 	if len(columns) == 0 {
 		return false, "Table must have at least one column"
 	}
@@ -337,7 +329,7 @@ schema_validate_columns :: proc(columns: []types.Column) -> (bool, string) {
 }
 
 // Find column index by name
-schema_find_column_index :: proc(columns: []types.Column, name: string) -> (int, bool) {
+find_column_index :: proc(columns: []types.Column, name: string) -> (int, bool) {
 	for col, i in columns {
 		if col.name == name {
 			return i, true
@@ -347,7 +339,7 @@ schema_find_column_index :: proc(columns: []types.Column, name: string) -> (int,
 }
 
 // Get primary key column index
-schema_get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
+get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
 	for col, i in columns {
 		if col.pk {
 			return i, true
@@ -357,10 +349,11 @@ schema_get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
 }
 
 // Debug: Print schema entry
-schema_debug_print_entry :: proc(table: types.Table) {
+debug_print_entry :: proc(table: types.Table) {
 	fmt.printf("Table: %s (root_page=%d)\n", table.name, table.root_page)
 	fmt.printf("SQL:   %s\n", table.sql)
 	fmt.println("Columns:")
+
 	for col, i in table.columns {
 		flags := make([dynamic]string, context.temp_allocator)
 		if col.pk do append(&flags, "PRIMARY KEY")
@@ -388,9 +381,9 @@ schema_debug_print_entry :: proc(table: types.Table) {
 }
 
 // Debug: Print all tables
-schema_debug_print_all :: proc(p: ^pager.Pager) {
+debug_print_all :: proc(p: ^pager.Pager) {
 	fmt.println("=== Database Schema ===")
-	tables := schema_list_tables(p, context.temp_allocator)
+	tables := list_tables(p, context.temp_allocator)
 	if len(tables) == 0 {
 		fmt.println("No tables found.")
 		return
@@ -398,14 +391,14 @@ schema_debug_print_all :: proc(p: ^pager.Pager) {
 
 	for table, i in tables {
 		if i > 0 do fmt.println()
-		schema_debug_print_entry(table)
+		debug_print_entry(table)
 	}
 	fmt.println("======================")
 }
 
 // Print the CREATE TABLE statements for all tables
-schema_print_ddl :: proc(p: ^pager.Pager) {
-	tables := schema_list_tables(p, context.temp_allocator)
+print_ddl :: proc(p: ^pager.Pager) {
+	tables := list_tables(p, context.temp_allocator)
 	for table in tables {
 		fmt.println(table.sql)
 	}

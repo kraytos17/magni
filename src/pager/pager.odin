@@ -25,51 +25,6 @@ Page :: struct {
 	page_num: u32,
 }
 
-// Create a new page instance in memory.
-//
-// Note: This does not read from disk; it allocates the container.
-page_new :: proc(page_num: u32, page_size: u32) -> ^Page {
-	page := new(Page)
-	if page == nil {
-		return nil
-	}
-
-	page.data = make([]u8, page_size)
-	if page.data == nil {
-		free(page)
-		return nil
-	}
-
-	mem.zero_slice(page.data)
-	page.dirty = false
-	page.pinned = false
-	page.page_num = page_num
-	return page
-}
-
-// Free page memory
-page_destroy :: proc(page: ^Page) {
-	if page == nil {
-		return
-	}
-	delete(page.data)
-	free(page)
-}
-
-// Mark page as dirty (modified)
-page_mark_dirty :: proc(page: ^Page) {
-	if page != nil {
-		page.dirty = true
-	}
-}
-
-// Mark page as clean (synced to disk)
-page_mark_clean :: proc(page: ^Page) {
-	if page != nil {
-		page.dirty = false
-	}
-}
-
 /*
  Pager
 
@@ -97,6 +52,37 @@ Pager :: struct {
 	mutex:           sync.Mutex,
 }
 
+// Create a new page instance in memory (does not read from disk).
+@(private = "file")
+create_page :: proc(page_num: u32, page_size: u32) -> ^Page {
+	page := new(Page)
+	if page == nil {
+		return nil
+	}
+
+	page.data = make([]u8, page_size)
+	if page.data == nil {
+		free(page)
+		return nil
+	}
+
+	mem.zero_slice(page.data)
+	page.dirty = false
+	page.pinned = false
+	page.page_num = page_num
+	return page
+}
+
+// Free page memory
+@(private = "file")
+destroy_page :: proc(page: ^Page) {
+	if page == nil {
+		return
+	}
+	delete(page.data)
+	free(page)
+}
+
 /*
  Opens the database file at the given path. If the file does not exist,
  it is created.
@@ -105,72 +91,74 @@ Pager :: struct {
  - ^Pager: Pointer to the initialized pager.
  - os.Error: Error code if file permissions fail or allocation fails.
  */
-pager_open :: proc(path: string) -> (^Pager, os.Error) {
-	pager := new(Pager)
-	if pager == nil {
+open :: proc(path: string) -> (^Pager, os.Error) {
+	p := new(Pager)
+	if p == nil {
 		return nil, .Out_Of_Memory
 	}
 
-	pager.page_size = types.PAGE_SIZE
-	pager.max_cache_pages = 256
-	pager.page_cache = make(map[u32]^Page, int(pager.max_cache_pages))
+	p.page_size = types.PAGE_SIZE
+	p.max_cache_pages = 256
+	p.page_cache = make(map[u32]^Page, int(p.max_cache_pages))
+
 	flags := os.O_RDWR | os.O_CREATE
 	file, open_err := os.open(path, flags)
 	if open_err != nil {
-		delete(pager.page_cache)
-		free(pager)
+		delete(p.page_cache)
+		free(p)
 		return nil, open_err
 	}
 
-	pager.file = file
+	p.file = file
 	file_size, size_err := os.file_size(file)
 	if size_err != nil {
 		os.close(file)
-		delete(pager.page_cache)
-		free(pager)
+		delete(p.page_cache)
+		free(p)
 		return nil, size_err
 	}
-	pager.file_len = file_size
-	return pager, nil
+
+	p.file_len = file_size
+	return p, nil
 }
 
 /*
  Flushes all dirty pages to disk, syncs the file, closes the file, and frees all memory associated with the cache.
  */
-pager_close :: proc(pager: ^Pager) {
-	if pager == nil {
+close :: proc(p: ^Pager) {
+	if p == nil {
 		return
 	}
 
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
 
-	pager_flush_all_unsafe(pager)
-	if pager.file != nil {
-		os.sync(pager.file)
-		os.close(pager.file)
-		pager.file = nil
+	flush_all_unsafe(p)
+	if p.file != nil {
+		os.sync(p.file)
+		os.close(p.file)
+		p.file = nil
 	}
 
-	for _, page in pager.page_cache {
-		page_destroy(page)
+	for _, page in p.page_cache {
+		destroy_page(page)
 	}
 
-	delete(pager.page_cache)
-	free(pager)
+	delete(p.page_cache)
+	free(p)
 }
 
 // Get a page from cache or disk (thread-safe)
 // Returns error if page doesn't exist in file yet
-pager_get_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
+get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, os.Error) {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
 
-	if page, ok := pager.page_cache[page_num]; ok {
+	if page, ok := p.page_cache[page_num]; ok {
 		return page, nil
 	}
 
-	num_pages := u32(pager.file_len / i64(pager.page_size))
+	num_pages := u32(p.file_len / i64(p.page_size))
 	if page_num >= num_pages {
 		return nil, .Not_Exist
 	}
@@ -178,25 +166,25 @@ pager_get_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
 		return nil, .Invalid_Argument
 	}
 
-	pager_evict_if_needed_unsafe(pager)
-	page := page_new(page_num, pager.page_size)
+	evict_if_needed_unsafe(p)
+	page := create_page(page_num, p.page_size)
 	if page == nil {
 		return nil, .Out_Of_Memory
 	}
 
-	offset := i64(page_num) * i64(pager.page_size)
-	bytes_read, read_err := os.read_at(pager.file, page.data, offset)
+	offset := i64(page_num) * i64(p.page_size)
+	bytes_read, read_err := os.read_at(p.file, page.data, offset)
 	if read_err != nil {
-		page_destroy(page)
+		destroy_page(page)
 		return nil, read_err
 	}
-	if bytes_read < int(pager.page_size) {
-		page_destroy(page)
+	if bytes_read < int(p.page_size) {
+		destroy_page(page)
 		return nil, .Unexpected_EOF
 	}
 
 	page.dirty = false
-	pager.page_cache[page_num] = page
+	p.page_cache[page_num] = page
 	return page, nil
 }
 
@@ -204,170 +192,157 @@ pager_get_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
 //
 // Note: The new page is marked `dirty` immediately so it will be written to disk
 // on the next flush/eviction.
-pager_allocate_page :: proc(pager: ^Pager) -> (^Page, os.Error) {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
+allocate_page :: proc(p: ^Pager) -> (^Page, os.Error) {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
 
-	page_num := u32(pager.file_len / i64(pager.page_size))
+	page_num := u32(p.file_len / i64(p.page_size))
 	if page_num > (1 << 30) {
 		return nil, .Invalid_Argument
 	}
 
-	pager_evict_if_needed_unsafe(pager)
-	page := page_new(page_num, pager.page_size)
+	evict_if_needed_unsafe(p)
+	page := create_page(page_num, p.page_size)
 	if page == nil {
 		return nil, .Out_Of_Memory
 	}
 
 	page.dirty = true
-	pager.page_cache[page_num] = page
-	pager.file_len += i64(pager.page_size)
+	p.page_cache[page_num] = page
+	p.file_len += i64(p.page_size)
 	return page, nil
 }
 
 // Get existing page or allocate new one
 //
 // NOTE: Only works for sequential allocation - page_num must equal current page count
-pager_get_or_allocate_page :: proc(pager: ^Pager, page_num: u32) -> (^Page, os.Error) {
-	page, err := pager_get_page(pager, page_num)
+get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, os.Error) {
+	page, err := get_page(p, page_num)
 	if err == nil {
 		return page, nil
 	}
 
-	sync.lock(&pager.mutex)
-	expected_page_num := u32(pager.file_len / i64(pager.page_size))
-	sync.unlock(&pager.mutex)
-	if err == .Not_Exist && page_num == expected_page_num {
-		return pager_allocate_page(pager)
+	if err == .Not_Exist {
+		sync.lock(&p.mutex)
+		expected_page_num := u32(p.file_len / i64(p.page_size))
+		sync.unlock(&p.mutex)
+		if page_num == expected_page_num {
+			return allocate_page(p)
+		}
 	}
 	return nil, err
 }
 
 // Mark a page as dirty (modified)
-pager_mark_dirty :: proc(pager: ^Pager, page_num: u32) {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
+mark_dirty :: proc(p: ^Pager, page_num: u32) {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
 
-	if page, ok := pager.page_cache[page_num]; ok {
-		page_mark_dirty(page)
+	if page, ok := p.page_cache[page_num]; ok {
+		page.dirty = true
 	}
 }
 
-// Internal: Flush a specific page to disk.
-// Requires caller to hold the mutex.
-@(private = "file")
-pager_flush_page_unsafe :: proc(pager: ^Pager, page_num: u32) -> os.Error {
-	page, found := pager.page_cache[page_num]
-	if !found {
-		return nil
+page_count :: proc(p: ^Pager) -> u32 {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
+	return u32(p.file_len / i64(p.page_size))
+}
+
+pin_page :: proc(p: ^Pager, page_num: u32) {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
+	if page, ok := p.page_cache[page_num]; ok {
+		page.pinned = true
 	}
-	if !page.dirty {
+}
+
+unpin_page :: proc(p: ^Pager, page_num: u32) {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
+	if page, ok := p.page_cache[page_num]; ok {
+		page.pinned = false
+	}
+}
+
+// Flushes a single page to disk.
+flush_page :: proc(p: ^Pager, page_num: u32) -> os.Error {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
+	return flush_page_unsafe(p, page_num)
+}
+
+// Flushes all dirty pages.
+flush_all :: proc(p: ^Pager) {
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
+	flush_all_unsafe(p)
+}
+
+// Flushes and fsyncs the file.
+sync_file :: proc(p: ^Pager) -> os.Error {
+	flush_all(p)
+
+	sync.lock(&p.mutex)
+	defer sync.unlock(&p.mutex)
+
+	if p.file != nil {
+		return os.sync(p.file)
+	}
+	return nil
+}
+
+@(private = "file")
+flush_page_unsafe :: proc(p: ^Pager, page_num: u32) -> os.Error {
+	page, found := p.page_cache[page_num]
+	if !found || !page.dirty {
 		return nil
 	}
 
-	offset := i64(page_num) * i64(pager.page_size)
-	bytes_written, write_err := os.write_at(pager.file, page.data, offset)
+	offset := i64(page_num) * i64(p.page_size)
+	bytes_written, write_err := os.write_at(p.file, page.data, offset)
 	if write_err != nil {
 		return write_err
 	}
 	if bytes_written != len(page.data) {
 		return .Short_Write
 	}
-	page_mark_clean(page)
+	page.dirty = false
 	return nil
 }
 
-// Flush all dirty pages to disk
-pager_flush_all :: proc(pager: ^Pager) {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
-
-	pager_flush_all_unsafe(pager)
-}
-
-// Internal: Iterates all cached pages and flushes dirty ones.
 @(private = "file")
-pager_flush_all_unsafe :: proc(pager: ^Pager) {
-	for page_num, page in pager.page_cache {
+flush_all_unsafe :: proc(p: ^Pager) {
+	for page_num, page in p.page_cache {
 		if page.dirty {
-			if err := pager_flush_page_unsafe(pager, page_num); err != nil {
+			if err := flush_page_unsafe(p, page_num); err != nil {
 				fmt.eprintf("Warning: failed to flush page %d: %v\n", page_num, err)
 			}
 		}
 	}
 }
 
-// Flush a specific page to disk
-pager_flush_page :: proc(pager: ^Pager, page_num: u32) -> os.Error {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
-
-	return pager_flush_page_unsafe(pager, page_num)
-}
-
-// Sync all data to disk (flush + fsync)
-pager_sync :: proc(pager: ^Pager) -> os.Error {
-	pager_flush_all(pager)
-
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
-
-	if pager.file != nil {
-		return os.sync(pager.file)
-	}
-	return nil
-}
-
-// Evict a clean page from cache if needed (UNSAFE - caller must hold mutex)
 @(private = "file")
-pager_evict_if_needed_unsafe :: proc(pager: ^Pager) {
-	if len(pager.page_cache) < int(pager.max_cache_pages) {
+evict_if_needed_unsafe :: proc(p: ^Pager) {
+	if len(p.page_cache) < int(p.max_cache_pages) {
 		return
 	}
 
-	for page_num, page in pager.page_cache {
+	for page_num, page in p.page_cache {
 		if !page.dirty && !page.pinned {
-			page_destroy(page)
-			delete_key(&pager.page_cache, page_num)
+			destroy_page(page)
+			delete_key(&p.page_cache, page_num)
 			return
 		}
 	}
 
-	pager_flush_all_unsafe(pager)
-	for page_num, page in pager.page_cache {
+	flush_all_unsafe(p)
+	for page_num, page in p.page_cache {
 		if !page.dirty && !page.pinned {
-			page_destroy(page)
-			delete_key(&pager.page_cache, page_num)
+			destroy_page(page)
+			delete_key(&p.page_cache, page_num)
 			return
 		}
 	}
-	fmt.eprintln("Warning: All cached pages are pinned, cannot evict")
-}
-
-// Get current page count
-pager_page_count :: proc(pager: ^Pager) -> u32 {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
-
-	return u32(pager.file_len / i64(pager.page_size))
-}
-
-// Pin a page (prevent eviction)
-pager_pin_page :: proc(pager: ^Pager, page_num: u32) {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
-
-	if page, ok := pager.page_cache[page_num]; ok {
-		page.pinned = true
-	}
-}
-
-// Unpin a page (allow eviction)
-pager_unpin_page :: proc(pager: ^Pager, page_num: u32) {
-	sync.lock(&pager.mutex)
-	defer sync.unlock(&pager.mutex)
-
-	if page, ok := pager.page_cache[page_num]; ok {
-		page.pinned = false
-	}
+	fmt.eprintln("Warning: All cache pages are pinned! Expanding cache temporarily.")
 }

@@ -1,5 +1,6 @@
 package main
 
+import "core:bufio"
 import "core:fmt"
 import os "core:os/os2"
 import "core:strings"
@@ -7,113 +8,128 @@ import "src:db"
 import "src:schema"
 
 PROMPT :: "magni> "
+CONT_PROMPT :: "   ...> "
 WELCOME_MSG :: "MagniDB v1.0 - Interactive Mode\nEnter .help for usage hints."
 
 main :: proc() {
 	database_path := "test.db"
-	database, ok := db.db_open(database_path)
+	database, ok := db.open(database_path)
 	if !ok {
 		fmt.eprintln("Fatal: Could not open database.")
 		return
 	}
 
-	defer db.db_close(database)
+	defer db.close(database)
 	fmt.println(WELCOME_MSG)
 
-	buffer: [1024]u8
-	for {
+	reader: bufio.Reader
+	bufio.reader_init(&reader, os.to_stream(os.stdin))
+	defer bufio.reader_destroy(&reader)
+
+	query_buffer := strings.builder_make()
+	defer strings.builder_destroy(&query_buffer)
+	loop: for {
 		defer free_all(context.temp_allocator)
-		fmt.print(PROMPT)
-		n, err := os.read(os.stdin, buffer[:])
-		if err != nil {
-			if err == .EOF {
-				fmt.println("\nExiting...")
-				return
-			}
-			fmt.eprintln("Error reading input:", err)
-			return
+		if strings.builder_len(query_buffer) == 0 {
+			fmt.print(PROMPT)
+		} else {
+			fmt.print(CONT_PROMPT)
 		}
 
-		line := string(buffer[:n])
-		line = strings.trim_space(line)
-		if len(line) == 0 {
+		line, err := bufio.reader_read_string(&reader, '\n')
+		if err != nil {
+			if err == .EOF {
+				break
+			}
+			fmt.eprintln("Error reading input:", err)
+			break
+		}
+
+		trimmed := strings.trim_space(line)
+		if len(trimmed) == 0 {
 			continue
 		}
-		if strings.has_prefix(line, ".") {
-			switch line {
+		if strings.builder_len(query_buffer) == 0 && strings.has_prefix(trimmed, ".") {
+			switch trimmed {
 			case ".exit", ".quit":
 				fmt.println("Goodbye.")
-				return
+				break loop
 			case ".help":
 				print_help()
 			case ".tables":
 				fmt.println("--- List of Tables ---")
-				db.db_list_tables(database)
+				db.list_tables(database)
 			case ".schema":
-				schema.schema_print_ddl(database.pager)
+				schema.print_ddl(database.pager)
 			case ".debug_schema":
 				fmt.println("--- Full Schema Dump (Debug) ---")
-				schema.schema_debug_print_all(database.pager)
+				schema.debug_print_all(database.pager)
 			case ".stats":
-				db.db_stats(database)
+				db.stats(database)
 			case ".checkpoint":
-				if db.db_checkpoint(database) {
+				if db.checkpoint(database) {
 					fmt.println("Database flushed to disk.")
 				}
 			case ".integrity":
-				if db.db_integrity_check(database) {
+				if db.integrity_check(database) {
 					fmt.println("OK")
 				}
 			case:
-				if strings.has_prefix(line, ".dump ") {
-					parts := strings.split(line, " ")
+				if strings.has_prefix(trimmed, ".dump ") {
+					parts := strings.split(trimmed, " ", context.temp_allocator)
 					if len(parts) == 2 {
-						table_name := parts[1]
-						db.db_dump_table(database, table_name)
+						db.dump_table(database, parts[1])
 					} else {
 						fmt.println("Usage: .dump <table_name>")
 					}
-					delete(parts)
-				} else if strings.has_prefix(line, ".desc ") {
-					parts := strings.split(line, " ")
+				} else if strings.has_prefix(trimmed, ".desc ") {
+					parts := strings.split(trimmed, " ", context.temp_allocator)
 					if len(parts) == 2 {
-						table_name := parts[1]
-						db.db_describe_table(database, table_name)
+						db.describe_table(database, parts[1])
 					} else {
 						fmt.println("Usage: .desc <table_name>")
 					}
-					delete(parts)
 				} else {
-					fmt.printf("Error: Unknown command '%s'\n", line)
+					fmt.printf("Error: Unknown command '%s'\n", trimmed)
 				}
 			}
 			continue
 		}
 
-		is_select := strings.has_prefix(strings.to_upper(line), "SELECT")
-		success := db.db_execute(database, line)
-		if success {
-			if !is_select {
-				fmt.println("Query executed successfully.")
+		strings.write_string(&query_buffer, line)
+		if strings.has_suffix(trimmed, ";") {
+			full_sql := strings.to_string(query_buffer)
+			is_select := strings.has_prefix(strings.to_upper(strings.trim_space(full_sql)), "SELECT")
+			success := db.execute(database, full_sql)
+			if success {
+				if !is_select {
+					fmt.println("Query executed successfully.")
+				}
+			} else {
+				fmt.println("Error executing query.")
 			}
-		} else {
-			fmt.println("Error executing query.")
+			strings.builder_reset(&query_buffer)
 		}
 	}
 }
 
 print_help :: proc() {
 	fmt.println("Commands:")
-	fmt.println("  .exit, .quit       Exit the application")
-	fmt.println("  .tables            List all tables")
-	fmt.println("  .schema            Show CREATE TABLE statements")
-	fmt.println("  .debug_schema      Show low-level schema (root pages, flags)")
-	fmt.println("  .dump <table_name> Print all raw rows in a table")
-	fmt.println("  .desc <table_name> Describe table columns")
-	fmt.println("  .stats             Show database file statistics")
-	fmt.println("  .integrity         Run consistency checks")
-	fmt.println("SQL:")
-	fmt.println("  CREATE TABLE ...")
-	fmt.println("  INSERT INTO ...")
-	fmt.println("  SELECT * FROM ...")
+	fmt.println("  .exit, .quit        Exit the application")
+	fmt.println("  .tables             List all tables")
+	fmt.println("  .schema             Show CREATE TABLE statements")
+	fmt.println("  .debug_schema       Show low-level schema (root pages, flags)")
+	fmt.println("  .dump <table_name>  Print all raw rows in a table")
+	fmt.println("  .desc <table_name>  Describe table columns")
+	fmt.println("  .stats              Show database file statistics")
+	fmt.println("  .integrity          Run consistency checks")
+	fmt.println("  .checkpoint         Flush WAL/Pages to disk")
+	fmt.println("\nSQL Support:")
+	fmt.println("  CREATE TABLE name (col type [PRIMARY KEY] [NOT NULL], ...);")
+	fmt.println("  INSERT INTO name VALUES (val1, val2, ...);")
+	fmt.println("  SELECT * FROM name WHERE col = val;")
+	fmt.println("  UPDATE name SET col = val WHERE col = val;")
+	fmt.println("  DELETE FROM name WHERE col = val;")
+	fmt.println("  DROP TABLE name;")
+	fmt.println("\nNote: End SQL commands with a semicolon (;).")
 }
