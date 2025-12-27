@@ -50,7 +50,9 @@ main :: proc() {
 				fmt.println("--- List of Tables ---")
 				db.db_list_tables(database)
 			case ".schema":
-				fmt.println("--- Full Schema Dump ---")
+				schema.schema_print_ddl(database.pager)
+			case ".debug_schema":
+				fmt.println("--- Full Schema Dump (Debug) ---")
 				schema.schema_debug_print_all(database.pager)
 			case ".stats":
 				db.db_stats(database)
@@ -104,7 +106,8 @@ print_help :: proc() {
 	fmt.println("Commands:")
 	fmt.println("  .exit, .quit       Exit the application")
 	fmt.println("  .tables            List all tables")
-	fmt.println("  .schema            Show database schema (debug view)")
+	fmt.println("  .schema            Show CREATE TABLE statements")
+	fmt.println("  .debug_schema      Show low-level schema (root pages, flags)")
 	fmt.println("  .dump <table_name> Print all raw rows in a table")
 	fmt.println("  .desc <table_name> Describe table columns")
 	fmt.println("  .stats             Show database file statistics")

@@ -5,6 +5,7 @@ import "core:strings"
 import "src:btree"
 import "src:pager"
 import "src:types"
+import "src:utils"
 
 SCHEMA_PAGE :: 1
 
@@ -33,27 +34,6 @@ schema_init :: proc(p: ^pager.Pager) -> bool {
 	return true
 }
 
-// Serialize a table definition into values for storage
-// Format: [name (TEXT), root_page (INTEGER), column_count (INTEGER),
-//          col1_name (TEXT), col1_type (INTEGER), col1_flags (INTEGER), ...]
-schema_table_to_values :: proc(table: types.Table, allocator := context.allocator) -> []types.Value {
-	values := make([dynamic]types.Value, allocator)
-	append(&values, types.value_text(strings.clone(table.name, allocator)))
-	append(&values, types.value_int(i64(table.root_page)))
-	append(&values, types.value_int(i64(len(table.columns))))
-
-	for col in table.columns {
-		append(&values, types.value_text(strings.clone(col.name, allocator)))
-		append(&values, types.value_int(i64(col.type)))
-
-		flags: i64 = 0
-		if col.not_null do flags |= 1
-		if col.pk do flags |= 2
-		append(&values, types.value_int(flags))
-	}
-	return values[:]
-}
-
 // Deserialize values back into a Table struct
 schema_table_from_values :: proc(
 	values: []types.Value,
@@ -62,59 +42,100 @@ schema_table_from_values :: proc(
 	types.Table,
 	bool,
 ) {
-	if len(values) < 3 {
+	if len(values) != 6 {
 		return types.Table{}, false
 	}
 
-	t_name_str, ok1 := values[0].(string)
-	root_page, ok2 := values[1].(i64)
-	col_cnt, ok3 := values[2].(i64)
-	if !ok1 || !ok2 || !ok3 {
-		return types.Table{}, false
-	}
-
-	col_count := int(col_cnt)
-	expected_len := 3 + col_count * 3
-	if len(values) != expected_len {
+	name_str, ok1 := values[1].(string)
+	root_page_i64, ok2 := values[3].(i64)
+	sql_stmt, ok3 := values[4].(string)
+	blob, ok4 := values[5].([]u8)
+	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return types.Table{}, false
 	}
 
 	table: types.Table
-	table.name = strings.clone(t_name_str, allocator)
-	table.root_page = u32(root_page)
-	columns := make([dynamic]types.Column, 0, col_count, allocator)
-	success := false
-	defer if !success {
+	table.name = strings.clone(name_str, allocator)
+	table.root_page = u32(root_page_i64)
+	table.sql = strings.clone(sql_stmt, allocator)
+	table.columns = deserialize_columns_from_blob(blob, allocator)
+	if table.columns == nil {
 		delete(table.name, allocator)
-		for col in columns {
-			delete(col.name, allocator)
-		}
-		delete(columns)
+		delete(table.sql, allocator)
+		return types.Table{}, false
 	}
-
-	idx := 3
-	for _ in 0 ..< col_count {
-		col_name, ok4 := values[idx].(string)
-		col_type, ok5 := values[idx + 1].(i64)
-		col_flags, ok6 := values[idx + 2].(i64)
-		if !ok4 || !ok5 || !ok6 {
-			return types.Table{}, false
-		}
-
-		col := types.Column {
-			name     = strings.clone(col_name, allocator),
-			type     = types.Column_Type(col_type),
-			not_null = (col_flags & 1) != 0,
-			pk       = (col_flags & 2) != 0,
-		}
-
-		append(&columns, col)
-		idx += 3
-	}
-
-	table.columns = columns[:]
-	success = true
 	return table, true
+}
+
+// Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b)]...
+serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.allocator) -> []u8 {
+	total_size := 4
+	for col in columns {
+		total_size += 4 + len(col.name) + 1 + 1
+	}
+
+	blob := make([]u8, total_size, allocator)
+	offset := 0
+	utils.write_u32_le(blob, offset, u32(len(columns)))
+	offset += 4
+	for col in columns {
+		utils.write_u32_le(blob, offset, u32(len(col.name)))
+		offset += 4
+
+		copy(blob[offset:], col.name)
+		offset += len(col.name)
+		blob[offset] = u8(col.type)
+		offset += 1
+
+		flags: u8 = 0
+		if col.not_null do flags |= 1
+		if col.pk do flags |= 2
+		blob[offset] = flags
+		offset += 1
+	}
+	return blob
+}
+
+deserialize_columns_from_blob :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
+	if len(blob) < 4 do return nil
+
+	offset := 0
+	count, ok_count := utils.read_u32_le(blob, offset)
+	if !ok_count do return nil
+
+	offset += 4
+	columns := make([dynamic]types.Column, 0, count, allocator)
+	for _ in 0 ..< count {
+		name_len, ok_len := utils.read_u32_le(blob, offset)
+		if !ok_len do return nil
+		offset += 4
+		if offset + int(name_len) > len(blob) {
+			delete(columns)
+			return nil
+		}
+
+		name_str := string(blob[offset:offset + int(name_len)])
+		offset += int(name_len)
+		if offset + 2 > len(blob) {
+			delete(columns)
+			return nil
+		}
+
+		type_byte := blob[offset]
+		offset += 1
+		flags_byte := blob[offset]
+		offset += 1
+		append(
+			&columns,
+			types.Column {
+				name = strings.clone(name_str, allocator),
+				type = types.Column_Type(type_byte),
+				not_null = (flags_byte & 1) != 0,
+				pk = (flags_byte & 2) != 0,
+			},
+		)
+	}
+	return columns[:]
 }
 
 // Add a table to the schema
@@ -123,14 +144,18 @@ schema_add_table :: proc(
 	table_name: string,
 	columns: []types.Column,
 	root_page: u32,
+	sql_stmt: string,
 ) -> bool {
-	table := types.Table {
-		name      = table_name,
-		root_page = root_page,
-		columns   = columns,
+	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
+	values := []types.Value {
+		types.value_text("table"), // type
+		types.value_text(table_name), // name
+		types.value_text(table_name), // tbl_name
+		types.value_int(i64(root_page)), // rootpage
+		types.value_text(sql_stmt), // sql
+		types.value_blob(col_blob), // hidden blob
 	}
 
-	values := schema_table_to_values(table, context.temp_allocator)
 	rowid := types.Row_ID(hash_string(table_name))
 	err := btree.btree_insert_cell(p, SCHEMA_PAGE, rowid, values)
 	if err != .None {
@@ -259,17 +284,22 @@ schema_table_exists :: proc(p: ^pager.Pager, table_name: string) -> bool {
 // Free table memory
 schema_table_free :: proc(table: types.Table) {
 	delete(table.name)
+	delete(table.sql)
 	for col in table.columns {
 		delete(col.name)
 	}
 	delete(table.columns)
 }
 
-// Simple hash function for table names
+// FNV-1a string hashing for table names
 hash_string :: proc(s: string) -> u64 {
-	h: u64 = 5381
-	for c in s {
-		h = ((h << 5) + h) + u64(c)
+	OFFSET_BASIS :: 0xcbf29ce484222325
+	PRIME :: 0x100000001b3
+
+	h: u64 = OFFSET_BASIS
+	for i in 0 ..< len(s) {
+		h = h ~ u64(s[i])
+		h = h * PRIME
 	}
 	return h & 0x7FFFFFFFFFFFFFFF
 }
@@ -329,6 +359,7 @@ schema_get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
 // Debug: Print schema entry
 schema_debug_print_entry :: proc(table: types.Table) {
 	fmt.printf("Table: %s (root_page=%d)\n", table.name, table.root_page)
+	fmt.printf("SQL:   %s\n", table.sql)
 	fmt.println("Columns:")
 	for col, i in table.columns {
 		flags := make([dynamic]string, context.temp_allocator)
@@ -370,4 +401,12 @@ schema_debug_print_all :: proc(p: ^pager.Pager) {
 		schema_debug_print_entry(table)
 	}
 	fmt.println("======================")
+}
+
+// Print the CREATE TABLE statements for all tables
+schema_print_ddl :: proc(p: ^pager.Pager) {
+	tables := schema_list_tables(p, context.temp_allocator)
+	for table in tables {
+		fmt.println(table.sql)
+	}
 }

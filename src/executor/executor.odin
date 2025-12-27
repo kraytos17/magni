@@ -85,7 +85,7 @@ execute_create_table :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 		fmt.eprintln("Error: Failed to initialize leaf page")
 		return false
 	}
-	if !schema.schema_add_table(p, stmt.table_name, stmt.columns, root_page.page_num) {
+	if !schema.schema_add_table(p, stmt.table_name, stmt.columns, root_page.page_num, stmt.original_sql) {
 		fmt.eprintln("Error: Failed to add table to schema")
 		return false
 	}

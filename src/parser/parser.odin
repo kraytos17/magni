@@ -112,6 +112,7 @@ Statement :: struct {
 	update_columns: []string,
 	update_values:  []types.Value,
 	from_table:     string,
+	original_sql:   string,
 }
 
 // Parser state
@@ -822,11 +823,13 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) 
 		statement_free(stmt)
 		return Statement{}, false
 	}
+	stmt.original_sql = strings.clone(sql, allocator)
 	return stmt, true
 }
 
 // Recursively frees all memory associated with a Statement AST.
 statement_free :: proc(stmt: Statement) {
+	delete(stmt.original_sql)
 	delete(stmt.table_name)
 	delete(stmt.from_table)
 

@@ -142,6 +142,7 @@ Table :: struct {
 	name:      string,
 	columns:   []Column,
 	root_page: u32, // Page number of B-tree root
+	sql:       string,
 }
 
 Result_Row :: []Value
