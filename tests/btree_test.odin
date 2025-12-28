@@ -2,17 +2,19 @@ package tests
 
 import "core:fmt"
 import os "core:os/os2"
+import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:cell"
 import "src:pager"
 import "src:types"
 
-TEST_DB_FILE :: "test_btree.db"
+create_test_pager :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string, u32) {
+	temp_name := fmt.tprintf("test_btree_%s.db", test_name)
+	filename, _ := strings.clone(temp_name, context.allocator)
 
-create_test_pager :: proc(t: ^testing.T) -> (^pager.Pager, u32) {
-	os.remove(TEST_DB_FILE)
-	p, err := pager.open(TEST_DB_FILE)
+	os.remove(filename)
+	p, err := pager.open(filename)
 	testing.expect(t, err == nil, "Failed to open pager")
 
 	pager.allocate_page(p)
@@ -21,19 +23,21 @@ create_test_pager :: proc(t: ^testing.T) -> (^pager.Pager, u32) {
 
 	init_err := btree.init_leaf_page(page.data)
 	testing.expect(t, init_err == .None, "Failed to initialize leaf page")
-	return p, page.page_num
+
+	return p, filename, page.page_num
 }
 
-destroy_test_pager :: proc(p: ^pager.Pager) {
+destroy_test_pager :: proc(p: ^pager.Pager, filename: string) {
 	pager.close(p)
-	os.remove(TEST_DB_FILE)
+	os.remove(filename)
+	delete(filename, context.allocator)
 }
 
 @(test)
 test_init_leaf_page :: proc(t: ^testing.T) {
-	page_data := make([]u8, types.PAGE_SIZE)
-	defer delete(page_data)
+	defer free_all(context.temp_allocator)
 
+	page_data := make([]u8, types.PAGE_SIZE, context.temp_allocator)
 	err := btree.init_leaf_page(page_data)
 	testing.expect(t, err == .None, "Failed to initialize leaf page")
 
@@ -46,8 +50,9 @@ test_init_leaf_page :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_cell_single :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "insert_single")
+	defer destroy_test_pager(p, file)
 
 	values := []types.Value{types.value_int(42), types.value_text("Hello")}
 	err := btree.insert_cell(p, page_num, 1, values)
@@ -65,8 +70,9 @@ test_insert_cell_single :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_cell_multiple_ordered :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "insert_ordered")
+	defer destroy_test_pager(p, file)
 
 	for i in 1 ..= 5 {
 		values := []types.Value{types.value_int(i64(i * 10))}
@@ -81,8 +87,9 @@ test_insert_cell_multiple_ordered :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_cell_unordered :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "insert_unordered")
+	defer destroy_test_pager(p, file)
 
 	rowids := []types.Row_ID{5, 2, 8, 1, 4}
 	for rowid in rowids {
@@ -92,7 +99,6 @@ test_insert_cell_unordered :: proc(t: ^testing.T) {
 	}
 
 	page, _ := pager.get_page(p, page_num)
-	header := btree.get_header(page.data)
 	pointers := btree.get_pointers(page.data)
 	prev_rowid := types.Row_ID(0)
 	for ptr in pointers {
@@ -109,8 +115,9 @@ test_insert_cell_unordered :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_cell_duplicate :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "insert_dup")
+	defer destroy_test_pager(p, file)
 
 	values := []types.Value{types.value_int(42)}
 	err := btree.insert_cell(p, page_num, 1, values)
@@ -122,8 +129,9 @@ test_insert_cell_duplicate :: proc(t: ^testing.T) {
 
 @(test)
 test_cursor_traversal :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "cursor")
+	defer destroy_test_pager(p, file)
 
 	for i in 1 ..= 3 {
 		values := []types.Value{types.value_int(i64(i))}
@@ -132,25 +140,25 @@ test_cursor_traversal :: proc(t: ^testing.T) {
 
 	cursor := btree.cursor_start(page_num)
 	testing.expect(t, !cursor.end_of_table, "Should not be at end")
-	
+
 	ref1, err1 := btree.cursor_get_cell(p, &cursor)
 	testing.expect(t, err1 == .None, "Failed to get cell 1")
 	testing.expect(t, ref1.cell.rowid == 1, "RowID mismatch")
-	
+
 	btree.cell_ref_destroy(&ref1)
 	btree.cursor_advance(p, &cursor)
 
 	ref2, err2 := btree.cursor_get_cell(p, &cursor)
 	testing.expect(t, err2 == .None, "Failed to get cell 2")
 	testing.expect(t, ref2.cell.rowid == 2, "RowID mismatch")
-	
+
 	btree.cell_ref_destroy(&ref2)
 	btree.cursor_advance(p, &cursor)
 
 	ref3, err3 := btree.cursor_get_cell(p, &cursor)
 	testing.expect(t, err3 == .None, "Failed to get cell 3")
 	testing.expect(t, ref3.cell.rowid == 3, "RowID mismatch")
-	
+
 	btree.cell_ref_destroy(&ref3)
 	btree.cursor_advance(p, &cursor)
 	testing.expect(t, cursor.end_of_table, "Should be at end")
@@ -158,8 +166,9 @@ test_cursor_traversal :: proc(t: ^testing.T) {
 
 @(test)
 test_find_by_rowid :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "find")
+	defer destroy_test_pager(p, file)
 
 	for i in 1 ..= 10 {
 		values := []types.Value{types.value_int(i64(i * 100))}
@@ -179,8 +188,9 @@ test_find_by_rowid :: proc(t: ^testing.T) {
 
 @(test)
 test_find_by_rowid_not_found :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "find_fail")
+	defer destroy_test_pager(p, file)
 
 	for i in 1 ..= 5 {
 		values := []types.Value{types.value_int(i64(i))}
@@ -193,8 +203,9 @@ test_find_by_rowid_not_found :: proc(t: ^testing.T) {
 
 @(test)
 test_delete_cell :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "delete")
+	defer destroy_test_pager(p, file)
 
 	for i in 1 ..= 5 {
 		values := []types.Value{types.value_int(i64(i * 10))}
@@ -217,8 +228,9 @@ test_delete_cell :: proc(t: ^testing.T) {
 
 @(test)
 test_foreach_cell :: proc(t: ^testing.T) {
-	p, page_num := create_test_pager(t)
-	defer destroy_test_pager(p)
+	defer free_all(context.temp_allocator)
+	p, file, page_num := create_test_pager(t, "foreach")
+	defer destroy_test_pager(p, file)
 
 	for i in 1 ..= 5 {
 		values := []types.Value{types.value_int(i64(i * 100))}
