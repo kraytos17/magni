@@ -115,6 +115,12 @@ write_u32_le :: proc(dest: []u8, offset: int, value: u32) -> bool {
 	return true
 }
 
+write_u32_be :: proc(dest: []u8, offset: int, value: u32) -> bool {
+	if offset + 4 > len(dest) do return false
+	endian.put_u32(dest[offset:], .Big, value)
+	return true
+}
+
 write_u64_le :: proc(dest: []u8, offset: int, value: u64) -> bool {
 	if offset + 8 > len(dest) do return false
 	endian.put_u64(dest[offset:], .Little, value)

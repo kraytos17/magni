@@ -8,6 +8,7 @@ import "src:pager"
 import "src:parser"
 import "src:schema"
 import "src:types"
+import "src:utils"
 
 MAGIC_STRING :: "MAGNI_DB_v1.0"
 
@@ -68,6 +69,8 @@ close :: proc(db: ^Database) {
 	if db == nil {
 		return
 	}
+
+	update_header(db)
 	if db.pager != nil {
 		pager.close(db.pager)
 	}
@@ -118,6 +121,16 @@ verify_header :: proc(db: ^Database) -> bool {
 		return false
 	}
 	return true
+}
+
+update_header :: proc(db: ^Database) {
+	page_0, err := pager.get_page(db.pager, 0)
+	if err != nil { return }
+
+	page_count := u32(db.pager.file_len / i64(db.pager.page_size))
+	utils.write_u32_be(page_0.data, 28, page_count)
+	pager.mark_dirty(db.pager, 0)
+	pager.flush_page(db.pager, 0)
 }
 
 execute :: proc(db: ^Database, sql: string) -> bool {
