@@ -305,16 +305,27 @@ validate :: proc(values: []types.Value, columns: []types.Column) -> bool {
 		if col.not_null && types.is_null(val) {
 			return false
 		}
+		if types.is_null(val) {
+			continue
+		}
 
 		switch col.type {
 		case .INTEGER:
-			if _, ok := val.(i64); !ok && !types.is_null(val) { return false }
+			if _, ok := val.(i64); !ok {
+				return false
+			}
 		case .REAL:
-			if _, ok := val.(f64); !ok && !types.is_null(val) { return false }
+			_, is_real := val.(f64)
+			_, is_int := val.(i64)
+			if !is_real && !is_int { return false }
 		case .TEXT:
-			if _, ok := val.(string); !ok && !types.is_null(val) { return false }
+			_, is_text := val.(string)
+			_, is_blob := val.([]u8)
+			if !is_text && !is_blob { return false }
 		case .BLOB:
-			if _, ok := val.([]u8); !ok && !types.is_null(val) { return false }
+			_, is_blob := val.([]u8)
+			_, is_text := val.(string)
+			if !is_blob && !is_text { return false }
 		}
 	}
 	return true
