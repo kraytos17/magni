@@ -93,6 +93,11 @@ read_u32_le :: proc(data: []u8, offset: int) -> (val: u32, ok: bool) {
 	return endian.get_u32(data[offset:], .Little)
 }
 
+read_u32_be :: proc(data: []u8, offset: int) -> (val: u32, ok: bool) {
+	if offset >= len(data) do return 0, false
+	return endian.get_u32(data[offset:], .Big)
+}
+
 read_u64_le :: proc(data: []u8, offset: int) -> (val: u64, ok: bool) {
 	if offset >= len(data) do return 0, false
 	return endian.get_u64(data[offset:], .Little)

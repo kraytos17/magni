@@ -7,25 +7,18 @@ import "src:pager"
 import "src:types"
 import "src:utils"
 
-SCHEMA_PAGE :: 1
+SCHEMA_PAGE :: 0
 
 // Initialize schema page
 init :: proc(p: ^pager.Pager) -> bool {
-	page, err := pager.allocate_page(p)
+	page, err := pager.get_page(p, SCHEMA_PAGE)
 	if err != nil {
 		return false
 	}
-	if page.page_num != SCHEMA_PAGE {
-		fmt.println("Critical Error: Schema page allocated at wrong index:", page.page_num)
+	if btree.init_leaf_page(page.data, SCHEMA_PAGE) != .None {
 		return false
 	}
-	if btree.init_leaf_page(page.data) != .None {
-		return false
-	}
-	if pager.flush_page(p, page.page_num) != nil {
-		fmt.println("Critical Error: Failed to flush schema page to disk")
-		return false
-	}
+	pager.mark_dirty(p, SCHEMA_PAGE)
 	return true
 }
 
@@ -197,7 +190,7 @@ find_table :: proc(
 // List all tables in the schema
 list_tables :: proc(p: ^pager.Pager, allocator := context.allocator) -> []types.Table {
 	tables := make([dynamic]types.Table, allocator)
-	cursor := btree.cursor_start(SCHEMA_PAGE, context.temp_allocator)
+	cursor, _ := btree.cursor_start(p, SCHEMA_PAGE, context.temp_allocator)
 	for !cursor.end_of_table {
 		config := btree.Config {
 			allocator        = context.temp_allocator,

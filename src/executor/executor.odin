@@ -79,7 +79,7 @@ exec_create_table :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 		}
 	}
 
-	init_err := btree.init_leaf_page(root_page.data)
+	init_err := btree.init_leaf_page(root_page.data, root_page.page_num)
 	if init_err != nil {
 		fmt.eprintln("Error: Failed to initialize leaf page")
 		return false
@@ -111,9 +111,8 @@ exec_insert :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 	}
 
 	next_rowid, rowid_err := btree.get_next_rowid(p, table.root_page)
-	if rowid_err != nil {
-		fmt.eprintln("Error: Failed to get next rowid")
-		return false
+	if rowid_err != .None {
+		next_rowid = 1
 	}
 
 	pk_col_idx, has_pk := schema.get_pk_column(table.columns)
@@ -124,7 +123,29 @@ exec_insert :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 	}
 
 	insert_err := btree.insert_cell(p, table.root_page, next_rowid, stmt.insert_values)
-	if insert_err != nil {
+	if insert_err == .Page_Full {
+		page, _ := pager.get_page(p, table.root_page)
+		header := btree.get_header(page.data, table.root_page)
+		if header.page_type == .LEAF_TABLE {
+			fmt.println("Root Leaf full! Splitting root...")
+			split_err := btree.split_leaf_root(p, table.root_page)
+			if split_err != .None {
+				fmt.eprintln("Critical Error: Failed to split root page:", split_err)
+				return false
+			}
+
+			// Retry insertion into the new structure (Root is now Interior)
+			insert_err = btree.insert_cell(p, table.root_page, next_rowid, stmt.insert_values)
+
+		} else {
+			fmt.eprintln(
+				"Error: Root Interior Node is full. Tree height increase not implemented for Interior Roots.",
+			)
+			return false
+		}
+	}
+
+	if insert_err != .None {
 		fmt.eprintln("Error: Failed to insert row:", insert_err)
 		return false
 	}
@@ -176,7 +197,7 @@ exec_select :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 	}
 
 	fmt.println()
-	cursor := btree.cursor_start(table.root_page, context.temp_allocator)
+	cursor, _ := btree.cursor_start(p, table.root_page, context.temp_allocator)
 	row_count := 0
 	for !cursor.end_of_table {
 		config := btree.Config {
@@ -241,16 +262,15 @@ exec_update :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 	}
 
 	rows_to_update := make([dynamic]Row_Update, context.temp_allocator)
-	cursor := btree.cursor_start(table.root_page, context.temp_allocator)
+	cursor, _ := btree.cursor_start(p, table.root_page, context.temp_allocator)
 	for !cursor.end_of_table {
 		config := btree.Config {
-			allocator        = context.temp_allocator,
-			zero_copy        = false,
-			check_duplicates = false,
+			allocator = context.temp_allocator,
+			zero_copy = false,
 		}
 
 		cell_ref, err := btree.cursor_get_cell(p, &cursor, config)
-		if err != nil {
+		if err != .None {
 			btree.cursor_advance(p, &cursor)
 			continue
 		}
@@ -267,7 +287,6 @@ exec_update :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 
 		new_values := make([]types.Value, len(row_values), context.temp_allocator)
 		copy(new_values, row_values)
-
 		for i in 0 ..< len(update_indices) {
 			new_values[update_indices[i]] = stmt.update_values[i]
 		}
@@ -285,11 +304,16 @@ exec_update :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 
 	update_count := 0
 	for row in rows_to_update {
-		if err := btree.delete_cell(p, table.root_page, row.rowid); err != nil {
-			fmt.eprintln("Warning: Failed to delete row", row.rowid)
+		leaf_page_num, find_err := btree.find_leaf_page(p, table.root_page, row.rowid)
+		if find_err != .None {
+			fmt.eprintln("Warning: Could not locate row for update:", row.rowid)
 			continue
 		}
-		if err := btree.insert_cell(p, table.root_page, row.rowid, row.values); err != nil {
+		if err := btree.delete_cell(p, leaf_page_num, row.rowid); err != .None {
+			fmt.eprintln("Warning: Failed to delete old row", row.rowid)
+			continue
+		}
+		if err := btree.insert_cell(p, table.root_page, row.rowid, row.values); err != .None {
 			fmt.eprintln("Warning: Failed to insert updated row", row.rowid)
 			continue
 		}
@@ -309,16 +333,15 @@ exec_delete :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 	}
 
 	rowids_to_delete := make([dynamic]types.Row_ID, context.temp_allocator)
-	cursor := btree.cursor_start(table.root_page, context.temp_allocator)
+	cursor, _ := btree.cursor_start(p, table.root_page, context.temp_allocator)
 	for !cursor.end_of_table {
 		config := btree.Config {
-			allocator        = context.temp_allocator,
-			zero_copy        = false,
-			check_duplicates = false,
+			allocator = context.temp_allocator,
+			zero_copy = false,
 		}
-
+		
 		cell_ref, err := btree.cursor_get_cell(p, &cursor, config)
-		if err != nil {
+		if err != .None {
 			btree.cursor_advance(p, &cursor)
 			continue
 		}
@@ -340,7 +363,11 @@ exec_delete :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 
 	delete_count := 0
 	for rowid in rowids_to_delete {
-		if btree.delete_cell(p, table.root_page, rowid) == nil {
+		leaf_page_num, find_err := btree.find_leaf_page(p, table.root_page, rowid)
+		if find_err != .None {
+			continue
+		}
+		if btree.delete_cell(p, leaf_page_num, rowid) == .None {
 			delete_count += 1
 		}
 	}

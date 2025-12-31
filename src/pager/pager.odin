@@ -131,21 +131,44 @@ close :: proc(p: ^Pager) {
 	}
 
 	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
+	assert_no_pinned_pages(p)
 
-	flush_all_unsafe(p)
-	if p.file != nil {
-		os.sync(p.file)
-		os.close(p.file)
-		p.file = nil
+	file := p.file
+	p.file = nil
+	pages := p.page_cache
+	p.page_cache = nil
+	page_size := p.page_size
+
+	sync.unlock(&p.mutex)
+
+	if file != nil {
+		for _, page in pages {
+			if page.dirty {
+				offset := i64(page.page_num) * i64(page_size)
+				_, err := os.write_at(file, page.data, offset)
+				if err != nil {
+					panic(fmt.tprintf("Pager close write failed page=%d err=%v", page.page_num, err))
+				}
+			}
+		}
+		os.sync(file)
+		os.close(file)
 	}
 
-	for _, page in p.page_cache {
+	for _, page in pages {
 		destroy_page(page)
 	}
-
-	delete(p.page_cache)
+	delete(pages)
 	free(p)
+}
+
+@(private = "file")
+assert_no_pinned_pages :: proc(p: ^Pager) {
+	for page_num, page in p.page_cache {
+		if page.pinned {
+			panic(fmt.tprintf("Pager close with pinned page %d", page_num))
+		}
+	}
 }
 
 // Get a page from cache or disk (thread-safe)
@@ -214,19 +237,13 @@ allocate_page :: proc(p: ^Pager) -> (^Page, os.Error) {
 }
 
 // Get existing page or allocate new one
-//
-// NOTE: Only works for sequential allocation - page_num must equal current page count
 get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, os.Error) {
 	page, err := get_page(p, page_num)
 	if err == nil {
 		return page, nil
 	}
-
 	if err == .Not_Exist {
-		sync.lock(&p.mutex)
-		expected_page_num := u32(p.file_len / i64(p.page_size))
-		sync.unlock(&p.mutex)
-		if page_num == expected_page_num {
+		if page_num == page_count(p) {
 			return allocate_page(p)
 		}
 	}
@@ -276,7 +293,20 @@ flush_page :: proc(p: ^Pager, page_num: u32) -> os.Error {
 flush_all :: proc(p: ^Pager) {
 	sync.lock(&p.mutex)
 	defer sync.unlock(&p.mutex)
-	flush_all_unsafe(p)
+
+	if !flush_all_strict(p) {
+		panic("flush_all failed")
+	}
+}
+
+shutdown :: proc(p: ^Pager) {
+	if p == nil {
+		return
+	}
+	if p.file == nil {
+		return
+	}
+	close(p)
 }
 
 // Flushes and fsyncs the file.
@@ -312,14 +342,28 @@ flush_page_unsafe :: proc(p: ^Pager, page_num: u32) -> os.Error {
 }
 
 @(private = "file")
-flush_all_unsafe :: proc(p: ^Pager) {
+flush_all_strict :: proc(p: ^Pager) -> bool {
 	for page_num, page in p.page_cache {
 		if page.dirty {
 			if err := flush_page_unsafe(p, page_num); err != nil {
-				fmt.eprintf("Warning: failed to flush page %d: %v\n", page_num, err)
+				fmt.eprintf("FATAL: flush failed page=%d err=%v\n", page_num, err)
+				return false
 			}
 		}
 	}
+	return true
+}
+
+@(private = "file")
+evict_page_unsafe :: proc(p: ^Pager, page_num: u32, page: ^Page) {
+	if page.pinned {
+		return
+	}
+	if page.dirty {
+		panic("Evicting dirty page without flush")
+	}
+	destroy_page(page)
+	delete_key(&p.page_cache, page_num)
 }
 
 @(private = "file")
@@ -329,20 +373,21 @@ evict_if_needed_unsafe :: proc(p: ^Pager) {
 	}
 
 	for page_num, page in p.page_cache {
-		if !page.dirty && !page.pinned {
-			destroy_page(page)
-			delete_key(&p.page_cache, page_num)
+		if !page.pinned && !page.dirty {
+			evict_page_unsafe(p, page_num, page)
 			return
 		}
 	}
 
-	flush_all_unsafe(p)
+	if !flush_all_strict(p) {
+		panic("Pager eviction failed: flush error")
+	}
+
 	for page_num, page in p.page_cache {
-		if !page.dirty && !page.pinned {
-			destroy_page(page)
-			delete_key(&p.page_cache, page_num)
+		if !page.pinned && !page.dirty {
+			evict_page_unsafe(p, page_num, page)
 			return
 		}
 	}
-	fmt.eprintln("Warning: All cache pages are pinned! Expanding cache temporarily.")
+	panic("All pages pinned; eviction impossible")
 }

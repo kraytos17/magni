@@ -2,6 +2,7 @@ package tests
 
 import "core:fmt"
 import os "core:os/os2"
+import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:executor"
@@ -11,14 +12,15 @@ import "src:schema"
 import "src:types"
 
 setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
-	filename := fmt.tprintf("test_exec_%s.db", test_name)
-	os.remove(filename)
+	temp_name := fmt.tprintf("test_exec_%s.db", test_name)
+	filename, _ := strings.clone(temp_name, context.allocator)
 
+	os.remove(filename)
 	p, err := pager.open(filename)
 	testing.expect(t, err == nil, "Failed to open pager")
 
 	pager.allocate_page(p) // Page 0
-	ok := schema.init(p) // Page 1
+	ok := schema.init(p)
 	testing.expect(t, ok, "Failed to init schema")
 
 	return p, filename
@@ -27,6 +29,7 @@ setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, s
 teardown_executor_env :: proc(p: ^pager.Pager, filename: string) {
 	pager.close(p)
 	os.remove(filename)
+	delete(filename, context.allocator)
 }
 
 make_create_stmt :: proc(name: string) -> parser.Statement {
@@ -56,8 +59,6 @@ make_insert_stmt :: proc(table: string, id: i64, name: string, score: f64) -> pa
 
 @(test)
 test_exec_create_table :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	p, file := setup_executor_env(t, "create")
 	defer teardown_executor_env(p, file)
 
@@ -73,8 +74,6 @@ test_exec_create_table :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	p, file := setup_executor_env(t, "insert")
 	defer teardown_executor_env(p, file)
 
@@ -98,8 +97,6 @@ test_exec_insert :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_validation_failure :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	p, file := setup_executor_env(t, "insert_fail")
 	defer teardown_executor_env(p, file)
 
@@ -123,8 +120,6 @@ test_exec_insert_validation_failure :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_update :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	p, file := setup_executor_env(t, "update")
 	defer teardown_executor_env(p, file)
 
@@ -165,8 +160,6 @@ test_exec_update :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_delete :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	p, file := setup_executor_env(t, "delete")
 	defer teardown_executor_env(p, file)
 
@@ -197,8 +190,6 @@ test_exec_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_evaluate_where_clause :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	cols := []types.Column {
 		{name = "id", type = .INTEGER},
 		{name = "name", type = .TEXT},
@@ -223,4 +214,56 @@ test_evaluate_where_clause :: proc(t: ^testing.T) {
 test_compare_values :: proc(t: ^testing.T) {
 	testing.expect(t, executor.compare_values(types.value_int(10), types.value_int(20)) == -1, "10 < 20")
 	testing.expect(t, executor.compare_values(types.value_text("a"), types.value_text("b")) == -1, "a < b")
+}
+
+@(test)
+test_page_splitting :: proc(t: ^testing.T) {
+	p, file := setup_executor_env(t, "split_test")
+	defer teardown_executor_env(p, file)
+
+	create_stmt := make_create_stmt("stress_test")
+	if !executor.execute_statement(p, create_stmt) {
+
+	}
+
+	fmt.println("--- Starting Stress Insert (70 rows) ---")
+	for i in 1 ..= 70 {
+		free_all(context.temp_allocator)
+		name := fmt.tprintf("Row Number %d with padding to force split.............................", i)
+		stmt := make_insert_stmt("stress_test", i64(i), name, 10.5)
+		success := executor.execute_statement(p, stmt)
+		if !success {
+			fmt.printf(" [FAIL] Insert failed at row ID %d\n", i)
+		}
+	}
+
+	fmt.println("--- Finished Stress Insert ---")
+	table, _ := schema.get_table(p, "stress_test", context.temp_allocator)
+
+	fmt.println("\n--- VERIFYING BTREE STRUCTURE ---")
+	ok := btree.verify_page(p, table.root_page, 1, 1_000_000)
+	testing.expect(t, ok, "B-tree invariant violation")
+
+	ref, err := btree.find_by_rowid(p, table.root_page, 60)
+	defer btree.cell_ref_destroy(&ref)
+
+	testing.expect_value(t, err, btree.Error.None)
+	if err == .None {
+		testing.expect(t, ref.cell.rowid == 60, "Row ID mismatch for Row 60")
+	}
+
+	root_page, pg_err := pager.get_page(p, table.root_page)
+	testing.expect(t, pg_err == nil, "Could not load root page for verification")
+	if pg_err == nil {
+		header := btree.get_header(root_page.data, table.root_page)
+		is_interior := header.page_type == .INTERIOR_TABLE
+		testing.expect(t, is_interior, "Root page did not split! It is still a Leaf Node.")
+		if is_interior {
+			fmt.printf(
+				" [PASS] Root Page %d is now Interior (Cells: %d)\n",
+				table.root_page,
+				header.cell_count,
+			)
+		}
+	}
 }

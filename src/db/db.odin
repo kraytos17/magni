@@ -79,29 +79,20 @@ close :: proc(db: ^Database) {
 }
 
 initialize :: proc(db: ^Database) -> bool {
-	page, err := pager.allocate_page(db.pager)
+	page0, err := pager.allocate_page(db.pager)
 	if err != nil {
-		fmt.eprintln("Error: Failed to allocate page 0")
-		return false
-	}
-	if page.page_num != 0 {
-		fmt.eprintln("Error: Allocated page was not 0")
 		return false
 	}
 
-	header := (^Header)(raw_data(page.data))
-	copy(header.magic[:], MAGIC_STRING)
-
-	header.page_size = types.PAGE_SIZE
-	header.page_count = 1
-	header.schema_version = 1
+	copy(page0.data[0:], MAGIC_STRING)
+	utils.write_u32_be(page0.data, 16, u32(db.pager.page_size))
+	utils.write_u32_be(page0.data, 28, 1)
+	if !schema.init(db.pager) {
+		return false
+	}
 
 	pager.mark_dirty(db.pager, 0)
 	pager.flush_page(db.pager, 0)
-	if !schema.init(db.pager) {
-		fmt.eprintln("Error: Failed to initialize schema")
-		return false
-	}
 	return true
 }
 
