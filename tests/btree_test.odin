@@ -21,9 +21,8 @@ create_test_pager :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, st
 	page, alloc_err := pager.allocate_page(p)
 	testing.expect(t, alloc_err == nil, "Failed to allocate page")
 
-	init_err := btree.init_leaf_page(page.data)
+	init_err := btree.init_leaf_page(page.data, page.page_num)
 	testing.expect(t, init_err == .None, "Failed to initialize leaf page")
-
 	return p, filename, page.page_num
 }
 
@@ -38,10 +37,12 @@ test_init_leaf_page :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 
 	page_data := make([]u8, types.PAGE_SIZE, context.temp_allocator)
-	err := btree.init_leaf_page(page_data)
+	page_num: u32 = 1
+
+	err := btree.init_leaf_page(page_data, page_num)
 	testing.expect(t, err == .None, "Failed to initialize leaf page")
 
-	header := btree.get_header(page_data)
+	header := btree.get_header(page_data, page_num)
 	testing.expect(t, header != nil, "Header should not be nil")
 	testing.expect(t, header.page_type == .LEAF_TABLE, "Wrong page type")
 	testing.expect(t, header.cell_count == 0, "Cell count should be 0")
@@ -59,7 +60,7 @@ test_insert_cell_single :: proc(t: ^testing.T) {
 	testing.expect(t, err == .None, "Failed to insert cell")
 
 	page, _ := pager.get_page(p, page_num)
-	header := btree.get_header(page.data)
+	header := btree.get_header(page.data, page_num)
 	testing.expect(t, header.cell_count == 1, "Cell count should be 1")
 	testing.expect(
 		t,
@@ -81,7 +82,7 @@ test_insert_cell_multiple_ordered :: proc(t: ^testing.T) {
 	}
 
 	page, _ := pager.get_page(p, page_num)
-	header := btree.get_header(page.data)
+	header := btree.get_header(page.data, page_num)
 	testing.expect(t, header.cell_count == 5, "Should have 5 cells")
 }
 
@@ -99,7 +100,7 @@ test_insert_cell_unordered :: proc(t: ^testing.T) {
 	}
 
 	page, _ := pager.get_page(p, page_num)
-	pointers := btree.get_pointers(page.data)
+	pointers := btree.get_pointers(page.data, page_num)
 	prev_rowid := types.Row_ID(0)
 	for ptr in pointers {
 		rowid, ok := cell.get_rowid(page.data, int(ptr))
@@ -138,7 +139,8 @@ test_cursor_traversal :: proc(t: ^testing.T) {
 		btree.insert_cell(p, page_num, types.Row_ID(i), values)
 	}
 
-	cursor := btree.cursor_start(page_num)
+	cursor, c_err := btree.cursor_start(p, page_num)
+	testing.expect(t, c_err == .None, "Cursor start failed")
 	testing.expect(t, !cursor.end_of_table, "Should not be at end")
 
 	ref1, err1 := btree.cursor_get_cell(p, &cursor)
@@ -146,21 +148,24 @@ test_cursor_traversal :: proc(t: ^testing.T) {
 	testing.expect(t, ref1.cell.rowid == 1, "RowID mismatch")
 
 	btree.cell_ref_destroy(&ref1)
-	btree.cursor_advance(p, &cursor)
+	adv_err1 := btree.cursor_advance(p, &cursor)
+	testing.expect(t, adv_err1 == .None, "Advance failed")
 
 	ref2, err2 := btree.cursor_get_cell(p, &cursor)
 	testing.expect(t, err2 == .None, "Failed to get cell 2")
 	testing.expect(t, ref2.cell.rowid == 2, "RowID mismatch")
 
 	btree.cell_ref_destroy(&ref2)
-	btree.cursor_advance(p, &cursor)
+	adv_err2 := btree.cursor_advance(p, &cursor)
+	testing.expect(t, adv_err2 == .None, "Advance failed")
 
 	ref3, err3 := btree.cursor_get_cell(p, &cursor)
 	testing.expect(t, err3 == .None, "Failed to get cell 3")
 	testing.expect(t, ref3.cell.rowid == 3, "RowID mismatch")
 
 	btree.cell_ref_destroy(&ref3)
-	btree.cursor_advance(p, &cursor)
+	adv_err3 := btree.cursor_advance(p, &cursor)
+	testing.expect(t, adv_err3 == .None, "Advance failed")
 	testing.expect(t, cursor.end_of_table, "Should be at end")
 }
 
@@ -241,8 +246,8 @@ test_foreach_cell :: proc(t: ^testing.T) {
 		count: int,
 		sum:   i64,
 	}
-	ctx := Context{0, 0}
 
+	ctx := Context{0, 0}
 	callback :: proc(c: ^cell.Cell, user_data: rawptr) -> bool {
 		ctx := cast(^Context)user_data
 		ctx.count += 1

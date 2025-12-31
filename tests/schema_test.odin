@@ -63,7 +63,7 @@ test_schema_init_correctness :: proc(t: ^testing.T) {
 	page, err := pager.get_page(p, schema.SCHEMA_PAGE)
 	testing.expect(t, err == nil, "Failed to get schema page")
 
-	header := btree.get_header(page.data)
+	header := btree.get_header(page.data, page.page_num)
 	testing.expect(t, header.page_type == .LEAF_TABLE, "Schema page should be a B-Tree Leaf")
 	testing.expect(t, header.cell_count == 0, "New schema should be empty")
 }
@@ -155,11 +155,8 @@ test_validate_columns_empty :: proc(t: ^testing.T) {
 
 @(test)
 test_validate_columns_duplicate :: proc(t: ^testing.T) {
-	cols := []types.Column {
-		{name = "age", type = .INTEGER},
-		{name = "age", type = .TEXT},
-	}
-	
+	cols := []types.Column{{name = "age", type = .INTEGER}, {name = "age", type = .TEXT}}
+
 	ok, msg := schema.validate_columns(cols)
 	testing.expect(t, !ok, "Should fail on duplicate names")
 	testing.expect(t, strings.contains(msg, "Duplicate"), "Error message mismatch")
@@ -171,7 +168,7 @@ test_validate_columns_multi_pk :: proc(t: ^testing.T) {
 		{name = "id1", type = .INTEGER, pk = true},
 		{name = "id2", type = .INTEGER, pk = true},
 	}
-	
+
 	ok, msg := schema.validate_columns(cols)
 	testing.expect(t, !ok, "Should fail on multiple PKs")
 	testing.expect(t, strings.contains(msg, "Multiple primary keys"), "Error message mismatch")
