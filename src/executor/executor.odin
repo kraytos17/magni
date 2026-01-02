@@ -80,7 +80,7 @@ exec_create_table :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 	}
 
 	init_err := btree.init_leaf_page(root_page.data, root_page.page_num)
-	if init_err != nil {
+	if init_err != .None {
 		fmt.eprintln("Error: Failed to initialize leaf page")
 		return false
 	}
@@ -130,18 +130,28 @@ exec_insert :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 			fmt.println("Root Leaf full! Splitting root...")
 			split_err := btree.split_leaf_root(p, table.root_page)
 			if split_err != .None {
-				fmt.eprintln("Critical Error: Failed to split root page:", split_err)
+				fmt.eprintln("Critical Error: Failed to split root leaf page:", split_err)
 				return false
 			}
 
-			// Retry insertion into the new structure (Root is now Interior)
 			insert_err = btree.insert_cell(p, table.root_page, next_rowid, stmt.insert_values)
+			if insert_err != .None {
+				fmt.eprintln("Error: Failed to insert after leaf root split:", insert_err)
+				return false
+			}
+		} else if header.page_type == .INTERIOR_TABLE {
+			// Root is Interior and full - this means a child Interior node split
+			// and we couldn't fit the separator into this root
+			// The split already happened in insert_recursive, we just need to handle
+			// the root being full
 
-		} else {
-			fmt.eprintln(
-				"Error: Root Interior Node is full. Tree height increase not implemented for Interior Roots.",
-			)
+			fmt.println("Root Interior full! This should not happen - insert_recursive should handle it")
+			fmt.eprintln("Error: Interior root split case hit - this indicates a deeper issue")
 			return false
+
+			// NOTE: The proper fix is in insert_recursive (see below)
+			// When insert_recursive detects the root needs to split, it should
+			// be handled there, not here
 		}
 	}
 
@@ -339,7 +349,7 @@ exec_delete :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
 			allocator = context.temp_allocator,
 			zero_copy = false,
 		}
-		
+
 		cell_ref, err := btree.cursor_get_cell(p, &cursor, config)
 		if err != .None {
 			btree.cursor_advance(p, &cursor)

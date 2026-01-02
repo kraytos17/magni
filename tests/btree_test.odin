@@ -1,6 +1,7 @@
 package tests
 
 import "core:fmt"
+import "core:mem"
 import os "core:os/os2"
 import "core:strings"
 import "core:testing"
@@ -9,255 +10,237 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
-create_test_pager :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string, u32) {
-	temp_name := fmt.tprintf("test_btree_%s.db", test_name)
-	filename, _ := strings.clone(temp_name, context.allocator)
+Test_Context :: struct {
+	pager:    ^pager.Pager,
+	tree:     btree.Tree,
+	filename: string,
+}
 
-	os.remove(filename)
+setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
+	filename := fmt.tprintf("test_%s.db", name)
+	if os.exists(filename) {
+		os.remove(filename)
+	}
+
 	p, err := pager.open(filename)
-	testing.expect(t, err == nil, "Failed to open pager")
-
-	pager.allocate_page(p)
-	page, alloc_err := pager.allocate_page(p)
-	testing.expect(t, alloc_err == nil, "Failed to allocate page")
-
-	init_err := btree.init_leaf_page(page.data, page.page_num)
-	testing.expect(t, init_err == .None, "Failed to initialize leaf page")
-	return p, filename, page.page_num
-}
-
-destroy_test_pager :: proc(p: ^pager.Pager, filename: string) {
-	pager.close(p)
-	os.remove(filename)
-	delete(filename, context.allocator)
-}
-
-@(test)
-test_init_leaf_page :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
-	page_data := make([]u8, types.PAGE_SIZE, context.temp_allocator)
-	page_num: u32 = 1
-
-	err := btree.init_leaf_page(page_data, page_num)
-	testing.expect(t, err == .None, "Failed to initialize leaf page")
-
-	header := btree.get_header(page_data, page_num)
-	testing.expect(t, header != nil, "Header should not be nil")
-	testing.expect(t, header.page_type == .LEAF_TABLE, "Wrong page type")
-	testing.expect(t, header.cell_count == 0, "Cell count should be 0")
-	testing.expect(t, header.cell_content_offset == u16le(types.PAGE_SIZE), "Wrong content offset")
-}
-
-@(test)
-test_insert_cell_single :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "insert_single")
-	defer destroy_test_pager(p, file)
-
-	values := []types.Value{types.value_int(42), types.value_text("Hello")}
-	err := btree.insert_cell(p, page_num, 1, values)
-	testing.expect(t, err == .None, "Failed to insert cell")
-
-	page, _ := pager.get_page(p, page_num)
-	header := btree.get_header(page.data, page_num)
-	testing.expect(t, header.cell_count == 1, "Cell count should be 1")
-	testing.expect(
-		t,
-		header.cell_content_offset < u16le(types.PAGE_SIZE),
-		"Content offset should have decreased",
-	)
-}
-
-@(test)
-test_insert_cell_multiple_ordered :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "insert_ordered")
-	defer destroy_test_pager(p, file)
-
-	for i in 1 ..= 5 {
-		values := []types.Value{types.value_int(i64(i * 10))}
-		err := btree.insert_cell(p, page_num, types.Row_ID(i), values)
-		testing.expect(t, err == .None, fmt.tprintf("Failed to insert cell %d", i))
+	if err != nil {
+		testing.fail_now(t, fmt.tprintf("FATAL: Failed to open pager for %s", name))
 	}
 
-	page, _ := pager.get_page(p, page_num)
-	header := btree.get_header(page.data, page_num)
-	testing.expect(t, header.cell_count == 5, "Should have 5 cells")
-}
-
-@(test)
-test_insert_cell_unordered :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "insert_unordered")
-	defer destroy_test_pager(p, file)
-
-	rowids := []types.Row_ID{5, 2, 8, 1, 4}
-	for rowid in rowids {
-		values := []types.Value{types.value_int(i64(rowid) * 100)}
-		err := btree.insert_cell(p, page_num, rowid, values)
-		testing.expect(t, err == .None, fmt.tprintf("Failed to insert rowid %d", rowid))
+	pg0, alloc_err := pager.allocate_page(p)
+	if alloc_err != nil {
+		pager.close(p)
+		testing.fail_now(t, "FATAL: Failed to allocate root page 0")
+	}
+	if pg0.page_num != 0 {
+		pager.close(p)
+		testing.fail_now(t, fmt.tprintf("FATAL: Allocated page was %d, expected 0", pg0.page_num))
 	}
 
-	page, _ := pager.get_page(p, page_num)
-	pointers := btree.get_pointers(page.data, page_num)
-	prev_rowid := types.Row_ID(0)
-	for ptr in pointers {
-		rowid, ok := cell.get_rowid(page.data, int(ptr))
-		testing.expect(t, ok, "Failed to get rowid")
-		testing.expect(
-			t,
-			rowid > prev_rowid,
-			fmt.tprintf("Rowids not sorted! Got %d after %d", rowid, prev_rowid),
-		)
-		prev_rowid = rowid
+	btree.init_leaf_page(pg0.data, pg0.page_num)
+	tree_inst := btree.init(p, 0)
+	return Test_Context{pager = p, tree = tree_inst, filename = filename}
+}
+
+teardown_tree :: proc(ctx: ^Test_Context) {
+	if ctx.pager != nil {
+		pager.close(ctx.pager)
+	}
+	if os.exists(ctx.filename) {
+		os.remove(ctx.filename)
 	}
 }
 
-@(test)
-test_insert_cell_duplicate :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "insert_dup")
-	defer destroy_test_pager(p, file)
-
-	values := []types.Value{types.value_int(42)}
-	err := btree.insert_cell(p, page_num, 1, values)
-	testing.expect(t, err == .None, "Failed to insert first cell")
-
-	err = btree.insert_cell(p, page_num, 1, values)
-	testing.expect(t, err == .Duplicate_Rowid, "Should reject duplicate rowid")
+make_large_text :: proc(allocator: mem.Allocator, size: int) -> string {
+	data := make([]u8, size, allocator)
+	for i in 0 ..< size {
+		data[i] = 'A' + u8(i % 26)
+	}
+	return string(data)
 }
 
 @(test)
-test_cursor_traversal :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "cursor")
-	defer destroy_test_pager(p, file)
+test_basic_operations :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "basic_ops")
+	defer teardown_tree(&ctx)
 
-	for i in 1 ..= 3 {
-		values := []types.Value{types.value_int(i64(i))}
-		btree.insert_cell(p, page_num, types.Row_ID(i), values)
-	}
+	val1 := []types.Value{types.value_int(100), types.value_text("Row One")}
+	err := btree.tree_insert(&ctx.tree, 1, val1)
+	testing.expect_value(t, err, btree.Error.None)
 
-	cursor, c_err := btree.cursor_start(p, page_num)
-	testing.expect(t, c_err == .None, "Cursor start failed")
-	testing.expect(t, !cursor.end_of_table, "Should not be at end")
+	val2 := []types.Value{types.value_int(200), types.value_text("Row Two")}
+	err = btree.tree_insert(&ctx.tree, 2, val2)
+	testing.expect_value(t, err, btree.Error.None)
 
-	ref1, err1 := btree.cursor_get_cell(p, &cursor)
-	testing.expect(t, err1 == .None, "Failed to get cell 1")
-	testing.expect(t, ref1.cell.rowid == 1, "RowID mismatch")
+	c, find_err := btree.tree_find(&ctx.tree, 1)
+	defer cell.destroy(&c)
 
-	btree.cell_ref_destroy(&ref1)
-	adv_err1 := btree.cursor_advance(p, &cursor)
-	testing.expect(t, adv_err1 == .None, "Advance failed")
-
-	ref2, err2 := btree.cursor_get_cell(p, &cursor)
-	testing.expect(t, err2 == .None, "Failed to get cell 2")
-	testing.expect(t, ref2.cell.rowid == 2, "RowID mismatch")
-
-	btree.cell_ref_destroy(&ref2)
-	adv_err2 := btree.cursor_advance(p, &cursor)
-	testing.expect(t, adv_err2 == .None, "Advance failed")
-
-	ref3, err3 := btree.cursor_get_cell(p, &cursor)
-	testing.expect(t, err3 == .None, "Failed to get cell 3")
-	testing.expect(t, ref3.cell.rowid == 3, "RowID mismatch")
-
-	btree.cell_ref_destroy(&ref3)
-	adv_err3 := btree.cursor_advance(p, &cursor)
-	testing.expect(t, adv_err3 == .None, "Advance failed")
-	testing.expect(t, cursor.end_of_table, "Should be at end")
-}
-
-@(test)
-test_find_by_rowid :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "find")
-	defer destroy_test_pager(p, file)
-
-	for i in 1 ..= 10 {
-		values := []types.Value{types.value_int(i64(i * 100))}
-		btree.insert_cell(p, page_num, types.Row_ID(i), values)
-	}
-
-	target_rowid := types.Row_ID(7)
-	cell_ref, err := btree.find_by_rowid(p, page_num, target_rowid)
-	defer btree.cell_ref_destroy(&cell_ref)
-
-	testing.expect(t, err == .None, "Failed to find cell")
-	testing.expect(t, cell_ref.cell.rowid == target_rowid, "Found wrong rowid")
-
-	val := cell_ref.cell.values[0].(i64)
-	testing.expect(t, val == 700, "Value should be 700")
-}
-
-@(test)
-test_find_by_rowid_not_found :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "find_fail")
-	defer destroy_test_pager(p, file)
-
-	for i in 1 ..= 5 {
-		values := []types.Value{types.value_int(i64(i))}
-		btree.insert_cell(p, page_num, types.Row_ID(i), values)
-	}
-
-	_, err := btree.find_by_rowid(p, page_num, 99)
-	testing.expect(t, err == .Cell_Not_Found, "Should not find cell")
-}
-
-@(test)
-test_delete_cell :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "delete")
-	defer destroy_test_pager(p, file)
-
-	for i in 1 ..= 5 {
-		values := []types.Value{types.value_int(i64(i * 10))}
-		btree.insert_cell(p, page_num, types.Row_ID(i), values)
-	}
-
-	err := btree.delete_cell(p, page_num, 3)
-	testing.expect(t, err == .None, "Failed to delete cell")
-
-	count, _ := btree.count_rows(p, page_num)
-	testing.expect(t, count == 4, "Should have 4 rows after deletion")
-
-	_, find_err := btree.find_by_rowid(p, page_num, 3)
-	testing.expect(t, find_err == .Cell_Not_Found, "Deleted cell should not be found")
-
-	ref, _ := btree.find_by_rowid(p, page_num, 4)
-	defer btree.cell_ref_destroy(&ref)
-	testing.expect(t, ref.cell.rowid == 4, "Row 4 should still exist")
-}
-
-@(test)
-test_foreach_cell :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file, page_num := create_test_pager(t, "foreach")
-	defer destroy_test_pager(p, file)
-
-	for i in 1 ..= 5 {
-		values := []types.Value{types.value_int(i64(i * 100))}
-		btree.insert_cell(p, page_num, types.Row_ID(i), values)
-	}
-
-	Context :: struct {
-		count: int,
-		sum:   i64,
-	}
-
-	ctx := Context{0, 0}
-	callback :: proc(c: ^cell.Cell, user_data: rawptr) -> bool {
-		ctx := cast(^Context)user_data
-		ctx.count += 1
+	testing.expect_value(t, find_err, btree.Error.None)
+	if find_err == .None {
+		testing.expect_value(t, c.rowid, 1)
 		val := c.values[0].(i64)
-		ctx.sum += val
-		return true
+		testing.expect_value(t, val, 100)
 	}
 
-	err := btree.foreach_cell(p, page_num, callback, &ctx)
-	testing.expect(t, err == .None, "Failed to iterate cells")
-	testing.expect(t, ctx.count == 5, "Should iterate 5 cells")
-	testing.expect(t, ctx.sum == 1500, "Sum should be 1500")
+	_, missing_err := btree.tree_find(&ctx.tree, 99)
+	testing.expect_value(t, missing_err, btree.Error.Cell_Not_Found)
+
+	count, count_err := btree.tree_count_rows(&ctx.tree)
+	testing.expect_value(t, count_err, btree.Error.None)
+	testing.expect_value(t, count, 2)
+}
+
+@(test)
+test_persistence :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "persistence")
+	vals := []types.Value{types.value_int(999)}
+	btree.tree_insert(&ctx.tree, 42, vals)
+
+	pager.close(ctx.pager)
+	ctx.pager = nil
+	p2, err := pager.open(ctx.filename)
+	if !testing.expect(t, err == nil, "Re-open of DB file failed") {
+		testing.fail_now(t, "Aborting persistence test due to file open failure")
+	}
+
+	ctx.pager = p2
+	defer teardown_tree(&ctx)
+
+	tree2 := btree.init(p2, 0)
+	c, find_err := btree.tree_find(&tree2, 42)
+	defer cell.destroy(&c)
+
+	testing.expect_value(t, find_err, btree.Error.None)
+	if find_err == .None {
+		val := c.values[0].(i64)
+		testing.expect_value(t, val, 999)
+	}
+}
+
+@(test)
+test_heavy_split_logic :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "splits")
+	defer teardown_tree(&ctx)
+
+	payload := make_large_text(context.temp_allocator, 100)
+	item_count := 200
+	for i in 1 ..= item_count {
+		vals := []types.Value{types.value_int(i64(i)), types.value_text(payload)}
+		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
+		if err != .None {
+			testing.fail_now(t, fmt.tprintf("Insert failed at index %d with error: %v", i, err))
+		}
+	}
+
+	is_valid := btree.tree_verify(&ctx.tree)
+	if !is_valid {
+		testing.fail_now(t, "Tree verification failed (Nodes disordered or keys out of bounds)")
+	}
+
+	c_start, _ := btree.tree_find(&ctx.tree, 1)
+	defer cell.destroy(&c_start)
+	testing.expect_value(t, c_start.values[0].(i64), 1)
+
+	c_end, _ := btree.tree_find(&ctx.tree, types.Row_ID(item_count))
+	defer cell.destroy(&c_end)
+	testing.expect_value(t, c_end.values[0].(i64), i64(item_count))
+
+	c_mid, _ := btree.tree_find(&ctx.tree, types.Row_ID(item_count / 2))
+	defer cell.destroy(&c_mid)
+	testing.expect_value(t, c_mid.values[0].(i64), i64(item_count / 2))
+}
+
+@(test)
+test_duplicates :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "duplicates")
+	defer teardown_tree(&ctx)
+
+	vals := []types.Value{types.value_int(1)}
+	btree.tree_insert(&ctx.tree, 10, vals)
+	err := btree.tree_insert(&ctx.tree, 10, vals)
+	testing.expect_value(t, err, btree.Error.Duplicate_Rowid)
+
+	ctx.tree.config.check_duplicates = false
+	err_unsafe := btree.tree_insert(&ctx.tree, 10, vals)
+	testing.expect_value(t, err_unsafe, btree.Error.None)
+}
+
+@(test)
+test_cursor :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "cursor")
+	defer teardown_tree(&ctx)
+
+	keys := []types.Row_ID{50, 10, 30, 40, 20}
+	for k in keys {
+		vals := []types.Value{types.value_int(i64(k))}
+		btree.tree_insert(&ctx.tree, k, vals)
+	}
+
+	cursor, err := btree.cursor_start(&ctx.tree)
+	if !testing.expect_value(t, err, btree.Error.None) {
+		testing.fail_now(t, "Could not start cursor")
+	}
+	defer btree.cursor_destroy(&cursor)
+
+	expected := []i64{10, 20, 30, 40, 50}
+	idx := 0
+	for cursor.is_valid {
+		c, get_err := btree.cursor_get_cell(&cursor)
+		if !testing.expect_value(t, get_err, btree.Error.None) {
+			break
+		}
+		if idx >= len(expected) {
+			testing.fail_now(t, "Cursor returned more items than expected")
+		}
+
+		val := c.values[0].(i64)
+		if val != expected[idx] {
+			testing.expect(t, false, fmt.tprintf("Index %d: Expected %d, Got %d", idx, expected[idx], val))
+		}
+
+		cell.destroy(&c)
+		btree.cursor_advance(&cursor)
+		idx += 1
+	}
+	testing.expect_value(t, idx, 5)
+}
+
+@(test)
+test_deletion :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "deletion")
+	defer teardown_tree(&ctx)
+
+	btree.tree_insert(&ctx.tree, 1, []types.Value{types.value_int(1)})
+	btree.tree_insert(&ctx.tree, 2, []types.Value{types.value_int(2)})
+	btree.tree_insert(&ctx.tree, 3, []types.Value{types.value_int(3)})
+
+	err := btree.tree_delete(&ctx.tree, 2)
+	testing.expect_value(t, err, btree.Error.None)
+
+	_, find_err := btree.tree_find(&ctx.tree, 2)
+	testing.expect_value(t, find_err, btree.Error.Cell_Not_Found)
+
+	c1, _ := btree.tree_find(&ctx.tree, 1)
+	defer cell.destroy(&c1)
+
+	c3, _ := btree.tree_find(&ctx.tree, 3)
+	defer cell.destroy(&c3)
+
+	cnt, _ := btree.tree_count_rows(&ctx.tree)
+	testing.expect_value(t, cnt, 2)
+}
+
+@(test)
+test_auto_increment :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "autoincrement")
+	defer teardown_tree(&ctx)
+
+	next, err := btree.tree_next_rowid(&ctx.tree)
+	testing.expect_value(t, err, btree.Error.None)
+	testing.expect_value(t, next, 1)
+
+	btree.tree_insert(&ctx.tree, 10, []types.Value{})
+
+	next2, _ := btree.tree_next_rowid(&ctx.tree)
+	testing.expect_value(t, next2, 11)
 }

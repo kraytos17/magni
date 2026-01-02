@@ -246,7 +246,7 @@ dump_table :: proc(db: ^Database, table_name: string) {
 	}
 
 	fmt.printf("=== Dumping Table: %s (Root Page: %d) ===\n", table.name, table.root_page)
-	cursor := btree.cursor_start(table.root_page, context.temp_allocator)
+	cursor, _ := btree.cursor_start(db.pager, table.root_page, context.temp_allocator)
 	config := btree.Config {
 		allocator        = context.temp_allocator,
 		zero_copy        = false,

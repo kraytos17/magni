@@ -1,13 +1,14 @@
 package schema
 
 import "core:fmt"
+import "core:hash"
 import "core:strings"
 import "src:btree"
 import "src:pager"
 import "src:types"
 import "src:utils"
 
-SCHEMA_PAGE :: 0
+SCHEMA_PAGE :: 1
 
 // Initialize schema page
 init :: proc(p: ^pager.Pager) -> bool {
@@ -278,15 +279,7 @@ table_free :: proc(table: types.Table) {
 
 // FNV-1a string hashing for table names
 hash_string :: proc(s: string) -> u64 {
-	OFFSET_BASIS :: 0xcbf29ce484222325
-	PRIME :: 0x100000001b3
-
-	h: u64 = OFFSET_BASIS
-	for c in s {
-		h = h ~ u64(c)
-		h = h * PRIME
-	}
-	return h & 0x7FFFFFFFFFFFFFFF
+	return hash.fnv64(transmute([]u8)s)
 }
 
 // Validate column definitions

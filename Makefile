@@ -6,7 +6,7 @@ ODIN          := odin
 COLLECTIONS   := -collection:src=$(SRC_DIR)
 DEBUG_FLAGS   := -debug -o:none
 RELEASE_FLAGS := -o:speed -no-bounds-check
-TEST_FLAGS    := -debug -o:none -warnings-as-errors
+TEST_FLAGS    := -debug -o:none -warnings-as-errors -define:ODIN_TEST_THREADS=1
 SOURCES       := $(wildcard $(SRC_DIR)/*.odin)
 TEST_DIR      := tests
 
