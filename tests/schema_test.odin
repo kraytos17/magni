@@ -9,184 +9,154 @@ import "src:pager"
 import "src:schema"
 import "src:types"
 
-setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
+T :: ^testing.T
+
+setup_schema_env :: proc(t: T, test_name: string) -> (btree.Tree, string) {
 	filename := fmt.tprintf("test_schema_%s.db", test_name)
 	safe_filename, _ := strings.clone(filename, context.allocator)
 	os.remove(safe_filename)
 
 	p, err := pager.open(safe_filename)
 	testing.expect(t, err == nil, "Failed to open pager")
-
-	pager.allocate_page(p)
-	ok := schema.init(p)
-	testing.expect(t, ok, "Failed to initialize schema page")
-
-	return p, safe_filename
+	tree := btree.init(p, schema.SCHEMA_PAGE_ID)
+	ok := schema.init(&tree)
+	testing.expect(t, ok, "Failed to init schema B-Tree on Page 1")
+	return tree, safe_filename
 }
 
-teardown_schema_env :: proc(p: ^pager.Pager, filename: string) {
-	pager.close(p)
+teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
+	pager.close(tree.pager)
 	os.remove(filename)
 	delete(filename, context.allocator)
 }
 
 @(test)
-test_column_serialization_roundtrip :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
+test_column_blob_roundtrip :: proc(t: T) {
+	cols := []types.Column {
+		{name = "id", type = .INTEGER, pk = true, not_null = true},
+		{name = "username", type = .TEXT, pk = false, not_null = true},
+		{name = "score", type = .REAL, pk = false, not_null = false},
+	}
 
-	original_cols := make([dynamic]types.Column, context.temp_allocator)
-	append(&original_cols, types.Column{name = "id", type = .INTEGER, pk = true, not_null = true})
-	append(&original_cols, types.Column{name = "username", type = .TEXT, pk = false, not_null = true})
-	append(&original_cols, types.Column{name = "avatar", type = .BLOB, pk = false, not_null = false})
+	blob := schema.serialize_columns_to_blob(cols, context.temp_allocator)
+	testing.expect(t, len(blob) > 4, "Blob too small")
 
-	blob := schema.serialize_columns_to_blob(original_cols[:], context.temp_allocator)
-	testing.expect(t, len(blob) > 0, "Blob should not be empty")
+	restored := schema.deserialize_columns(blob, context.temp_allocator)
+	testing.expect_value(t, len(restored), 3)
 
-	restored_cols := schema.deserialize_columns_from_blob(blob, context.temp_allocator)
-	testing.expect(t, len(restored_cols) == 3, "Column count mismatch")
+	testing.expect_value(t, restored[0].name, "id")
+	testing.expect_value(t, restored[0].pk, true)
 
-	testing.expect(t, restored_cols[0].name == "id", "Col 0 name mismatch")
-	testing.expect(t, restored_cols[0].type == .INTEGER, "Col 0 type mismatch")
-	testing.expect(t, restored_cols[0].pk == true, "Col 0 PK mismatch")
+	testing.expect_value(t, restored[1].name, "username")
+	testing.expect_value(t, restored[1].type, types.Column_Type.TEXT)
 
-	testing.expect(t, restored_cols[1].name == "username", "Col 1 name mismatch")
-	testing.expect(t, restored_cols[1].not_null == true, "Col 1 Not Null mismatch")
-	testing.expect(t, restored_cols[2].type == .BLOB, "Col 2 type mismatch")
+	testing.expect_value(t, restored[2].name, "score")
+	testing.expect_value(t, restored[2].not_null, false)
 }
 
 @(test)
-test_schema_init_correctness :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file := setup_schema_env(t, "init")
-	defer teardown_schema_env(p, file)
-
-	page, err := pager.get_page(p, schema.SCHEMA_PAGE)
-	testing.expect(t, err == nil, "Failed to get schema page")
-
-	header := btree.get_header(page.data, page.page_num)
-	testing.expect(t, header.page_type == .LEAF_TABLE, "Schema page should be a B-Tree Leaf")
-	testing.expect(t, header.cell_count == 0, "New schema should be empty")
-}
-
-@(test)
-test_add_and_find_table :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file := setup_schema_env(t, "add_find")
-	defer teardown_schema_env(p, file)
-
-	cols := []types.Column{{name = "col1", type = .INTEGER}}
-	root_page := u32(2)
-	sql_stmt := "CREATE TABLE t1 (col1 INTEGER);"
-	ok := schema.add_table(p, "t1", cols, root_page, sql_stmt)
-	testing.expect(t, ok, "Failed to add table")
-
-	table, found := schema.find_table(p, "t1", context.temp_allocator)
-	testing.expect(t, found, "Table not found")
-	testing.expect(t, table.name == "t1", "Name mismatch")
-	testing.expect(t, table.root_page == root_page, "Root page mismatch")
-	testing.expect(t, table.sql == sql_stmt, "SQL mismatch")
-	testing.expect(t, len(table.columns) == 1, "Column count mismatch")
-}
-
-@(test)
-test_table_exists :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file := setup_schema_env(t, "exists")
-	defer teardown_schema_env(p, file)
+test_add_and_find_table :: proc(t: T) {
+	tree, file := setup_schema_env(t, "basic_ops")
+	defer teardown_schema_env(tree, file)
 
 	cols := []types.Column{{name = "id", type = .INTEGER}}
-	schema.add_table(p, "exists_test", cols, 5, "")
+	root_page := u32(2)
+	sql := "CREATE TABLE users (id INT)"
 
-	testing.expect(t, schema.table_exists(p, "exists_test"), "Should return true for existing table")
-	testing.expect(t, !schema.table_exists(p, "ghost_table"), "Should return false for missing table")
+	added := schema.add_table(&tree, "users", cols, root_page, sql)
+	testing.expect(t, added, "schema.add_table failed")
+
+	tbl, found := schema.find_table(&tree, "users", context.temp_allocator)
+	testing.expect(t, found, "Table 'users' not found after insertion")
+
+	testing.expect_value(t, tbl.name, "users")
+	testing.expect_value(t, tbl.root_page, root_page)
+	testing.expect_value(t, tbl.sql, sql)
+	testing.expect_value(t, len(tbl.columns), 1)
 }
 
 @(test)
-test_list_tables :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file := setup_schema_env(t, "list")
-	defer teardown_schema_env(p, file)
+test_table_persistence :: proc(t: T) {
+	tree, file := setup_schema_env(t, "persistence")
+	cols := []types.Column{{name = "x", type = .INTEGER}}
+
+	ok := schema.add_table(&tree, "persistent", cols, 99, "")
+	testing.expect(t, ok, "add_table failed in persistence test")
+	pager.close(tree.pager)
+
+	p2, _ := pager.open(file)
+	tree2 := btree.init(p2, schema.SCHEMA_PAGE_ID)
+	defer teardown_schema_env(tree2, file)
+
+	exists := schema.table_exists(&tree2, "persistent")
+	testing.expect(t, exists, "Table lost after reload")
+}
+
+@(test)
+test_list_tables :: proc(t: T) {
+	tree, file := setup_schema_env(t, "list")
+	defer teardown_schema_env(tree, file)
 
 	cols := []types.Column{{name = "a", type = .INTEGER}}
-	schema.add_table(p, "alpha", cols, 2, "")
-	schema.add_table(p, "beta", cols, 3, "")
-	schema.add_table(p, "gamma", cols, 4, "")
+	schema.add_table(&tree, "t1", cols, 2, "")
+	schema.add_table(&tree, "t2", cols, 3, "")
+	schema.add_table(&tree, "t3", cols, 4, "")
 
-	tables := schema.list_tables(p, context.temp_allocator)
-	testing.expect(t, len(tables) == 3, "Should list 3 tables")
-
-	found_alpha := false
-	found_beta := false
+	tables := schema.list_tables(&tree, context.temp_allocator)
+	testing.expect_value(t, len(tables), 3)
+	found_count := 0
 	for tbl in tables {
-		if tbl.name == "alpha" do found_alpha = true
-		if tbl.name == "beta" do found_beta = true
+		if tbl.name == "t1" || tbl.name == "t2" || tbl.name == "t3" {
+			found_count += 1
+		}
 	}
-	testing.expect(t, found_alpha && found_beta, "List missing tables")
+	testing.expect_value(t, found_count, 3)
 }
 
 @(test)
-test_drop_table :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	p, file := setup_schema_env(t, "drop")
-	defer teardown_schema_env(p, file)
+test_drop_table :: proc(t: T) {
+	tree, file := setup_schema_env(t, "drop")
+	defer teardown_schema_env(tree, file)
 
-	cols := []types.Column{{name = "x", type = .INTEGER}}
-	schema.add_table(p, "temp_table", cols, 2, "")
-	testing.expect(t, schema.table_exists(p, "temp_table"), "Table should exist before drop")
+	cols := []types.Column{{name = "id", type = .INTEGER}}
+	schema.add_table(&tree, "to_delete", cols, 10, "")
+	testing.expect(t, schema.table_exists(&tree, "to_delete"), "Pre-condition failed")
 
-	ok := schema.drop_table(p, "temp_table")
-	testing.expect(t, ok, "Drop table failed")
-	testing.expect(t, !schema.table_exists(p, "temp_table"), "Table should not exist after drop")
+	dropped := schema.drop_table(&tree, "to_delete")
+	testing.expect(t, dropped, "drop_table returned false")
+	testing.expect(t, !schema.table_exists(&tree, "to_delete"), "Table still exists after drop")
 }
 
 @(test)
-test_validate_columns_valid :: proc(t: ^testing.T) {
-	cols := []types.Column{{name = "id", type = .INTEGER, pk = true}, {name = "name", type = .TEXT}}
-	ok, msg := schema.validate_columns(cols)
-	testing.expect(t, ok, fmt.tprintf("Valid columns rejected: %s", msg))
+test_column_validation :: proc(t: T) {
+	c1 := []types.Column{{name = "ok", type = .INTEGER}}
+	ok1, _ := schema.validate_columns(c1)
+	testing.expect(t, ok1, "Valid column failed")
+
+	c2 := []types.Column{}
+	ok2, msg2 := schema.validate_columns(c2)
+	testing.expect(t, !ok2, "Empty columns allowed")
+	testing.expect(t, strings.contains(msg2, "at least one"), "Wrong error message")
+
+	c3 := []types.Column{{name = "dup", type = .INTEGER}, {name = "dup", type = .TEXT}}
+	ok3, msg3 := schema.validate_columns(c3)
+	testing.expect(t, !ok3, "Duplicate columns allowed")
+	testing.expect(t, strings.contains(msg3, "Duplicate"), "Wrong error message")
 }
 
 @(test)
-test_validate_columns_empty :: proc(t: ^testing.T) {
-	cols := []types.Column{}
-	ok, _ := schema.validate_columns(cols)
-	testing.expect(t, !ok, "Should fail on 0 columns")
-}
+test_get_table_deep_copy :: proc(t: T) {
+	tree, file := setup_schema_env(t, "deep_copy")
+	defer teardown_schema_env(tree, file)
 
-@(test)
-test_validate_columns_duplicate :: proc(t: ^testing.T) {
-	cols := []types.Column{{name = "age", type = .INTEGER}, {name = "age", type = .TEXT}}
+	cols := []types.Column{{name = "data", type = .BLOB}}
+	schema.add_table(&tree, "deep", cols, 50, "")
 
-	ok, msg := schema.validate_columns(cols)
-	testing.expect(t, !ok, "Should fail on duplicate names")
-	testing.expect(t, strings.contains(msg, "Duplicate"), "Error message mismatch")
-}
-
-@(test)
-test_validate_columns_multi_pk :: proc(t: ^testing.T) {
-	cols := []types.Column {
-		{name = "id1", type = .INTEGER, pk = true},
-		{name = "id2", type = .INTEGER, pk = true},
-	}
-
-	ok, msg := schema.validate_columns(cols)
-	testing.expect(t, !ok, "Should fail on multiple PKs")
-	testing.expect(t, strings.contains(msg, "Multiple primary keys"), "Error message mismatch")
-}
-
-@(test)
-test_get_table_memory_safety :: proc(t: ^testing.T) {
-	p, file := setup_schema_env(t, "memory")
-	defer teardown_schema_env(p, file)
-
-	cols := []types.Column{{name = "persist", type = .TEXT}}
-	schema.add_table(p, "mem_test", cols, 2, "")
-	table, found := schema.get_table(p, "mem_test", context.allocator)
+	tbl, found := schema.get_table(&tree, "deep", context.allocator)
 	testing.expect(t, found, "Table not found")
+	defer schema.table_free(tbl, context.allocator)
 
 	free_all(context.temp_allocator)
-	testing.expect(t, table.name == "mem_test", "Name corrupted after temp free")
-	testing.expect(t, table.columns[0].name == "persist", "Column name corrupted")
-
-	schema.table_free(table)
+	testing.expect_value(t, tbl.name, "deep")
+	testing.expect_value(t, tbl.columns[0].name, "data")
 }

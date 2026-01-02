@@ -65,7 +65,6 @@ load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	if err != nil {
 		return {}, .Page_Read_Failed
 	}
-
 	return node_from_bytes(page_id, page.data)
 }
 
