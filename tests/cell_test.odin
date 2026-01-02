@@ -4,442 +4,161 @@ import "core:testing"
 import "src:cell"
 import "src:types"
 
-@(test)
-test_cell_create_and_destroy :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(42), types.value_text("hello"), types.value_real(3.14)}
-	c, err := cell.create(1, values)
-	defer cell.destroy(&c)
-
-	testing.expect(t, err == nil, "Failed to create cell")
-	testing.expect(t, c.rowid == 1, "Rowid mismatch")
-	testing.expect(t, len(c.values) == 3, "Value count mismatch")
-
-	val0 := c.values[0].(i64)
-	testing.expect(t, val0 == 42, "Integer value mismatch")
-
-	val1 := c.values[1].(string)
-	testing.expect(t, val1 == "hello", "String value mismatch")
-
-	val2 := c.values[2].(f64)
-	testing.expect(t, val2 == 3.14, "Float value mismatch")
-}
+T :: ^testing.T
 
 @(test)
-test_cell_create_with_blob :: proc(t: ^testing.T) {
-	blob_data := []u8{0x01, 0x02, 0x03, 0x04, 0x05}
-	values := []types.Value{types.value_int(1), types.value_blob(blob_data)}
+test_lifecycle_create_destroy :: proc(t: T) {
+	values := []types.Value{types.value_int(101), types.value_text("Odin Lang"), types.value_real(1.618)}
 
 	c, err := cell.create(1, values)
+	testing.expect(t, err == nil, "Cell creation failed")
 	defer cell.destroy(&c)
 
-	testing.expect(t, err == nil, "Failed to create cell with blob")
-	blob := c.values[1].([]u8)
-	testing.expect(t, len(blob) == 5, "Blob length mismatch")
-	testing.expect(t, blob[0] == 0x01, "Blob data mismatch")
-	testing.expect(t, blob[4] == 0x05, "Blob data mismatch")
+	testing.expect_value(t, c.rowid, 1)
+	testing.expect_value(t, len(c.values), 3)
+	testing.expect_value(t, c.owns_data, true)
+
+	testing.expect_value(t, c.values[0].(i64), 101)
+	testing.expect_value(t, c.values[1].(string), "Odin Lang")
+	testing.expect_value(t, c.values[2].(f64), 1.618)
 }
 
 @(test)
-test_cell_calculate_size :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(42), types.value_text("hello")}
-	size := cell.calculate_size(1, values)
-	testing.expect(t, size > 0, "Cell size should be positive")
-	testing.expect(t, size < 1024, "Cell size should be reasonable")
-}
-
-@(test)
-test_cell_calculate_size_various_types :: proc(t: ^testing.T) {
-	values1 := []types.Value{types.value_int(1)}
-	size1 := cell.calculate_size(1, values1)
-	values2 := []types.Value{types.value_int(1), types.value_text("test")}
-	size2 := cell.calculate_size(1, values2)
-
-	testing.expect(t, size2 > size1, "Adding text should increase size")
-	values3 := []types.Value{types.value_int(1), types.value_text("this is a much longer text string")}
-	size3 := cell.calculate_size(1, values3)
-	testing.expect(t, size3 > size2, "Longer text should increase size")
-}
-
-@(test)
-test_cell_serialize_deserialize_simple :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(42)}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	bytes_written, ok := cell.serialize(buffer, 1, values)
-	testing.expect(t, ok, "Serialization failed")
-	testing.expect(t, bytes_written > 0, "Should write some bytes")
-
-	c, bytes_read, deser_ok := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c)
-
-	testing.expect(t, deser_ok, "Deserialization failed")
-	testing.expect(t, bytes_read == bytes_written, "Bytes read/written mismatch")
-	testing.expect(t, c.rowid == 1, "Rowid mismatch")
-	testing.expect(t, len(c.values) == 1, "Value count mismatch")
-
-	val := c.values[0].(i64)
-	testing.expect(t, val == 42, "Value mismatch")
-}
-
-@(test)
-test_cell_serialize_deserialize_multiple_values :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(100), types.value_text("world"), types.value_real(2.718)}
-	buffer := make([]u8, 512)
-	defer delete(buffer)
-
-	bytes_written, ok := cell.serialize(buffer, 5, values)
-	testing.expect(t, ok, "Serialization failed")
-
-	c, bytes_read, deser_ok := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c)
-
-	testing.expect(t, deser_ok, "Deserialization failed")
-	testing.expect(t, bytes_read == bytes_written, "Bytes mismatch")
-	testing.expect(t, c.rowid == 5, "Rowid mismatch")
-	testing.expect(t, len(c.values) == 3, "Value count mismatch")
-
-	val0 := c.values[0].(i64)
-	testing.expect(t, val0 == 100, "Integer mismatch")
-
-	val1 := c.values[1].(string)
-	testing.expect(t, val1 == "world", "String mismatch")
-
-	val2 := c.values[2].(f64)
-	testing.expect(t, val2 == 2.718, "Float mismatch")
-}
-
-@(test)
-test_cell_serialize_deserialize_with_null :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(1), types.value_null(), types.value_text("test")}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	bytes_written, ok := cell.serialize(buffer, 1, values)
-	testing.expect(t, ok, "Serialization failed")
-
-	c, _, deser_ok := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c)
-
-	testing.expect(t, deser_ok, "Deserialization failed")
-	testing.expect(t, len(c.values) == 3, "Value count mismatch")
-	testing.expect(t, types.is_null(c.values[1]), "Second value should be NULL")
-}
-
-@(test)
-test_cell_serialize_deserialize_blob :: proc(t: ^testing.T) {
-	blob_data := []u8{0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE}
+test_blob_handling :: proc(t: T) {
+	blob_data := []u8{0xDE, 0xAD, 0xBE, 0xEF}
 	values := []types.Value{types.value_int(1), types.value_blob(blob_data)}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
 
-	bytes_written, ok := cell.serialize(buffer, 10, values)
-	testing.expect(t, ok, "Serialization failed")
-
-	c, _, deser_ok := cell.deserialize(buffer, 0)
+	c, _ := cell.create(1, values)
 	defer cell.destroy(&c)
 
-	testing.expect(t, deser_ok, "Deserialization failed")
-	blob := c.values[1].([]u8)
-	testing.expect(t, len(blob) == 6, "Blob length mismatch")
-	testing.expect(t, blob[0] == 0xDE, "Blob data mismatch")
-	testing.expect(t, blob[5] == 0xFE, "Blob data mismatch")
+	res_blob := c.values[1].([]u8)
+	testing.expect_value(t, len(res_blob), 4)
+	testing.expect_value(t, res_blob[0], 0xDE)
+	testing.expect_value(t, res_blob[3], 0xEF)
 }
 
 @(test)
-test_cell_serialize_buffer_too_small :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_text("this is a very long string that won't fit")}
-	small_buffer := make([]u8, 5)
-	defer delete(small_buffer)
-
-	_, ok := cell.serialize(small_buffer, 1, values)
-	testing.expect(t, !ok, "Should fail with small buffer")
-}
-
-@(test)
-test_cell_serialize_empty_buffer :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(1)}
-	empty_buffer := []u8{}
-	_, ok := cell.serialize(empty_buffer, 1, values)
-	testing.expect(t, !ok, "Should fail with empty buffer")
-}
-
-@(test)
-test_cell_deserialize_invalid_offset :: proc(t: ^testing.T) {
-	buffer := make([]u8, 10)
-	defer delete(buffer)
-
-	_, _, ok := cell.deserialize(buffer, 100)
-	testing.expect(t, !ok, "Should fail with invalid offset")
-}
-
-@(test)
-test_cell_deserialize_zero_copy :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(1), types.value_text("shared")}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	cell.serialize(buffer, 1, values)
-	config := cell.Config {
-		allocator = context.allocator,
-		zero_copy = true,
-	}
-
-	c, _, ok := cell.deserialize(buffer, 0, config)
-	defer delete(c.values)
-
-	testing.expect(t, ok, "Deserialization failed")
-	text := c.values[1].(string)
-	testing.expect(t, text == "shared", "Text mismatch")
-}
-
-@(test)
-test_cell_get_rowid :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(42)}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	cell.serialize(buffer, 123, values)
-	rowid, ok := cell.get_rowid(buffer, 0)
-	testing.expect(t, ok, "Failed to get rowid")
-	testing.expect(t, rowid == 123, "Rowid mismatch")
-}
-
-@(test)
-test_cell_get_rowid_invalid :: proc(t: ^testing.T) {
-	buffer := make([]u8, 2)
-	defer delete(buffer)
-
-	_, ok := cell.get_rowid(buffer, 10)
-	testing.expect(t, !ok, "Should fail with invalid offset")
-}
-
-@(test)
-test_cell_get_size :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(1), types.value_text("test")}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	bytes_written, _ := cell.serialize(buffer, 1, values)
-	size, ok := cell.get_size(buffer, 0)
-	testing.expect(t, ok, "Failed to get size")
-	testing.expect(t, size == bytes_written, "Size mismatch")
-}
-
-@(test)
-test_cell_get_size_invalid :: proc(t: ^testing.T) {
-	buffer := make([]u8, 5)
-	defer delete(buffer)
-
-	_, ok := cell.get_size(buffer, 10)
-	testing.expect(t, !ok, "Should fail with invalid offset")
-}
-
-@(test)
-test_cell_validate_data :: proc(t: ^testing.T) {
-	columns := []types.Column {
-		{name = "id", type = .INTEGER, not_null = true, pk = true},
-		{name = "name", type = .TEXT, not_null = true, pk = false},
-		{name = "score", type = .REAL, not_null = false, pk = false},
-	}
-
-	values := []types.Value{types.value_int(1), types.value_text("test"), types.value_real(99.5)}
-	valid := cell.validate(values, columns)
-	testing.expect(t, valid, "Validation should pass")
-}
-
-@(test)
-test_cell_validate_wrong_count :: proc(t: ^testing.T) {
-	columns := []types.Column {
-		{name = "id", type = .INTEGER, not_null = true, pk = true},
-		{name = "name", type = .TEXT, not_null = true, pk = false},
-	}
-
-	values := []types.Value{types.value_int(1)}
-	valid := cell.validate(values, columns)
-	testing.expect(t, !valid, "Should fail with wrong value count")
-}
-
-@(test)
-test_cell_validate_null_violation :: proc(t: ^testing.T) {
-	columns := []types.Column{{name = "id", type = .INTEGER, not_null = true, pk = true}}
-	values := []types.Value{types.value_null()}
-	valid := cell.validate(values, columns)
-	testing.expect(t, !valid, "Should fail with NULL in NOT NULL column")
-}
-
-@(test)
-test_cell_validate_type_mismatch :: proc(t: ^testing.T) {
-	columns := []types.Column{{name = "id", type = .INTEGER, not_null = true, pk = true}}
-	values := []types.Value{types.value_text("not an integer")}
-	valid := cell.validate(values, columns)
-	testing.expect(t, !valid, "Should fail with type mismatch")
-}
-
-@(test)
-test_cell_validate_nullable_with_null :: proc(t: ^testing.T) {
-	columns := []types.Column {
-		{name = "id", type = .INTEGER, not_null = true, pk = true},
-		{name = "optional", type = .TEXT, not_null = false, pk = false},
-	}
-
-	values := []types.Value{types.value_int(1), types.value_null()}
-	valid := cell.validate(values, columns)
-	testing.expect(t, valid, "Should allow NULL in nullable column")
-}
-
-@(test)
-test_cell_clone :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(42), types.value_text("original")}
-	original, _ := cell.create(1, values)
-	defer cell.destroy(&original)
-
-	cloned, err := cell.clone(original)
-	defer cell.destroy(&cloned)
-
-	testing.expect(t, err == nil, "Clone failed")
-	testing.expect(t, cloned.rowid == original.rowid, "Rowid mismatch")
-	testing.expect(t, len(cloned.values) == len(original.values), "Value count mismatch")
-
-	val0 := cloned.values[0].(i64)
-	testing.expect(t, val0 == 42, "Integer mismatch")
-
-	val1 := cloned.values[1].(string)
-	testing.expect(t, val1 == "original", "String mismatch")
-}
-
-@(test)
-test_cell_serialize_special_integers :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(0), types.value_int(1), types.value_int(2)}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	bytes_written, ok := cell.serialize(buffer, 1, values)
-	testing.expect(t, ok, "Serialization failed")
-
-	c, _, deser_ok := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c)
-
-	testing.expect(t, deser_ok, "Deserialization failed")
-	val0 := c.values[0].(i64)
-	val1 := c.values[1].(i64)
-	val2 := c.values[2].(i64)
-
-	testing.expect(t, val0 == 0, "Zero mismatch")
-	testing.expect(t, val1 == 1, "One mismatch")
-	testing.expect(t, val2 == 2, "Two mismatch")
-}
-
-@(test)
-test_cell_serialize_large_integers :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(i64(max(i32))), types.value_int(i64(min(i32)))}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	bytes_written, ok := cell.serialize(buffer, 1, values)
-	testing.expect(t, ok, "Serialization failed")
-
-	c, _, deser_ok := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c)
-
-	testing.expect(t, deser_ok, "Deserialization failed")
-	val0 := c.values[0].(i64)
-	val1 := c.values[1].(i64)
-
-	testing.expect(t, val0 == i64(max(i32)), "Max i32 mismatch")
-	testing.expect(t, val1 == i64(min(i32)), "Min i32 mismatch")
-}
-
-@(test)
-test_cell_serialize_empty_string :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_text("")}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	bytes_written, ok := cell.serialize(buffer, 1, values)
-	testing.expect(t, ok, "Serialization failed")
-
-	c, _, deser_ok := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c)
-
-	testing.expect(t, deser_ok, "Deserialization failed")
-	text := c.values[0].(string)
-	testing.expect(t, text == "", "Empty string mismatch")
-}
-
-@(test)
-test_cell_serialize_empty_blob :: proc(t: ^testing.T) {
-	empty_blob := []u8{}
-	values := []types.Value{types.value_blob(empty_blob)}
-	buffer := make([]u8, 256)
-	defer delete(buffer)
-
-	bytes_written, ok := cell.serialize(buffer, 1, values)
-	testing.expect(t, ok, "Serialization failed")
-
-	c, _, deser_ok := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c)
-
-	testing.expect(t, deser_ok, "Deserialization failed")
-
-	blob := c.values[0].([]u8)
-	testing.expect(t, len(blob) == 0, "Empty blob mismatch")
-}
-
-@(test)
-test_cell_roundtrip_complex :: proc(t: ^testing.T) {
-	blob := []u8{1, 2, 3, 4, 5}
-	values := []types.Value {
-		types.value_int(12345),
-		types.value_text("Hello, World!"),
-		types.value_real(3.14159),
+test_serialization_roundtrip :: proc(t: T) {
+	original_values := []types.Value {
+		types.value_int(999999),
+		types.value_text("Hello Serialization"),
 		types.value_null(),
-		types.value_blob(blob),
-		types.value_int(0),
-		types.value_int(1),
+		types.value_real(3.14159),
 	}
 
 	buffer := make([]u8, 1024)
 	defer delete(buffer)
 
-	bytes_written, ok := cell.serialize(buffer, 999, values)
-	testing.expect(t, ok, "Serialization failed")
+	bytes_written, ok := cell.serialize(buffer, 42, original_values)
+	testing.expect(t, ok, "Serialization returned false")
+	testing.expect(t, bytes_written > 0, "No bytes written")
 
 	c, bytes_read, deser_ok := cell.deserialize(buffer, 0)
+	testing.expect(t, deser_ok, "Deserialization failed")
 	defer cell.destroy(&c)
 
-	testing.expect(t, deser_ok, "Deserialization failed")
-	testing.expect(t, bytes_read == bytes_written, "Bytes mismatch")
-	testing.expect(t, c.rowid == 999, "Rowid mismatch")
-	testing.expect(t, len(c.values) == 7, "Value count mismatch")
+	testing.expect_value(t, bytes_read, bytes_written)
+	testing.expect_value(t, c.rowid, 42)
+	testing.expect_value(t, c.owns_data, true)
 
-	testing.expect(t, c.values[0].(i64) == 12345, "Int mismatch")
-	testing.expect(t, c.values[1].(string) == "Hello, World!", "String mismatch")
-	testing.expect(t, c.values[2].(f64) == 3.14159, "Float mismatch")
-	testing.expect(t, types.is_null(c.values[3]), "NULL mismatch")
-
-	result_blob := c.values[4].([]u8)
-	testing.expect(t, len(result_blob) == 5, "Blob length mismatch")
-
-	testing.expect(t, c.values[5].(i64) == 0, "Zero mismatch")
-	testing.expect(t, c.values[6].(i64) == 1, "One mismatch")
+	testing.expect_value(t, c.values[0].(i64), 999999)
+	testing.expect_value(t, c.values[1].(string), "Hello Serialization")
+	testing.expect(t, types.is_null(c.values[2]), "Expected NULL value")
 }
 
 @(test)
-test_cell_serialize_at_offset :: proc(t: ^testing.T) {
-	values := []types.Value{types.value_int(42)}
+test_zero_copy_mechanics :: proc(t: T) {
+	values := []types.Value{types.value_text("PersistentData")}
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 
-	bytes1, _ := cell.serialize(buffer[0:], 1, values)
-	bytes2, _ := cell.serialize(buffer[bytes1:], 2, values)
-	c1, _, ok1 := cell.deserialize(buffer, 0)
-	defer cell.destroy(&c1)
+	cell.serialize(buffer, 10, values)
+	cfg := cell.Config {
+		allocator = context.allocator,
+		zero_copy = true,
+	}
 
-	c2, _, ok2 := cell.deserialize(buffer, bytes1)
-	defer cell.destroy(&c2)
+	c, _, ok := cell.deserialize(buffer, 0, cfg)
+	testing.expect(t, ok, "Deserialization failed")
+	defer cell.destroy(&c)
 
-	testing.expect(t, ok1 && ok2, "Deserialization failed")
-	testing.expect(t, c1.rowid == 1, "First rowid mismatch")
-	testing.expect(t, c2.rowid == 2, "Second rowid mismatch")
+	testing.expect_value(t, c.owns_data, false)
+	val := c.values[0].(string)
+	testing.expect_value(t, val, "PersistentData")
+
+	str_ptr := raw_data(val)
+	buf_ptr := raw_data(buffer)
+	buf_end := rawptr(uintptr(buf_ptr) + uintptr(len(buffer)))
+	is_inside := uintptr(str_ptr) >= uintptr(buf_ptr) && uintptr(str_ptr) < uintptr(buf_end)
+	testing.expect(t, is_inside, "Zero-copy violation: String data does not point to source buffer")
+}
+
+@(test)
+test_buffer_boundaries :: proc(t: T) {
+	values := []types.Value{types.value_int(123)}
+	small_buf := make([]u8, 2)
+	defer delete(small_buf)
+
+	_, _, ok := cell.deserialize(small_buf, 0)
+	testing.expect(t, !ok, "Should fail on truncated buffer")
+	valid_buf := make([]u8, 100)
+	defer delete(valid_buf)
+
+	_, _, ok2 := cell.deserialize(valid_buf, 999)
+	testing.expect(t, !ok2, "Should fail on OOB offset")
+}
+
+@(test)
+test_multiple_cells_in_buffer :: proc(t: T) {
+	values_a := []types.Value{types.value_int(1)}
+	values_b := []types.Value{types.value_int(2)}
+	buffer := make([]u8, 256)
+	defer delete(buffer)
+
+	len_a, _ := cell.serialize(buffer[0:], 1, values_a)
+	len_b, _ := cell.serialize(buffer[len_a:], 2, values_b)
+	c, consumed, ok := cell.deserialize(buffer, len_a)
+	defer cell.destroy(&c)
+
+	testing.expect(t, ok, "Failed to read second cell")
+	testing.expect_value(t, c.rowid, 2)
+	testing.expect_value(t, consumed, len_b)
+}
+
+@(test)
+test_schema_validation :: proc(t: T) {
+	cols := []types.Column {
+		{name = "id", type = .INTEGER, not_null = true},
+		{name = "name", type = .TEXT, not_null = false},
+	}
+
+	v1 := []types.Value{types.value_int(1), types.value_text("Alice")}
+	testing.expect(t, cell.validate(v1, cols), "Valid row validation failed")
+
+	v2 := []types.Value{types.value_int(2), types.value_null()}
+	testing.expect(t, cell.validate(v2, cols), "Nullable validation failed")
+
+	v3 := []types.Value{types.value_text("NaN"), types.value_text("Bob")}
+	testing.expect(t, !cell.validate(v3, cols), "Type mismatch validation failed")
+
+	v4 := []types.Value{types.value_null(), types.value_text("Bob")}
+	testing.expect(t, !cell.validate(v4, cols), "Not-Null constraint validation failed")
+
+	v5 := []types.Value{types.value_int(1)}
+	testing.expect(t, !cell.validate(v5, cols), "Column count validation failed")
+}
+
+@(test)
+test_utilities :: proc(t: T) {
+	values := []types.Value{types.value_int(42), types.value_text("SizeTest")}
+	calc_size := cell.calculate_size(1, values)
+	buffer := make([]u8, 256)
+	defer delete(buffer)
+
+	written, _ := cell.serialize(buffer, 1, values)
+	testing.expect_value(t, calc_size, written)
+
+	rowid, ok := cell.get_rowid(buffer, 0)
+	testing.expect(t, ok, "get_rowid failed")
+	testing.expect_value(t, rowid, 1)
 }

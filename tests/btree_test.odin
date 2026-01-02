@@ -3,7 +3,6 @@ package tests
 import "core:fmt"
 import "core:mem"
 import os "core:os/os2"
-import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:cell"
