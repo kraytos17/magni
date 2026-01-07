@@ -2,6 +2,7 @@ package tests
 
 import "core:fmt"
 import os "core:os/os2"
+import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:executor"
@@ -11,7 +12,8 @@ import "src:schema"
 import "src:types"
 
 setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
-	filename := fmt.tprintf("test_exec_%s.db", test_name)
+	temp_name := fmt.tprintf("test_exec_%s.db", test_name)
+	filename := strings.clone(temp_name, context.allocator)
 	if os.exists(filename) {
 		os.remove(filename)
 	}
@@ -30,6 +32,7 @@ teardown_executor_env :: proc(tree: btree.Tree, filename: string) {
 	if os.exists(filename) {
 		os.remove(filename)
 	}
+	delete(filename)
 }
 
 make_create_stmt :: proc(name: string) -> parser.Statement {
@@ -55,10 +58,7 @@ make_insert_stmt :: proc(table: string, id: i64, name: string, score: f64) -> pa
 		table_name = table,
 		values     = vals[:],
 	}
-	return parser.Statement {
-		type = variant,
-		sql  = "",
-	}
+	return parser.Statement{type = variant, sql = ""}
 }
 
 @(test)
