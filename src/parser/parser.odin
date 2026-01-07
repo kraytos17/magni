@@ -96,13 +96,18 @@ Drop_Stmt :: struct {
 	table_name: string,
 }
 
-Statement :: union {
+Statement_Variant :: union {
 	Create_Stmt,
 	Insert_Stmt,
 	Select_Stmt,
 	Update_Stmt,
 	Delete_Stmt,
 	Drop_Stmt,
+}
+
+Statement :: struct {
+	type: Statement_Variant,
+	sql:  string,
 }
 
 Parser :: struct {
@@ -335,7 +340,13 @@ expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 }
 
 // Parse CREATE TABLE statement
-parse_create_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+parse_create_table :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
 	if !match(p, .TABLE) do return nil, false
 
 	name_token := expect(p, .IDENTIFIER) or_return
@@ -394,7 +405,7 @@ parse_create_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt:
 }
 
 // Parse INSERT statement
-parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
 	if !match(p, .INTO) do return nil, false
 
 	name_token := expect(p, .IDENTIFIER) or_return
@@ -442,7 +453,7 @@ parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 }
 
 // Parse SELECT statement
-parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
 	columns := make([dynamic]string, allocator)
 	defer if !ok do delete(columns)
 
@@ -469,7 +480,7 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 }
 
 // Parse UPDATE statement
-parse_update :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+parse_update :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
 	table_token := expect(p, .IDENTIFIER) or_return
 	table_name := strings.clone(table_token.lexeme, allocator)
 	if !match(p, .SET) {
@@ -528,13 +539,13 @@ parse_update :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 }
 
 // Parse DELETE statement
-parse_delete :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+parse_delete :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
 	if !match(p, .FROM) do return nil, false
 
 	table_token := expect(p, .IDENTIFIER) or_return
 	table_name := strings.clone(table_token.lexeme, allocator)
 	defer if !ok do delete(table_name, allocator)
-	
+
 	where_cl: Maybe(Where_Clause)
 	if match(p, .WHERE) {
 		where_cl = parse_where_clause(p, allocator) or_return
@@ -543,7 +554,7 @@ parse_delete :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 }
 
 // Parse DROP TABLE statement
-parse_drop_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement, ok: bool) {
+parse_drop_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
 	if !match(p, .TABLE) do return nil, false
 	table_token := expect(p, .IDENTIFIER) or_return
 	return Drop_Stmt{table_name = strings.clone(table_token.lexeme, allocator)}, true
@@ -662,7 +673,7 @@ parse_where_clause :: proc(
 parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) {
 	tokens, ok := tokenize(sql, context.temp_allocator)
 	if !ok {
-		return nil, false
+		return {}, false
 	}
 
 	parser := Parser {
@@ -671,36 +682,35 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) 
 	}
 
 	first := peek(&parser)
-	stmt: Statement
+	variant: Statement_Variant
 	success: bool
 	#partial switch first.type {
 	case .CREATE:
 		advance(&parser)
-		stmt, success = parse_create_table(&parser, allocator)
+		variant, success = parse_create_table(&parser, allocator)
 	case .INSERT:
 		advance(&parser)
-		stmt, success = parse_insert(&parser, allocator)
+		variant, success = parse_insert(&parser, allocator)
 	case .SELECT:
 		advance(&parser)
-		stmt, success = parse_select(&parser, allocator)
+		variant, success = parse_select(&parser, allocator)
 	case .UPDATE:
 		advance(&parser)
-		stmt, success = parse_update(&parser, allocator)
+		variant, success = parse_update(&parser, allocator)
 	case .DELETE:
 		advance(&parser)
-		stmt, success = parse_delete(&parser, allocator)
+		variant, success = parse_delete(&parser, allocator)
 	case .DROP:
 		advance(&parser)
-		stmt, success = parse_drop_table(&parser, allocator)
+		variant, success = parse_drop_table(&parser, allocator)
 	case:
-		return nil, false
+		return {}, false
 	}
 
 	if !success {
-		statement_free(stmt, allocator)
-		return nil, false
+		return {}, false
 	}
-	return stmt, true
+	return Statement{type = variant, sql = strings.clone(sql, allocator)}, true
 }
 
 where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
@@ -718,9 +728,9 @@ where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
 
 // Recursively frees all memory associated with a Statement AST.
 statement_free :: proc(stmt: Statement, allocator := context.allocator) {
-	if stmt == nil { return }
+	delete(stmt.sql, allocator)
 
-	switch s in stmt {
+	switch s in stmt.type {
 	case Create_Stmt:
 		delete(s.table_name, allocator)
 		for col in s.columns {

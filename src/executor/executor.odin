@@ -33,416 +33,298 @@ deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	return new_values
 }
 
-// Execute a parsed statement
-execute_statement :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
-	switch stmt.type {
-	case .CREATE_TABLE:
-		return exec_create_table(p, stmt)
-	case .INSERT:
-		return exec_insert(p, stmt)
-	case .SELECT:
-		return exec_select(p, stmt)
-	case .UPDATE:
-		return exec_update(p, stmt)
-	case .DELETE:
-		return exec_delete(p, stmt)
-	case .DROP_TABLE:
-		return exec_drop_table(p, stmt)
+execute :: proc(schema_tree: ^btree.Tree, stmt: parser.Statement) -> bool {
+	switch s in stmt.type {
+	case parser.Create_Stmt:
+		return exec_create(schema_tree, s, stmt.sql)
+	case parser.Insert_Stmt:
+		return exec_insert(schema_tree, s)
+	case parser.Select_Stmt:
+		return exec_select(schema_tree, s)
+	case parser.Update_Stmt:
+		return exec_update(schema_tree, s)
+	case parser.Delete_Stmt:
+		return exec_delete(schema_tree, s)
+	case parser.Drop_Stmt:
+		return exec_drop(schema_tree, s)
 	}
 	return false
 }
 
-exec_create_table :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
-	ok, err_msg := schema.validate_columns(stmt.columns)
-	if !ok {
-		fmt.eprintln("Error:", err_msg)
+exec_create :: proc(t: ^btree.Tree, stmt: parser.Create_Stmt, sql: string) -> bool {
+	if ok, msg := schema.validate_columns(stmt.columns); !ok {
+		fmt.eprintln("Schema Error:", msg)
 		return false
 	}
-	if schema.table_exists(p, stmt.table_name) {
+	if schema.table_exists(t, stmt.table_name) {
 		fmt.eprintln("Error: Table already exists:", stmt.table_name)
 		return false
 	}
 
-	root_page, err := pager.allocate_page(p)
-	if err != nil {
-		fmt.eprintln("Error: Failed to allocate page for table")
+	root_page, err := pager.allocate_page(t.pager)
+	for err == .None && root_page.page_num <= schema.SCHEMA_PAGE_ID {
+		pager.mark_dirty(t.pager, root_page.page_num)
+		root_page, err = pager.allocate_page(t.pager)
+	}
+
+	if err != .None {
+		fmt.eprintln("Error: Failed to allocate table root page")
 		return false
 	}
 
-	for root_page.page_num <= schema.SCHEMA_PAGE {
-		pager.mark_dirty(p, root_page.page_num)
-		pager.flush_page(p, root_page.page_num)
-		root_page, err = pager.allocate_page(p)
-		if err != nil {
-			fmt.eprintln("Error: Failed to allocate valid page")
-			return false
-		}
-	}
-
-	init_err := btree.init_leaf_page(root_page.data, root_page.page_num)
-	if init_err != .None {
-		fmt.eprintln("Error: Failed to initialize leaf page")
+	btree.init_leaf_page(root_page.data, root_page.page_num)
+	pager.mark_dirty(t.pager, root_page.page_num)
+	if !schema.add_table(t, stmt.table_name, stmt.columns, root_page.page_num, sql) {
+		fmt.eprintln("Error: Failed to register table in schema")
 		return false
 	}
-	if !schema.add_table(p, stmt.table_name, stmt.columns, root_page.page_num, stmt.original_sql) {
-		fmt.eprintln("Error: Failed to add table to schema")
-		return false
-	}
-
-	pager.flush_page(p, root_page.page_num)
-	fmt.printf("Created table: %s\n", stmt.table_name)
+	fmt.printf("Created table '%s' at Page %d\n", stmt.table_name, root_page.page_num)
 	return true
 }
 
-exec_insert :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
-	table, found := schema.get_table(p, stmt.table_name, context.temp_allocator)
+exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
+	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
 		fmt.eprintln("Error: Table not found:", stmt.table_name)
 		return false
 	}
-	if len(stmt.insert_values) != len(table.columns) {
-		fmt.eprintln("Error: Column count mismatch")
-		fmt.printfln("Expected %d columns, got %d", len(table.columns), len(stmt.insert_values))
+	defer schema.table_free(table, context.temp_allocator)
+
+	if len(stmt.values) != len(table.columns) {
+		fmt.eprintfln(
+			"Error: Column count mismatch. Expected %d, got %d",
+			len(table.columns),
+			len(stmt.values),
+		)
 		return false
 	}
-	if !cell.validate(stmt.insert_values, table.columns) {
-		fmt.eprintln("Error: Type or constraint validation failed")
+	if !cell.validate(stmt.values, table.columns) {
+		fmt.eprintln("Error: Data type validation failed")
 		return false
 	}
 
-	next_rowid, rowid_err := btree.get_next_rowid(p, table.root_page)
-	if rowid_err != .None {
-		next_rowid = 1
-	}
-
-	pk_col_idx, has_pk := schema.get_pk_column(table.columns)
+	table_tree := btree.init(t.pager, table.root_page)
+	next_rowid: types.Row_ID = 0
+	pk_idx, has_pk := schema.get_pk_column(table.columns)
 	if has_pk {
-		if pk_val, ok := stmt.insert_values[pk_col_idx].(i64); ok {
-			next_rowid = types.Row_ID(pk_val)
+		if val, is_int := stmt.values[pk_idx].(i64); is_int {
+			next_rowid = types.Row_ID(val)
+		} else {
+			next_rowid, _ = btree.tree_next_rowid(&table_tree)
+		}
+	} else {
+		id, err := btree.tree_next_rowid(&table_tree)
+		if err != .None {
+			next_rowid = 1
+		} else {
+			next_rowid = id
 		}
 	}
 
-	insert_err := btree.insert_cell(p, table.root_page, next_rowid, stmt.insert_values)
-	if insert_err == .Page_Full {
-		page, _ := pager.get_page(p, table.root_page)
-		header := btree.get_header(page.data, table.root_page)
-		if header.page_type == .LEAF_TABLE {
-			fmt.println("Root Leaf full! Splitting root...")
-			split_err := btree.split_leaf_root(p, table.root_page)
-			if split_err != .None {
-				fmt.eprintln("Critical Error: Failed to split root leaf page:", split_err)
-				return false
-			}
-
-			insert_err = btree.insert_cell(p, table.root_page, next_rowid, stmt.insert_values)
-			if insert_err != .None {
-				fmt.eprintln("Error: Failed to insert after leaf root split:", insert_err)
-				return false
-			}
-		} else if header.page_type == .INTERIOR_TABLE {
-			// Root is Interior and full - this means a child Interior node split
-			// and we couldn't fit the separator into this root
-			// The split already happened in insert_recursive, we just need to handle
-			// the root being full
-
-			fmt.println("Root Interior full! This should not happen - insert_recursive should handle it")
-			fmt.eprintln("Error: Interior root split case hit - this indicates a deeper issue")
-			return false
-
-			// NOTE: The proper fix is in insert_recursive (see below)
-			// When insert_recursive detects the root needs to split, it should
-			// be handled there, not here
-		}
-	}
-
-	if insert_err != .None {
-		fmt.eprintln("Error: Failed to insert row:", insert_err)
+	err := btree.tree_insert(&table_tree, next_rowid, stmt.values)
+	if err != .None {
+		fmt.eprintln("Error inserting row:", err)
 		return false
 	}
-
-	pager.flush_page(p, table.root_page)
-	fmt.printf("Inserted 1 row (rowid=%d)\n", next_rowid)
+	fmt.println("Inserted row", next_rowid)
 	return true
 }
 
-exec_select :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
-	table, found := schema.get_table(p, stmt.from_table, context.temp_allocator)
+exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
+	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.from_table)
+		fmt.eprintln("Error: Table not found:", stmt.table_name)
 		return false
 	}
+	defer schema.table_free(table, context.temp_allocator)
 
-	display_all := len(stmt.select_columns) == 0
-	col_indices := make([dynamic]int, context.temp_allocator)
-	if !display_all {
-		for col_name in stmt.select_columns {
-			idx, ok := schema.find_column_index(table.columns, col_name)
+	display_indices := make([dynamic]int, context.temp_allocator)
+	if len(stmt.columns) == 0 {
+		for i in 0 ..< len(table.columns) {
+			append(&display_indices, i)
+		}
+	} else {
+		for req_col in stmt.columns {
+			idx, ok := schema.find_column_index(table.columns, req_col)
 			if !ok {
-				fmt.eprintln("Error: Column not found:", col_name)
+				fmt.eprintln("Error: Unknown column:", req_col)
 				return false
 			}
-			append(&col_indices, idx)
-		}
-	} else {
-		for i in 0 ..< len(table.columns) {
-			append(&col_indices, i)
-		}
-	}
-	if display_all {
-		for col, i in table.columns {
-			if i > 0 do fmt.print(" | ")
-			fmt.print(col.name)
-		}
-	} else {
-		for col_name, i in stmt.select_columns {
-			if i > 0 do fmt.print(" | ")
-			fmt.print(col_name)
+			append(&display_indices, idx)
 		}
 	}
 
-	fmt.println()
-	for i in 0 ..< len(col_indices) {
-		if i > 0 do fmt.print("-+-")
-		fmt.print("----------")
+	print_header(table.columns, display_indices[:])
+	table_tree := btree.init(t.pager, table.root_page)
+	cursor, err := btree.cursor_start(&table_tree, context.temp_allocator)
+	if err != .None {
+		return true
 	}
+	defer btree.cursor_destroy(&cursor)
 
-	fmt.println()
-	cursor, _ := btree.cursor_start(p, table.root_page, context.temp_allocator)
 	row_count := 0
-	for !cursor.end_of_table {
-		config := btree.Config {
-			allocator        = context.temp_allocator,
-			zero_copy        = false,
-			check_duplicates = false,
-		}
-
-		cell_ref, err := btree.cursor_get_cell(p, &cursor, config)
-		if err != nil {
-			btree.cursor_advance(p, &cursor)
+	for cursor.is_valid {
+		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
+		if get_err != .None {
+			btree.cursor_advance(&cursor)
 			continue
 		}
-
-		row_values := deep_copy_values(cell_ref.cell.values)
-		if clause, has_where := stmt.where_clause.?; has_where {
-			if !evaluate_where_clause(clause, row_values, table.columns) {
-				btree.cell_ref_destroy(&cell_ref)
-				btree.cursor_advance(p, &cursor)
+		if where_clause, has_where := stmt.where_clause.?; has_where {
+			if !evaluate_where(where_clause, c.values, table.columns) {
+				btree.cursor_advance(&cursor)
 				continue
 			}
 		}
 
-		for idx, i in col_indices {
-			if i > 0 do fmt.print(" | ")
-			if idx < len(row_values) {
-				fmt.print(types.value_to_string(row_values[idx]))
-			} else {
-				fmt.print("NULL")
-			}
-		}
-
-		fmt.println()
+		print_row(c.values, display_indices[:])
 		row_count += 1
-		btree.cell_ref_destroy(&cell_ref)
-		btree.cursor_advance(p, &cursor)
+		btree.cursor_advance(&cursor)
 	}
-	fmt.printf("\n%d row(s) returned\n", row_count)
+	fmt.printf("(%d rows)\n", row_count)
 	return true
 }
 
-exec_update :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
-	table, found := schema.get_table(p, stmt.from_table, context.temp_allocator)
+exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
+	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.from_table)
+		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		return false
+	}
+	defer schema.table_free(table, context.temp_allocator)
+
+	update_map := make(map[int]types.Value, context.temp_allocator)
+	if len(stmt.update_columns) != len(stmt.update_values) {
+		fmt.eprintln("Error: Column/Value count mismatch in UPDATE")
 		return false
 	}
 
-	update_indices := make([dynamic]int, context.temp_allocator)
-	for col_name in stmt.update_columns {
+	for i in 0 ..< len(stmt.update_columns) {
+		col_name := stmt.update_columns[i]
 		idx, ok := schema.find_column_index(table.columns, col_name)
 		if !ok {
-			fmt.eprintln("Error: Column not found:", col_name)
+			fmt.eprintln("Error: Unknown column:", col_name)
 			return false
 		}
-		append(&update_indices, idx)
+		update_map[idx] = stmt.update_values[i]
 	}
 
-	Row_Update :: struct {
-		rowid:  types.Row_ID,
-		values: []types.Value,
+	Update_Op :: struct {
+		rowid:      types.Row_ID,
+		new_values: []types.Value,
 	}
 
-	rows_to_update := make([dynamic]Row_Update, context.temp_allocator)
-	cursor, _ := btree.cursor_start(p, table.root_page, context.temp_allocator)
-	for !cursor.end_of_table {
-		config := btree.Config {
-			allocator = context.temp_allocator,
-			zero_copy = false,
-		}
+	ops := make([dynamic]Update_Op, context.temp_allocator)
+	table_tree := btree.init(t.pager, table.root_page)
+	cursor, _ := btree.cursor_start(&table_tree, context.temp_allocator)
+	defer btree.cursor_destroy(&cursor)
 
-		cell_ref, err := btree.cursor_get_cell(p, &cursor, config)
-		if err != .None {
-			btree.cursor_advance(p, &cursor)
-			continue
+	for cursor.is_valid {
+		c, _ := btree.cursor_get_cell(&cursor, context.temp_allocator)
+		should_update := true
+		if where_clause, has_where := stmt.where_clause.?; has_where {
+			should_update = evaluate_where(where_clause, c.values, table.columns)
 		}
-
-		row_values := deep_copy_values(cell_ref.cell.values)
-		rowid := cell_ref.cell.rowid
-		if clause, has_where := stmt.where_clause.?; has_where {
-			if !evaluate_where_clause(clause, row_values, table.columns) {
-				btree.cell_ref_destroy(&cell_ref)
-				btree.cursor_advance(p, &cursor)
-				continue
+		if should_update {
+			new_row := deep_copy_values(c.values)
+			for idx, val in update_map {
+				new_row[idx] = val
 			}
+			append(&ops, Update_Op{c.rowid, new_row})
 		}
-
-		new_values := make([]types.Value, len(row_values), context.temp_allocator)
-		copy(new_values, row_values)
-		for i in 0 ..< len(update_indices) {
-			new_values[update_indices[i]] = stmt.update_values[i]
-		}
-
-		if !cell.validate(new_values, table.columns) {
-			fmt.eprintln("Error: Type or constraint validation failed")
-			btree.cell_ref_destroy(&cell_ref)
-			return false
-		}
-
-		append(&rows_to_update, Row_Update{rowid, new_values})
-		btree.cell_ref_destroy(&cell_ref)
-		btree.cursor_advance(p, &cursor)
+		btree.cursor_advance(&cursor)
 	}
 
-	update_count := 0
-	for row in rows_to_update {
-		leaf_page_num, find_err := btree.find_leaf_page(p, table.root_page, row.rowid)
-		if find_err != .None {
-			fmt.eprintln("Warning: Could not locate row for update:", row.rowid)
-			continue
+	count := 0
+	for op in ops {
+		if btree.tree_delete(&table_tree, op.rowid) == .None {
+			btree.tree_insert(&table_tree, op.rowid, op.new_values)
+			count += 1
 		}
-		if err := btree.delete_cell(p, leaf_page_num, row.rowid); err != .None {
-			fmt.eprintln("Warning: Failed to delete old row", row.rowid)
-			continue
-		}
-		if err := btree.insert_cell(p, table.root_page, row.rowid, row.values); err != .None {
-			fmt.eprintln("Warning: Failed to insert updated row", row.rowid)
-			continue
-		}
-		update_count += 1
 	}
-
-	pager.flush_page(p, table.root_page)
-	fmt.printf("Updated %d row(s)\n", update_count)
+	fmt.printf("Updated %d rows.\n", count)
 	return true
 }
 
-exec_delete :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
-	table, found := schema.get_table(p, stmt.from_table, context.temp_allocator)
+exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
+	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.from_table)
-		return false
-	}
-
-	rowids_to_delete := make([dynamic]types.Row_ID, context.temp_allocator)
-	cursor, _ := btree.cursor_start(p, table.root_page, context.temp_allocator)
-	for !cursor.end_of_table {
-		config := btree.Config {
-			allocator = context.temp_allocator,
-			zero_copy = false,
-		}
-
-		cell_ref, err := btree.cursor_get_cell(p, &cursor, config)
-		if err != .None {
-			btree.cursor_advance(p, &cursor)
-			continue
-		}
-
-		row_values := deep_copy_values(cell_ref.cell.values)
-		rowid := cell_ref.cell.rowid
-		if clause, has_where := stmt.where_clause.?; has_where {
-			if !evaluate_where_clause(clause, row_values, table.columns) {
-				btree.cell_ref_destroy(&cell_ref)
-				btree.cursor_advance(p, &cursor)
-				continue
-			}
-		}
-
-		append(&rowids_to_delete, rowid)
-		btree.cell_ref_destroy(&cell_ref)
-		btree.cursor_advance(p, &cursor)
-	}
-
-	delete_count := 0
-	for rowid in rowids_to_delete {
-		leaf_page_num, find_err := btree.find_leaf_page(p, table.root_page, rowid)
-		if find_err != .None {
-			continue
-		}
-		if btree.delete_cell(p, leaf_page_num, rowid) == .None {
-			delete_count += 1
-		}
-	}
-
-	pager.flush_page(p, table.root_page)
-	fmt.printf("Deleted %d row(s)\n", delete_count)
-	return true
-}
-
-exec_drop_table :: proc(p: ^pager.Pager, stmt: parser.Statement) -> bool {
-	if !schema.table_exists(p, stmt.table_name) {
 		fmt.eprintln("Error: Table not found:", stmt.table_name)
 		return false
 	}
-	if !schema.drop_table(p, stmt.table_name) {
-		fmt.eprintln("Error: Failed to drop table")
+	defer schema.table_free(table, context.temp_allocator)
+
+	targets := make([dynamic]types.Row_ID, context.temp_allocator)
+	table_tree := btree.init(t.pager, table.root_page)
+	cursor, _ := btree.cursor_start(&table_tree, context.temp_allocator)
+	defer btree.cursor_destroy(&cursor)
+
+	for cursor.is_valid {
+		c, _ := btree.cursor_get_cell(&cursor, context.temp_allocator)
+		should_delete := true
+		if where_cl, has_where := stmt.where_clause.?; has_where {
+			should_delete = evaluate_where(where_cl, c.values, table.columns)
+		}
+		if should_delete {
+			append(&targets, c.rowid)
+		}
+		btree.cursor_advance(&cursor)
+	}
+
+	count := 0
+	for rowid in targets {
+		if btree.tree_delete(&table_tree, rowid) == .None {
+			count += 1
+		}
+	}
+	fmt.printf("Deleted %d rows.\n", count)
+	return true
+}
+
+exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> bool {
+	if !schema.table_exists(t, stmt.table_name) {
+		fmt.eprintln("Error: Table not found:", stmt.table_name)
 		return false
 	}
-	fmt.printf("Dropped table: %s\n", stmt.table_name)
-	return true
+	if schema.drop_table(t, stmt.table_name) {
+		fmt.println("Dropped table:", stmt.table_name)
+		return true
+	}
+	return false
 }
 
 // Evaluate WHERE clause against a row
-evaluate_where_clause :: proc(
-	clause: parser.Where_Clause,
-	values: []types.Value,
-	columns: []types.Column,
-) -> bool {
+evaluate_where :: proc(clause: parser.Where_Clause, row: []types.Value, cols: []types.Column) -> bool {
 	if len(clause.conditions) == 0 {
 		return true
 	}
 
-	results := make([dynamic]bool, context.temp_allocator)
+	match := true
+	if !clause.is_and {
+		match = false
+	}
+
 	for cond in clause.conditions {
-		col_idx, ok := schema.find_column_index(columns, cond.column)
-		if !ok || col_idx >= len(values) {
-			append(&results, false)
-			continue
+		idx, found := schema.find_column_index(cols, cond.column)
+		if !found {
+			return false
 		}
 
-		result := evaluate_condition(cond, values[col_idx])
-		append(&results, result)
-	}
-
-	if len(results) == 0 {
-		return true
-	}
-
-	final_result := results[0]
-	if clause.is_and {
-		for r in results[1:] {
-			final_result = final_result && r
-		}
-	} else {
-		for r in results[1:] {
-			final_result = final_result || r
+		val := row[idx]
+		cond_result := compare_condition(val, cond.operator, cond.value)
+		if clause.is_and {
+			match = match && cond_result
+			if !match do return false
+		} else {
+			match = match || cond_result
+			if match do return true
 		}
 	}
-	return final_result
+	return match
 }
 
-// Evaluate a single condition
-evaluate_condition :: proc(cond: parser.Condition, value: types.Value) -> bool {
-	cmp := compare_values(value, cond.value)
-	#partial switch cond.operator {
+compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types.Value) -> bool {
+	cmp := compare_values(val, target)
+	#partial switch op {
 	case .EQUALS:
 		return cmp == 0
 	case .NOT_EQUALS:
@@ -459,53 +341,61 @@ evaluate_condition :: proc(cond: parser.Condition, value: types.Value) -> bool {
 	return false
 }
 
-// Compare two values (-1: left < right, 0: equal, 1: left > right)
-compare_values :: proc(left: types.Value, right: types.Value) -> int {
-	if types.is_null(left) && types.is_null(right) do return 0
-	if types.is_null(left) do return -1
-	if types.is_null(right) do return 1
+compare_values :: proc(a: types.Value, b: types.Value) -> int {
+	if types.is_null(a) && types.is_null(b) do return 0
+	if types.is_null(a) do return -1
+	if types.is_null(b) do return 1
 
-	#partial switch l in left {
+	#partial switch va in a {
 	case i64:
-		if r, ok := right.(i64); ok {
-			if l < r do return -1
-			if l > r do return 1
+		if vb, ok := b.(i64); ok {
+			if va < vb do return -1
+			if va > vb do return 1
 			return 0
 		}
-		if r, ok := right.(f64); ok {
-			lf := f64(l)
-			if lf < r do return -1
-			if lf > r do return 1
+		if vb, ok := b.(f64); ok {
+			if f64(va) < vb do return -1
+			if f64(va) > vb do return 1
 			return 0
 		}
 	case f64:
-		if r, ok := right.(f64); ok {
-			if l < r do return -1
-			if l > r do return 1
+		if vb, ok := b.(f64); ok {
+			if va < vb do return -1
+			if va > vb do return 1
 			return 0
 		}
-		if r, ok := right.(i64); ok {
-			rf := f64(r)
-			if l < rf do return -1
-			if l > rf do return 1
+		if vb, ok := b.(i64); ok {
+			if va < f64(vb) do return -1
+			if va > f64(vb) do return 1
 			return 0
 		}
 	case string:
-		if r, ok := right.(string); ok {
-			return strings.compare(l, r)
-		}
-	case []u8:
-		if r, ok := right.([]u8); ok {
-			min_len := min(len(l), len(r))
-			for i in 0 ..< min_len {
-				if l[i] < r[i] do return -1
-				if l[i] > r[i] do return 1
-			}
-
-			if len(l) < len(r) do return -1
-			if len(l) > len(r) do return 1
-			return 0
+		if vb, ok := b.(string); ok {
+			return strings.compare(va, vb)
 		}
 	}
 	return 0
+}
+
+print_header :: proc(cols: []types.Column, indices: []int) {
+	for idx, i in indices {
+		if i > 0 do fmt.print(" | ")
+		fmt.print(cols[idx].name)
+	}
+	fmt.println()
+	for _, i in indices {
+		if i > 0 do fmt.print("-+-")
+		for _ in 0 ..< len(cols[indices[i]].name) {
+			fmt.print("-")
+		}
+	}
+	fmt.println()
+}
+
+print_row :: proc(values: []types.Value, indices: []int) {
+	for idx, i in indices {
+		if i > 0 do fmt.print(" | ")
+		fmt.print(types.value_to_string(values[idx]))
+	}
+	fmt.println()
 }
