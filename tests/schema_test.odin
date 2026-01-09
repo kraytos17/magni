@@ -9,9 +9,7 @@ import "src:pager"
 import "src:schema"
 import "src:types"
 
-T :: ^testing.T
-
-setup_schema_env :: proc(t: T, test_name: string) -> (btree.Tree, string) {
+setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
 	filename := fmt.tprintf("test_schema_%s.db", test_name)
 	safe_filename, _ := strings.clone(filename, context.allocator)
 	os.remove(safe_filename)
@@ -31,7 +29,7 @@ teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
 }
 
 @(test)
-test_column_blob_roundtrip :: proc(t: T) {
+test_column_blob_roundtrip :: proc(t: ^testing.T) {
 	cols := []types.Column {
 		{name = "id", type = .INTEGER, pk = true, not_null = true},
 		{name = "username", type = .TEXT, pk = false, not_null = true},
@@ -55,7 +53,7 @@ test_column_blob_roundtrip :: proc(t: T) {
 }
 
 @(test)
-test_add_and_find_table :: proc(t: T) {
+test_add_and_find_table :: proc(t: ^testing.T) {
 	tree, file := setup_schema_env(t, "basic_ops")
 	defer teardown_schema_env(tree, file)
 
@@ -76,7 +74,7 @@ test_add_and_find_table :: proc(t: T) {
 }
 
 @(test)
-test_table_persistence :: proc(t: T) {
+test_table_persistence :: proc(t: ^testing.T) {
 	tree, file := setup_schema_env(t, "persistence")
 	cols := []types.Column{{name = "x", type = .INTEGER}}
 
@@ -93,7 +91,7 @@ test_table_persistence :: proc(t: T) {
 }
 
 @(test)
-test_list_tables :: proc(t: T) {
+test_list_tables :: proc(t: ^testing.T) {
 	tree, file := setup_schema_env(t, "list")
 	defer teardown_schema_env(tree, file)
 
@@ -114,7 +112,7 @@ test_list_tables :: proc(t: T) {
 }
 
 @(test)
-test_drop_table :: proc(t: T) {
+test_drop_table :: proc(t: ^testing.T) {
 	tree, file := setup_schema_env(t, "drop")
 	defer teardown_schema_env(tree, file)
 
@@ -128,7 +126,7 @@ test_drop_table :: proc(t: T) {
 }
 
 @(test)
-test_column_validation :: proc(t: T) {
+test_column_validation :: proc(t: ^testing.T) {
 	c1 := []types.Column{{name = "ok", type = .INTEGER}}
 	ok1, _ := schema.validate_columns(c1)
 	testing.expect(t, ok1, "Valid column failed")
@@ -145,7 +143,7 @@ test_column_validation :: proc(t: T) {
 }
 
 @(test)
-test_get_table_deep_copy :: proc(t: T) {
+test_get_table_deep_copy :: proc(t: ^testing.T) {
 	tree, file := setup_schema_env(t, "deep_copy")
 	defer teardown_schema_env(tree, file)
 

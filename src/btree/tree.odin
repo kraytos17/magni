@@ -395,8 +395,8 @@ insert_recursive :: proc(
 	curr, err := load_node(t, page_id)
 	if err != .None { return {}, err }
 	if is_leaf(curr) {
-		err := node_insert_leaf_cell(t, &curr, rowid, values)
-		if err == .Page_Full {
+		e := node_insert_leaf_cell(t, &curr, rowid, values)
+		if e == .Page_Full {
 			split, s_err := split_leaf_node(t, &curr)
 			if s_err != .None { return {}, s_err }
 
@@ -752,7 +752,7 @@ verify_recursive :: proc(
 	if is_leaf(node) {
 		ptrs := get_pointers(node.data, page_id)
 		prev := min_k
-		for ptr, i in ptrs {
+		for ptr in ptrs {
 			rowid, _ := cell.get_rowid(node.data, int(ptr))
 			if rowid < prev {
 				fmt.printf("❌ Leaf key disorder: %d came after %d\n", rowid, prev)

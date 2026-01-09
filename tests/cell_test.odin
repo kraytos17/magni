@@ -95,7 +95,6 @@ test_zero_copy_mechanics :: proc(t: T) {
 
 @(test)
 test_buffer_boundaries :: proc(t: T) {
-	values := []types.Value{types.value_int(123)}
 	small_buf := make([]u8, 2)
 	defer delete(small_buf)
 

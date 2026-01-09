@@ -7,8 +7,6 @@ import "src:types"
 
 @(test)
 test_tokenize_basic :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "SELECT * FROM users WHERE id = 1;"
 	tokens, ok := parser.tokenize(sql, context.temp_allocator)
 	testing.expect(t, ok, "Tokenization failed")
@@ -26,8 +24,6 @@ test_tokenize_basic :: proc(t: ^testing.T) {
 
 @(test)
 test_tokenize_literals :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "VALUES ('hello', 123, -45.67)"
 	tokens, ok := parser.tokenize(sql, context.temp_allocator)
 	testing.expect(t, ok, "Tokenization failed")
@@ -44,13 +40,11 @@ test_tokenize_literals :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_create_table :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL);"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	create_stmt, is_create := stmt.(parser.Create_Stmt)
+	create_stmt, is_create := stmt.type.(parser.Create_Stmt)
 	testing.expect(t, is_create, "Expected Create_Stmt variant")
 
 	testing.expect(t, create_stmt.table_name == "products", "Wrong table name")
@@ -73,13 +67,11 @@ test_parse_create_table :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_insert :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "INSERT INTO users VALUES (1, 'Alice', NULL, 99.9);"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	insert_stmt, is_insert := stmt.(parser.Insert_Stmt)
+	insert_stmt, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt variant")
 
 	testing.expect(t, insert_stmt.table_name == "users", "Wrong table")
@@ -100,13 +92,11 @@ test_parse_insert :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_select_star :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "SELECT * FROM data;"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	sel, is_select := stmt.(parser.Select_Stmt)
+	sel, is_select := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_select, "Expected Select_Stmt")
 
 	testing.expect(t, sel.table_name == "data", "Wrong table")
@@ -116,13 +106,11 @@ test_parse_select_star :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_select_specific :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "SELECT id, name, age FROM users;"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	sel, is_select := stmt.(parser.Select_Stmt)
+	sel, is_select := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_select, "Expected Select_Stmt")
 
 	testing.expect(t, len(sel.columns) == 3, "Column count mismatch")
@@ -132,13 +120,11 @@ test_parse_select_specific :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_select_where :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "SELECT * FROM users WHERE age >= 18 AND status = 'active';"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	sel, is_select := stmt.(parser.Select_Stmt)
+	sel, is_select := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_select, "Expected Select_Stmt")
 
 	clause, has_clause := sel.where_clause.?
@@ -159,13 +145,11 @@ test_parse_select_where :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_update :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "UPDATE employees SET salary = 50000, rank = 2 WHERE id = 10;"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	upd, is_update := stmt.(parser.Update_Stmt)
+	upd, is_update := stmt.type.(parser.Update_Stmt)
 	testing.expect(t, is_update, "Expected Update_Stmt")
 
 	testing.expect(t, upd.table_name == "employees", "Wrong table")
@@ -182,13 +166,11 @@ test_parse_update :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_delete :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "DELETE FROM logs WHERE date < '2023-01-01';"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	del, is_delete := stmt.(parser.Delete_Stmt)
+	del, is_delete := stmt.type.(parser.Delete_Stmt)
 	testing.expect(t, is_delete, "Expected Delete_Stmt")
 	testing.expect(t, del.table_name == "logs", "Wrong table")
 
@@ -199,13 +181,11 @@ test_parse_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_drop :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-
 	sql := "DROP TABLE old_data;"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
-	drop, is_drop := stmt.(parser.Drop_Stmt)
+	drop, is_drop := stmt.type.(parser.Drop_Stmt)
 	testing.expect(t, is_drop, "Expected Drop_Stmt")
 	testing.expect(t, drop.table_name == "old_data", "Wrong table")
 }

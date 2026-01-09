@@ -26,18 +26,18 @@ setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 		testing.fail_now(t, fmt.tprintf("FATAL: Failed to open pager for %s", name))
 	}
 
-	pg0, alloc_err := pager.allocate_page(p)
+	pg1, alloc_err := pager.allocate_page(p)
 	if alloc_err != nil {
 		pager.close(p)
 		testing.fail_now(t, "FATAL: Failed to allocate root page 0")
 	}
-	if pg0.page_num != 0 {
+	if pg1.page_num != 1 {
 		pager.close(p)
-		testing.fail_now(t, fmt.tprintf("FATAL: Allocated page was %d, expected 0", pg0.page_num))
+		testing.fail_now(t, fmt.tprintf("FATAL: Allocated page was %d, expected 1", pg1.page_num))
 	}
 
-	btree.init_leaf_page(pg0.data, pg0.page_num)
-	tree_inst := btree.init(p, 0)
+	btree.init_leaf_page(pg1.data, pg1.page_num)
+	tree_inst := btree.init(p, 1)
 	return Test_Context{pager = p, tree = tree_inst, filename = filename}
 }
 
@@ -105,7 +105,7 @@ test_persistence :: proc(t: ^testing.T) {
 	ctx.pager = p2
 	defer teardown_tree(&ctx)
 
-	tree2 := btree.init(p2, 0)
+	tree2 := btree.init(p2, 1)
 	c, find_err := btree.tree_find(&tree2, 42)
 	defer cell.destroy(&c)
 

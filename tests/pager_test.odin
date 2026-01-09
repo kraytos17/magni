@@ -137,7 +137,7 @@ test_pager_max_cache_eviction :: proc(t: ^testing.T) {
 
 	p.max_cache_pages = 2
 	p1, _ := pager.allocate_page(p) // Count: 1
-	p2, _ := pager.allocate_page(p) // Count: 2
+	pager.allocate_page(p) // Count: 2
 	testing.expect_value(t, len(p.page_cache), 2)
 
 	_, err_full := pager.allocate_page(p)
