@@ -137,23 +137,24 @@ test_pager_max_cache_eviction :: proc(t: ^testing.T) {
 
 	p.max_cache_pages = 2
 	p1, _ := pager.allocate_page(p) // Count: 1
+	p1_page_num := p1.page_num
 	pager.allocate_page(p) // Count: 2
-	testing.expect_value(t, len(p.page_cache), 2)
+	testing.expect_value(t, p.slot_count, 2)
 
 	_, err_full := pager.allocate_page(p)
 	testing.expect(t, err_full == .Cache_Full, "Should fail if all pages are pinned")
 
-	pager.unpin_page(p, p1.page_num)
+	pager.unpin_page(p, p1_page_num)
 	testing.expect_value(t, p1.pin_count, 0)
 
 	p3, err_ok := pager.allocate_page(p)
 	testing.expect(t, err_ok == .None, "Failed to allocate page 3 after unpinning")
-	testing.expect_value(t, len(p.page_cache), 2)
+	testing.expect_value(t, p.slot_count, 2)
 
-	_, p1_exists := p.page_cache[p1.page_num]
+	p1_exists := pager.page_in_cache(p, p1_page_num)
 	testing.expect(t, !p1_exists, "Page 1 should have been evicted")
 
-	_, p3_exists := p.page_cache[p3.page_num]
+	p3_exists := pager.page_in_cache(p, p3.page_num)
 	testing.expect(t, p3_exists, "Page 3 should be in cache")
 }
 

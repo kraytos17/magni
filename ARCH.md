@@ -1,507 +1,572 @@
 # Magni Architecture
 
-Magni is a SQL database engine built from scratch in [Odin](https://odin-lang.org/). It implements a
-subset of SQL with a custom B+tree-backed storage engine, an SQLite-compatible record format, and a
-recursive-descent parser. This document describes the system's design, component relationships, data
-flow, and key implementation details.
+Magni is an embedded SQL database engine built in [Odin](https://odin-lang.org/). It implements a
+subset of SQL with a copy-on-write (COW) B+tree storage engine, SQLite-compatible row format, and an
+append-only snapshot chain supporting time-travel queries and point-in-time restore.
 
 ---
 
 ## Table of Contents
 
-- [Project Layout](#project-layout)
-- [Data Flow Overview](#data-flow-overview)
-- [Package Responsibilities](#package-responsibilities)
-- [Parser](#parser)
-- [Executor](#executor)
+- [System Overview](#system-overview)
+- [Architecture Principles](#architecture-principles)
+- [Layer Architecture](#layer-architecture)
 - [Storage Engine](#storage-engine)
-- [CLI & REPL](#cli--repl)
-- [Schema Management](#schema-management)
-- [Thread Safety](#thread-safety)
-- [Build System](#build-system)
-- [Test Infrastructure](#test-infrastructure)
-- [Key Design Decisions & Limitations](#key-design-decisions--limitations)
+- [Query Execution](#query-execution)
+- [Snapshot System](#snapshot-system)
+- [Transaction & Concurrency Model](#transaction--concurrency-model)
+- [Memory Management](#memory-management)
+- [Performance Characteristics](#performance-characteristics)
+- [API Surfaces](#api-surfaces)
+- [Build & Test](#build--test)
+- [Trade-offs & Alternatives](#trade-offs--alternatives)
+- [Limitations](#limitations)
 
 ---
 
-## Project Layout
+## System Overview
 
 ```
-magni/
-├── src/
-│   ├── main.odin              CLI entry point, REPL, dot-commands, batch/pipe mode
-│   ├── btree/
-│   │   ├── tree.odin          B+tree engine: insert, find, delete, cursor, split
-│   │   ├── headers.odin       Page header structs, page type enums
-│   │   └── cursor.odin        In-order row cursor via path stack
-│   ├── cell/
-│   │   └── cell.odin          SQLite-compatible row serialization / deserialization
-│   ├── db/
-│   │   └── db.odin            Top-level database handle, open/close/execute
-│   ├── executor/
-│   │   └── executor.odin      SQL execution, WHERE evaluation, JOINs, aggregates
-│   ├── parser/
-│   │   └── parser.odin        Lexer + recursive-descent parser, full AST types
-│   ├── pager/
-│   │   └── pager.odin         Page cache, file I/O, LRU eviction
-│   ├── schema/
-│   │   └── schema.odin        Table metadata persistence (schema B-tree on page 1)
-│   ├── types/
-│   │   └── types.odin         Core types: Value, Column, Table, Serial_Type, constants
-│   └── utils/
-│       └── utils.odin         Varint encode/decode, endian read/write helpers
-├── tests/
-│   ├── parser_test.odin       38 tests — parsing, literals, JOINs, subqueries, errors
-│   ├── executor_test.odin     64 tests — full end-to-end SQL execution, constraints
-│   ├── btree_test.odin        17 tests — B-tree insert/find/delete/split/cursor
-│   ├── cell_test.odin         11 tests — serialization roundtrip, validation
-│   ├── pager_test.odin        12 tests — page cache, I/O, eviction
-│   └── schema_test.odin       10 tests — metadata persistence, columns
-├── Makefile                   Build, test, vet, CLI integration targets
-├── odinfmt.json               Odin formatter config
-├── ols.json                   Odin Language Server config
-└── README.md
+┌────────────────────────────────────────────────────────────────────┐
+│                          CLI / REPL                                │
+│  main.odin — flag parsing, mode dispatch, dot-commands             │
+└──────────────────────────┬─────────────────────────────────────────┘
+                           │ SQL string
+                           ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                       SQL Layer                                    │
+│  parser.odin — tokenize → recursive-descent parse → AST            │
+│  executor.odin — plan, execute, evaluate WHERE, JOIN, aggregates   │
+└──────────────────────────┬─────────────────────────────────────────┘
+                           │ Statement
+                           ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                     Storage Engine                                 │
+│  schema.odin — table metadata (schema B-tree)                      │
+│  btree/     — B+tree with COW: insert/find/delete/update           │
+│  cell/      — SQLite-compatible row serialization                  │
+│  pager/     — slab page cache, freelist, file I/O                  │
+│  snapshot/  — append-only snapshot chain, manifests, GC            │
+│  db/        — coordinator: open/close/execute/snapshot mgmt        │
+└────────────────────────────────────────────────────────────────────┘
 ```
+
+**Data flow for a write query:**
+
+1. `db.execute()` acquires `Database.mu` (exclusive lock)
+2. `parser.parse()` tokenizes and builds AST on `temp_allocator`
+3. `executor.execute()` dispatches to DML-specific handler:
+   - Each mutation (INSERT/UPDATE/DELETE) uses COW B-tree operations
+   - Schema tree root is updated via `tree_update_cow` (single traversal)
+4. After execution, a snapshot is created capturing the new schema root
+5. `free_all(context.temp_allocator)` reclaims all temporary memory
+6. Lock is released
 
 ---
 
-## Data Flow Overview
+## Architecture Principles
 
-```
-SQL string
-    │
-    ▼
-┌────────────────┐
-│   parser.odin  │  tokenize → recursive-descent parse → AST
-│  (lex + parse) │
-└───────┬────────┘
-        │  Statement{Create_Stmt | Insert_Stmt | Select_Stmt | ...}
-        ▼
-┌────────────────┐
-│    db.odin     │  lock mutex, dispatch to executor
-│  db.execute()  │
-└───────┬────────┘
-        │
-        ▼
-┌──────────────────┐
-│ executor.odin    │  switch on statement type:
-│  execute()       │    CREATE → allocate root page, persist schema
-│                  │    INSERT → validate, serialize, btree insert
-│                  │    SELECT → scan/filter/aggregate/sort/display
-│                  │    UPDATE → collect rowids, delete + reinsert
-│                  │    DELETE → collect rowids, batch delete
-│                  │    DROP   → remove schema entry
-└───────┬──────────┘
-        │
-        ▼
-┌──────────────────┐
-│ btree/tree.odin  │  recursive descent, binary search, split & propagate
-│  insert / find   │
-│  delete / foreach│
-└───────┬──────────┘
-        │
-        ▼
-┌──────────────────┐
-│ cell/cell.odin   │  encode/decode Value[] ↔ []byte (varint record format)
-│  serialize /     │
-│  deserialize     │
-└───────┬──────────┘
-        │
-        ▼
-┌──────────────────┐
-│ pager/pager.odin │  get/allocate/flush pages, LRU cache, file I/O
-│  page cache      │
-└──────────────────┘
-```
+1. **Copy-on-write (COW)** — No page is ever modified in-place. Every mutation creates new pages
+   along the path from root to leaf. Old pages remain readable for time-travel.
+
+2. **Append-only history** — Snapshot chain never mutates. `snapshot_restore` creates a new
+   `.RESTORE` snapshot rather than rewriting history.
+
+3. **Single-traversal mutations** — Delete + re-insert (the core pattern for UPDATE) is done in
+   one root-to-leaf traversal, not two.
+
+4. **Bulk memory management** — All per-statement allocations use `context.temp_allocator` and are
+   freed in one shot via `free_all()`. No per-node freeing during parse or execute.
+
+5. **Slab allocation for hot data** — Page cache uses a fixed-size inline slab rather than a
+   heap-allocated map. Zero per-page heap allocations.
 
 ---
 
-## Package Responsibilities
+## Layer Architecture
 
-### `main` — CLI Entry Point
+### 1. SQL Layer — `parser/` and `executor/`
 
-File: `src/main.odin`
+**Parser** (`parser.odin`):
+- Lexer: character-by-character scanner producing `[]Token`. Token types ~70 values.
+- Recursive-descent parser: one function per grammar rule (`parse_create_table`,
+  `parse_insert`, `parse_select`, `parse_update`, `parse_delete`, `parse_drop_table`).
+- `Select_Stmt` supports `AS OF SNAPSHOT <id>` and `AS OF TIMESTAMP <micros>`.
+- `Token_Type` is `enum u8` (compact — 1 byte per token tag).
+- All AST nodes allocated on caller-provided allocator; no per-node cleanup needed.
 
-- Parses CLI flags using `core:flags`:
-  - Positional argument: database path (default `"test.db"`)
-  - `--eval "<sql>"`: execute a single SQL statement
-  - `--file <path>`: read and execute SQL from a file
-- **Mode selection** (priority order):
-  1. `--file <path>` — batch mode from file
-  2. `--eval "<sql>"` — single statement mode
-  3. stdin is not a TTY — pipe mode (read all of stdin as SQL)
-  4. stdin is a TTY — interactive REPL
-- **REPL** features:
-  - Multi-line input (accumulates until `;`)
-  - Continuation prompt `...> ` on subsequent lines
-  - Dot-commands: `.exit`, `.quit`, `.help`, `.tables`, `.schema`,
-    `.debug_schema`, `.dump <table>`, `.desc <table>`, `.stats`,
-    `.integrity`, `.checkpoint`
-  - Silent EOF on Ctrl+D (no error message)
+**Executor** (`executor.odin`):
+- Entry: `execute(schema_tree, stmt) -> (ok, new_schema_root)`.
+- DML dispatch (CREATE, INSERT, SELECT, UPDATE, DELETE, DROP).
+- Key subroutines:
 
-### `parser` — Lexer & AST
+| Subroutine | Role | Performance note |
+|---|---|---|
+| `scan_table` | Full table scan via cursor | Moves cell values directly (no deep copy) |
+| `try_pk_lookup` | Fast-path: `WHERE pk = literal` | O(log n) tree_find vs full scan |
+| `evaluate_where` | Filter rows against WHERE clause | Supports qualified names (t.col) |
+| `try_join_match` | Combine rows + ON evaluation | Uses temp_allocator only on match |
+| `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | Aggregator per group |
+| `display_results` | Pretty-printed output | LIMIT/OFFSET applied here |
 
-File: `src/parser/parser.odin`
+### 2. Storage Engine — `btree/`, `cell/`, `pager/`, `schema/`, `db/`
 
-- **Lexer**: character-by-character scanner producing `[]Token`.
-  - Token types enum (~70 values): keywords (`CREATE`, `TABLE`, `SELECT`, ...),
-    operators (`=`, `!=`, `<>`, `<`, `>`, `<=`, `>=`, `LIKE`),
-    punctuation, literals.
-  - String literals: single-quoted with `''` escape.
-  - BLOB literals: `X'hex'` / `x'hex'` notation.
-  - Numbers: integers and floats (handles leading negative sign).
-  - Comments: `--` line comments.
-- **Recursive-descent parser**: one function per grammar rule, rooted at `parse()`.
-  - `parse_create_table` — columns, types, constraints (`PK`, `NOT NULL`, `DEFAULT`).
-  - `parse_insert` — optional column list, `VALUES` rows.
-  - `parse_select` — select list (expr/aggregate/star), `FROM` (table/join/subquery),
-    `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT` / `OFFSET`.
-  - `parse_update` — `SET col = expr`, optional `WHERE`.
-  - `parse_delete` — optional `WHERE`.
-  - `parse_drop_table`.
-- **`Where_Clause`** uses uniform `AND` or `OR` (no mixing). Conditions are
-  `column op value` or `column op column` (for equi-joins).
-- Memory: allocated with caller-provided allocator; `statement_free` /
-  `where_clause_free` for cleanup.
+#### B+tree (`btree/tree.odin`, `headers.odin`, `cursor.odin`)
 
-### `executor` — SQL Execution
+**On-disk page layout (4096 bytes):**
 
-File: `src/executor/executor.odin`
+```
+Page 1:
+  [DB Header: 100B] [B-tree offset 100: Page_Header|Cell_Pointers|Cells...]
 
-Entry point: `execute(schema_tree, stmt) -> bool`
+Page N (N > 1):
+  [offset 0: Page_Header|Cell_Pointers|Cells...]
+```
 
-**CREATE TABLE** (`exec_create`):
-- Validate column definitions (no duplicates, max 10, single PK).
-- Check table doesn't already exist.
-- Allocate a root page (skipping schema page 1), initialize as leaf.
-- Persist metadata via `schema.add_table`.
+**Page header (8 bytes, `#packed`):**
 
-**INSERT** (`exec_insert`):
-- Look up table from schema.
-- Handle optional column list: reorder values, fill defaults / NULLs.
-- Validate values against column types via `cell.validate`.
-- Determine row ID: explicit PK if provided, else auto-increment via
-  `tree_next_rowid`.
-- Insert into B-tree via `btree.tree_insert`.
+```
+┌──────────┬─────────────────┬────────────┬──────────────────────┬──────────────────┐
+│ page_type│ first_freeblock │ cell_count │ cell_content_offset  │ fragmented_bytes │
+│  (u8)    │    (u16le)      │  (u16le)   │      (u16le)         │      (u8)        │
+└──────────┴─────────────────┴────────────┴──────────────────────┴──────────────────┘
+```
 
-**SELECT** (`exec_select`):
-Three dispatch paths:
-1. **Single table** — `exec_select_single`: `scan_table` → filter rows →
-   aggregate (if aggrs present) → sort → display.
-2. **Multi-table JOINs** — build combined column layout with `Table_Col_Range`,
-   nested-loop join over source tables, ON clause evaluation,
-   LEFT JOIN null-padding.
-3. **Subqueries** — execute inner SELECT, treat result as virtual table,
-   apply outer WHERE / ORDER BY / LIMIT.
+Interior pages append `rightmost_ptr: u32be` after the standard header (12 bytes total).
 
-Key subroutines:
-- `scan_table` — B-tree cursor iteration, collects `Row_Entry{rowid, values}`.
-- `evaluate_where` — match conditions against row values; supports qualified
-  names (`t.col`).
-- `try_pk_lookup` — fast path: detect `WHERE pk = literal` and use O(log n)
-  `tree_find` instead of full scan.
-- `compute_aggregates` — `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`.
-- `exec_select_aggregate_combined` — GROUP BY grouping + per-group aggregate
-  computation + HAVING filter.
-- `sort_rows` — stable sort via `slice.sort_by_with_data`.
-- `display_results` — pretty-printed table with headers, LIMIT/OFFSET.
-- `try_join_match` — combine two rows and evaluate ON clause, used by both
-  virtual-table and real-table join branches.
-
-**UPDATE** (`exec_update`):
-- Two-phase: collect matching row IDs, then delete + reinsert with new values.
-- PK fast-path for single-row updates.
-- Validates new values; skips no-op (unchanged) updates.
-
-**DELETE** (`exec_delete`):
-- Collect target row IDs, then batch delete.
-- PK fast-path support.
-
-**DROP TABLE** (`exec_drop`):
-- Validate table exists.
-- `schema.drop_table` removes metadata from schema tree.
-
-### `btree` — B+tree Engine
-
-Files: `src/btree/tree.odin`, `src/btree/headers.odin`, `src/btree/cursor.odin`
-
-- Custom B+tree (table b-trees only, no index b-trees).
-- **Page types**: `LEAF_TABLE` (13), `INTERIOR_TABLE` (5).
-- **Node layout**:
-  ```
-  [Page_Header: 8B] [Cell_Pointers: N×2B] [free space] [Cell data grows down]
-  ```
-  Interior pages append a 4B `rightmost_ptr` after the standard header.
-- **Operations**:
-  - `tree_insert` — recursive descent, split at midpoint when full.
-    Root split creates a new interior root + two leaves.
-  - `tree_find` — binary search descending to leaf, then `leaf_lower_bound`.
-  - `tree_delete` — remove cell by rowid, update `fragmented_bytes`.
-  - `tree_foreach` — iterate all rows (uses cursor).
-  - `cursor` — leftmost-deep drill-down, then in-order advancement via
-    path stack.
-- **Split**: leaf splits move upper half to new sibling; interior splits
-  promote the separator key upward. No rebalancing on delete.
-
-### `cell` — Record Serialization
-
-File: `src/cell/cell.odin`
-
-- SQLite-compatible record format:
-  ```
-  [PayloadLength varint] [RowID varint] [HeaderSize varint] [SerialTypes...] [Values...]
-  ```
-- Serial types encode both type and byte size:
-  - `NULL=0`, `INT8=1` through `INT64=6`, `FLOAT64=7`, `ZERO=8`, `ONE=9`
-  - `BLOB = 12 + 2*N`, `TEXT = 13 + 2*N` for length N
-- Zero-copy mode: string/BLOB values can point directly into page buffer
-  (unsafe but allocation-free). Controlled by `Cell.Config.zero_copy`.
-- `Cell` struct owns its data when `owns_data = true`; otherwise values
-  borrow from the page.
-- `calculate_size` computes serialized size; `validate` checks column type
-  compatibility.
-
-### `pager` — Page Cache & I/O
-
-File: `src/pager/pager.odin`
-
-- **Page size**: 4096 bytes (configurable via `PAGE_SIZE` constant).
-- **Database header**: 100 bytes on page 1:
-  - Magic: `"MAGNI_DB_v1.0"` (13 bytes)
-  - `page_size`, `page_count`, `schema_version` (u32le each)
-  - 75 bytes reserved
-- **Page 1** is special: its cell content area starts at offset 100
-  (after the database header); all other pages start at offset 0.
-- **Cache**: `map[u32]^Page` with pin/unpin reference counting.
-  - `get_page` — cache hit: return; miss: read from disk, insert.
-  - `allocate_page` — append zero-filled page to file, cache it.
-  - `flush_all` — write all dirty pages to disk.
-  - Eviction: linear scan for first unpinned page (simple LRU approximation).
-  - Max cache: default 256 pages (1 MB).
-
-### `schema` — Table Metadata
-
-File: `src/schema/schema.odin`
-
-- Schema B-tree lives on page 1 (`SCHEMA_PAGE_ID = 1`).
-- Each table is stored as a row:
-  - Row ID = `fnv64(table_name) & 0x7FFF...`
-  - Values: `["table", name, name, root_page, sql_stmt, columns_blob]`
-- **Column blob** format:
-  ```
-  [count:u32le]  { [name_len:u32le, name_bytes, type_byte, flags_byte,
-                    default_marker, default_value...] } × count
-  ```
-  - Flags: bit 0 = NOT_NULL, bit 1 = PK
-  - Default values serialized with type discriminator byte
-    (0=null, 1=i64, 2=f64, 3=string, 4=blob)
-- `get_table` returns a deep copy (independent of page buffers).
-- `add_table` / `drop_table` / `list_tables` / `find_table` interface.
-
-### `types` — Core Type System
-
-File: `src/types/types.odin`
+**In-memory `Node` struct (24 bytes):**
 
 ```odin
-Value  :: union { i64, f64, string, []u8, Null }
-Row_ID :: distinct i64
-
-Column_Type :: enum { INTEGER, TEXT, REAL, BLOB }
-
-Column :: struct {
-    name: string,
-    type: Column_Type,
-    not_null, pk: bool,
-    default_value: Maybe(Value),
+Node :: struct {
+    id:     u32,
+    data:   []u8,
+    header: ^Page_Header,     // computed once on load
 }
-
-Table :: struct {
-    name: string,
-    columns: []Column,
-    root_page: u32,
-    sql: string,
-}
-
-Serial_Type :: enum u64 { NULL=0, INT8=1, ..., INT64=6, FLOAT64=7,
-                          ZERO=8, ONE=9 }
 ```
 
-Constants: `PAGE_SIZE = 4096`, `DATABASE_HEADER_SIZE = 100`,
-`SCHEMA_PAGE_ID = 1`, `MAX_COLUMNS = 10`.
+`leaf`/`interior` sub-headers are computed on demand via `node_leaf()` / `node_interior()` —
+no redundant pointer storage (was 48 bytes, now 24).
 
-### `utils` — Encoding Helpers
+**B-tree operations:**
 
-File: `src/utils/utils.odin`
+| Operation | COW variant | Description | Traversals |
+|---|---|---|---|
+| `tree_insert` | `tree_insert_cow` | Insert cell, split when full. COW variant copies each page on the path before modifying. | 1 |
+| `tree_find` | — | Binary search descending to leaf, then `leaf_lower_bound` (binary). | 1 |
+| `tree_delete` | `tree_delete_cow` | Remove cell by rowid via binary search. COW variant COWs the full path (not just root). | 1 |
+| `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
+| `tree_foreach` | — | Full iteration via cursor. | full scan |
 
-- `put_varint` / `get_varint` — SQLite-compatible varint (up to 9 bytes).
-- `i64_to_be` / `be_to_i64` — big-endian byte conversion for interior page
-  separator keys.
-- `map_type` — maps `Column_Type` to `Serial_Type`.
+**Cursor** — fixed-size path stack `[32]Cursor_Stack_Item` (no heap allocation):
 
-### `db` — Database Handle
+```odin
+Cursor_Stack_Item :: struct {
+    page_id:    u32,
+    cell_index: u16,       // was int (8 bytes), now u16 (2 bytes)
+}
+```
 
-File: `src/db/db.odin`
+#### Record Serialization (`cell/cell.odin`)
+
+SQLite-compatible varint format:
+
+```
+[PayloadLength varint] [RowID varint] [HeaderSize varint] [SerialTypes...] [Payload...]
+```
+
+Serial types encode type + byte size in a single u64:
+
+| Type | Encoding | Payload size |
+|---|---|---|
+| NULL | 0 | 0 |
+| INT8–INT64 | 1–6 | 1–8 bytes |
+| FLOAT64 | 7 | 8 bytes |
+| ZERO / ONE | 8 / 9 | 0 |
+| TEXT | 13 + 2*N | N bytes |
+| BLOB | 12 + 2*N | N bytes |
+
+`Serialization_Info` computes serial types inline from the `values` slice (no heap alloc —
+was `make([]u64)` per call). `cell.deserialize` decodes into a fixed `[MAX_COLS]u64` array
+(was `[dynamic]u64` — 0 heap allocs per row).
+
+#### Page Cache (`pager/pager.odin`)
+
+**Architecture:**
+
+```
+Pager:
+  ├── file: os.File
+  ├── slots: [256]Page_Slot    ← contiguous 1MB slab
+  │   └── Page_Slot:
+  │       ├── page: Page { page_num, dirty, pin_count, data: slice→ }
+  │       └── _data_buf: [4096]u8    ← inline page buffer
+  ├── first_free_page: u32          ← freelist head (on-disk linked list)
+  ├── mutex: RW_Mutex
+  └── ...
+```
+
+- **Zero per-page heap allocations**: All 256 page buffers are inline in the slab.
+- **Lookup**: Open-addressing from `page_num % 256` with linear probe + full scan fallback.
+- **Eviction**: Linear scan for first unpinned slot (simple clock-hand approximation).
+- **Freelist**: Linked list stored in-page (first 4 bytes = next free page). `first_free_page`
+  persisted in database header.
+- **Concurrency**: `RW_Mutex` — read-only operations (`page_count`, `page_in_cache`)
+  use shared locks; all mutations use exclusive locks.
+- **Zero-on-alloc**: Only the first 100 bytes (header region) are zeroed. Callers overwrite
+  as needed (was full 4096-byte memset).
+
+#### Table Metadata (`schema/schema.odin`)
+
+Schema is stored as a B-tree on page 1:
+
+| Column | Type | Description |
+|---|---|---|
+| RowID | i64 | `fnv64(table_name) & 0x7FFF...` |
+| type | TEXT | `"table"` |
+| name | TEXT | Table name |
+| tbl_name | TEXT | Table name (SQLite compat) |
+| root_page | INT | B-tree root page number |
+| sql | TEXT | Original CREATE TABLE statement |
+| columns_blob | BLOB | Serialized column definitions |
+
+All mutations (`add_table_cow`, `drop_table_cow`, `update_root_page_cow`) use COW and
+return a new schema root. `get_table` passes the caller's allocator directly through to
+`find_table` (no double-clone — was allocating on temp_allocator then cloning to permanent).
+
+#### Database Coordinator (`db/db.odin`)
 
 ```odin
 Database :: struct {
-    pager: ^pager.Pager,
-    schema_tree: ^btree.Tree,
-    mu: sync.Mutex,
+    path:             string,
+    pager:            ^pager.Pager,
+    is_new:           bool,
+    mu:               sync.Mutex,
+    schema_root_page: u32,
+    latest_snapshot:  u32,
+    txn_state:        Transaction_State,
+    txn_snapshot_id:  u64,
+    snapshot_index:   map[u64]u32,     // O(1) snapshot lookup
 }
 ```
 
-- `open(path)` — create/open file, init pager, load/init schema tree.
-- `close(db)` — flush, destroy, close file.
-- `execute(db, sql)` — lock, parse, execute, unlock.
-- `execute_stmt(db, stmt)` — direct statement execution (used by executor
-  internally for subqueries).
+Responsibility: coordinate the full lifecycle of a query.
+
+```
+execute(db, sql):
+  lock(mu)
+  stmt = parse(sql, temp_allocator)
+  ok, new_root = executor.execute(schema_tree, stmt)
+  db.schema_root_page = new_root
+  if ok && !readonly:
+    create_snapshot()
+    run_prune()
+    run_gc()
+  free_all(temp_allocator)
+  unlock(mu)
+```
 
 ---
 
-## CLI & REPL
+## Snapshot System
 
-The main entry point (`main.odin`) uses `core:flags` for argument parsing:
+### Chain Structure
 
-| Argument / Flag | Description |
-|----------------|-------------|
-| `[database]`   | Database file path (positional, default `test.db`) |
-| `--eval`       | Execute SQL string and exit |
-| `--file`       | Execute SQL from file and exit |
+```
+latest_snapshot
+    │
+    ▼
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│ snapshot 3  │───▶│ snapshot 2  │───▶│ snapshot 1  │───▶ 0 (genesis)
+│ schema_root │    │ schema_root │    │ schema_root │
+│ manifest_3  │    │ manifest_2  │    │ manifest_1  │
+│ state=C     │    │ state=C     │    │ state=A     │
+│ op=INSERT   │    │ op=CREATE   │    │ op=CREATE   │
+│ timestamp=T3│    │ timestamp=T2│    │ timestamp=T1│
+└─────────────┘    └─────────────┘    └─────────────┘
+                                                ABANDONED (pruned)
+```
 
-**Modes** (checked in order):
+### Snapshot Header (40 bytes on disk, `#packed`)
 
-1. **File mode** (`--file <path>`): reads entire file, executes
-   statement by statement (semicolon-separated), prints results, exits.
-2. **Eval mode** (`--eval "<sql>"`): executes a single statement, exits.
-3. **Pipe mode** (stdin is not a TTY): reads all stdin, splits on `;`,
-   executes, exits. Enables `echo "SELECT 1;" | magni` usage.
-4. **REPL mode** (stdin is a TTY): interactive prompt.
+```
+┌──────┬─────────────┬───────────────┬───────────┬─────────────┬───────────────┬───────┬─────────┬───────┐
+│magic │ snapshot_id │ prev_snapshot │ timestamp │ schema_root │ manifest_page │ state │  op     │ pad   │
+│ 8B   │    8B       │     4B        │   8B      │    4B       │     4B        │  1B   │  1B     │  2B   │
+└──────┴─────────────┴───────────────┴───────────┴─────────────┴───────────────┴───────┴─────────┴───────┘
+```
 
-**REPL dot-commands**:
+Tags (64 bytes) stored at offset 40 in unused page space — no format change.
 
-| Command | Action |
-|---------|--------|
-| `.exit`, `.quit` | Exit |
-| `.help`          | List commands |
-| `.tables`        | List tables |
-| `.schema`        | Show all CREATE TABLE statements |
-| `.schema <tbl>`  | Show a specific table's DDL |
-| `.debug_schema`  | Dump raw schema tree cells |
-| `.dump <tbl>`    | Dump all rows as INSERT statements |
-| `.desc <tbl>`    | Describe table columns |
-| `.stats`         | Show count of each dot-command usage |
-| `.integrity`     | Verify all B-trees (schema + data) |
-| `.checkpoint`    | Force flush dirty pages to disk |
+### Manifest Page
 
----
+Each manifest maps table names to their B-tree root pages at a snapshot point-in-time:
 
-## Thread Safety
+```
+[MAGIC: 8B] [count: u32le] [entry × count]
+entry = [name_hash: u64, root_page: u32, name_len: u16, name_bytes: name_len]
+```
 
-- `Database.mu` (`sync.Mutex`) guards all public `db.*` operations.
-- The pager has its own `sync.Mutex` for internal page cache access.
-- This design is safe for sequential or single-client use but does not
-  support concurrent reads.
+### Operations
 
----
+| Operation | Complexity | Description |
+|---|---|---|
+| `create` | O(pages) | Allocate page, write header |
+| `find_by_id` | O(1) | Map lookup in `Database.snapshot_index` |
+| `find_by_timestamp` | O(n) chain | Walk chain for newest `timestamp ≤ target` |
+| `diff_manifests` | O(n*m) | Compare two manifests (n, m = table count) |
+| `prune` | O(chain) | Mark old snapshots as ABANDONED |
+| `gc` | O(pages_in_chain) | Mark-and-sweep: free unreachable pages |
+| `set_tag` / `get_tag` | O(1) | Read/write 64 bytes at page offset 40 |
 
-## Build System
+### GC Algorithm
 
-### Makefile targets
-
-| Target | Description |
-|--------|-------------|
-| `build`       | Debug build (`-debug -o:none -warnings-as-errors`) |
-| `release`     | Optimized build (`-o:aggressive -no-bounds-check -microarch:native`) |
-| `run`         | Build + execute |
-| `test`        | Run all unit tests |
-| `test-cli`    | Shell-based CLI integration tests |
-| `vet`         | Comprehensive vet (fast check, no LLVM) |
-| `vet-all`     | Vet via build + test (full LLVM) |
-| `vet-shadowing` | Shadowing check |
-| `vet-unused`  | Unused declarations check |
-| `vet-style`   | Style + semicolon checks |
-| `vet-cast`    | Redundant casts check |
-| `check`       | Parse + type check (fast) |
-| `clean`       | Remove `build/` directory |
-
-All source files use `-collection:src=src`, mapping import prefix `src:` to
-the `src/` directory.
+```
+gc(pager, latest_page, keep_count):
+  live = {page_1}
+  walk chain backward from latest_page for keep_count:
+    live += snapshot_page, manifest_page, schema_root
+    for each table root in manifest:
+      live += root
+      btree.collect_pages(root) → live += all sub-pages
+  for every page from 2..max_page:
+    if page not in live:
+      pager.free_page(page)
+```
 
 ---
 
-## Test Infrastructure
+## Transaction & Concurrency Model
 
-- **Framework**: Odin's built-in `core:testing`.
-- **160+ tests** across 6 files in package `tests`.
-- Test files create temporary `.db` files via setup/teardown helpers,
-  initialize pager + schema tree, run operations, verify results, and
-  clean up on completion.
-- Categories:
-  - **Parser**: tokenization, literal types, all SQL statement forms,
-    JOIN syntax, subqueries, aliases, error handling.
-  - **Executor**: full end-to-end execution for all DML/DDL, WHERE
-    filtering (all operators), ORDER BY, LIMIT/OFFSET, GROUP BY + HAVING,
-    aggregates, JOINs (CROSS/INNER/LEFT/self/multi/aliased), subqueries,
-    LIKE wildcards, type validation, constraints, defaults, stress test
-    (70 rows causing B-tree splits).
-  - **B-tree**: insert/find/delete, cursor iteration (ordered output),
-    persistence across close/reopen, duplicate detection, split stress
-    (200 items), auto-increment, tree verification.
-  - **Cell**: serialization roundtrip for all types, zero-copy semantics,
-    buffer boundaries, schema validation, `calculate_size` consistency.
-  - **Pager**: open/close, allocate/persistence, caching behavior,
-    pinning/eviction, edge cases.
-  - **Schema**: column blob roundtrip, add/find/drop/list, deep copy
-    independence, duplicate rejection.
-- Running: `make test` or `odin test tests/ -collection:src=src`.
+### Lock Hierarchy
+
+```
+Database.mu (sync.Mutex)           ← serializes all db.* operations
+    │
+    └── Pager.mutex (sync.RW_Mutex)  ← per-operation page cache access
+        ├── Read shared:  page_count, page_in_cache
+        └── Write exclusive: get_page, allocate_page, unpin_page,
+                             flush_all, mark_dirty, free_page
+```
+
+Single-writer principle: `Database.mu` ensures at most one statement executes at a time.
+The pager's `RW_Mutex` allows concurrent read-only cache probes but serializes modifications.
+
+### Snapshot Isolation
+
+Every mutation outside a transaction creates an implicit snapshot. Time-travel queries
+(`AS OF SNAPSHOT` / `AS OF TIMESTAMP`) read against the historical schema root. COW
+guarantees that old B-tree pages remain intact and readable.
+
+```
+INSERT INTO t VALUES (1);   → snapshot 1 created (root = 100)
+INSERT INTO t VALUES (2);   → snapshot 2 created (root = 105, COW of root)
+
+SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
+```
 
 ---
 
-## Key Design Decisions & Limitations
+## Memory Management
 
-### Decisions
+### Allocator Strategy
 
-1. **SQLite-compatible record format**: The varint-based serial type system
-   matches SQLite's storage format, enabling potential interop and leveraging
-   a well-tested design.
+| Allocator | Used by | Lifecycle |
+|---|---|---|
+| `context.allocator` | Persistent: database handle, pager slab, snapshot index | Until `db.close()` |
+| `context.temp_allocator` | Per-statement: AST, tokens, intermediate rows, cursor results | `free_all()` at end of `db.execute()` |
+| `context.temp_allocator` (REPL) | Per-iteration: REPL output formatting | `free_all()` at top of REPL loop |
 
-2. **Simple B+tree without rebalancing**: Deletes update `fragmented_bytes`
-   but do not rebalance or merge underfull nodes. This keeps the code simple
-   at the cost of potential space waste over time.
+### Heap Allocation Profile
 
-3. **Recursive-descent parser**: Hand-written parser with one function per
-   grammar rule. Explicit and debuggable, but requires manual error recovery.
+| Allocation | Count per INSERT | Previous count | Change |
+|---|---|---|---|
+| Page struct + data buffer | 0 (inline slab) | 2 (heap Page + heap []u8) | -100% |
+| Cell (per row scanned) | 0 (if moving values) | 1 (deep_copy_values) | -100% |
+| `Serialization_Info.serial_types` | 0 (inline compute) | 1 (`make([]u64)`) | -100% |
+| Cell.allocator | 0 (removed) | 1 (16 bytes) | -100% |
+| Cursor path | 0 (`[32]` stack) | 1 (`make([dynamic]`) | -100% |
+| AST nodes | many (temp_allocator) | many (temp_allocator) | Same (bulk-freed) |
 
-4. **Uniform WHERE connectives**: `AND` and `OR` cannot be mixed in a single
-   WHERE clause. This simplifies the condition evaluation model.
+---
 
-5. **PK fast-paths**: WHERE clauses matching `pk = literal` bypass full table
-   scans for SELECT, UPDATE, and DELETE, using O(log n) B-tree lookup.
+## Performance Characteristics
 
-6. **Two-phase mutation**: UPDATE and DELETE first collect all matching row
-   IDs into a buffer, then apply modifications. This avoids cursor
-   invalidation during mutation but uses extra memory.
+### B-tree
 
-7. **Threading model**: Single mutex on the database handle. Sufficient for
-   embedded / single-client use, not designed for concurrent OLTP.
+| Metric | Leaf page | Interior page |
+|---|---|---|
+| Max cells (INT8 key + 4B pointer) | ~400 | ~650 |
+| Avg cells (real-world) | ~100 | ~200 |
+| Tree depth (1M rows, 100 cells/page) | 3 | 3 |
+| Search complexity | O(log₁₀₀ n) | O(log₂₀₀ n) |
+| Insert: pages COW'd | depth + 1 | depth + 1 |
+| Delete: pages COW'd (COW variant) | depth | depth |
 
-8. **Zero-copy cells**: When enabled, string/BLOB values reference page
-   buffer memory directly, avoiding allocation overhead. Requires care to
-   prevent dangling pointers after page eviction.
+### Page Cache
 
-### Limitations
+| Metric | Value |
+|---|---|
+| Slots | 256 |
+| Slot size | 4120 bytes (24 Page + 4096 data) |
+| Total memory | ~1 MB |
+| Lookup (hit, avg probes) | ~1.5 (hash from `page_num % 256`) |
+| Lookup (miss, full scan) | 256 probes |
+| Eviction cost | 1 `os.write_at` + 1 `os.read_at` |
 
-- **No `NULLS FIRST` / `NULLS LAST`**: ORDER BY places NULLs according to
-  default ordering (min or max depending on direction).
+### Snapshot
+
+| Operation | Complexity | Note |
+|---|---|---|
+| `find_by_id` | O(1) | In-memory map |
+| `find_by_timestamp` | O(keep_count) | Chain walk, typically ≤100 |
+| `create` | O(tables) | Manifest serialization |
+| `diff_manifests` | O(tables²) | Nested loop comparison |
+
+---
+
+## API Surfaces
+
+### Public `db` API
+
+```odin
+open(path: string)                 -> ^Database, bool
+close(db: ^Database)
+execute(db: ^Database, sql: string) -> bool
+checkpoint(db: ^Database)           -> bool
+begin(db: ^Database)                -> bool
+commit(db: ^Database)               -> bool
+rollback(db: ^Database)             -> bool
+snapshot_restore(db, id)            -> bool
+snapshot_tag(db, id, label)         -> bool
+print_snapshots(db)
+snapshot_diff(db, older, newer)     -> bool
+integrity_check(db)                 -> bool
+```
+
+### Public `btree` API
+
+```odin
+init(pager, root, config) -> Tree
+tree_insert(t, rowid, values)                             -> Error
+tree_insert_cow(t, rowid, values)                         -> (u32, Error)
+tree_find(t, rowid, allocator)                            -> (Cell, Error)
+tree_delete(t, rowid)                                     -> Error
+tree_delete_cow(t, rowid)                                 -> (u32, Error)
+tree_update(t, rowid, values)                             -> Error
+tree_update_cow(t, rowid, values)                         -> (u32, Error)
+tree_foreach(t, callback, user_data)                      -> Error
+tree_next_rowid(t)                                        -> (Row_ID, Error)
+cursor_start(t, allocator)                                -> (Cursor, Error)
+cursor_advance(c)                                         -> Error
+cursor_get_cell(c, allocator)                             -> (Cell, Error)
+collect_pages(t, root, &page_set)
+```
+
+### Public `snapshot` API
+
+```odin
+create(pager, id, prev, schema_root, manifest, op)     -> (u32, bool)
+load(pager, page)                                        -> (Snapshot_Header, bool)
+find_by_id(pager, start_page, id)                        -> (Snapshot_Header, bool)
+find_by_timestamp(pager, start_page, ts)                 -> (Snapshot_Header, bool)
+create_manifest(pager, tables)                           -> u32
+find_in_manifest(pager, manifest_page, table_name)       -> (u32, bool)
+diff_manifests(pager, a, b, allocator)                   -> ([]Diff_Entry, bool)
+diff_snapshots(pager, older, newer, latest, allocator)   -> ([]Diff_Entry, bool)
+prune(pager, start_page, max_keep)
+gc(pager, latest_page, keep_count)
+set_tag(pager, page, tag)
+get_tag(pager, page)                                     -> string
+list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
+```
+
+### CLI Dot-commands
+
+| Command | Action | Implementation |
+|---|---|---|
+| `.exit` / `.quit` | Exit | `os.exit(0)` |
+| `.tables` | List tables | `db.list_tables()` |
+| `.schema` | Show DDL | `db.print_schema()` |
+| `.dump <table>` | Dump rows | `db.dump_table()` |
+| `.desc <table>` | Describe columns | `db.describe_table()` |
+| `.stats` | DB statistics | `db.stats()` |
+| `.integrity` | Verify B-trees | `db.integrity_check()` |
+| `.checkpoint` | Flush + GC | `db.checkpoint()` |
+| `.snapshots` | Show chain | `db.print_snapshots()` |
+| `.snapdiff <a> <b>` | Diff snapshots | `db.snapshot_diff()` |
+| `.snapshot tag <id> <label>` | Tag snapshot | `db.snapshot_tag()` |
+| `.snapshot restore <id>` | Restore | `db.snapshot_restore()` |
+| `.begin` / `.commit` / `.rollback` | Transaction | `db.begin/commit/rollback()` |
+
+---
+
+## Build & Test
+
+### Makefile
+
+| Target | Flags | Use case |
+|---|---|---|
+| `build` | `-debug -o:none -warnings-as-errors` | Development |
+| `release` | `-o:aggressive -no-bounds-check -microarch:native` | Production |
+| `test` | `odin test tests/ -collection:src=src` | Unit tests |
+| `vet-all` | `odin build + odin test` with `-vet*` flags | Full CI check |
+| `check` | Parse + type check only | Fast pre-commit |
+
+### Test Coverage (142 tests)
+
+| Package | Tests | Coverage |
+|---|---|---|
+| `parser` | 38 | Tokenization, all SQL forms, JOINs, subqueries, error handling |
+| `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates |
+| `btree` | 20 | Insert/find/delete/update, cursor, split, persistence, duplicates |
+| `cell` | 11 | Serialization roundtrip, zero-copy, edge cases |
+| `pager` | 12 | Open/close, caching, pinning, eviction |
+| `schema` | 10 | Column blob, add/find/drop/list |
+| `snapshot` | 12 | Chain, manifest, diff, tags, timestamp lookup, GC |
+| `integration` | 16 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence |
+
+---
+
+## Trade-offs & Alternatives
+
+### COW vs WAL
+
+| Aspect | COW (chosen) | WAL (alternative) |
+|---|---|---|
+| Read concurrency | Single-threaded but historical reads | Concurrent readers + writer |
+| Write amplification | Depth × 4KB per mutation | ~1 page per mutation |
+| Snapshot isolation | Built-in (old pages persist) | Requires separate version store |
+| Crash recovery | No recovery needed (pages intact) | Requires WAL replay |
+| Implementation complexity | Moderate | High |
+
+### Slab cache vs Map
+
+| Aspect | Slab (chosen) | Map (previous) |
+|---|---|---|
+| Per-page heap alloc | 0 | 2 (Page struct + data buffer) |
+| Cache locality | Contiguous 1MB | Fragmented across heap |
+| Eviction | Linear scan, O(cache_size) | HashMap iteration, O(entries) |
+| Resizing | Fixed at 256 slots | Configurable via `max_cache_pages` |
+
+### Single traversal vs Delete+Insert
+
+| Aspect | Single traversal (chosen) | Delete + Insert (previous) |
+|---|---|---|
+| Tree traversals per UPDATE | 2 (`tree_find` + `tree_update_cow`) | 3 (`tree_find` + `delete` + `insert`) |
+| Branch mispredictions | ~depth × 2 | ~depth × 3 |
+| Code complexity | Moderate (new recursive function) | Low (two existing functions) |
+
+---
+
+## Limitations
+
 - **No `DISTINCT`**: Not yet implemented.
-- **No `UNION` / `INTERSECT` / `EXCEPT`**: Set operations are absent.
-- **No `CHECK` constraints**: Only PK, NOT NULL, and type validation.
+- **No `UNION` / `INTERSECT` / `EXCEPT`**: Set operations absent.
 - **No `FOREIGN KEY` enforcement**: Declared in DDL but not enforced.
 - **No indexes**: Only the implicit primary-key B-tree exists.
-- **No transactions**: Every statement is auto-committed.
-- **No WAL / rollback journal**: Single-file, no crash recovery.
+- **No WAL / crash recovery**: Single-file, `os.sync` only on flush.
 - **No B-tree rebalancing**: Deletes fragment pages without merging.
-- **No nested subqueries beyond FROM clause**: Subqueries in WHERE
-  `IN (SELECT ...)` are not supported.
-- **Simple WHERE only**: No parenthesized precedence groups or mixed
-  AND/OR connectives.
+- **No nested WHERE subqueries**: `IN (SELECT ...)` not supported.
+- **Mixed AND/OR WHERE**: Not supported.
+- **GROUP BY linear scan**: Groups compared via linear search instead of hash map.
+  Fine for low cardinality; degrades for hundreds of distinct groups.

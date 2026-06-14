@@ -5,24 +5,30 @@ import "core:os"
 import "core:sync"
 import "src:types"
 
-/*
-  Page Structure
-*/
+PAGE_CACHE_SIZE :: 256
+
 Page :: struct {
 	data:      []u8,
 	page_num:  u32,
 	dirty:     bool,
-	pin_count: int,
+	pin_count: u8,
+}
+
+Page_Slot :: struct {
+	page:      Page,
+	_data_buf: [types.PAGE_SIZE]u8,
 }
 
 Pager :: struct {
 	file:            ^os.File,
 	file_len:        i64,
 	page_size:       u32,
-	page_cache:      map[u32]^Page,
+	slots:           [PAGE_CACHE_SIZE]Page_Slot,
 	max_cache_pages: u32,
-	mutex:           sync.Mutex,
+	mutex:           sync.RW_Mutex,
 	allocator:       mem.Allocator,
+	first_free_page: u32,
+	slot_count:      u32,
 }
 
 Error :: enum {
@@ -35,14 +41,76 @@ Error :: enum {
 	Invalid_Page_Num,
 }
 
+@(private = "file")
+slot_hash :: proc(page_num: u32) -> u32 {
+	return page_num % PAGE_CACHE_SIZE
+}
+
+@(private = "file")
+find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot {
+	start := slot_hash(page_num)
+	for i := u32(0); i < PAGE_CACHE_SIZE; i += 1 {
+		idx := (start + i) % PAGE_CACHE_SIZE
+		slot := &p.slots[idx]
+		if slot.page.page_num == page_num { return slot }
+	}
+	return nil
+}
+
+@(private = "file")
+find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
+	if p.slot_count >= p.max_cache_pages {
+		if err := evict_one_slot(p); err != .None {
+			return nil
+		}
+	}
+	for i in 0 ..< PAGE_CACHE_SIZE {
+		slot := &p.slots[i]
+		if slot.page.page_num == 0 {
+			slot.page.data = slot._data_buf[:]
+			p.slot_count += 1
+			return slot
+		}
+	}
+	if evict_one_slot(p) != .None { return nil }
+	// Retry after eviction
+	for i in 0 ..< PAGE_CACHE_SIZE {
+		slot := &p.slots[i]
+		if slot.page.page_num == 0 {
+			slot.page.data = slot._data_buf[:]
+			p.slot_count += 1
+			return slot
+		}
+	}
+	return nil
+}
+
+@(private = "file")
+evict_one_slot :: proc(p: ^Pager) -> Error {
+	for i in 0 ..< PAGE_CACHE_SIZE {
+		slot := &p.slots[i]
+		if slot.page.page_num != 0 && slot.page.pin_count == 0 {
+			if slot.page.dirty {
+				if err := flush_page_unsafe(p, &slot.page); err != .None {
+					return err
+				}
+			}
+			slot.page.page_num = 0
+			slot.page.data = nil
+			p.slot_count -= 1
+			return .None
+		}
+	}
+	return .Cache_Full
+}
+
 open :: proc(path: string, max_pages: u32 = 256, allocator := context.allocator) -> (^Pager, Error) {
 	p := new(Pager, allocator)
 	if p == nil { return nil, .Out_Of_Memory }
 
 	p.allocator = allocator
 	p.page_size = types.PAGE_SIZE
-	p.max_cache_pages = max_pages
-	p.page_cache = make(map[u32]^Page, int(max_pages), allocator)
+	p.max_cache_pages = min(max_pages, PAGE_CACHE_SIZE)
 
 	flags := os.O_RDWR | os.O_CREATE
 	file, open_err := os.open(path, flags)
@@ -73,12 +141,7 @@ close :: proc(p: ^Pager) -> Error {
 	if p.file != nil {
 		os.close(p.file)
 	}
-	for _, page in p.page_cache {
-		delete(page.data, p.allocator)
-		free(page, p.allocator)
-	}
-	
-	delete(p.page_cache)
+
 	free(p, p.allocator)
 	return flush_err
 }
@@ -87,12 +150,12 @@ close :: proc(p: ^Pager) -> Error {
 get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	if page_num < 1 { return nil, .Invalid_Page_Num }
 
-	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
 
-	if page, ok := p.page_cache[page_num]; ok {
-		page.pin_count += 1
-		return page, .None
+	if slot := find_slot(p, page_num); slot != nil {
+		slot.page.pin_count += 1
+		return &slot.page, .None
 	}
 
 	max_page := u32(p.file_len / i64(p.page_size))
@@ -100,87 +163,92 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 		return nil, .Page_Not_Found
 	}
 
-	page, err := alloc_free_slot(p)
-	if err != .None { return nil, err }
+	slot := find_empty_slot(p)
+	if slot == nil { return nil, .Cache_Full }
 
 	offset := i64(page_num - 1) * i64(p.page_size)
-	bytes_read, read_err := os.read_at(p.file, page.data, offset)
+	bytes_read, read_err := os.read_at(p.file, slot._data_buf[:], offset)
 	if read_err != nil || bytes_read < int(p.page_size) {
-		delete(page.data, p.allocator)
-		free(page, p.allocator)
+		slot.page.page_num = 0
+		slot.page.data = nil
+		p.slot_count -= 1
 		return nil, .IO_Error
 	}
 
-	page.page_num = page_num
-	page.pin_count = 1
-	page.dirty = false
-	p.page_cache[page_num] = page
-	return page, .None
+	slot.page.page_num = page_num
+	slot.page.pin_count = 1
+	slot.page.dirty = false
+	return &slot.page, .None
 }
 
-// Creates a new page at the end of the file
+// Creates a new page. Tries the freelist first; if empty, appends to end of file.
 allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
-	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
 
-	page, err := alloc_free_slot(p)
-	if err != .None { return nil, err }
+	if p.first_free_page != 0 {
+		return alloc_from_freelist(p)
+	}
+
+	slot := find_empty_slot(p)
+	if slot == nil { return nil, .Cache_Full }
 
 	new_page_num := u32(p.file_len / i64(p.page_size)) + 1
-	mem.set(raw_data(page.data), 0, int(p.page_size))
-	page.page_num = new_page_num
-	page.pin_count = 1
-	page.dirty = true
-	p.page_cache[new_page_num] = page
+	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
+	slot.page.page_num = new_page_num
+	slot.page.pin_count = 1
+	slot.page.dirty = true
 	p.file_len += i64(p.page_size)
-	return page, .None
+	return &slot.page, .None
 }
 
 // Helper for algorithms that might need to get OR create (like root page init)
 get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
-	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
 
-	if existing, ok := p.page_cache[page_num]; ok {
-		existing.pin_count += 1
-		return existing, .None
+	if page_num < 1 { return nil, .Page_Not_Found }
+
+	if slot := find_slot(p, page_num); slot != nil {
+		slot.page.pin_count += 1
+		return &slot.page, .None
 	}
 
 	current_max := u32(p.file_len / i64(p.page_size))
 	if page_num == current_max + 1 {
-		page, err := alloc_free_slot(p)
-		if err != .None { return nil, err }
+		slot := find_empty_slot(p)
+		if slot == nil { return nil, .Cache_Full }
 
 		new_page_num := current_max + 1
-		mem.set(raw_data(page.data), 0, int(p.page_size))
-		page.page_num = new_page_num
-		page.pin_count = 1
-		page.dirty = true
-		p.page_cache[new_page_num] = page
+		mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
+		slot.page.page_num = new_page_num
+		slot.page.pin_count = 1
+		slot.page.dirty = true
 		p.file_len += i64(p.page_size)
-		return page, .None
+		return &slot.page, .None
 	}
 	return nil, .Page_Not_Found
 }
 
 unpin_page :: proc(p: ^Pager, page_num: u32) {
-	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
 
-	if page, ok := p.page_cache[page_num]; ok {
-		if page.pin_count > 0 {
-			page.pin_count -= 1
+	if slot := find_slot(p, page_num); slot != nil {
+		if slot.page.pin_count > 0 {
+			slot.page.pin_count -= 1
 		}
 	}
 }
 
 flush_all :: proc(p: ^Pager) -> Error {
-	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
 
-	for _, page in p.page_cache {
-		if page.dirty {
-			if err := flush_page_unsafe(p, page); err != .None {
+	for i in 0 ..< PAGE_CACHE_SIZE {
+		slot := &p.slots[i]
+		if slot.page.dirty {
+			if err := flush_page_unsafe(p, &slot.page); err != .None {
 				return err
 			}
 		}
@@ -206,58 +274,24 @@ copy_page :: proc(p: ^Pager, src_page_num: u32) -> (^Page, Error) {
 }
 
 mark_dirty :: proc(p: ^Pager, page_num: u32) {
-	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
-	if page, ok := p.page_cache[page_num]; ok {
-		page.dirty = true
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
+	if slot := find_slot(p, page_num); slot != nil {
+		slot.page.dirty = true
 	}
 }
 
 page_count :: proc(p: ^Pager) -> u32 {
-	sync.lock(&p.mutex)
-	defer sync.unlock(&p.mutex)
+	sync.rw_mutex_shared_lock(&p.mutex)
+	defer sync.rw_mutex_shared_unlock(&p.mutex)
 	return u32(p.file_len / i64(p.page_size))
 }
 
-// Finds a free memory slot. Evicts if cache is full.
-// Returns a Page struct with allocated data buffer, NOT yet in the map.
-@(private = "file")
-alloc_free_slot :: proc(p: ^Pager) -> (^Page, Error) {
-	if len(p.page_cache) >= int(p.max_cache_pages) {
-		if err := evict_one_page(p); err != .None {
-			return nil, err
-		}
-	}
-
-	page := new(Page, p.allocator)
-	if page == nil { return nil, .Out_Of_Memory }
-
-	page.data = make([]u8, p.page_size, p.allocator)
-	if page.data == nil {
-		free(page, p.allocator)
-		return nil, .Out_Of_Memory
-	}
-	return page, .None
-}
-
-// Finds one unpinned page and removes it from cache (flushing if dirty).
-@(private = "file")
-evict_one_page :: proc(p: ^Pager) -> Error {
-	for id, page in p.page_cache {
-		if page.pin_count == 0 {
-			if page.dirty {
-				if err := flush_page_unsafe(p, page); err != .None {
-					return err
-				}
-			}
-
-			delete(page.data, p.allocator)
-			free(page, p.allocator)
-			delete_key(&p.page_cache, id)
-			return .None
-		}
-	}
-	return .Cache_Full
+// Returns true if the given page number is currently in the cache.
+page_in_cache :: proc(p: ^Pager, page_num: u32) -> bool {
+	sync.rw_mutex_shared_lock(&p.mutex)
+	defer sync.rw_mutex_shared_unlock(&p.mutex)
+	return find_slot(p, page_num) != nil
 }
 
 @(private = "file")
@@ -270,4 +304,52 @@ flush_page_unsafe :: proc(p: ^Pager, page: ^Page) -> Error {
 
 	page.dirty = false
 	return .None
+}
+
+// Allocates a page from the free-page linked list. Caller must hold p.mutex.
+@(private = "file")
+alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
+	free_page_num := p.first_free_page
+
+	slot := find_empty_slot(p)
+	if slot == nil { return nil, .Cache_Full }
+
+	offset := i64(free_page_num - 1) * i64(p.page_size)
+	bytes_read, read_err := os.read_at(p.file, slot._data_buf[:], offset)
+	if read_err != nil || bytes_read < int(p.page_size) {
+		slot.page.page_num = 0
+		slot.page.data = nil
+		p.slot_count -= 1
+		return nil, .IO_Error
+	}
+
+	next_free := (^u32)(raw_data(slot._data_buf[:]))^
+	p.first_free_page = next_free
+
+	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
+	slot.page.page_num = free_page_num
+	slot.page.pin_count = 1
+	slot.page.dirty = true
+	return &slot.page, .None
+}
+
+// Adds a page to the free-page linked list and evicts it from cache.
+free_page :: proc(p: ^Pager, page_num: u32) {
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
+
+	if page_num <= 1 { return }
+
+	if slot := find_slot(p, page_num); slot != nil {
+		if slot.page.pin_count > 0 { return }
+		(^u32)(raw_data(slot._data_buf[:]))^ = p.first_free_page
+		slot.page.dirty = true
+		if err := flush_page_unsafe(p, &slot.page); err != nil {
+			return
+		}
+		slot.page.page_num = 0
+		slot.page.data = nil
+		p.slot_count -= 1
+	}
+	p.first_free_page = page_num
 }

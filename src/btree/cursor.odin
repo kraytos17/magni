@@ -1,26 +1,29 @@
 package btree
 
-import "core:mem"
 import "src:cell"
 import "src:pager"
 import "src:utils"
 
 Cursor_Stack_Item :: struct {
 	page_id:    u32,
-	cell_index: int,
+	cell_index: u16,
 }
 
 Cursor :: struct {
-	tree:      ^Tree,
-	path:      [dynamic]Cursor_Stack_Item,
-	is_valid:  bool,
-	allocator: mem.Allocator,
+	tree:     ^Tree,
+	path:     [32]Cursor_Stack_Item,
+	depth:    u8,
+	is_valid: bool,
 }
 
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	curr := start_page
 	for {
-		append(&c.path, Cursor_Stack_Item{page_id = curr, cell_index = 0})
+		c.path[c.depth] = Cursor_Stack_Item {
+			page_id    = curr,
+			cell_index = 0,
+		}
+		c.depth += 1
 		node, err := load_node(c.tree, curr)
 		if err != .None {
 			return err
@@ -40,25 +43,20 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	return .None
 }
 
-cursor_destroy :: proc(c: ^Cursor) {
-	delete(c.path)
-}
+cursor_destroy :: proc(c: ^Cursor) {  }
 
 cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error) {
 	c := Cursor {
-		tree      = t,
-		path      = make([dynamic]Cursor_Stack_Item, allocator),
-		is_valid  = true,
-		allocator = allocator,
+		tree     = t,
+		is_valid = true,
 	}
 
 	err := drill_down_leftmost(&c, t.root)
 	if err != .None {
-		cursor_destroy(&c)
 		return Cursor{}, err
 	}
-	if len(c.path) > 0 {
-		top := c.path[len(c.path) - 1]
+	if c.depth > 0 {
+		top := c.path[c.depth - 1]
 		node, e := load_node(t, top.page_id)
 		if e != .None {
 			c.is_valid = false
@@ -75,11 +73,11 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error
 }
 
 cursor_advance :: proc(c: ^Cursor) -> Error {
-	if !c.is_valid || len(c.path) == 0 {
+	if !c.is_valid || c.depth == 0 {
 		return .None
 	}
-	for len(c.path) > 0 {
-		top_idx := len(c.path) - 1
+	for c.depth > 0 {
+		top_idx := c.depth - 1
 		item := &c.path[top_idx]
 		node, err := load_node(c.tree, item.page_id)
 		if err != .None {
@@ -90,14 +88,14 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 		item.cell_index += 1
 		limit := int(node.header.cell_count)
 		if is_leaf(node) {
-			if item.cell_index < limit {
+			if int(item.cell_index) < limit {
 				return .None
 			}
-			pop(&c.path)
+			c.depth -= 1
 		} else {
-			if item.cell_index <= limit {
+			if int(item.cell_index) <= limit {
 				child_page: u32
-				if item.cell_index == limit {
+				if int(item.cell_index) == limit {
 					child_page = get_right_ptr(node.data, item.page_id)
 				} else {
 					ptrs := get_pointers(node.data, item.page_id)
@@ -106,7 +104,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 				}
 				return drill_down_leftmost(c, child_page)
 			}
-			pop(&c.path)
+			c.depth -= 1
 		}
 	}
 	c.is_valid = false
@@ -114,11 +112,11 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 }
 
 cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cell, Error) {
-	if !c.is_valid || len(c.path) == 0 {
+	if !c.is_valid || c.depth == 0 {
 		return {}, .Cell_Not_Found
 	}
 
-	item := c.path[len(c.path) - 1]
+	item := c.path[c.depth - 1]
 	node, err := load_node(c.tree, item.page_id)
 	if err != .None {
 		return {}, err
@@ -130,14 +128,14 @@ cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cel
 	}
 
 	pointers := get_pointers(node.data, item.page_id)
-	if item.cell_index >= len(pointers) {
+	if int(item.cell_index) >= len(pointers) {
 		return {}, .Cell_Not_Found
 	}
 
 	cell_ptr := pointers[item.cell_index]
 	actual_alloc := allocator
 	if actual_alloc.procedure == nil {
-		actual_alloc = c.allocator
+		actual_alloc = context.allocator
 	}
 
 	cell_cfg := cell.Config {

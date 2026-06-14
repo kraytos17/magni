@@ -6,7 +6,7 @@ import "core:strings"
 import "core:unicode"
 import "src:types"
 
-Token_Type :: enum {
+Token_Type :: enum u8 {
 	EOF,
 	IDENTIFIER,
 	NUMBER,
@@ -67,12 +67,20 @@ Token_Type :: enum {
 	ON,
 	AS,
 	OUTER,
+	// Transaction keywords
+	BEGIN,
+	COMMIT,
+	ROLLBACK,
+	// Time-travel keywords
+	OF,
+	SNAPSHOT,
+	TIMESTAMP,
 }
 
 Token :: struct {
 	type:   Token_Type,
 	lexeme: string,
-	line:   int,
+	line:   u32,
 }
 
 Condition :: struct {
@@ -143,17 +151,19 @@ Join_Source_Result :: struct {
 }
 
 Select_Stmt :: struct {
-	from:         From_Source,
-	from_alias:   string,
-	joins:        []Join_Clause,
-	columns:      []string,
-	aggregates:   []Aggregate_Expr,
-	where_clause: Maybe(Where_Clause),
-	order_by:     Maybe([]Order_By_Column),
-	limit:        Maybe(u64),
-	offset:       Maybe(u64),
-	group_by:     []string,
-	having:       Maybe(Where_Clause),
+	from:            From_Source,
+	from_alias:      string,
+	joins:           []Join_Clause,
+	columns:         []string,
+	aggregates:      []Aggregate_Expr,
+	where_clause:    Maybe(Where_Clause),
+	order_by:        Maybe([]Order_By_Column),
+	limit:           Maybe(u64),
+	offset:          Maybe(u64),
+	group_by:        []string,
+	having:          Maybe(Where_Clause),
+	as_of_snapshot:  Maybe(u64),
+	as_of_timestamp: Maybe(u64),
 }
 
 Update_Stmt :: struct {
@@ -172,6 +182,16 @@ Drop_Stmt :: struct {
 	table_name: string,
 }
 
+Txn_Op :: enum {
+	BEGIN,
+	COMMIT,
+	ROLLBACK,
+}
+
+Txn_Stmt :: struct {
+	op: Txn_Op,
+}
+
 Statement_Variant :: union {
 	Create_Stmt,
 	Insert_Stmt,
@@ -179,6 +199,7 @@ Statement_Variant :: union {
 	Update_Stmt,
 	Delete_Stmt,
 	Drop_Stmt,
+	Txn_Stmt,
 }
 
 Statement :: struct {
@@ -274,6 +295,18 @@ get_keyword_type :: proc(ident: string) -> Token_Type {
 		return .AS
 	case "OUTER":
 		return .OUTER
+	case "BEGIN":
+		return .BEGIN
+	case "COMMIT":
+		return .COMMIT
+	case "ROLLBACK":
+		return .ROLLBACK
+	case "OF":
+		return .OF
+	case "SNAPSHOT":
+		return .SNAPSHOT
+	case "TIMESTAMP":
+		return .TIMESTAMP
 	}
 	return .IDENTIFIER
 }
@@ -288,7 +321,7 @@ Returns:
 tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
 	tokens := make([dynamic]Token, allocator)
 	i := 0
-	line := 1
+	line := u32(1)
 	for i < len(sql) {
 		c := rune(sql[i])
 		if unicode.is_space(c) {
@@ -471,9 +504,37 @@ expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 	return token, true
 }
 
+is_keyword_token :: proc(t: Token_Type) -> bool {
+	#partial switch t {
+	case .EOF,
+	     .IDENTIFIER,
+	     .NUMBER,
+	     .STRING,
+	     .BLOB_LITERAL,
+	     .COMMA,
+	     .SEMICOLON,
+	     .LPAREN,
+	     .RPAREN,
+	     .ASTERISK,
+	     .EQUALS,
+	     .NOT_EQUALS,
+	     .LESS_THAN,
+	     .GREATER_THAN,
+	     .LESS_EQUAL,
+	     .GREATER_EQUAL,
+	     .DOT:
+		return false
+	}
+	return true
+}
+
 parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: string, ok: bool) {
-	token := expect(p, .IDENTIFIER) or_return
-	return strings.clone(token.lexeme, allocator), true
+	tok := peek(p)
+	if tok.type != .IDENTIFIER && !is_keyword_token(tok.type) {
+		return {}, false
+	}
+	advance(p)
+	return strings.clone(tok.lexeme, allocator), true
 }
 
 // Parse an optionally qualified identifier: "name" or "table.name"
@@ -499,22 +560,34 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 		if !sel_ok { return {} }
 
 		inner_sel, _ := inner_variant.(Select_Stmt)
-		subq := new(Select_Stmt)
+		subq := new(Select_Stmt, allocator)
 		subq^ = inner_sel
-		if !match(p, .RPAREN) { return {} }
+		if !match(p, .RPAREN) {
+			free(subq, allocator)
+			return {}
+		}
 
 		match(p, .AS)
 		al, al_ok := parse_identifier(p, allocator)
-		if !al_ok { return {} }
+		if !al_ok {
+			free(subq, allocator)
+			return {}
+		}
 		return {source = subq, alias = al, success = true}
 	}
 
 	tbl, tbl_ok := parse_identifier(p, allocator)
 	if !tbl_ok { return {} }
 	if match(p, .AS) {
-		al2, al2_ok := parse_identifier(p, allocator)
-		if !al2_ok { return {} }
-		return {source = tbl, alias = al2, success = true}
+		// Peek ahead: if the next keyword is OF, this AS belongs to
+		// "AS OF SNAPSHOT", not to an alias. Back out by decrementing.
+		if peek(p).type == .OF {
+			p.current -= 1
+		} else {
+			al2, al2_ok := parse_identifier(p, allocator)
+			if !al2_ok { return {} }
+			return {source = tbl, alias = al2, success = true}
+		}
 	} else if is_alias(p) {
 		al3, al3_ok := parse_identifier(p, allocator)
 		if !al3_ok { return {} }
@@ -662,12 +735,7 @@ parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 	values := make([dynamic]types.Value, allocator)
 	defer if !ok {
 		for v in values {
-			#partial switch sv in v {
-			case string:
-				delete(sv, allocator)
-			case []u8:
-				delete(sv, allocator)
-			}
+			types.value_delete(v, allocator)
 		}
 		delete(table_name, allocator)
 		delete(values)
@@ -687,13 +755,15 @@ parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 	return Insert_Stmt{table_name = table_name, columns = columns[:], values = values[:]}, true
 }
 
-// Parse SELECT statement
-parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
-	columns := make([dynamic]string, allocator)
-	defer if !ok do delete(columns)
-	aggregates := make([dynamic]Aggregate_Expr, allocator)
-	defer if !ok do delete(aggregates)
-
+// Parse the SELECT column list (including aggregate functions).
+// Returns true on success, false on parse error.
+@(private = "file")
+parse_select_columns :: proc(
+	p: ^Parser,
+	columns: ^[dynamic]string,
+	aggregates: ^[dynamic]Aggregate_Expr,
+	allocator := context.allocator,
+) -> bool {
 	if match(p, .ASTERISK) {  } else {
 		for {
 			tok := peek(p)
@@ -715,31 +785,85 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 				case "MAX":
 					agg_func = .MAX; agg_ok = true
 				}
+
 				if !agg_ok {
-					append(&columns, parse_identifier(p, allocator) or_return)
+					col, cok := parse_identifier(p, allocator)
+					if !cok { return false }
+					append(columns, col)
 				} else {
-					advance(p) // function name
-					advance(p) // LPAREN
+					advance(p)
+					advance(p)
 					is_star := match(p, .ASTERISK)
 					arg_col: string
 					if !is_star {
-						arg_col = parse_qualified_identifier(p, allocator) or_return
+						var, acok := parse_qualified_identifier(p, allocator)
+						if !acok { return false }
+						arg_col = var
 					}
-					if !match(p, .RPAREN) {
-						return nil, false
-					}
+					if !match(p, .RPAREN) { return false }
 
 					arg_display := "*" if is_star else arg_col
 					display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
-					append(&columns, display)
+					append(columns, display)
 					agg_col := "" if is_star else arg_col
-					append(&aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
+					append(aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
 				}
 			} else {
-				append(&columns, parse_qualified_identifier(p, allocator) or_return)
+				col, cok := parse_qualified_identifier(p, allocator)
+				if !cok { return false }
+				append(columns, col)
 			}
 			if !match(p, .COMMA) do break
 		}
+	}
+	return true
+}
+
+// Parse JOIN clauses after the FROM clause.
+@(private = "file")
+parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynamic]Join_Clause {
+	joins := make([dynamic]Join_Clause, allocator)
+	for {
+		if match(p, .COMMA) {
+			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false)
+			if !jc_ok { break }
+			append(&joins, jc)
+		} else if match(p, .JOIN) {
+			jc, jc_ok := parse_single_join(p, allocator, .INNER, false)
+			if !jc_ok { break }
+			append(&joins, jc)
+		} else if match(p, .INNER) {
+			if !match(p, .JOIN) do break
+			jc, jc_ok := parse_single_join(p, allocator, .INNER, true)
+			if !jc_ok { break }
+			append(&joins, jc)
+		} else if match(p, .CROSS) {
+			if !match(p, .JOIN) do break
+			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false)
+			if !jc_ok { break }
+			append(&joins, jc)
+		} else if match(p, .LEFT) {
+			match(p, .OUTER)
+			if !match(p, .JOIN) do break
+			jc, jc_ok := parse_single_join(p, allocator, .LEFT, true)
+			if !jc_ok { break }
+			append(&joins, jc)
+		} else {
+			break
+		}
+	}
+	return joins
+}
+
+// Parse SELECT statement
+parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
+	columns := make([dynamic]string, allocator)
+	defer if !ok do delete(columns)
+	aggregates := make([dynamic]Aggregate_Expr, allocator)
+	defer if !ok do delete(aggregates)
+
+	if !parse_select_columns(p, &columns, &aggregates, allocator) {
+		return nil, false
 	}
 	if !match(p, .FROM) do return nil, false
 
@@ -750,36 +874,18 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 
 	from_val = js.source
 	from_alias = js.alias
-	joins := make([dynamic]Join_Clause, allocator)
+	joins := parse_join_clauses(p, allocator)
 	defer if !ok do delete(joins)
 
-	for {
-		if match(p, .COMMA) {
-			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false)
-			if !jc_ok { return nil, false }
-			append(&joins, jc)
-		} else if match(p, .JOIN) {
-			jc, jc_ok := parse_single_join(p, allocator, .INNER, false)
-			if !jc_ok { return nil, false }
-			append(&joins, jc)
-		} else if match(p, .INNER) {
-			if !match(p, .JOIN) do return nil, false
-			jc, jc_ok := parse_single_join(p, allocator, .INNER, true)
-			if !jc_ok { return nil, false }
-			append(&joins, jc)
-		} else if match(p, .CROSS) {
-			if !match(p, .JOIN) do return nil, false
-			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false)
-			if !jc_ok { return nil, false }
-			append(&joins, jc)
-		} else if match(p, .LEFT) {
-			match(p, .OUTER)
-			if !match(p, .JOIN) do return nil, false
-			jc, jc_ok := parse_single_join(p, allocator, .LEFT, true)
-			if !jc_ok { return nil, false }
-			append(&joins, jc)
-		} else {
-			break
+	as_of_snapshot: Maybe(u64)
+	as_of_timestamp: Maybe(u64)
+	if match(p, .AS) && match(p, .OF) {
+		if match(p, .SNAPSHOT) {
+			id_token := expect(p, .NUMBER) or_return
+			as_of_snapshot = strconv.parse_u64(id_token.lexeme) or_return
+		} else if match(p, .TIMESTAMP) {
+			id_token := expect(p, .NUMBER) or_return
+			as_of_timestamp = strconv.parse_u64(id_token.lexeme) or_return
 		}
 	}
 
@@ -830,6 +936,7 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 			offset = offset_val
 		}
 	}
+
 	return Select_Stmt {
 			from = from_val,
 			from_alias = from_alias,
@@ -842,6 +949,8 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 			offset = offset,
 			group_by = group_by[:],
 			having = having_cl,
+			as_of_snapshot = as_of_snapshot,
+			as_of_timestamp = as_of_timestamp,
 		},
 		true
 }
@@ -908,19 +1017,14 @@ parse_drop_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: S
 }
 
 @(private = "file")
-cleanup_where_conditions :: proc(conditions: [dynamic]Condition) {
+cleanup_where_conditions :: proc(conditions: [dynamic]Condition, allocator := context.allocator) {
 	for cond in conditions {
-		delete(cond.column)
+		delete(cond.column, allocator)
 		if rc, ok := cond.rhs.(string); ok {
-			delete(rc)
+			delete(rc, allocator)
 		}
 		if val, ok := cond.rhs.(types.Value); ok {
-			#partial switch v in val {
-			case string:
-				delete(v)
-			case []u8:
-				delete(v)
-			}
+			types.value_delete(val)
 		}
 	}
 	delete(conditions)
@@ -983,7 +1087,7 @@ parse_where_clause :: proc(
 	}
 
 	conditions := make([dynamic]Condition, allocator)
-	defer if !ok do cleanup_where_conditions(conditions)
+	defer if !ok do cleanup_where_conditions(conditions, allocator)
 
 	first_logical_op_seen := false
 	for {
@@ -1083,6 +1187,24 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) 
 	case .DROP:
 		advance(&parser)
 		variant, success = parse_drop_table(&parser, allocator)
+	case .BEGIN:
+		advance(&parser)
+		variant = Txn_Stmt {
+			op = .BEGIN,
+		}
+		success = true
+	case .COMMIT:
+		advance(&parser)
+		variant = Txn_Stmt {
+			op = .COMMIT,
+		}
+		success = true
+	case .ROLLBACK:
+		advance(&parser)
+		variant = Txn_Stmt {
+			op = .ROLLBACK,
+		}
+		success = true
 	case:
 		return {}, false
 	}
@@ -1100,12 +1222,7 @@ where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
 			delete(rc, allocator)
 		}
 		if val, ok := cond.rhs.(types.Value); ok {
-			#partial switch v in val {
-			case string:
-				delete(v, allocator)
-			case []u8:
-				delete(v, allocator)
-			}
+			types.value_delete(val, allocator)
 		}
 	}
 	delete(w.conditions, allocator)
@@ -1120,12 +1237,7 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		for col in s.columns {
 			delete(col.name, allocator)
 			if def, ok := col.default_value.?; ok {
-				#partial switch v in def {
-				case string:
-					delete(v, allocator)
-				case []u8:
-					delete(v, allocator)
-				}
+				types.value_delete(def, allocator)
 			}
 		}
 		delete(s.columns, allocator)
@@ -1137,12 +1249,7 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 
 		delete(s.columns, allocator)
 		for val in s.values {
-			#partial switch v in val {
-			case string:
-				delete(v, allocator)
-			case []u8:
-				delete(v, allocator)
-			}
+			types.value_delete(val, allocator)
 		}
 		delete(s.values, allocator)
 	case Select_Stmt:
@@ -1208,12 +1315,7 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 
 		delete(s.update_columns, allocator)
 		for val in s.update_values {
-			#partial switch v in val {
-			case string:
-				delete(v, allocator)
-			case []u8:
-				delete(v, allocator)
-			}
+			types.value_delete(val, allocator)
 		}
 
 		delete(s.update_values, allocator)
@@ -1227,5 +1329,6 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		}
 	case Drop_Stmt:
 		delete(s.table_name, allocator)
+	case Txn_Stmt:
 	}
 }

@@ -4,6 +4,7 @@ import "core:bufio"
 import "core:flags"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "src:db"
 
@@ -21,7 +22,7 @@ main :: proc() {
 	cli := CLI {
 		database = "test.db",
 	}
-	
+
 	err := flags.parse(&cli, os.args[1:], .Unix)
 	if err != nil {
 		if _, ok := err.(flags.Help_Request); ok {
@@ -116,6 +117,33 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
 		db.print_schema_debug(database)
 	case ".stats":
 		db.stats(database)
+	case ".begin":
+		if db.begin(database) {
+			fmt.println("Transaction started.")
+		}
+	case ".commit":
+		if db.commit(database) {
+			fmt.println("Transaction committed.")
+		}
+	case ".rollback":
+		if db.rollback(database) {
+			fmt.println("Transaction rolled back.")
+		}
+	case ".snapshots":
+		db.print_snapshots(database)
+	case ".snapdiff":
+		parts := strings.split(trimmed, " ", context.temp_allocator)
+		if len(parts) == 3 {
+			older, older_ok := strconv.parse_u64(parts[1])
+			newer, newer_ok := strconv.parse_u64(parts[2])
+			if older_ok && newer_ok {
+				db.snapshot_diff(database, older, newer)
+			} else {
+				fmt.println("Usage: .snapdiff <older_id> <newer_id>")
+			}
+		} else {
+			fmt.println("Usage: .snapdiff <older_id> <newer_id>")
+		}
 	case ".checkpoint":
 		if db.checkpoint(database) {
 			fmt.println("Database flushed to disk.")
@@ -125,7 +153,34 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
 			fmt.println("OK")
 		}
 	case:
-		if strings.has_prefix(trimmed, ".dump ") {
+		if strings.has_prefix(trimmed, ".snapshot tag ") {
+			parts := strings.split(trimmed, " ", context.temp_allocator)
+			if len(parts) >= 3 {
+				id, id_ok := strconv.parse_u64(parts[2])
+				if id_ok && len(parts) >= 4 {
+					tag := strings.join(parts[3:], " ", context.temp_allocator)
+					if db.snapshot_tag(database, id, tag) {
+						fmt.printf("Tagged snapshot %d as '%s'\n", id, tag)
+					}
+				} else {
+					fmt.println("Usage: .snapshot tag <id> <label>")
+				}
+			} else {
+				fmt.println("Usage: .snapshot tag <id> <label>")
+			}
+		} else if strings.has_prefix(trimmed, ".snapshot restore ") {
+			parts := strings.split(trimmed, " ", context.temp_allocator)
+			if len(parts) == 3 {
+				id, id_ok := strconv.parse_u64(parts[2])
+				if id_ok {
+					db.snapshot_restore(database, id)
+				} else {
+					fmt.println("Usage: .snapshot restore <id>")
+				}
+			} else {
+				fmt.println("Usage: .snapshot restore <id>")
+			}
+		} else if strings.has_prefix(trimmed, ".dump ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
 				db.dump_table(database, parts[1])
@@ -202,6 +257,13 @@ print_help :: proc() {
 	fmt.println("  .debug_schema       Show low-level schema (root pages, flags)")
 	fmt.println("  .dump <table_name>  Print all raw rows in a table")
 	fmt.println("  .desc <table_name>  Describe table columns")
+	fmt.println("  .begin              Begin a transaction")
+	fmt.println("  .commit             Commit the current transaction (creates a snapshot)")
+	fmt.println("  .rollback           Roll back the current transaction")
+	fmt.println("  .snapshots          Show the snapshot chain")
+	fmt.println("  .snapdiff <old> <new>  Show diff between two snapshots")
+	fmt.println("  .snapshot tag <id> <label>  Tag a snapshot with a label")
+	fmt.println("  .snapshot restore <id>  Restore database to a historical snapshot")
 	fmt.println("  .stats              Show database file statistics")
 	fmt.println("  .integrity          Run consistency checks")
 	fmt.println("  .checkpoint         Flush WAL/Pages to disk")
@@ -217,6 +279,8 @@ print_help :: proc() {
 	fmt.println("    SELECT * FROM t1 [INNER|CROSS|LEFT [OUTER]] JOIN t2 ON condition;")
 	fmt.println("    SELECT * FROM (SELECT ...) AS alias [WHERE ...] [ORDER BY ...];")
 	fmt.println("    SELECT t1.col, t2.col FROM t1, t2 [WHERE t1.x = t2.y];")
+	fmt.println("    SELECT ... FROM name AS OF SNAPSHOT <id> [WHERE ...];")
+	fmt.println("    SELECT ... FROM name AS OF TIMESTAMP <micros> [WHERE ...];")
 	fmt.println("    UPDATE name SET col = val, ... [WHERE cond];")
 	fmt.println("    DELETE FROM name [WHERE cond];")
 	fmt.println("  WHERE:")

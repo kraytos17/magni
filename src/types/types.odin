@@ -1,6 +1,7 @@
 package types
 
 import "core:fmt"
+import "core:hash"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -8,7 +9,7 @@ import "core:strings"
 PAGE_SIZE :: 4096
 DATABASE_HEADER_SIZE :: 100
 MAX_COLS :: 10
-MAGIC_STRING :: "MAGNI_DB_v2.0"
+MAGIC_STRING :: "MAGNI_DB_v1.0"
 
 // Serial types used for encoding values in cells
 Serial_Type :: enum u64 {
@@ -89,12 +90,12 @@ value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.All
 	}
 }
 
-value_free :: proc(v: Value) {
+value_delete :: proc(v: Value, allocator := context.allocator) {
 	#partial switch val in v {
 	case string:
-		delete(val)
+		delete(val, allocator)
 	case []u8:
-		delete(val)
+		delete(val, allocator)
 	}
 }
 
@@ -181,7 +182,10 @@ Column :: struct {
 	default_value: Maybe(Value),
 }
 
-// Table definition
+hash_string :: proc(s: string) -> u64 {
+	return hash.fnv64(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
+}
+
 Table :: struct {
 	name:      string,
 	columns:   []Column,

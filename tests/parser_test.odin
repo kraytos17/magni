@@ -154,13 +154,10 @@ test_parse_update :: proc(t: ^testing.T) {
 
 	upd, is_update := stmt.type.(parser.Update_Stmt)
 	testing.expect(t, is_update, "Expected Update_Stmt")
-
 	testing.expect(t, upd.table_name == "employees", "Wrong table")
-
 	testing.expect(t, len(upd.update_columns) == 2, "Update col count mismatch")
 	testing.expect(t, upd.update_columns[0] == "salary", "Col 0 mismatch")
 	testing.expect(t, upd.update_values[0].(i64) == 50000, "Val 0 mismatch")
-
 	testing.expect(t, upd.update_columns[1] == "rank", "Col 1 mismatch")
 
 	_, has_where := upd.where_clause.?
@@ -196,14 +193,14 @@ test_parse_drop :: proc(t: ^testing.T) {
 @(test)
 test_parse_error_mixed_logic :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t WHERE a=1 AND b=2 OR c=3;"
-	_, ok := parser.parse(sql, context.allocator)
+	_, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, !ok, "Should fail on mixed AND/OR logic")
 }
 
 @(test)
 test_parse_error_syntax :: proc(t: ^testing.T) {
 	sql := "CREATE user (id INT);"
-	_, ok := parser.parse(sql, context.allocator)
+	_, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, !ok, "Should fail on bad syntax (missing TABLE keyword)")
 }
 
@@ -233,9 +230,9 @@ test_parse_not_equals :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_empty_sql :: proc(t: ^testing.T) {
-	_, ok := parser.parse("", context.allocator)
+	_, ok := parser.parse("", context.temp_allocator)
 	testing.expect(t, !ok, "Empty SQL should fail")
-	_, ok2 := parser.parse("   ;", context.allocator)
+	_, ok2 := parser.parse("   ;", context.temp_allocator)
 	testing.expect(t, !ok2, "Whitespace-only SQL should fail")
 }
 
@@ -662,4 +659,67 @@ test_parse_int_alias :: proc(t: ^testing.T) {
 	testing.expect(t, is_create, "Expected Create_Stmt")
 	testing.expect(t, len(create.columns) == 1, "Expected 1 column")
 	testing.expect_value(t, create.columns[0].type, types.Column_Type.INTEGER)
+}
+
+@(test)
+test_parse_as_of_snapshot :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t AS OF SNAPSHOT 5;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "AS OF SNAPSHOT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	snap_id, has_snap := sel.as_of_snapshot.?
+	testing.expect(t, has_snap, "Expected as_of_snapshot to be set")
+	testing.expect_value(t, snap_id, u64(5))
+}
+
+@(test)
+test_parse_as_of_snapshot_no_as :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t OF SNAPSHOT 3;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Parses as SELECT without AS OF (unconsumed tokens)")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	_, has_snap := sel.as_of_snapshot.?
+	testing.expect(t, !has_snap, "as_of_snapshot should NOT be set without AS")
+}
+
+@(test)
+test_parse_as_of_snapshot_with_where :: proc(t: ^testing.T) {
+	sql := "SELECT id, name FROM t AS OF SNAPSHOT 2 WHERE id > 1;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "AS OF SNAPSHOT with WHERE should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	snap_id, has_snap := sel.as_of_snapshot.?
+	testing.expect(t, has_snap, "Expected as_of_snapshot to be set")
+	testing.expect_value(t, snap_id, u64(2))
+	_, has_where := sel.where_clause.?
+	testing.expect(t, has_where, "Expected WHERE clause")
+}
+
+@(test)
+test_parse_as_of_snapshot_with_limit :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t AS OF SNAPSHOT 1 LIMIT 10;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "AS OF SNAPSHOT with LIMIT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	snap_id, has_snap := sel.as_of_snapshot.?
+	testing.expect(t, has_snap, "Expected as_of_snapshot")
+	testing.expect_value(t, snap_id, u64(1))
+	lim, has_lim := sel.limit.?
+	testing.expect(t, has_lim, "Expected LIMIT")
+	testing.expect_value(t, lim, u64(10))
+}
+
+@(test)
+test_parse_as_of_snapshot_snapshot_as_table_name :: proc(t: ^testing.T) {
+	sql := "SELECT snapshot FROM t;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "snapshot as column name should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect(t, len(sel.columns) == 1, "Expected 1 column")
+	testing.expect_value(t, sel.columns[0], "snapshot")
 }

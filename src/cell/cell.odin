@@ -14,7 +14,6 @@ import "src:utils"
 Cell :: struct {
 	rowid:     types.Row_ID,
 	values:    []types.Value,
-	allocator: mem.Allocator,
 	owns_data: bool,
 }
 
@@ -37,46 +36,39 @@ create :: proc(
 		cloned, err := types.value_clone(val, allocator)
 		if err != nil {
 			for j in 0 ..< i {
-				types.value_free(values_copy[j])
+				types.value_delete(values_copy[j])
 			}
 			delete(values_copy, allocator)
 			return {}, err
 		}
 		values_copy[i] = cloned
 	}
-	return Cell{rowid = rowid, values = values_copy, allocator = allocator, owns_data = true}, nil
+	return Cell{rowid = rowid, values = values_copy, owns_data = true}, nil
 }
 
-destroy :: proc(c: ^Cell) {
+destroy :: proc(c: ^Cell, allocator := context.allocator) {
 	if c.values == nil {
 		return
 	}
 	if c.owns_data {
 		for val in c.values {
-			types.value_free(val)
+			types.value_delete(val, allocator)
 		}
 	}
-	delete(c.values, c.allocator)
+	delete(c.values, allocator)
 	c.values = nil
 }
 
 Serialization_Info :: struct {
-	serial_types:      []u64,
 	serial_types_size: int,
 	payload_size:      int,
 	total_size:        int,
 }
 
-compute_info :: proc(
-	rowid: types.Row_ID,
-	values: []types.Value,
-	allocator := context.temp_allocator,
-) -> Serialization_Info {
+compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serialization_Info {
 	info: Serialization_Info
-	info.serial_types = make([]u64, len(values), allocator)
-	for val, i in values {
+	for val in values {
 		serial := utils.serial_type_for_value(val)
-		info.serial_types[i] = serial
 		info.serial_types_size += utils.varint_size(serial)
 		content_size, _ := types.serial_type_content_size(serial)
 		info.payload_size += content_size
@@ -116,11 +108,12 @@ serialize :: proc(
 	offset += utils.varint_encode(dest[offset:], u64(total_payload))
 	offset += utils.varint_encode(dest[offset:], u64(rowid))
 	offset += utils.varint_encode(dest[offset:], u64(info.serial_types_size))
-	for st in info.serial_types {
-		offset += utils.varint_encode(dest[offset:], st)
+	for val in values {
+		serial := utils.serial_type_for_value(val)
+		offset += utils.varint_encode(dest[offset:], serial)
 	}
-	for val, i in values {
-		serial := info.serial_types[i]
+	for val in values {
+		serial := utils.serial_type_for_value(val)
 		switch v in val {
 		case types.Null:
 		case i64:
@@ -175,20 +168,22 @@ deserialize :: proc(
 	pos += n3
 
 	header_start := pos
-	serial_types := make([dynamic]u64, context.temp_allocator)
-	defer delete(serial_types)
+	serial_types: [types.MAX_COLS]u64
+	serial_count := 0
 
-	for pos < header_start + int(header_size) {
+	for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
 		st, n4, ok_st := utils.varint_decode(src, pos)
 		if !ok_st { return {}, 0, false }
-		append(&serial_types, st)
+		serial_types[serial_count] = st
+		serial_count += 1
 		pos += n4
 	}
 
-	values := make([dynamic]types.Value, 0, len(serial_types), alloc)
+	values := make([dynamic]types.Value, 0, serial_count, alloc)
 	defer if !ok { delete(values) }
 
-	for st in serial_types {
+	for st_idx in 0 ..< serial_count {
+		st := serial_types[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
 		type_code := types.Serial_Type(st)
 		if pos + content_size > len(src) {
@@ -235,7 +230,6 @@ deserialize :: proc(
 	cell = Cell {
 		rowid     = types.Row_ID(rowid_val),
 		values    = values[:],
-		allocator = alloc,
 		owns_data = !config.zero_copy,
 	}
 	return cell, pos - offset, true

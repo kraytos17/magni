@@ -17,7 +17,6 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 	p, err := pager.open(safe_filename)
 	testing.expect(t, err == nil, "Failed to open pager")
 
-	// Allocate and initialize schema root page
 	schema_page, aerr := pager.allocate_page(p)
 	testing.expect(t, aerr == .None, "Failed to allocate schema page")
 	btree.init_leaf_page(schema_page.data, schema_page.page_num)

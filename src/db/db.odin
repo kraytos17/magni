@@ -24,26 +24,33 @@ Transaction_State :: enum {
 // finer-grained locking.
 Database :: struct {
 	path:             string,
-	pager:            ^pager.Pager, // Page manager for disk I/O (owned pointer)
-	is_new:           bool, // Tells if database was just created
-	mu:               sync.Mutex, // Guards all access to pager and schema tree
-	schema_root_page: u32, // Root page of the schema B-tree (latest COW'd version)
-	latest_snapshot:  u32, // Latest snapshot page (0 = none)
+	pager:            ^pager.Pager,
+	is_new:           bool,
+	mu:               sync.Mutex,
+	schema_root_page: u32,
+	latest_snapshot:  u32,
 	txn_state:        Transaction_State,
-	txn_snapshot_id:  u64, // Monotonic snapshot ID counter
+	txn_snapshot_id:  u64,
+	snapshot_index:   map[u64]u32,
 }
 
 Header :: struct #packed {
-	magic:          [13]u8,
-	page_size:      u32le,
-	page_count:     u32le,
-	schema_version: u32le,
-	schema_root_page: u32le, // Root page of schema B-tree (0 if uninitialized)
+	magic:                [13]u8,
+	page_size:            u32le,
+	page_count:           u32le,
+	schema_version:       u32le,
+	schema_root_page:     u32le, // Root page of schema B-tree (0 if uninitialized)
 	latest_snapshot_page: u32le, // Latest snapshot page (0 = none)
-	reserved:       [67]u8,
+	snapshot_id_counter:  u64le, // Monotonic snapshot ID counter
+	first_free_page:      u32le, // Head of free-page linked list (0 = empty)
+	reserved:             [55]u8,
 }
 
 #assert(size_of(Header) == types.DATABASE_HEADER_SIZE)
+
+schema_tree :: proc(db: ^Database) -> btree.Tree {
+	return btree.init(db.pager, db.schema_root_page)
+}
 
 // Opens an existing database or creates a new one at the specified path.
 open :: proc(path: string) -> (^Database, bool) {
@@ -67,6 +74,7 @@ open :: proc(path: string) -> (^Database, bool) {
 	db.is_new = (db.pager.file_len == 0)
 	db.txn_state = .NONE
 	db.txn_snapshot_id = 0
+	db.snapshot_index = make(map[u64]u32, 128)
 	if db.is_new {
 		fmt.println("Initializing new database...")
 		if !initialize(db) {
@@ -79,17 +87,29 @@ open :: proc(path: string) -> (^Database, bool) {
 			close(db)
 			return nil, false
 		}
-		// Read schema_root_page from header
+
 		page1, h_err := pager.get_page(db.pager, 1)
 		if h_err != .None {
 			fmt.eprintln("Error: Failed to read database header")
 			close(db)
 			return nil, false
 		}
+
 		header := (^Header)(raw_data(page1.data))
 		db.schema_root_page = u32(header.schema_root_page)
 		db.latest_snapshot = u32(header.latest_snapshot_page)
+		db.txn_snapshot_id = u64(header.snapshot_id_counter)
+		db.pager.first_free_page = u32(header.first_free_page)
 		pager.unpin_page(db.pager, 1)
+
+		// Build snapshot index by walking the chain
+		page := db.latest_snapshot
+		for page != 0 {
+			h, ok := snapshot.load(db.pager, page)
+			if !ok { break }
+			db.snapshot_index[h.snapshot_id] = page
+			page = h.prev_snapshot
+		}
 	}
 	return db, true
 }
@@ -108,6 +128,7 @@ close :: proc(db: ^Database) {
 			fmt.eprintln("Warning: error closing database:", err)
 		}
 	}
+	delete(db.snapshot_index)
 	delete(db.path)
 	free(db)
 }
@@ -127,7 +148,6 @@ initialize :: proc(db: ^Database) -> bool {
 	header.page_count = 1
 	header.schema_version = 1
 
-	// Allocate a dedicated page for the schema tree root (page 2 normally)
 	schema_page, s_err := pager.allocate_page(db.pager)
 	if s_err != .None {
 		fmt.eprintln("Error: Failed to allocate schema root page:", s_err)
@@ -143,8 +163,8 @@ initialize :: proc(db: ^Database) -> bool {
 	header.latest_snapshot_page = 0
 	header.page_count = u32le(schema_page.page_num)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	if !schema.init(&schema_tree) {
+	st := schema_tree(db)
+	if !schema.init(&st) {
 		fmt.eprintln("Error: Failed to initialize schema tree")
 		return false
 	}
@@ -182,6 +202,8 @@ update_header :: proc(db: ^Database) {
 	header.page_count = u32le(page_count)
 	header.schema_root_page = u32le(db.schema_root_page)
 	header.latest_snapshot_page = u32le(db.latest_snapshot)
+	header.snapshot_id_counter = u64le(db.txn_snapshot_id)
+	header.first_free_page = u32le(db.pager.first_free_page)
 
 	pager.mark_dirty(db.pager, 1)
 	pager.flush_all(db.pager)
@@ -205,11 +227,89 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 		fmt.eprintln("Error: Failed to parse SQL statement")
 		return false
 	}
-	defer parser.statement_free(stmt, context.temp_allocator)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	exec_ok, new_root := executor.execute(&schema_tree, stmt)
-	db.schema_root_page = new_root
+	if txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt); is_txn {
+		switch txn_stmt.op {
+		case .BEGIN:
+			return begin(db)
+		case .COMMIT:
+			return commit(db)
+		case .ROLLBACK:
+			return rollback(db)
+		}
+	}
+
+	st := schema_tree(db)
+	as_of_override := false
+	if sel, is_sel := stmt.type.(parser.Select_Stmt); is_sel {
+		if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
+			snap_page, has_page := db.snapshot_index[snap_id]
+			if !has_page {
+				fmt.eprintln("Error: Snapshot", snap_id, "not found")
+				return false
+			}
+			snap_h, snap_ok := snapshot.load(db.pager, snap_page)
+			if !snap_ok {
+				fmt.eprintln("Error: Failed to load snapshot", snap_id)
+				return false
+			}
+			st.root = snap_h.schema_root
+			as_of_override = true
+		} else if ts_val, has_ts := sel.as_of_timestamp.?; has_ts {
+			snap_h, snap_ok := snapshot.find_by_timestamp(db.pager, db.latest_snapshot, ts_val)
+			if !snap_ok {
+				fmt.eprintln("Error: No snapshot found at or before timestamp", ts_val)
+				return false
+			}
+			st.root = snap_h.schema_root
+			as_of_override = true
+		}
+	}
+
+	exec_ok, new_root := executor.execute(&st, stmt)
+	if !as_of_override {
+		db.schema_root_page = new_root
+	}
+	if exec_ok && db.txn_state == .NONE && !as_of_override {
+		snap_op: snapshot.Snapshot_Operation
+		#partial switch s in stmt.type {
+		case parser.Insert_Stmt:
+			snap_op = .INSERT
+		case parser.Update_Stmt:
+			snap_op = .UPDATE
+		case parser.Delete_Stmt:
+			snap_op = .DELETE
+		case parser.Create_Stmt:
+			snap_op = .CREATE
+		case parser.Drop_Stmt:
+			snap_op = .DROP
+		}
+
+		tables := schema.list_tables(&st, context.temp_allocator)
+		manifest_page := snapshot.create_manifest(db.pager, tables)
+		defer if manifest_page != 0 {
+			pager.unpin_page(db.pager, manifest_page)
+		}
+
+		db.txn_snapshot_id += 1
+		snap_id := db.txn_snapshot_id
+		snap_page, snap_ok := snapshot.create(
+			db.pager,
+			snap_id,
+			db.latest_snapshot,
+			db.schema_root_page,
+			manifest_page,
+			snap_op,
+		)
+		if snap_ok {
+			db.snapshot_index[snap_id] = snap_page
+			db.latest_snapshot = snap_page
+			snapshot.prune(db.pager, db.latest_snapshot, 100)
+			snapshot.gc(db.pager, db.latest_snapshot, 100)
+		}
+		pager.flush_all(db.pager)
+	}
+	free_all(context.temp_allocator)
 	return exec_ok
 }
 
@@ -218,7 +318,12 @@ checkpoint :: proc(db: ^Database) -> bool {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
+	if db.latest_snapshot != 0 {
+		snapshot.gc(db.pager, db.latest_snapshot, 100)
+	}
+
 	pager.flush_all(db.pager)
+	update_header(db)
 	fmt.println("Checkpoint complete: all pages flushed to disk")
 	return true
 }
@@ -233,6 +338,7 @@ begin :: proc(db: ^Database) -> bool {
 		fmt.eprintln("Warning: Transaction already in progress")
 		return false
 	}
+
 	db.txn_state = .ACTIVE
 	fmt.println("BEGIN transaction")
 	return true
@@ -252,18 +358,32 @@ commit :: proc(db: ^Database) -> bool {
 	}
 
 	db.txn_snapshot_id += 1
-	snap_page, snap_ok := snapshot.create(db.pager, db.txn_snapshot_id, db.latest_snapshot, db.schema_root_page)
+	snap_id := db.txn_snapshot_id
+	st := schema_tree(db)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	manifest_page := snapshot.create_manifest(db.pager, tables)
+	defer if manifest_page != 0 {
+		pager.unpin_page(db.pager, manifest_page)
+	}
+
+	snap_page, snap_ok := snapshot.create(
+		db.pager,
+		snap_id,
+		db.latest_snapshot,
+		db.schema_root_page,
+		manifest_page,
+		.COMMIT,
+	)
 	if !snap_ok {
 		fmt.eprintln("Error: Failed to create snapshot")
 		return false
 	}
 
 	db.latest_snapshot = snap_page
+	db.snapshot_index[snap_id] = snap_page
 	db.txn_state = .NONE
-
-	// Prune old snapshots
 	snapshot.prune(db.pager, db.latest_snapshot, 100)
-
+	snapshot.gc(db.pager, db.latest_snapshot, 100)
 	fmt.println("COMMIT transaction (snapshot", db.txn_snapshot_id, ")")
 	return true
 }
@@ -280,8 +400,6 @@ rollback :: proc(db: ^Database) -> bool {
 		fmt.eprintln("Warning: No active transaction to roll back")
 		return false
 	}
-
-	// Restore schema root from latest snapshot
 	if db.latest_snapshot != 0 {
 		snap_h, snap_ok := snapshot.load(db.pager, db.latest_snapshot)
 		if snap_ok {
@@ -291,6 +409,123 @@ rollback :: proc(db: ^Database) -> bool {
 
 	db.txn_state = .NONE
 	fmt.println("ROLLBACK transaction")
+	return true
+}
+
+// Prints the snapshot chain for debugging.
+print_snapshots :: proc(db: ^Database) {
+	if !db_check(db) { return }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	if db.latest_snapshot == 0 {
+		fmt.println("No snapshots.")
+		return
+	}
+	snapshot.debug_print_chain(db.pager, db.latest_snapshot)
+}
+
+snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	if db.latest_snapshot == 0 {
+		fmt.println("No snapshots.")
+		return false
+	}
+
+	entries, ok := snapshot.diff_snapshots(db.pager, older_id, newer_id, db.latest_snapshot)
+	if !ok {
+		fmt.eprintf("Error: failed to diff snapshots %d → %d\n", older_id, newer_id)
+		return false
+	}
+	defer {
+		for e in entries { delete(e.table_name) }
+		delete(entries)
+	}
+
+	if len(entries) == 0 {
+		fmt.printf("No changes between snapshots %d and %d.\n", older_id, newer_id)
+		return true
+	}
+
+	fmt.printf("=== Snapshot Diff: %d → %d ===\n", older_id, newer_id)
+	for e in entries {
+		switch e.change {
+		case .CREATED:
+			fmt.printf("  %-20s CREATED  (root %d)\n", e.table_name, e.new_root)
+		case .DROPPED:
+			fmt.printf("  %-20s DROPPED  (was root %d)\n", e.table_name, e.old_root)
+		case .MODIFIED:
+			fmt.printf("  %-20s MODIFIED (root %d → %d)\n", e.table_name, e.old_root, e.new_root)
+		}
+	}
+	fmt.printf("(%d table(s) changed)\n", len(entries))
+	return true
+}
+
+// Tags a snapshot with a human-readable label.
+snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	page, has_page := db.snapshot_index[snapshot_id]
+	if !has_page {
+		fmt.eprintln("Error: Snapshot", snapshot_id, "not found")
+		return false
+	}
+	snapshot.set_tag(db.pager, page, tag)
+	return true
+}
+
+// Restores the database to a historical snapshot state by creating a new
+// snapshot that references the historical schema root and manifest.
+snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	if db.latest_snapshot == 0 {
+		fmt.eprintln("Error: No snapshots")
+		return false
+	}
+
+	snap_page, has_page := db.snapshot_index[snapshot_id]
+	if !has_page {
+		fmt.eprintln("Error: Snapshot", snapshot_id, "not found")
+		return false
+	}
+	snap_h, snap_ok := snapshot.load(db.pager, snap_page)
+	if !snap_ok {
+		fmt.eprintln("Error: Failed to load snapshot", snapshot_id)
+		return false
+	}
+
+	db.txn_snapshot_id += 1
+	new_id := db.txn_snapshot_id
+	new_page, create_ok := snapshot.create(
+		db.pager,
+		new_id,
+		db.latest_snapshot,
+		snap_h.schema_root,
+		snap_h.manifest_page,
+		.RESTORE,
+	)
+	if !create_ok {
+		fmt.eprintln("Error: Failed to create restore snapshot")
+		return false
+	}
+
+	db.snapshot_index[new_id] = new_page
+	db.latest_snapshot = new_page
+	db.schema_root_page = snap_h.schema_root
+	snapshot.prune(db.pager, db.latest_snapshot, 100)
+	snapshot.gc(db.pager, db.latest_snapshot, 100)
+	pager.flush_all(db.pager)
+	update_header(db)
+	fmt.printf("Restored to snapshot %d (schema root %d)\n", snapshot_id, snap_h.schema_root)
 	return true
 }
 
@@ -314,9 +549,8 @@ integrity_check :: proc(db: ^Database) -> bool {
 
 	defer pager.unpin_page(db.pager, db.schema_root_page)
 	fmt.println("✓ Schema page exists")
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-
-	tables := schema.list_tables(&schema_tree, context.temp_allocator)
+	st := schema_tree(db)
+	tables := schema.list_tables(&st, context.temp_allocator)
 	fmt.printf("✓ Found %d table(s)\n", len(tables))
 	for table in tables {
 		_, page_err := pager.get_page(db.pager, table.root_page)
@@ -338,8 +572,8 @@ list_tables :: proc(db: ^Database) {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	schema.debug_print_all(&schema_tree)
+	st := schema_tree(db)
+	schema.debug_print_all(&st)
 }
 
 describe_table :: proc(db: ^Database, table_name: string) -> bool {
@@ -347,8 +581,8 @@ describe_table :: proc(db: ^Database, table_name: string) -> bool {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	table, found := schema.find_table(&schema_tree, table_name, context.temp_allocator)
+	st := schema_tree(db)
+	table, found := schema.find_table(&st, table_name, context.temp_allocator)
 	if !found {
 		fmt.eprintln("Error: Table not found:", table_name)
 		return false
@@ -374,8 +608,8 @@ stats :: proc(db: ^Database) {
 		f64(page_count * u32(types.PAGE_SIZE)) / 1024.0,
 	)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	tables := schema.list_tables(&schema_tree, context.temp_allocator)
+	st := schema_tree(db)
+	tables := schema.list_tables(&st, context.temp_allocator)
 	fmt.printf("Total tables: %d\n", len(tables))
 	fmt.println("===========================")
 }
@@ -385,8 +619,8 @@ dump_table :: proc(db: ^Database, table_name: string) {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	table, found := schema.find_table(&schema_tree, table_name, context.temp_allocator)
+	st := schema_tree(db)
+	table, found := schema.find_table(&st, table_name, context.temp_allocator)
 	if !found {
 		fmt.printf("Error: Table '%s' not found.\n", table_name)
 		return
@@ -433,8 +667,8 @@ print_schema :: proc(db: ^Database) {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	schema.print_ddl(&schema_tree)
+	st := schema_tree(db)
+	schema.print_ddl(&st)
 }
 
 print_schema_debug :: proc(db: ^Database) {
@@ -442,6 +676,6 @@ print_schema_debug :: proc(db: ^Database) {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	schema_tree := btree.init(db.pager, db.schema_root_page)
-	schema.debug_print_all(&schema_tree)
+	st := schema_tree(db)
+	schema.debug_print_all(&st)
 }

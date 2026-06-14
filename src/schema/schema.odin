@@ -1,10 +1,8 @@
 package schema
 
 import "core:fmt"
-import "core:hash"
 import "core:strings"
 import "src:btree"
-import "src:pager"
 import "src:types"
 import "src:utils"
 
@@ -30,13 +28,42 @@ add_table :: proc(
 		types.value_blob(col_blob), // custom binary metadata
 	}
 
-	rowid := types.Row_ID(hash_string(table_name))
+	rowid := types.Row_ID(types.hash_string(table_name))
 	err := btree.tree_insert(t, rowid, values)
 	if err != .None {
 		fmt.eprintln("[Schema] add_table failed:", err)
 		return false
 	}
 	return true
+}
+
+add_table_cow :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	columns: []types.Column,
+	root_page: u32,
+	sql_stmt: string,
+) -> (
+	u32,
+	bool,
+) {
+	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
+	values := []types.Value {
+		types.value_text("table"),
+		types.value_text(table_name),
+		types.value_text(table_name),
+		types.value_int(i64(root_page)),
+		types.value_text(sql_stmt),
+		types.value_blob(col_blob),
+	}
+
+	rowid := types.Row_ID(types.hash_string(table_name))
+	new_root, err := btree.tree_insert_cow(t, rowid, values)
+	if err != .None {
+		fmt.eprintln("[Schema] add_table_cow failed:", err)
+		return t.root, false
+	}
+	return new_root, true
 }
 
 find_table :: proc(
@@ -47,7 +74,7 @@ find_table :: proc(
 	types.Table,
 	bool,
 ) {
-	rowid := types.Row_ID(hash_string(table_name))
+	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
 		return {}, false
@@ -72,31 +99,7 @@ get_table :: proc(
 	types.Table,
 	bool,
 ) {
-	temp_table, found := find_table(t, table_name, context.temp_allocator)
-	if !found {
-		return {}, false
-	}
-
-	table := types.Table {
-		name      = strings.clone(temp_table.name, allocator),
-		root_page = temp_table.root_page,
-		sql       = strings.clone(temp_table.sql, allocator),
-		columns   = make([]types.Column, len(temp_table.columns), allocator),
-	}
-
-	for col, i in temp_table.columns {
-		table.columns[i] = types.Column {
-			name     = strings.clone(col.name, allocator),
-			type     = col.type,
-			not_null = col.not_null,
-			pk       = col.pk,
-		}
-		if def, ok := col.default_value.?; ok {
-			cloned, _ := types.value_clone(def, allocator)
-			table.columns[i].default_value = cloned
-		}
-	}
-	return table, true
+	return find_table(t, table_name, allocator)
 }
 
 list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.Table {
@@ -118,12 +121,22 @@ list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.T
 }
 
 drop_table :: proc(t: ^btree.Tree, table_name: string) -> bool {
-	rowid := types.Row_ID(hash_string(table_name))
+	rowid := types.Row_ID(types.hash_string(table_name))
 	return btree.tree_delete(t, rowid) == .None
 }
 
+drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
+	rowid := types.Row_ID(types.hash_string(table_name))
+	new_root, err := btree.tree_delete_cow(t, rowid)
+	if err != .None {
+		fmt.eprintln("[Schema] drop_table_cow failed:", err)
+		return t.root, false
+	}
+	return new_root, true
+}
+
 table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
-	rowid := types.Row_ID(hash_string(table_name))
+	rowid := types.Row_ID(types.hash_string(table_name))
 	_, err := btree.tree_find(t, rowid, context.temp_allocator)
 	return err == .None
 }
@@ -321,19 +334,10 @@ table_free :: proc(table: types.Table, allocator := context.allocator) {
 	for col in table.columns {
 		delete(col.name, allocator)
 		if def, ok := col.default_value.?; ok {
-			#partial switch v in def {
-			case string:
-				delete(v, allocator)
-			case []u8:
-				delete(v, allocator)
-			}
+			types.value_delete(def, allocator)
 		}
 	}
 	delete(table.columns, allocator)
-}
-
-hash_string :: proc(s: string) -> u64 {
-	return hash.fnv64(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
 }
 
 // Updates a table's root_page in the schema tree using COW.
@@ -346,13 +350,29 @@ update_root_page_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	rowid := types.Row_ID(hash_string(table_name))
+	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
-	if err != .None { return t.root, false }
+	if err != .None {
+		fmt.eprintf(
+			"[schema] update_root_page_cow: tree_find failed for '%s' rowid=%v root=%d\n",
+			table_name,
+			rowid,
+			t.root,
+		)
+		return t.root, false
+	}
 
 	old_sql, sql_ok := c.values[4].(string)
 	old_blob, blob_ok := c.values[5].([]u8)
-	if !sql_ok || !blob_ok { return t.root, false }
+	if !sql_ok || !blob_ok {
+		fmt.eprintf(
+			"[schema] update_root_page_cow: type assertion failed sql=%v blob=%v for '%s'\n",
+			sql_ok,
+			blob_ok,
+			table_name,
+		)
+		return t.root, false
+	}
 
 	values := []types.Value {
 		types.value_text("table"),
@@ -363,13 +383,16 @@ update_root_page_cow :: proc(
 		types.value_blob(old_blob),
 	}
 
-	schema_root, del_err := btree.tree_delete_cow(t, rowid)
-	if del_err != .None { return t.root, false }
-
-	cow_tree := btree.init(t.pager, schema_root)
-	root2, ins_err := btree.tree_insert_cow(&cow_tree, rowid, values)
-	if ins_err != .None { return t.root, false }
-	return root2, true
+	new_root, upd_err := btree.tree_update_cow(t, rowid, values)
+	if upd_err != .None {
+		fmt.eprintf(
+			"[schema] update_root_page_cow: tree_update_cow failed for '%s': %v\n",
+			table_name,
+			upd_err,
+		)
+		return t.root, false
+	}
+	return new_root, true
 }
 
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {

@@ -247,51 +247,61 @@ try_join_match :: proc(
 	table_ranges: []Table_Col_Range,
 	new_rows: ^[dynamic]Row_Entry,
 	matched: ^bool,
-	allocator := context.allocator,
 ) {
-	combined := make([]types.Value, len(outer_row.values) + len(inner_values), allocator)
+	if on_cl, has_on := jc.on_clause.?; has_on {
+		tmp := make([]types.Value, len(outer_row.values) + len(inner_values), context.temp_allocator)
+		copy(tmp[:len(outer_row.values)], outer_row.values)
+		copy(tmp[len(outer_row.values):], inner_values)
+		if !evaluate_where(&on_cl, tmp, combined_cols, table_ranges) { return }
+	}
+
+	combined := make([]types.Value, len(outer_row.values) + len(inner_values), context.temp_allocator)
 	copy(combined[:len(outer_row.values)], outer_row.values)
 	copy(combined[len(outer_row.values):], inner_values)
-
-	on_pass := true
-	if on_cl, has_on := jc.on_clause.?; has_on {
-		on_pass = evaluate_where(&on_cl, combined, combined_cols, table_ranges)
-	}
-	if on_pass {
-		matched^ = true
-		append(new_rows, Row_Entry{0, combined})
-	}
+	matched^ = true
+	append(new_rows, Row_Entry{0, combined})
 }
 
 execute :: proc(schema_tree: ^btree.Tree, stmt: parser.Statement) -> (ok: bool, new_schema_root: u32) {
+	new_root: u32
 	switch s in stmt.type {
 	case parser.Create_Stmt:
-		ok := exec_create(schema_tree, s, stmt.sql)
-		return ok, schema_tree.root
+		ok, new_root = exec_create(schema_tree, s, stmt.sql)
+		schema_tree.root = new_root
+		return ok, new_root
 	case parser.Insert_Stmt:
-		return exec_insert_cow(schema_tree, s)
+		ok, new_root = exec_insert_cow(schema_tree, s)
+		schema_tree.root = new_root
+		return ok, new_root
 	case parser.Select_Stmt:
 		return exec_select(schema_tree, s), schema_tree.root
 	case parser.Update_Stmt:
-		return exec_update_cow(schema_tree, s)
+		ok, new_root = exec_update_cow(schema_tree, s)
+		schema_tree.root = new_root
+		return ok, new_root
 	case parser.Delete_Stmt:
-		return exec_delete_cow(schema_tree, s)
+		ok, new_root = exec_delete_cow(schema_tree, s)
+		schema_tree.root = new_root
+		return ok, new_root
 	case parser.Drop_Stmt:
-		ok := exec_drop(schema_tree, s)
-		return ok, schema_tree.root
+		ok, new_root = exec_drop(schema_tree, s)
+		schema_tree.root = new_root
+		return ok, new_root
+	case parser.Txn_Stmt:
+		return false, schema_tree.root
 	}
 	return false, schema_tree.root
 }
 
 @(private)
-exec_create :: proc(t: ^btree.Tree, stmt: parser.Create_Stmt, sql: string) -> bool {
+exec_create :: proc(t: ^btree.Tree, stmt: parser.Create_Stmt, sql: string) -> (bool, u32) {
 	if ok, msg := schema.validate_columns(stmt.columns); !ok {
 		fmt.eprintln("Schema Error:", msg)
-		return false
+		return false, t.root
 	}
 	if schema.table_exists(t, stmt.table_name) {
 		fmt.eprintln("Error: Table already exists:", stmt.table_name)
-		return false
+		return false, t.root
 	}
 
 	root_page, err := pager.allocate_page(t.pager)
@@ -302,18 +312,19 @@ exec_create :: proc(t: ^btree.Tree, stmt: parser.Create_Stmt, sql: string) -> bo
 	}
 	if err != .None {
 		fmt.eprintln("Error: Failed to allocate table root page")
-		return false
+		return false, t.root
 	}
 	defer pager.unpin_page(t.pager, root_page.page_num)
 
 	btree.init_leaf_page(root_page.data, root_page.page_num)
 	pager.mark_dirty(t.pager, root_page.page_num)
-	if !schema.add_table(t, stmt.table_name, stmt.columns, root_page.page_num, sql) {
+	new_root, ok := schema.add_table_cow(t, stmt.table_name, stmt.columns, root_page.page_num, sql)
+	if !ok {
 		fmt.eprintln("Error: Failed to register table in schema")
-		return false
+		return false, t.root
 	}
 	fmt.printf("Created table '%s' at Page %d\n", stmt.table_name, root_page.page_num)
-	return true
+	return true, new_root
 }
 
 @(private)
@@ -400,8 +411,8 @@ exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry,
 	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
-	rows := scan_table(&table_tree, &table, nil, context.temp_allocator)
-	if rows == nil { return nil, nil }
+	rows, scan_err := scan_table(&table_tree, &table, nil, context.temp_allocator)
+	if scan_err { return nil, nil }
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		rows = filter_rows(
 			rows,
@@ -416,7 +427,6 @@ exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry,
 			},
 		)
 	}
-
 	if len(stmt.columns) > 0 {
 		// Project only requested columns
 		col_indices := make([]int, len(stmt.columns), context.temp_allocator)
@@ -556,8 +566,14 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 
 	rows: []Row_Entry
 	if col_count_0 > 0 {
-		rows = scan_table(&table_ctxs[0].info.tree, &table_ctxs[0].info.table, nil, context.temp_allocator)
-		if rows == nil { return false }
+		r, scan_err := scan_table(
+			&table_ctxs[0].info.tree,
+			&table_ctxs[0].info.table,
+			nil,
+			context.temp_allocator,
+		)
+		if scan_err { return false }
+		rows = r
 	} else if vt, is_virtual := table_ctxs[0].info.virtual.?; is_virtual {
 		rows = vt.rows
 	}
@@ -568,27 +584,28 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		is_left := jc.join_type == .LEFT
 		right_col_count := table_ctxs[info_idx].range.col_count
 		new_rows := make([dynamic]Row_Entry, context.temp_allocator)
+
+		right_rows: []Row_Entry
+		if vt, is_vt := table_ctxs[info_idx].info.virtual.?; is_vt {
+			right_rows = vt.rows
+		} else {
+			right_tree := &table_ctxs[info_idx].info.tree
+			right_table := &table_ctxs[info_idx].info.table
+			right_rows, _ = scan_table(right_tree, right_table, nil, context.temp_allocator)
+		}
+
 		for outer_row in rows {
 			matched := false
-			if vt, is_vt := table_ctxs[info_idx].info.virtual.?; is_vt {
-				for c, _ in vt.rows {
-					try_join_match(outer_row, c.values, jc, combined_cols, table_ranges, &new_rows, &matched)
-				}
-			} else {
-				right_tree := &table_ctxs[info_idx].info.tree
-				cursor, cursor_err := btree.cursor_start(right_tree, context.temp_allocator)
-				if cursor_err != .None { return false }
-				for cursor.is_valid {
-					c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
-					if get_err != .None {
-						btree.cursor_advance(&cursor)
-						continue
-					}
-
-					try_join_match(outer_row, c.values, jc, combined_cols, table_ranges, &new_rows, &matched)
-					btree.cursor_advance(&cursor)
-				}
-				btree.cursor_destroy(&cursor)
+			for right_row in right_rows {
+				try_join_match(
+					outer_row,
+					right_row.values,
+					jc,
+					combined_cols,
+					table_ranges,
+					&new_rows,
+					&matched,
+				)
 			}
 
 			if is_left && !matched {
@@ -667,13 +684,14 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
-	rows := scan_table(&table_tree, &table, nil, context.temp_allocator)
-	if rows == nil { return false }
+	rows, scan_err := scan_table(&table_tree, &table, nil, context.temp_allocator)
+	if scan_err { return false }
 
 	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
 	single_range := []Table_Col_Range {
 		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
 	}
+
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		rows = filter_rows(rows, &where_clause, table.columns, single_range)
 	}
@@ -793,10 +811,13 @@ scan_table :: proc(
 	table: ^types.Table,
 	where_clause: Maybe(parser.Where_Clause),
 	allocator := context.allocator,
-) -> []Row_Entry {
-	rows := make([dynamic]Row_Entry, allocator)
-	cursor, err := btree.cursor_start(tree, allocator)
-	if err != .None { return nil }
+) -> (
+	rows: []Row_Entry,
+	err: bool,
+) {
+	r := make([dynamic]Row_Entry, allocator)
+	cursor, c_err := btree.cursor_start(tree, allocator)
+	if c_err != .None { return nil, true }
 	defer btree.cursor_destroy(&cursor)
 
 	for cursor.is_valid {
@@ -812,11 +833,11 @@ scan_table :: proc(
 			}
 		}
 
-		cloned := deep_copy_values(c.values)
-		append(&rows, Row_Entry{c.rowid, cloned})
+		append(&r, Row_Entry{c.rowid, c.values})
+		c.values = nil
 		btree.cursor_advance(&cursor)
 	}
-	return rows[:]
+	return r[:], false
 }
 
 @(private)
@@ -859,8 +880,7 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 				} else if values_equal(c.values, new_row) {
 					fmt.printf("Updated 0 rows.\n")
 				} else {
-					btree.tree_delete(&table_tree, target_rowid)
-					btree.tree_insert(&table_tree, target_rowid, new_row)
+					btree.tree_update(&table_tree, target_rowid, new_row)
 					fmt.printf("Updated 1 row.\n")
 				}
 			} else {
@@ -904,13 +924,10 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 
 	count := 0
 	for op in ops {
-		if btree.tree_delete(&table_tree, op.rowid) == .None {
-			if btree.tree_insert(&table_tree, op.rowid, op.new_values) != .None {
-				btree.tree_insert(&table_tree, op.rowid, op.old_values)
-				fmt.eprintln("Error: Failed to update row", op.rowid)
-			} else {
-				count += 1
-			}
+		if upd_err := btree.tree_update(&table_tree, op.rowid, op.new_values); upd_err == .None {
+			count += 1
+		} else {
+			btree.tree_update(&table_tree, op.rowid, op.old_values)
 		}
 	}
 	fmt.printf("Updated %d rows.\n", count)
@@ -973,19 +990,19 @@ exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 }
 
 @(private)
-exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> bool {
+exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32) {
 	if !schema.table_exists(t, stmt.table_name) {
 		fmt.eprintln("Error: Table not found:", stmt.table_name)
-		return false
+		return false, t.root
 	}
-	if schema.drop_table(t, stmt.table_name) {
-		fmt.println("Dropped table:", stmt.table_name)
-		return true
-	}
-	return false
-}
 
-// ─── COW DML Operations ───────────────────────────────────────────────────────
+	new_root, ok := schema.drop_table_cow(t, stmt.table_name)
+	if ok {
+		fmt.println("Dropped table:", stmt.table_name)
+		return true, new_root
+	}
+	return false, t.root
+}
 
 @(private)
 exec_insert_cow :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> (bool, u32) {
@@ -1087,8 +1104,6 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 	}
 
 	table_tree := btree.init(t.pager, table.root_page)
-
-	// PK fast-path: use tree_find + tree_delete_cow + tree_insert_cow
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		if target_rowid, pk_ok := try_pk_lookup(table, where_clause); pk_ok {
 			c, find_err := btree.tree_find(&table_tree, target_rowid, context.temp_allocator)
@@ -1106,15 +1121,9 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 					return true, t.root
 				}
 
-				droot, del_err := btree.tree_delete_cow(&table_tree, target_rowid)
-				if del_err != .None {
-					fmt.eprintln("Error: Failed to delete old row in UPDATE")
-					return false, t.root
-				}
-				cow_tree := btree.init(t.pager, droot)
-				nroot, ins_err := btree.tree_insert_cow(&cow_tree, target_rowid, new_row)
-				if ins_err != .None {
-					fmt.eprintln("Error: Failed to insert updated row")
+				nroot, upd_err := btree.tree_update_cow(&table_tree, target_rowid, new_row)
+				if upd_err != .None {
+					fmt.eprintln("Error: Failed to update row")
 					return false, t.root
 				}
 
@@ -1140,6 +1149,7 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 			btree.cursor_advance(&cursor)
 			continue
 		}
+
 		should_update := true
 		if where_cl, has_where := stmt.where_clause.?; has_where {
 			should_update = evaluate_where(&where_cl, c.values, table.columns, nil)
@@ -1152,8 +1162,7 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 			if !cell.validate(new_row, table.columns) {
 				fmt.eprintln("Warning: Skipping UPDATE row", c.rowid, "— violates column constraints")
 			} else if !values_equal(c.values, new_row) {
-				old_row := deep_copy_values(c.values)
-				append(&ops, Update_Op{c.rowid, old_row, new_row})
+				append(&ops, Update_Op{c.rowid, nil, new_row})
 			}
 		}
 		btree.cursor_advance(&cursor)
@@ -1163,16 +1172,12 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 	count := 0
 	for op in ops {
 		tree_at := btree.init(t.pager, current_root)
-		droot, del_err := btree.tree_delete_cow(&tree_at, op.rowid)
-		if del_err != .None { continue }
+		nroot, upd_err := btree.tree_update_cow(&tree_at, op.rowid, op.new_values)
+		if upd_err != .None { continue }
 
-		cow_at := btree.init(t.pager, droot)
-		nroot, ins_err := btree.tree_insert_cow(&cow_at, op.rowid, op.new_values)
-		if ins_err != .None { continue }
 		current_root = nroot
 		count += 1
 	}
-
 	if count > 0 {
 		new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, current_root)
 		if !ok { return false, t.root }
@@ -1193,8 +1198,6 @@ exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32)
 	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
-
-	// PK fast-path: single delete with COW
 	if where_cl, has_where := stmt.where_clause.?; has_where {
 		if target_rowid, pk_ok := try_pk_lookup(table, where_cl); pk_ok {
 			nroot, del_err := btree.tree_delete_cow(&table_tree, target_rowid)
@@ -1221,6 +1224,7 @@ exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32)
 			btree.cursor_advance(&cursor)
 			continue
 		}
+
 		should_delete := true
 		if where_cl, has_where := stmt.where_clause.?; has_where {
 			should_delete = evaluate_where(&where_cl, c.values, table.columns, nil)
@@ -1241,7 +1245,6 @@ exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32)
 			count += 1
 		}
 	}
-
 	if count > 0 {
 		new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, current_root)
 		if !ok { return false, t.root }
