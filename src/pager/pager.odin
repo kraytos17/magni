@@ -1,7 +1,7 @@
 package pager
 
 import "core:mem"
-import os "core:os/os2"
+import "core:os"
 import "core:sync"
 import "src:types"
 
@@ -58,24 +58,29 @@ open :: proc(path: string, max_pages: u32 = 256, allocator := context.allocator)
 		free(p)
 		return nil, .IO_Error
 	}
-	p.file_len = file_size
+	if file_size == 0 {
+		p.file_len = 0
+	} else {
+		p.file_len = file_size
+	}
 	return p, .None
 }
 
-close :: proc(p: ^Pager) {
-	if p == nil { return }
+close :: proc(p: ^Pager) -> Error {
+	if p == nil { return .None }
 
-	flush_all(p)
+	flush_err := flush_all(p)
 	if p.file != nil {
 		os.close(p.file)
 	}
-
 	for _, page in p.page_cache {
 		delete(page.data, p.allocator)
 		free(page, p.allocator)
 	}
+	
 	delete(p.page_cache)
 	free(p, p.allocator)
+	return flush_err
 }
 
 // Retrieves an existing page from cache or disk
@@ -133,9 +138,6 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 
 // Helper for algorithms that might need to get OR create (like root page init)
 get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
-	page, err := get_page(p, page_num)
-	if err == .None { return page, .None }
-
 	sync.lock(&p.mutex)
 	defer sync.unlock(&p.mutex)
 
@@ -146,8 +148,17 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 
 	current_max := u32(p.file_len / i64(p.page_size))
 	if page_num == current_max + 1 {
-		sync.unlock(&p.mutex)
-		return allocate_page(p)
+		page, err := alloc_free_slot(p)
+		if err != .None { return nil, err }
+
+		new_page_num := current_max + 1
+		mem.set(raw_data(page.data), 0, int(p.page_size))
+		page.page_num = new_page_num
+		page.pin_count = 1
+		page.dirty = true
+		p.page_cache[new_page_num] = page
+		p.file_len += i64(p.page_size)
+		return page, .None
 	}
 	return nil, .Page_Not_Found
 }
@@ -163,16 +174,35 @@ unpin_page :: proc(p: ^Pager, page_num: u32) {
 	}
 }
 
-flush_all :: proc(p: ^Pager) {
+flush_all :: proc(p: ^Pager) -> Error {
 	sync.lock(&p.mutex)
 	defer sync.unlock(&p.mutex)
 
 	for _, page in p.page_cache {
 		if page.dirty {
-			flush_page_unsafe(p, page)
+			if err := flush_page_unsafe(p, page); err != .None {
+				return err
+			}
 		}
 	}
-	os.sync(p.file)
+	if err := os.sync(p.file); err != nil {
+		return .IO_Error
+	}
+	return .None
+}
+
+// Creates a copy of an existing page at a new page number. Returns the new page.
+copy_page :: proc(p: ^Pager, src_page_num: u32) -> (^Page, Error) {
+	src, err := get_page(p, src_page_num)
+	if err != .None { return nil, err }
+	defer unpin_page(p, src_page_num)
+
+	dst, dst_err := allocate_page(p)
+	if dst_err != .None { return nil, dst_err }
+
+	copy(dst.data, src.data)
+	dst.dirty = true
+	return dst, .None
 }
 
 mark_dirty :: proc(p: ^Pager, page_num: u32) {
@@ -220,6 +250,7 @@ evict_one_page :: proc(p: ^Pager) -> Error {
 					return err
 				}
 			}
+
 			delete(page.data, p.allocator)
 			free(page, p.allocator)
 			delete_key(&p.page_cache, id)

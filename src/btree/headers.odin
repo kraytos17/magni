@@ -5,7 +5,8 @@ import "src:types"
 import "src:utils"
 
 PAGE_HEADER_OFFSET_ROOT :: 100
-PAGE_SIZE :: 4096
+#assert(PAGE_HEADER_OFFSET_ROOT == types.DATABASE_HEADER_SIZE)
+PAGE_SIZE :: types.PAGE_SIZE
 
 Page_Type :: enum u8 {
 	INTERIOR_TABLE = 5, // Internal node: pointers to pages
@@ -62,7 +63,7 @@ get_leaf_header :: proc(data: []u8, page_id: u32) -> ^Leaf_Header {
 
 init_interior_page :: proc(data: []u8, page_id: u32) {
 	off := get_page_header_offset(page_id)
-	mem.zero_slice(data)
+	mem.zero_slice(data[off:])
 
 	header := (^Interior_Header)(raw_data(data[off:]))
 	header.page_type = .INTERIOR_TABLE
@@ -75,7 +76,7 @@ init_interior_page :: proc(data: []u8, page_id: u32) {
 
 init_leaf_page :: proc(data: []u8, page_id: u32) {
 	off := get_page_header_offset(page_id)
-	mem.zero_slice(data)
+	mem.zero_slice(data[off:])
 
 	header := (^Leaf_Header)(raw_data(data[off:]))
 	header.page_type = .LEAF_TABLE
@@ -91,8 +92,13 @@ get_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 
 	off := get_page_header_offset(page_id)
 	hdr_sz := page_header_size(header.page_type)
-	ptr_start := raw_data(data[off + hdr_sz:])
-	return ([^]Cell_Pointer)(ptr_start)[:header.cell_count]
+	start := off + hdr_sz
+	if start >= len(data) { return nil }
+
+	max_ptrs := (len(data) - start) / size_of(Cell_Pointer)
+	n := min(int(header.cell_count), max_ptrs)
+	ptr_start := raw_data(data[start:])
+	return ([^]Cell_Pointer)(ptr_start)[:n]
 }
 
 get_raw_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
@@ -122,19 +128,6 @@ set_right_ptr :: proc(data: []u8, page_id: u32, ptr: u32) {
 	}
 }
 
-node_get_leftmost_child :: proc(n: ^Node) -> u32 {
-	if n.interior == nil {
-		return 0
-	}
-	if n.header.cell_count > 0 {
-		ptrs := get_pointers(n.data, n.id)
-		first_offset := int(ptrs[0])
-		child, _ := utils.read_u32_be(n.data, first_offset)
-		return child
-	}
-	return u32(n.interior.rightmost_ptr)
-}
-
 find_interior_cell_for_child :: proc(data: []u8, page_id: u32, child_page: u32) -> int {
 	pointers := get_pointers(data, page_id)
 	for ptr, i in pointers {
@@ -147,27 +140,27 @@ find_interior_cell_for_child :: proc(data: []u8, page_id: u32, child_page: u32) 
 	return -1
 }
 
-find_interior_insert_index :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> int {
-	header := get_header(data, page_id)
-	if header == nil { return 0 }
-
+@(private)
+interior_lower_bound :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> (int, bool) {
 	pointers := get_pointers(data, page_id)
 	left := 0
-	right := int(header.cell_count)
+	right := len(pointers)
 	for left < right {
 		mid := left + (right - left) / 2
-		off := int(pointers[mid])
-		sep_val, _, ok := utils.varint_decode(data, off + 4)
-		if !ok {
-			return left
-		}
+		sep_val, _, ok := utils.varint_decode(data, int(pointers[mid]) + 4)
+		if !ok { return left, false }
 		if key >= types.Row_ID(sep_val) {
 			left = mid + 1
 		} else {
 			right = mid
 		}
 	}
-	return left
+	return left, true
+}
+
+find_interior_insert_index :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> int {
+	idx, _ := interior_lower_bound(data, page_id, key)
+	return idx
 }
 
 interior_cell_size :: proc(key: types.Row_ID) -> int {

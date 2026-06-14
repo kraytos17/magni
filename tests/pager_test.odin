@@ -1,7 +1,7 @@
 package tests
 
 import "core:fmt"
-import os "core:os/os2"
+import "core:os"
 import "core:testing"
 import "src:pager"
 import "src:types"
@@ -19,7 +19,7 @@ create_test_pager_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager
 }
 
 destroy_test_pager_env :: proc(p: ^pager.Pager, filename: string) {
-	pager.close(p)
+	_ = pager.close(p)
 	if os.exists(filename) {
 		os.remove(filename)
 	}
@@ -62,10 +62,10 @@ test_pager_write_and_flush :: proc(t: ^testing.T) {
 	copy(page.data[:], test_data)
 
 	pager.mark_dirty(p, page.page_num)
-	pager.close(p)
+	_ = pager.close(p)
 	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "Failed to reopen pager")
-	defer pager.close(p2)
+	defer _ = pager.close(p2)
 
 	page_read, read_err := pager.get_page(p2, 1)
 	testing.expect(t, read_err == .None, "Failed to read page 1")
@@ -155,4 +155,63 @@ test_pager_max_cache_eviction :: proc(t: ^testing.T) {
 
 	_, p3_exists := p.page_cache[p3.page_num]
 	testing.expect(t, p3_exists, "Page 3 should be in cache")
+}
+
+@(test)
+test_pager_get_non_existent :: proc(t: ^testing.T) {
+	p, file := create_test_pager_env(t, "noexist")
+	defer destroy_test_pager_env(p, file)
+
+	_, err := pager.get_page(p, 999)
+	testing.expect_value(t, err, pager.Error.Page_Not_Found)
+}
+
+@(test)
+test_pager_double_unpin :: proc(t: ^testing.T) {
+	p, file := create_test_pager_env(t, "unpin2")
+	defer destroy_test_pager_env(p, file)
+
+	page, _ := pager.allocate_page(p)
+	testing.expect_value(t, page.pin_count, 1)
+
+	pager.unpin_page(p, page.page_num)
+	testing.expect_value(t, page.pin_count, 0)
+
+	pager.unpin_page(p, page.page_num)
+	testing.expect_value(t, page.pin_count, 0)
+}
+
+@(test)
+test_pager_file_len_after_write :: proc(t: ^testing.T) {
+	p, file := create_test_pager_env(t, "filelen")
+	defer os.remove(file)
+
+	pager.allocate_page(p)
+	pager.allocate_page(p)
+	_ = pager.close(p)
+
+	p2, err := pager.open(file)
+	testing.expect(t, err == .None, "Failed to reopen")
+	defer _ = pager.close(p2)
+
+	testing.expect_value(t, p2.file_len, i64(types.PAGE_SIZE * 2))
+	testing.expect_value(t, pager.page_count(p2), 2)
+}
+
+@(test)
+test_page_zero_invalid :: proc(t: ^testing.T) {
+	p, file := create_test_pager_env(t, "page_zero")
+	defer destroy_test_pager_env(p, file)
+
+	_, err := pager.get_page(p, 0)
+	testing.expect_value(t, err, pager.Error.Invalid_Page_Num)
+}
+
+@(test)
+test_allocate_page_zero_fails :: proc(t: ^testing.T) {
+	p, file := create_test_pager_env(t, "alloc_zero")
+	defer destroy_test_pager_env(p, file)
+
+	_, err := pager.get_or_allocate_page(p, 0)
+	testing.expect_value(t, err, pager.Error.Page_Not_Found)
 }

@@ -32,34 +32,19 @@ create :: proc(
 	mem.Allocator_Error,
 ) {
 	values_copy := make([]types.Value, len(values), allocator)
-	if values_copy == nil { return {}, .Out_Of_Memory }
-
+	if values_copy == nil && len(values) > 0 { return {}, .Out_Of_Memory }
 	for val, i in values {
-		#partial switch v in val {
-		case string:
-			str_copy, err := strings.clone(v, allocator)
-			if err != nil {
-				delete(values_copy, allocator)
-				return {}, err
+		cloned, err := types.value_clone(val, allocator)
+		if err != nil {
+			for j in 0 ..< i {
+				types.value_free(values_copy[j])
 			}
-			values_copy[i] = types.value_text(str_copy)
-		case []u8:
-			blob_copy, err := make([]u8, len(v), allocator)
-			if err != nil {
-				delete(values_copy, allocator)
-				return {}, err
-			}
-			copy(blob_copy, v)
-			values_copy[i] = types.value_blob(blob_copy)
-		case:
-			values_copy[i] = val
+			delete(values_copy, allocator)
+			return {}, err
 		}
+		values_copy[i] = cloned
 	}
 	return Cell{rowid = rowid, values = values_copy, allocator = allocator, owns_data = true}, nil
-}
-
-clone :: proc(c: Cell, allocator := context.allocator) -> (Cell, mem.Allocator_Error) {
-	return create(c.rowid, c.values, allocator)
 }
 
 destroy :: proc(c: ^Cell) {
@@ -68,77 +53,74 @@ destroy :: proc(c: ^Cell) {
 	}
 	if c.owns_data {
 		for val in c.values {
-			#partial switch v in val {
-			case string:
-				delete(v, c.allocator)
-			case []u8:
-				delete(v, c.allocator)
-			}
+			types.value_free(val)
 		}
 	}
 	delete(c.values, c.allocator)
 	c.values = nil
 }
 
-calculate_size :: proc(rowid: types.Row_ID, values: []types.Value) -> int {
-	payload_size := 0
-	serial_types_size := 0
-	for val in values {
+Serialization_Info :: struct {
+	serial_types:      []u64,
+	serial_types_size: int,
+	payload_size:      int,
+	total_size:        int,
+}
+
+compute_info :: proc(
+	rowid: types.Row_ID,
+	values: []types.Value,
+	allocator := context.temp_allocator,
+) -> Serialization_Info {
+	info: Serialization_Info
+	info.serial_types = make([]u64, len(values), allocator)
+	for val, i in values {
 		serial := utils.serial_type_for_value(val)
-		serial_types_size += utils.varint_size(serial)
+		info.serial_types[i] = serial
+		info.serial_types_size += utils.varint_size(serial)
 		content_size, _ := types.serial_type_content_size(serial)
-		payload_size += content_size
+		info.payload_size += content_size
 	}
 
 	header_bytes :=
-		utils.varint_size(u64(rowid)) + utils.varint_size(u64(serial_types_size)) + serial_types_size
+		utils.varint_size(u64(rowid)) +
+		utils.varint_size(u64(info.serial_types_size)) +
+		info.serial_types_size
+	total_payload := header_bytes + info.payload_size
+	info.total_size = utils.varint_size(u64(total_payload)) + total_payload
+	return info
+}
 
-	total_payload := header_bytes + payload_size
-	return utils.varint_size(u64(total_payload)) + total_payload
+calculate_size :: proc(rowid: types.Row_ID, values: []types.Value) -> int {
+	return compute_info(rowid, values).total_size
 }
 
 serialize :: proc(
 	dest: []u8,
 	rowid: types.Row_ID,
 	values: []types.Value,
-	temp_allocator := context.temp_allocator,
+	info: Serialization_Info,
 ) -> (
 	bytes_written: int,
 	ok: bool,
 ) {
-	if len(dest) == 0 { return 0, false }
-
-	serial_types := make([dynamic]u64, 0, len(values), temp_allocator)
-	defer delete(serial_types)
-
-	payload_size := 0
-	serial_types_size := 0
-	for val in values {
-		serial := utils.serial_type_for_value(val)
-		append(&serial_types, serial)
-
-		size, _ := types.serial_type_content_size(serial)
-		payload_size += size
-		serial_types_size += utils.varint_size(serial)
-	}
-
-	header_size_bytes :=
-		utils.varint_size(u64(rowid)) + utils.varint_size(u64(serial_types_size)) + serial_types_size
-
-	total_payload := header_size_bytes + payload_size
-	total_size_needed := utils.varint_size(u64(total_payload)) + total_payload
-	if len(dest) < total_size_needed { return 0, false }
+	if len(dest) < info.total_size { return 0, false }
 
 	offset := 0
+	header_bytes :=
+		utils.varint_size(u64(rowid)) +
+		utils.varint_size(u64(info.serial_types_size)) +
+		info.serial_types_size
+
+	total_payload := header_bytes + info.payload_size
 	offset += utils.varint_encode(dest[offset:], u64(total_payload))
 	offset += utils.varint_encode(dest[offset:], u64(rowid))
-	offset += utils.varint_encode(dest[offset:], u64(serial_types_size))
-	
-	for st in serial_types {
+	offset += utils.varint_encode(dest[offset:], u64(info.serial_types_size))
+	for st in info.serial_types {
 		offset += utils.varint_encode(dest[offset:], st)
 	}
 	for val, i in values {
-		serial := serial_types[i]
+		serial := info.serial_types[i]
 		switch v in val {
 		case types.Null:
 		case i64:
@@ -264,8 +246,8 @@ get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	pos := offset
 	_, n, ok := utils.varint_decode(src, pos)
 	if !ok { return 0, false }
-	pos += n
 
+	pos += n
 	rowid, _, ok2 := utils.varint_decode(src, pos)
 	if !ok2 { return 0, false }
 	return types.Row_ID(rowid), true
@@ -289,12 +271,10 @@ debug_print :: proc(c: Cell) {
 
 validate :: proc(values: []types.Value, columns: []types.Column) -> bool {
 	if len(values) != len(columns) { return false }
-
 	for val, i in values {
 		col := columns[i]
 		if col.not_null && types.is_null(val) { return false }
 		if types.is_null(val) { continue }
-
 		switch col.type {
 		case .INTEGER:
 			if _, ok := val.(i64); !ok { return false }

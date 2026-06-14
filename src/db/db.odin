@@ -2,20 +2,35 @@ package db
 
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import "src:btree"
 import "src:executor"
 import "src:pager"
 import "src:parser"
 import "src:schema"
+import "src:snapshot"
 import "src:types"
 
-MAGIC_STRING :: "MAGNI_DB_v1.0"
+Transaction_State :: enum {
+	NONE,
+	ACTIVE,
+}
 
 // Database handle
+//
+// Thread safety: All public functions acquire mu (sync.Mutex) before accessing
+// the pager or schema tree. This serializes all operations — safe for
+// single-client use. True concurrent reads across coroutines would need
+// finer-grained locking.
 Database :: struct {
-	path:   string, // File path to the database
-	pager:  ^pager.Pager, // Page manager for disk I/O (owned pointer)
-	is_new: bool, // Tells if database was just created
+	path:             string,
+	pager:            ^pager.Pager, // Page manager for disk I/O (owned pointer)
+	is_new:           bool, // Tells if database was just created
+	mu:               sync.Mutex, // Guards all access to pager and schema tree
+	schema_root_page: u32, // Root page of the schema B-tree (latest COW'd version)
+	latest_snapshot:  u32, // Latest snapshot page (0 = none)
+	txn_state:        Transaction_State,
+	txn_snapshot_id:  u64, // Monotonic snapshot ID counter
 }
 
 Header :: struct #packed {
@@ -23,10 +38,12 @@ Header :: struct #packed {
 	page_size:      u32le,
 	page_count:     u32le,
 	schema_version: u32le,
-	reserved:       [75]u8,
+	schema_root_page: u32le, // Root page of schema B-tree (0 if uninitialized)
+	latest_snapshot_page: u32le, // Latest snapshot page (0 = none)
+	reserved:       [67]u8,
 }
 
-#assert(size_of(Header) == 100)
+#assert(size_of(Header) == types.DATABASE_HEADER_SIZE)
 
 // Opens an existing database or creates a new one at the specified path.
 open :: proc(path: string) -> (^Database, bool) {
@@ -37,6 +54,7 @@ open :: proc(path: string) -> (^Database, bool) {
 	}
 
 	db.path = strings.clone(path)
+	db.latest_snapshot = 0
 	p, err := pager.open(path)
 	if err != nil {
 		fmt.eprintln("Error: Failed to open database file:", err)
@@ -47,6 +65,8 @@ open :: proc(path: string) -> (^Database, bool) {
 
 	db.pager = p
 	db.is_new = (db.pager.file_len == 0)
+	db.txn_state = .NONE
+	db.txn_snapshot_id = 0
 	if db.is_new {
 		fmt.println("Initializing new database...")
 		if !initialize(db) {
@@ -59,6 +79,17 @@ open :: proc(path: string) -> (^Database, bool) {
 			close(db)
 			return nil, false
 		}
+		// Read schema_root_page from header
+		page1, h_err := pager.get_page(db.pager, 1)
+		if h_err != .None {
+			fmt.eprintln("Error: Failed to read database header")
+			close(db)
+			return nil, false
+		}
+		header := (^Header)(raw_data(page1.data))
+		db.schema_root_page = u32(header.schema_root_page)
+		db.latest_snapshot = u32(header.latest_snapshot_page)
+		pager.unpin_page(db.pager, 1)
 	}
 	return db, true
 }
@@ -68,10 +99,14 @@ close :: proc(db: ^Database) {
 	if db == nil {
 		return
 	}
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
 	update_header(db)
 	if db.pager != nil {
-		pager.close(db.pager)
+		if err := pager.close(db.pager); err != .None {
+			fmt.eprintln("Warning: error closing database:", err)
+		}
 	}
 	delete(db.path)
 	free(db)
@@ -86,32 +121,48 @@ initialize :: proc(db: ^Database) -> bool {
 	defer pager.unpin_page(db.pager, page1.page_num)
 
 	header := (^Header)(raw_data(page1.data))
-	copy(header.magic[:], MAGIC_STRING)
+	copy(header.magic[:], types.MAGIC_STRING)
 
 	header.page_size = u32le(types.PAGE_SIZE)
 	header.page_count = 1
 	header.schema_version = 1
-	schema_tree := btree.init(db.pager, schema.SCHEMA_PAGE_ID)
+
+	// Allocate a dedicated page for the schema tree root (page 2 normally)
+	schema_page, s_err := pager.allocate_page(db.pager)
+	if s_err != .None {
+		fmt.eprintln("Error: Failed to allocate schema root page:", s_err)
+		return false
+	}
+	defer pager.unpin_page(db.pager, schema_page.page_num)
+
+	btree.init_leaf_page(schema_page.data, schema_page.page_num)
+	pager.mark_dirty(db.pager, schema_page.page_num)
+
+	db.schema_root_page = schema_page.page_num
+	header.schema_root_page = u32le(schema_page.page_num)
+	header.latest_snapshot_page = 0
+	header.page_count = u32le(schema_page.page_num)
+
+	schema_tree := btree.init(db.pager, db.schema_root_page)
 	if !schema.init(&schema_tree) {
 		fmt.eprintln("Error: Failed to initialize schema tree")
 		return false
 	}
 
-	pager.mark_dirty(db.pager, 0)
 	pager.flush_all(db.pager)
 	return true
 }
 
 // Verifies that the database file has a valid header.
 verify_header :: proc(db: ^Database) -> bool {
-	page, err := pager.get_page(db.pager, 0)
+	page, err := pager.get_page(db.pager, 1)
 	if err != .None {
 		return false
 	}
-	defer pager.unpin_page(db.pager, 0)
+	defer pager.unpin_page(db.pager, 1)
 
 	header := (^Header)(raw_data(page.data))
-	if string(header.magic[:]) != MAGIC_STRING {
+	if string(header.magic[:]) != types.MAGIC_STRING {
 		return false
 	}
 	if header.page_size != u32le(types.PAGE_SIZE) {
@@ -122,23 +173,32 @@ verify_header :: proc(db: ^Database) -> bool {
 }
 
 update_header :: proc(db: ^Database) {
-	page1, err := pager.get_page(db.pager, 0)
+	page1, err := pager.get_page(db.pager, 1)
 	if err != .None { return }
-	defer pager.unpin_page(db.pager, 0)
+	defer pager.unpin_page(db.pager, 1)
 
 	header := (^Header)(raw_data(page1.data))
 	page_count := pager.page_count(db.pager)
 	header.page_count = u32le(page_count)
+	header.schema_root_page = u32le(db.schema_root_page)
+	header.latest_snapshot_page = u32le(db.latest_snapshot)
 
-	pager.mark_dirty(db.pager, 0)
+	pager.mark_dirty(db.pager, 1)
 	pager.flush_all(db.pager)
 }
 
-execute :: proc(db: ^Database, sql: string) -> bool {
+db_check :: proc(db: ^Database) -> bool {
 	if db == nil || db.pager == nil {
 		fmt.eprintln("Error: Invalid database handle")
 		return false
 	}
+	return true
+}
+
+execute :: proc(db: ^Database, sql: string) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	if !ok {
@@ -147,26 +207,97 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 	}
 	defer parser.statement_free(stmt, context.temp_allocator)
 
-	schema_tree := btree.init(db.pager, schema.SCHEMA_PAGE_ID)
-	return executor.execute(&schema_tree, stmt)
+	schema_tree := btree.init(db.pager, db.schema_root_page)
+	exec_ok, new_root := executor.execute(&schema_tree, stmt)
+	db.schema_root_page = new_root
+	return exec_ok
 }
 
 checkpoint :: proc(db: ^Database) -> bool {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return false
-	}
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
 	pager.flush_all(db.pager)
 	fmt.println("Checkpoint complete: all pages flushed to disk")
 	return true
 }
 
-integrity_check :: proc(db: ^Database) -> bool {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
+// Begins a new transaction.
+begin :: proc(db: ^Database) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	if db.txn_state == .ACTIVE {
+		fmt.eprintln("Warning: Transaction already in progress")
 		return false
 	}
+	db.txn_state = .ACTIVE
+	fmt.println("BEGIN transaction")
+	return true
+}
+
+// Commits the current transaction. Creates a snapshot page capturing the
+// current schema tree root, links it into the snapshot chain, and updates
+// the database header.
+commit :: proc(db: ^Database) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	if db.txn_state != .ACTIVE {
+		fmt.eprintln("Warning: No active transaction to commit")
+		return false
+	}
+
+	db.txn_snapshot_id += 1
+	snap_page, snap_ok := snapshot.create(db.pager, db.txn_snapshot_id, db.latest_snapshot, db.schema_root_page)
+	if !snap_ok {
+		fmt.eprintln("Error: Failed to create snapshot")
+		return false
+	}
+
+	db.latest_snapshot = snap_page
+	db.txn_state = .NONE
+
+	// Prune old snapshots
+	snapshot.prune(db.pager, db.latest_snapshot, 100)
+
+	fmt.println("COMMIT transaction (snapshot", db.txn_snapshot_id, ")")
+	return true
+}
+
+// Rolls back the current transaction. The schema root reverts to the last
+// committed snapshot's root. COW'd pages from the aborted transaction remain
+// in the file but are no longer referenced.
+rollback :: proc(db: ^Database) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	if db.txn_state != .ACTIVE {
+		fmt.eprintln("Warning: No active transaction to roll back")
+		return false
+	}
+
+	// Restore schema root from latest snapshot
+	if db.latest_snapshot != 0 {
+		snap_h, snap_ok := snapshot.load(db.pager, db.latest_snapshot)
+		if snap_ok {
+			db.schema_root_page = snap_h.schema_root
+		}
+	}
+
+	db.txn_state = .NONE
+	fmt.println("ROLLBACK transaction")
+	return true
+}
+
+integrity_check :: proc(db: ^Database) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
 	fmt.println("=== Integrity Check ===")
 	if !verify_header(db) {
@@ -175,15 +306,15 @@ integrity_check :: proc(db: ^Database) -> bool {
 	}
 
 	fmt.println("✓ Database header is valid")
-	_, err := pager.get_page(db.pager, schema.SCHEMA_PAGE_ID)
+	_, err := pager.get_page(db.pager, db.schema_root_page)
 	if err != .None {
 		fmt.println("✗ Schema page is missing")
 		return false
 	}
 
-	pager.unpin_page(db.pager, schema.SCHEMA_PAGE_ID)
+	defer pager.unpin_page(db.pager, db.schema_root_page)
 	fmt.println("✓ Schema page exists")
-	schema_tree := btree.init(db.pager, schema.SCHEMA_PAGE_ID)
+	schema_tree := btree.init(db.pager, db.schema_root_page)
 
 	tables := schema.list_tables(&schema_tree, context.temp_allocator)
 	fmt.printf("✓ Found %d table(s)\n", len(tables))
@@ -193,7 +324,7 @@ integrity_check :: proc(db: ^Database) -> bool {
 			fmt.printf("✗ Table '%s' root page %d is missing\n", table.name, table.root_page)
 			return false
 		}
-		pager.unpin_page(db.pager, table.root_page)
+		defer pager.unpin_page(db.pager, table.root_page)
 		fmt.printf("✓ Table '%s' is valid\n", table.name)
 	}
 
@@ -203,21 +334,20 @@ integrity_check :: proc(db: ^Database) -> bool {
 }
 
 list_tables :: proc(db: ^Database) {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return
-	}
-	schema_tree := btree.init(db.pager, schema.SCHEMA_PAGE_ID)
+	if !db_check(db) { return }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	schema_tree := btree.init(db.pager, db.schema_root_page)
 	schema.debug_print_all(&schema_tree)
 }
 
 describe_table :: proc(db: ^Database, table_name: string) -> bool {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return false
-	}
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
-	schema_tree := btree.init(db.pager, schema.SCHEMA_PAGE_ID)
+	schema_tree := btree.init(db.pager, db.schema_root_page)
 	table, found := schema.find_table(&schema_tree, table_name, context.temp_allocator)
 	if !found {
 		fmt.eprintln("Error: Table not found:", table_name)
@@ -228,10 +358,9 @@ describe_table :: proc(db: ^Database, table_name: string) -> bool {
 }
 
 stats :: proc(db: ^Database) {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return
-	}
+	if !db_check(db) { return }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
 	fmt.println("=== Database Statistics ===")
 	fmt.printf("Path: %s\n", db.path)
@@ -245,19 +374,18 @@ stats :: proc(db: ^Database) {
 		f64(page_count * u32(types.PAGE_SIZE)) / 1024.0,
 	)
 
-	schema_tree := btree.init(db.pager, schema.SCHEMA_PAGE_ID)
+	schema_tree := btree.init(db.pager, db.schema_root_page)
 	tables := schema.list_tables(&schema_tree, context.temp_allocator)
 	fmt.printf("Total tables: %d\n", len(tables))
 	fmt.println("===========================")
 }
 
 dump_table :: proc(db: ^Database, table_name: string) {
-	if db == nil || db.pager == nil {
-		fmt.println("Error: Invalid database handle")
-		return
-	}
+	if !db_check(db) { return }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
-	schema_tree := btree.init(db.pager, schema.SCHEMA_PAGE_ID)
+	schema_tree := btree.init(db.pager, db.schema_root_page)
 	table, found := schema.find_table(&schema_tree, table_name, context.temp_allocator)
 	if !found {
 		fmt.printf("Error: Table '%s' not found.\n", table_name)
@@ -300,60 +428,20 @@ dump_table :: proc(db: ^Database, table_name: string) {
 	fmt.printf("=== Total: %d rows ===\n", row_count)
 }
 
-vacuum :: proc(db: ^Database) {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return
-	}
+print_schema :: proc(db: ^Database) {
+	if !db_check(db) { return }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
-	fmt.println("VACUUM not fully implemented in MVP")
-	fmt.println("  - Defragment pages")
-	fmt.println("  - Reclaim deleted space")
-	fmt.println("  - Rebuild indexes")
+	schema_tree := btree.init(db.pager, db.schema_root_page)
+	schema.print_ddl(&schema_tree)
 }
 
-begin :: proc(db: ^Database) -> bool {
-	if db == nil {
-		return false
-	}
-	fmt.println("BEGIN (Note: MVP has no transaction support yet)")
-	return true
-}
+print_schema_debug :: proc(db: ^Database) {
+	if !db_check(db) { return }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
-commit :: proc(db: ^Database) -> bool {
-	if db == nil {
-		return false
-	}
-	fmt.println("COMMIT")
-	return checkpoint(db)
-}
-
-rollback :: proc(db: ^Database) -> bool {
-	if db == nil {
-		return false
-	}
-	fmt.println("ROLLBACK (Note: MVP has no transaction support yet)")
-	return false
-}
-
-export_sql :: proc(db: ^Database, output_path: string) -> bool {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return false
-	}
-
-	fmt.println("SQL export not implemented in MVP")
-	fmt.printf("Would export to: %s\n", output_path)
-	return false
-}
-
-import_sql :: proc(db: ^Database, input_path: string) -> bool {
-	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return false
-	}
-
-	fmt.println("SQL import not implemented in MVP")
-	fmt.printf("Would import from: %s\n", input_path)
-	return false
+	schema_tree := btree.init(db.pager, db.schema_root_page)
+	schema.debug_print_all(&schema_tree)
 }

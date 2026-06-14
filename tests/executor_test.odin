@@ -67,12 +67,12 @@ test_exec_create_table :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	stmt := make_create_stmt("users")
-	success := executor.execute(&tree, stmt)
+	success, _ := executor.execute(&tree, stmt)
 
 	testing.expect(t, success, "CREATE TABLE should succeed")
 	testing.expect(t, schema.table_exists(&tree, "users"), "Table should exist in schema")
 
-	success_dup := executor.execute(&tree, stmt)
+	success_dup, _ := executor.execute(&tree, stmt)
 	testing.expect(t, !success_dup, "Duplicate CREATE TABLE should fail")
 }
 
@@ -85,7 +85,7 @@ test_exec_insert_select :: proc(t: ^testing.T) {
 	executor.execute(&tree, create_stmt)
 
 	insert_stmt := make_insert_stmt("players", 100, "Alice", 99.5)
-	success := executor.execute(&tree, insert_stmt)
+	success, _ := executor.execute(&tree, insert_stmt)
 	testing.expect(t, success, "INSERT should succeed")
 
 	table, _ := schema.get_table(&tree, "players", context.temp_allocator)
@@ -120,7 +120,7 @@ test_exec_insert_validation_failure :: proc(t: ^testing.T) {
 		sql  = "",
 	}
 
-	success := executor.execute(&tree, stmt)
+	success, _ := executor.execute(&tree, stmt)
 	testing.expect(t, !success, "INSERT with wrong column count should fail")
 }
 
@@ -154,7 +154,7 @@ test_exec_update :: proc(t: ^testing.T) {
 		sql  = "UPDATE ...",
 	}
 
-	success := executor.execute(&tree, stmt)
+	success, _ := executor.execute(&tree, stmt)
 	testing.expect(t, success, "UPDATE should succeed")
 
 	table, _ := schema.get_table(&tree, "inventory", context.temp_allocator)
@@ -188,7 +188,7 @@ test_exec_delete :: proc(t: ^testing.T) {
 		sql  = "DELETE ...",
 	}
 
-	success := executor.execute(&tree, stmt)
+	success, _ := executor.execute(&tree, stmt)
 	testing.expect(t, success, "DELETE should succeed")
 
 	table, _ := schema.get_table(&tree, "logs", context.temp_allocator)
@@ -208,7 +208,7 @@ test_page_splitting_stress :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 		name := fmt.tprintf("Row Number %d with padding to force split.............................", i)
 		stmt := make_insert_stmt("stress", i64(i), name, 10.5)
-		success := executor.execute(&tree, stmt)
+		success, _ := executor.execute(&tree, stmt)
 		if !success {
 			fmt.printf(" [FAIL] Insert failed at row ID %d\n", i)
 			testing.fail(t)

@@ -1,7 +1,7 @@
 package tests
 
 import "core:fmt"
-import os "core:os/os2"
+import "core:os"
 import "core:strings"
 import "core:testing"
 import "src:btree"
@@ -16,14 +16,22 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 
 	p, err := pager.open(safe_filename)
 	testing.expect(t, err == nil, "Failed to open pager")
-	tree := btree.init(p, schema.SCHEMA_PAGE_ID)
+
+	// Allocate and initialize schema root page
+	schema_page, aerr := pager.allocate_page(p)
+	testing.expect(t, aerr == .None, "Failed to allocate schema page")
+	btree.init_leaf_page(schema_page.data, schema_page.page_num)
+	pager.mark_dirty(p, schema_page.page_num)
+	pager.unpin_page(p, schema_page.page_num)
+
+	tree := btree.init(p, schema_page.page_num)
 	ok := schema.init(&tree)
-	testing.expect(t, ok, "Failed to init schema B-Tree on Page 1")
+	testing.expect(t, ok, "Failed to init schema B-Tree")
 	return tree, safe_filename
 }
 
 teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
-	pager.close(tree.pager)
+	_ = pager.close(tree.pager)
 	os.remove(filename)
 	delete(filename, context.allocator)
 }
@@ -76,14 +84,15 @@ test_add_and_find_table :: proc(t: ^testing.T) {
 @(test)
 test_table_persistence :: proc(t: ^testing.T) {
 	tree, file := setup_schema_env(t, "persistence")
+	schema_root := tree.root
 	cols := []types.Column{{name = "x", type = .INTEGER}}
 
 	ok := schema.add_table(&tree, "persistent", cols, 99, "")
 	testing.expect(t, ok, "add_table failed in persistence test")
-	pager.close(tree.pager)
+	_ = pager.close(tree.pager)
 
 	p2, _ := pager.open(file)
-	tree2 := btree.init(p2, schema.SCHEMA_PAGE_ID)
+	tree2 := btree.init(p2, schema_root)
 	defer teardown_schema_env(tree2, file)
 
 	exists := schema.table_exists(&tree2, "persistent")
@@ -157,4 +166,35 @@ test_get_table_deep_copy :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 	testing.expect_value(t, tbl.name, "deep")
 	testing.expect_value(t, tbl.columns[0].name, "data")
+}
+
+@(test)
+test_find_nonexistent_table :: proc(t: ^testing.T) {
+	tree, file := setup_schema_env(t, "find_nonexist")
+	defer teardown_schema_env(tree, file)
+
+	_, found := schema.find_table(&tree, "ghost", context.temp_allocator)
+	testing.expect(t, !found, "find_table should return false for non-existent table")
+}
+
+@(test)
+test_drop_nonexistent_table :: proc(t: ^testing.T) {
+	tree, file := setup_schema_env(t, "drop_nonexist")
+	defer teardown_schema_env(tree, file)
+
+	dropped := schema.drop_table(&tree, "ghost")
+	testing.expect(t, !dropped, "drop_table should return false for non-existent table")
+}
+
+@(test)
+test_duplicate_table_name :: proc(t: ^testing.T) {
+	tree, file := setup_schema_env(t, "dup_name")
+	defer teardown_schema_env(tree, file)
+
+	cols := []types.Column{{name = "id", type = .INTEGER}}
+	ok1 := schema.add_table(&tree, "dup", cols, 2, "")
+	testing.expect(t, ok1, "First add should succeed")
+
+	ok2 := schema.add_table(&tree, "dup", cols, 3, "")
+	testing.expect(t, !ok2, "Duplicate add should fail")
 }

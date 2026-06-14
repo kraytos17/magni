@@ -8,21 +8,9 @@ import "src:pager"
 import "src:types"
 import "src:utils"
 
-SCHEMA_PAGE_ID :: 1
-
 init :: proc(t: ^btree.Tree) -> bool {
-	_, err := btree.load_node(t, SCHEMA_PAGE_ID)
-	if err == .None {
-		return true
-	}
-
-	page, e := pager.get_or_allocate_page(t.pager, SCHEMA_PAGE_ID)
-	if e != .None { return false }
-
-	btree.init_leaf_page(page.data, SCHEMA_PAGE_ID)
-	pager.mark_dirty(t.pager, SCHEMA_PAGE_ID)
-	_, reload_err := btree.load_node(t, SCHEMA_PAGE_ID)
-	return reload_err == .None
+	_, err := btree.load_node(t, t.root)
+	return err == .None
 }
 
 add_table :: proc(
@@ -44,7 +32,11 @@ add_table :: proc(
 
 	rowid := types.Row_ID(hash_string(table_name))
 	err := btree.tree_insert(t, rowid, values)
-	return err == .None
+	if err != .None {
+		fmt.eprintln("[Schema] add_table failed:", err)
+		return false
+	}
+	return true
 }
 
 find_table :: proc(
@@ -98,6 +90,10 @@ get_table :: proc(
 			type     = col.type,
 			not_null = col.not_null,
 			pk       = col.pk,
+		}
+		if def, ok := col.default_value.?; ok {
+			cloned, _ := types.value_clone(def, allocator)
+			table.columns[i].default_value = cloned
 		}
 	}
 	return table, true
@@ -156,11 +152,98 @@ table_from_values :: proc(values: []types.Value, allocator := context.allocator)
 	return table, true
 }
 
-// Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b)]...
+// Write a Value in a simple binary format:
+//	[type_byte(1)] + [payload]
+//	type_byte: 0=null, 1=i64(8LE), 2=f64(8BE), 3=string(4LE+data), 4=blob(4LE+data)
+serialize_value_to_blob :: proc(dest: []u8, offset: ^int, val: types.Value) {
+	v := val
+	#partial switch vv in v {
+	case types.Null:
+		dest[offset^] = 0; offset^ += 1
+	case i64:
+		dest[offset^] = 1; offset^ += 1
+		utils.write_u64_le(dest, offset^, u64(vv)); offset^ += 8
+	case f64:
+		dest[offset^] = 2; offset^ += 1
+		utils.write_f64_be(dest, offset^, vv); offset^ += 8
+	case string:
+		dest[offset^] = 3; offset^ += 1
+		utils.write_u32_le(dest, offset^, u32(len(vv))); offset^ += 4
+		copy(dest[offset^:], vv)
+		offset^ += len(vv)
+	case []u8:
+		dest[offset^] = 4; offset^ += 1
+		utils.write_u32_le(dest, offset^, u32(len(vv))); offset^ += 4
+		copy(dest[offset^:], vv)
+		offset^ += len(vv)
+	}
+}
+
+deserialize_value_from_blob :: proc(
+	src: []u8,
+	offset: ^int,
+	allocator := context.allocator,
+) -> (
+	types.Value,
+	bool,
+) {
+	if offset^ >= len(src) { return {}, false }
+
+	type_byte := src[offset^]; offset^ += 1
+	switch type_byte {
+	case 0:
+		return types.value_null(), true
+	case 1:
+		if offset^ + 8 > len(src) { return {}, false }
+		val, _ := utils.read_u64_le(src, offset^); offset^ += 8
+		return types.value_int(i64(val)), true
+	case 2:
+		if offset^ + 8 > len(src) { return {}, false }
+		val, _ := utils.read_f64_be(src, offset^); offset^ += 8
+		return types.value_real(val), true
+	case 3:
+		if offset^ + 4 > len(src) { return {}, false }
+		len_val, _ := utils.read_u32_le(src, offset^); offset^ += 4
+		if offset^ + int(len_val) > len(src) { return {}, false }
+
+		str_val := string(src[offset^:offset^ + int(len_val)])
+		offset^ += int(len_val)
+		return types.value_text(strings.clone(str_val, allocator)), true
+	case 4:
+		if offset^ + 4 > len(src) { return {}, false }
+		len_val, _ := utils.read_u32_le(src, offset^); offset^ += 4
+		if offset^ + int(len_val) > len(src) { return {}, false }
+
+		blob := make([]u8, int(len_val), allocator)
+		copy(blob, src[offset^:offset^ + int(len_val)])
+		offset^ += int(len_val)
+		return types.value_blob(blob), true
+	case:
+		return {}, false
+	}
+}
+
+// Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b) + DefaultMarker(1b) + DefaultValue...]
 serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.allocator) -> []u8 {
 	size := 4
 	for col in columns {
-		size += 4 + len(col.name) + 1 + 1
+		size += 4 + len(col.name) + 1 + 1 + 1
+	}
+	for col in columns {
+		if def, ok := col.default_value.?; ok {
+			#partial switch v in def {
+			case types.Null:
+				size += 1
+			case i64:
+				size += 1 + 8
+			case f64:
+				size += 1 + 8
+			case string:
+				size += 1 + 4 + len(v)
+			case []u8:
+				size += 1 + 4 + len(v)
+			}
+		}
 	}
 
 	blob := make([]u8, size, allocator)
@@ -178,8 +261,15 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 		flags: u8 = 0
 		if col.not_null do flags |= 1
 		if col.pk do flags |= 2
+
 		blob[offset] = flags
 		offset += 1
+		if def, ok := col.default_value.?; ok {
+			blob[offset] = 1; offset += 1
+			serialize_value_to_blob(blob, &offset, def)
+		} else {
+			blob[offset] = 0; offset += 1
+		}
 	}
 	return blob
 }
@@ -198,7 +288,7 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 		if !ok_len { return nil }
 
 		offset += 4
-		if offset + int(name_len) + 2 > len(blob) { return nil }
+		if offset + int(name_len) + 3 > len(blob) { return nil }
 
 		name_str := string(blob[offset:offset + int(name_len)])
 		offset += int(name_len)
@@ -206,16 +296,21 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 		offset += 1
 		flags_byte := blob[offset]
 		offset += 1
+		default_marker := blob[offset]
+		offset += 1
 
-		append(
-			&cols,
-			types.Column {
-				name = strings.clone(name_str, allocator),
-				type = types.Column_Type(type_byte),
-				not_null = (flags_byte & 1) != 0,
-				pk = (flags_byte & 2) != 0,
-			},
-		)
+		col := types.Column {
+			name     = strings.clone(name_str, allocator),
+			type     = types.Column_Type(type_byte),
+			not_null = (flags_byte & 1) != 0,
+			pk       = (flags_byte & 2) != 0,
+		}
+		if default_marker == 1 {
+			def_val, def_ok := deserialize_value_from_blob(blob, &offset, allocator)
+			if !def_ok { return nil }
+			col.default_value = def_val
+		}
+		append(&cols, col)
 	}
 	return cols[:]
 }
@@ -225,6 +320,14 @@ table_free :: proc(table: types.Table, allocator := context.allocator) {
 	delete(table.sql, allocator)
 	for col in table.columns {
 		delete(col.name, allocator)
+		if def, ok := col.default_value.?; ok {
+			#partial switch v in def {
+			case string:
+				delete(v, allocator)
+			case []u8:
+				delete(v, allocator)
+			}
+		}
 	}
 	delete(table.columns, allocator)
 }
@@ -233,17 +336,40 @@ hash_string :: proc(s: string) -> u64 {
 	return hash.fnv64(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
 }
 
-// Simple text dump of schema
-debug_print_schema :: proc(t: ^btree.Tree) {
-	fmt.println("=== Schema Dump ===")
-	tables := list_tables(t, context.temp_allocator)
-	for table in tables {
-		fmt.printf("TABLE %s (Root: %d)\n", table.name, table.root_page)
-		for col in table.columns {
-			fmt.printf("  - %s %v\n", col.name, col.type)
-		}
+// Updates a table's root_page in the schema tree using COW.
+// Returns the new schema tree root page.
+update_root_page_cow :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	new_root_page: u32,
+) -> (
+	new_schema_root: u32,
+	ok: bool,
+) {
+	rowid := types.Row_ID(hash_string(table_name))
+	c, err := btree.tree_find(t, rowid, context.temp_allocator)
+	if err != .None { return t.root, false }
+
+	old_sql, sql_ok := c.values[4].(string)
+	old_blob, blob_ok := c.values[5].([]u8)
+	if !sql_ok || !blob_ok { return t.root, false }
+
+	values := []types.Value {
+		types.value_text("table"),
+		types.value_text(table_name),
+		types.value_text(table_name),
+		types.value_int(i64(new_root_page)),
+		types.value_text(old_sql),
+		types.value_blob(old_blob),
 	}
-	fmt.println("===================")
+
+	schema_root, del_err := btree.tree_delete_cow(t, rowid)
+	if del_err != .None { return t.root, false }
+
+	cow_tree := btree.init(t.pager, schema_root)
+	root2, ins_err := btree.tree_insert_cow(&cow_tree, rowid, values)
+	if ins_err != .None { return t.root, false }
+	return root2, true
 }
 
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {
@@ -268,7 +394,6 @@ validate_columns :: proc(columns: []types.Column) -> (bool, string) {
 			}
 		}
 	}
-
 	if pk_count > 1 {
 		return false, "Multiple primary keys not supported right now"
 	}
@@ -331,7 +456,6 @@ debug_print_all :: proc(t: ^btree.Tree) {
 		fmt.println("No tables found.")
 		return
 	}
-
 	for table, i in tables {
 		if i > 0 do fmt.println("-----------------------")
 		debug_print_entry(table)

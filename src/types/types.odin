@@ -1,11 +1,14 @@
 package types
 
 import "core:fmt"
+import "core:mem"
+import "core:slice"
 import "core:strings"
 
 PAGE_SIZE :: 4096
 DATABASE_HEADER_SIZE :: 100
 MAX_COLS :: 10
+MAGIC_STRING :: "MAGNI_DB_v2.0"
 
 // Serial types used for encoding values in cells
 Serial_Type :: enum u64 {
@@ -70,6 +73,53 @@ is_null :: proc(v: Value) -> bool {
 	return ok
 }
 
+value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.Allocator_Error) {
+	#partial switch val in v {
+	case string:
+		str_copy, err := strings.clone(val, allocator)
+		if err != nil { return {}, err }
+		return value_text(str_copy), nil
+	case []u8:
+		blob_copy, err := make([]u8, len(val), allocator)
+		if err != nil { return {}, err }
+		copy(blob_copy, val)
+		return value_blob(blob_copy), nil
+	case:
+		return val, nil
+	}
+}
+
+value_free :: proc(v: Value) {
+	#partial switch val in v {
+	case string:
+		delete(val)
+	case []u8:
+		delete(val)
+	}
+}
+
+value_compare :: proc(a, b: Value) -> bool {
+	#partial switch va in a {
+	case Null:
+		_, is_null := b.(Null)
+		return is_null
+	case i64:
+		vb, ok := b.(i64)
+		return ok && va == vb
+	case f64:
+		vb, ok := b.(f64)
+		return ok && va == vb
+	case string:
+		vb, ok := b.(string)
+		return ok && va == vb
+	case []u8:
+		vb, ok := b.([]u8)
+		return ok && slice.equal(va, vb)
+	case:
+		return false
+	}
+}
+
 // Convert value to string representation
 // If allocator is context.temp_allocator (default), the result is temporary.
 // If a persistent allocator is provided, the result is a new copy you must free.
@@ -85,8 +135,9 @@ value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string
 		return strings.clone(val, allocator)
 	case []u8:
 		return fmt.aprintf("<BLOB %d bytes>", len(val), allocator = allocator)
+	case:
+		return strings.clone("<?>", allocator)
 	}
-	unreachable()
 }
 
 // Calculate content size from serial type
@@ -123,10 +174,11 @@ Row_ID :: distinct i64
 
 // Column definition
 Column :: struct {
-	name:     string,
-	type:     Column_Type,
-	not_null: bool,
-	pk:       bool,
+	name:          string,
+	type:          Column_Type,
+	not_null:      bool,
+	pk:            bool,
+	default_value: Maybe(Value),
 }
 
 // Table definition
@@ -135,22 +187,4 @@ Table :: struct {
 	columns:   []Column,
 	root_page: u32, // Page number of B-tree root
 	sql:       string,
-}
-
-Result_Row :: []Value
-Result_Set :: []Result_Row
-
-// Error types
-Error :: enum {
-	None,
-	Invalid_Type,
-	Invalid_Serial_Type,
-	Buffer_Too_Small,
-	Parse_Error,
-	Table_Not_Found,
-	Column_Not_Found,
-	Type_Mismatch,
-	Constraint_Violation,
-	IO_Error,
-	Out_Of_Memory,
 }

@@ -2,6 +2,7 @@ package btree
 
 import "core:mem"
 import "src:cell"
+import "src:pager"
 import "src:utils"
 
 Cursor_Stack_Item :: struct {
@@ -24,12 +25,13 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 		if err != .None {
 			return err
 		}
-		if is_leaf(node) {
-			break
-		}
+		defer pager.unpin_page(c.tree.pager, node.id)
+
+		if is_leaf(node) { break }
 		if node.header.cell_count > 0 {
 			ptrs := get_pointers(node.data, curr)
-			child, _ := utils.read_u32_be(node.data, int(ptrs[0]))
+			child, ok := utils.read_u32_be(node.data, int(ptrs[0]))
+			if !ok { return .Invalid_Cell_Pointer }
 			curr = child
 		} else {
 			curr = get_right_ptr(node.data, curr)
@@ -57,9 +59,14 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error
 	}
 	if len(c.path) > 0 {
 		top := c.path[len(c.path) - 1]
-		node, _ := load_node(t, top.page_id)
-		if node.header.cell_count == 0 {
+		node, e := load_node(t, top.page_id)
+		if e != .None {
 			c.is_valid = false
+		} else {
+			defer pager.unpin_page(t.pager, node.id)
+			if node.header.cell_count == 0 {
+				c.is_valid = false
+			}
 		}
 	} else {
 		c.is_valid = false
@@ -71,7 +78,6 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 	if !c.is_valid || len(c.path) == 0 {
 		return .None
 	}
-
 	for len(c.path) > 0 {
 		top_idx := len(c.path) - 1
 		item := &c.path[top_idx]
@@ -79,6 +85,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 		if err != .None {
 			return err
 		}
+		defer pager.unpin_page(c.tree.pager, node.id)
 
 		item.cell_index += 1
 		limit := int(node.header.cell_count)
@@ -116,6 +123,8 @@ cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cel
 	if err != .None {
 		return {}, err
 	}
+	defer pager.unpin_page(c.tree.pager, node.id)
+
 	if !is_leaf(node) {
 		return {}, .Invalid_Page_Header
 	}

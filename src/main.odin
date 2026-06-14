@@ -1,27 +1,57 @@
 package main
 
 import "core:bufio"
+import "core:flags"
 import "core:fmt"
-import os "core:os/os2"
+import "core:os"
 import "core:strings"
 import "src:db"
-import "src:schema"
 
 PROMPT :: "magni> "
 CONT_PROMPT :: "   ...> "
-WELCOME_MSG :: "MagniDB v1.0 - Interactive Mode\nEnter .help for usage hints."
+WELCOME_MSG :: "MagniDB v1.0\nEnter .help for usage hints."
+
+CLI :: struct {
+	database: string `args:"pos=0,usage=Database file path (default: test.db)"`,
+	file:     string `args:"name=file,usage=Execute SQL from file and exit"`,
+	eval:     string `args:"name=eval,usage=Execute a single SQL statement and exit"`,
+}
 
 main :: proc() {
-	database_path := "test.db"
-	database, ok := db.open(database_path)
-	if !ok {
-		fmt.eprintln("Fatal: Could not open database.")
+	cli := CLI {
+		database = "test.db",
+	}
+	
+	err := flags.parse(&cli, os.args[1:], .Unix)
+	if err != nil {
+		if _, ok := err.(flags.Help_Request); ok {
+			flags.write_usage(os.to_stream(os.stderr), CLI, os.args[0], .Unix)
+			return
+		}
+		fmt.eprintln("Error:", err)
 		return
 	}
 
+	database, ok := db.open(cli.database)
+	if !ok {
+		fmt.eprintf("Fatal: Could not open database '%s'.\n", cli.database)
+		os.exit(1)
+	}
 	defer db.close(database)
-	fmt.println(WELCOME_MSG)
 
+	if len(cli.file) > 0 {
+		execute_script_file(database, cli.file)
+	} else if len(cli.eval) > 0 {
+		execute_sql(database, cli.eval)
+	} else if os.is_tty(os.stdin) {
+		fmt.println(WELCOME_MSG)
+		repl(database)
+	} else {
+		execute_script_stream(database)
+	}
+}
+
+repl :: proc(database: ^db.Database) {
 	reader: bufio.Reader
 	bufio.reader_init(&reader, os.to_stream(os.stdin))
 	defer bufio.reader_destroy(&reader)
@@ -39,6 +69,7 @@ main :: proc() {
 		line, err := bufio.reader_read_string(&reader, '\n')
 		if err != nil {
 			if err == .EOF {
+				fmt.println()
 				break
 			}
 			fmt.eprintln("Error reading input:", err)
@@ -50,49 +81,7 @@ main :: proc() {
 			continue
 		}
 		if strings.builder_len(query_buffer) == 0 && strings.has_prefix(trimmed, ".") {
-			switch trimmed {
-			case ".exit", ".quit":
-				fmt.println("Goodbye.")
-				break loop
-			case ".help":
-				print_help()
-			case ".tables":
-				fmt.println("--- List of Tables ---")
-				db.list_tables(database)
-			case ".schema":
-				schema.print_ddl(database.pager)
-			case ".debug_schema":
-				fmt.println("--- Full Schema Dump (Debug) ---")
-				schema.debug_print_all(database.pager)
-			case ".stats":
-				db.stats(database)
-			case ".checkpoint":
-				if db.checkpoint(database) {
-					fmt.println("Database flushed to disk.")
-				}
-			case ".integrity":
-				if db.integrity_check(database) {
-					fmt.println("OK")
-				}
-			case:
-				if strings.has_prefix(trimmed, ".dump ") {
-					parts := strings.split(trimmed, " ", context.temp_allocator)
-					if len(parts) == 2 {
-						db.dump_table(database, parts[1])
-					} else {
-						fmt.println("Usage: .dump <table_name>")
-					}
-				} else if strings.has_prefix(trimmed, ".desc ") {
-					parts := strings.split(trimmed, " ", context.temp_allocator)
-					if len(parts) == 2 {
-						db.describe_table(database, parts[1])
-					} else {
-						fmt.println("Usage: .desc <table_name>")
-					}
-				} else {
-					fmt.printf("Error: Unknown command '%s'\n", trimmed)
-				}
-			}
+			handle_dot_command(database, trimmed)
 			continue
 		}
 
@@ -100,17 +89,109 @@ main :: proc() {
 		if strings.has_suffix(trimmed, ";") {
 			full_sql := strings.to_string(query_buffer)
 			is_select := strings.has_prefix(strings.to_upper(strings.trim_space(full_sql)), "SELECT")
-			success := db.execute(database, full_sql)
-			if success {
+			if db.execute(database, full_sql) {
 				if !is_select {
 					fmt.println("Query executed successfully.")
 				}
-			} else {
-				fmt.println("Error executing query.")
 			}
 			strings.builder_reset(&query_buffer)
 		}
 	}
+}
+
+handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
+	switch trimmed {
+	case ".exit", ".quit":
+		fmt.println("Goodbye.")
+		os.exit(0)
+	case ".help":
+		print_help()
+	case ".tables":
+		fmt.println("--- List of Tables ---")
+		db.list_tables(database)
+	case ".schema":
+		db.print_schema(database)
+	case ".debug_schema":
+		fmt.println("--- Full Schema Dump (Debug) ---")
+		db.print_schema_debug(database)
+	case ".stats":
+		db.stats(database)
+	case ".checkpoint":
+		if db.checkpoint(database) {
+			fmt.println("Database flushed to disk.")
+		}
+	case ".integrity":
+		if db.integrity_check(database) {
+			fmt.println("OK")
+		}
+	case:
+		if strings.has_prefix(trimmed, ".dump ") {
+			parts := strings.split(trimmed, " ", context.temp_allocator)
+			if len(parts) == 2 {
+				db.dump_table(database, parts[1])
+			} else {
+				fmt.println("Usage: .dump <table_name>")
+			}
+		} else if strings.has_prefix(trimmed, ".desc ") {
+			parts := strings.split(trimmed, " ", context.temp_allocator)
+			if len(parts) == 2 {
+				db.describe_table(database, parts[1])
+			} else {
+				fmt.println("Usage: .desc <table_name>")
+			}
+		} else {
+			fmt.printf("Error: Unknown command '%s'. Try .help\n", trimmed)
+		}
+	}
+}
+
+execute_script_file :: proc(database: ^db.Database, path: string) {
+	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
+	if err != nil {
+		fmt.eprintf("Error: Could not read file '%s'\n", path)
+		return
+	}
+	execute_sql(database, string(data))
+}
+
+execute_script_stream :: proc(database: ^db.Database) {
+	data, err := os.read_entire_file_from_file(os.stdin, context.temp_allocator)
+	if err != nil {
+		fmt.eprintf("Error: Could not read from stdin\n")
+		return
+	}
+	execute_sql(database, string(data))
+}
+
+execute_sql :: proc(database: ^db.Database, sql: string) {
+	statements := split_statements(sql)
+	for stmt in statements {
+		trimmed := strings.trim_space(stmt)
+		if len(trimmed) == 0 { continue }
+		if !db.execute(database, trimmed) {
+			display_len := len(trimmed)
+			if display_len > 80 { display_len = 80 }
+			fmt.eprintf("Error near: %s\n", trimmed[:display_len])
+		}
+	}
+}
+
+split_statements :: proc(sql: string) -> []string {
+	result := make([dynamic]string, context.temp_allocator)
+	start := 0
+	for i in 0 ..< len(sql) {
+		if sql[i] == ';' {
+			append(&result, sql[start:i + 1])
+			start = i + 1
+		}
+	}
+	if start < len(sql) {
+		remaining := strings.trim_space(sql[start:])
+		if len(remaining) > 0 {
+			append(&result, remaining)
+		}
+	}
+	return result[:]
 }
 
 print_help :: proc() {
@@ -125,11 +206,24 @@ print_help :: proc() {
 	fmt.println("  .integrity          Run consistency checks")
 	fmt.println("  .checkpoint         Flush WAL/Pages to disk")
 	fmt.println("\nSQL Support:")
-	fmt.println("  CREATE TABLE name (col type [PRIMARY KEY] [NOT NULL], ...);")
-	fmt.println("  INSERT INTO name VALUES (val1, val2, ...);")
-	fmt.println("  SELECT * FROM name WHERE col = val;")
-	fmt.println("  UPDATE name SET col = val WHERE col = val;")
-	fmt.println("  DELETE FROM name WHERE col = val;")
-	fmt.println("  DROP TABLE name;")
+	fmt.println("  DDL:")
+	fmt.println("    CREATE TABLE name (col type [PRIMARY KEY] [NOT NULL] [DEFAULT val], ...);")
+	fmt.println("    DROP TABLE name;")
+	fmt.println("  DML:")
+	fmt.println("    INSERT INTO name [(col1, col2, ...)] VALUES (val1, val2, ...);")
+	fmt.printf("    SELECT col1, col2, ... FROM name [WHERE cond]")
+	fmt.printf(" [ORDER BY col [ASC|DESC]] [LIMIT n [OFFSET m]];\n")
+	fmt.println("    SELECT func(col) FROM name [WHERE ...] [GROUP BY col [HAVING cond]];")
+	fmt.println("    SELECT * FROM t1 [INNER|CROSS|LEFT [OUTER]] JOIN t2 ON condition;")
+	fmt.println("    SELECT * FROM (SELECT ...) AS alias [WHERE ...] [ORDER BY ...];")
+	fmt.println("    SELECT t1.col, t2.col FROM t1, t2 [WHERE t1.x = t2.y];")
+	fmt.println("    UPDATE name SET col = val, ... [WHERE cond];")
+	fmt.println("    DELETE FROM name [WHERE cond];")
+	fmt.println("  WHERE:")
+	fmt.println("    col = val, col != val, col <> val, col < val, col <= val")
+	fmt.println("    col LIKE pattern (% = any, _ = single char)")
+	fmt.println("    col AND/OR col  (simple AND/OR, no nesting)")
+	fmt.println("  Functions: COUNT(*), SUM(col), AVG(col), MIN(col), MAX(col)")
+	fmt.println("  Literals:  integers, reals, strings ('text'), BLOBs (X'DEAD')")
 	fmt.println("\nNote: End SQL commands with a semicolon (;).")
 }

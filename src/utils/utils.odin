@@ -1,7 +1,6 @@
 package utils
 
 import "core:encoding/endian"
-import "core:fmt"
 import "src:types"
 
 // Encode a u64 into varint format
@@ -51,6 +50,7 @@ varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: in
 		if (b & 0x80) == 0 {
 			return value, bytes_read, true
 		}
+
 		shift += 7
 		if bytes_read >= 9 {
 			return 0, 0, false
@@ -241,8 +241,9 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 	case []u8:
 		// BLOB: 12 + 2*N
 		return u64(len(val) * 2 + 12)
+	case:
+		return u64(types.Serial_Type.NULL)
 	}
-	unreachable()
 }
 
 // Get content length from serial type
@@ -262,18 +263,4 @@ is_text_serial :: proc(serial: u64) -> bool {
 
 is_blob_serial :: proc(serial: u64) -> bool {
 	return serial >= 12 && (serial % 2 == 0)
-}
-
-// Debug helper to print bytes
-debug_print_bytes :: proc(label: string, data: []u8, max_len: int = 64) {
-	fmt.printf("%s (%d bytes): ", label, len(data))
-	limit := min(max_len, len(data))
-	for i in 0 ..< limit {
-		fmt.printf("%02X ", data[i])
-	}
-
-	if len(data) > max_len {
-		fmt.print("...")
-	}
-	fmt.println()
 }

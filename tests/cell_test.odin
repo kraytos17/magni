@@ -49,7 +49,8 @@ test_serialization_roundtrip :: proc(t: T) {
 	buffer := make([]u8, 1024)
 	defer delete(buffer)
 
-	bytes_written, ok := cell.serialize(buffer, 42, original_values)
+	ci := cell.compute_info(42, original_values)
+	bytes_written, ok := cell.serialize(buffer, 42, original_values, ci)
 	testing.expect(t, ok, "Serialization returned false")
 	testing.expect(t, bytes_written > 0, "No bytes written")
 
@@ -72,7 +73,8 @@ test_zero_copy_mechanics :: proc(t: T) {
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 
-	cell.serialize(buffer, 10, values)
+	ci := cell.compute_info(10, values)
+	cell.serialize(buffer, 10, values, ci)
 	cfg := cell.Config {
 		allocator = context.allocator,
 		zero_copy = true,
@@ -114,8 +116,10 @@ test_multiple_cells_in_buffer :: proc(t: T) {
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 
-	len_a, _ := cell.serialize(buffer[0:], 1, values_a)
-	len_b, _ := cell.serialize(buffer[len_a:], 2, values_b)
+	ci_a := cell.compute_info(1, values_a)
+	ci_b := cell.compute_info(2, values_b)
+	len_a, _ := cell.serialize(buffer[0:], 1, values_a, ci_a)
+	len_b, _ := cell.serialize(buffer[len_a:], 2, values_b, ci_b)
 	c, consumed, ok := cell.deserialize(buffer, len_a)
 	defer cell.destroy(&c)
 
@@ -148,13 +152,44 @@ test_schema_validation :: proc(t: T) {
 }
 
 @(test)
+test_empty_value_list :: proc(t: T) {
+	c, err := cell.create(42, {})
+	testing.expect(t, err == nil, "create with empty values should succeed")
+	defer cell.destroy(&c)
+	testing.expect_value(t, c.rowid, 42)
+	testing.expect_value(t, len(c.values), 0)
+}
+
+@(test)
+test_all_null_values :: proc(t: T) {
+	vals := []types.Value{types.value_null(), types.value_null(), types.value_null()}
+	c, err := cell.create(7, vals)
+	testing.expect(t, err == nil, "create with all null values should succeed")
+	defer cell.destroy(&c)
+	for i in 0 ..< 3 {
+		testing.expect(t, types.is_null(c.values[i]), "all values should be null")
+	}
+}
+
+@(test)
+test_get_rowid_on_invalid_buffer :: proc(t: T) {
+	truncated := []u8{0xFF}
+	_, ok := cell.get_rowid(truncated, 0)
+	testing.expect(t, !ok, "get_rowid on single-byte buffer should fail")
+
+	_, ok2 := cell.get_rowid({}, 0)
+	testing.expect(t, !ok2, "get_rowid on empty buffer should fail")
+}
+
+@(test)
 test_utilities :: proc(t: T) {
 	values := []types.Value{types.value_int(42), types.value_text("SizeTest")}
+	cinfo := cell.compute_info(1, values)
 	calc_size := cell.calculate_size(1, values)
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 
-	written, _ := cell.serialize(buffer, 1, values)
+	written, _ := cell.serialize(buffer, 1, values, cinfo)
 	testing.expect_value(t, calc_size, written)
 
 	rowid, ok := cell.get_rowid(buffer, 0)

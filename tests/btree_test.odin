@@ -2,7 +2,7 @@ package tests
 
 import "core:fmt"
 import "core:mem"
-import os "core:os/os2"
+import "core:os"
 import "core:testing"
 import "src:btree"
 import "src:cell"
@@ -28,11 +28,11 @@ setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 
 	pg1, alloc_err := pager.allocate_page(p)
 	if alloc_err != nil {
-		pager.close(p)
+		_ = pager.close(p)
 		testing.fail_now(t, "FATAL: Failed to allocate root page 0")
 	}
 	if pg1.page_num != 1 {
-		pager.close(p)
+		_ = pager.close(p)
 		testing.fail_now(t, fmt.tprintf("FATAL: Allocated page was %d, expected 1", pg1.page_num))
 	}
 
@@ -43,7 +43,7 @@ setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 
 teardown_tree :: proc(ctx: ^Test_Context) {
 	if ctx.pager != nil {
-		pager.close(ctx.pager)
+		_ = pager.close(ctx.pager)
 	}
 	if os.exists(ctx.filename) {
 		os.remove(ctx.filename)
@@ -95,7 +95,7 @@ test_persistence :: proc(t: ^testing.T) {
 	vals := []types.Value{types.value_int(999)}
 	btree.tree_insert(&ctx.tree, 42, vals)
 
-	pager.close(ctx.pager)
+	_ = pager.close(ctx.pager)
 	ctx.pager = nil
 	p2, err := pager.open(ctx.filename)
 	if !testing.expect(t, err == nil, "Re-open of DB file failed") {
@@ -242,4 +242,152 @@ test_auto_increment :: proc(t: ^testing.T) {
 
 	next2, _ := btree.tree_next_rowid(&ctx.tree)
 	testing.expect_value(t, next2, 11)
+}
+
+@(test)
+test_tree_verify :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "verify")
+	defer teardown_tree(&ctx)
+
+	items := 50
+	for i in 1 ..= items {
+		btree.tree_insert(&ctx.tree, types.Row_ID(i), []types.Value{types.value_int(i64(i))})
+	}
+	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verification failed after inserts")
+
+	btree.tree_delete(&ctx.tree, 25)
+	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verification failed after delete")
+}
+
+@(test)
+test_delete_non_existent :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "del_miss")
+	defer teardown_tree(&ctx)
+
+	btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(10)})
+	err := btree.tree_delete(&ctx.tree, 99)
+	testing.expect_value(t, err, btree.Error.Cell_Not_Found)
+	cnt, _ := btree.tree_count_rows(&ctx.tree)
+	testing.expect_value(t, cnt, 1)
+}
+
+@(test)
+test_delete_first_last_key :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "del_first_last")
+	defer teardown_tree(&ctx)
+
+	for i in 1 ..= 5 {
+		btree.tree_insert(&ctx.tree, types.Row_ID(i), []types.Value{types.value_int(i64(i))})
+	}
+
+	err := btree.tree_delete(&ctx.tree, 1)
+	testing.expect_value(t, err, btree.Error.None)
+	_, find_err := btree.tree_find(&ctx.tree, 1)
+	testing.expect_value(t, find_err, btree.Error.Cell_Not_Found)
+	cnt, _ := btree.tree_count_rows(&ctx.tree)
+	testing.expect_value(t, cnt, 4)
+
+	err = btree.tree_delete(&ctx.tree, 5)
+	testing.expect_value(t, err, btree.Error.None)
+	_, find_err = btree.tree_find(&ctx.tree, 5)
+	testing.expect_value(t, find_err, btree.Error.Cell_Not_Found)
+	cnt, _ = btree.tree_count_rows(&ctx.tree)
+	testing.expect_value(t, cnt, 3)
+
+	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verify failed after first/last delete")
+}
+
+@(test)
+test_consecutive_deletes :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "consec_del")
+	defer teardown_tree(&ctx)
+
+	for i in 1 ..= 5 {
+		btree.tree_insert(&ctx.tree, types.Row_ID(i), []types.Value{types.value_int(i64(i))})
+	}
+
+	for i in 1 ..= 5 {
+		err := btree.tree_delete(&ctx.tree, types.Row_ID(i))
+		testing.expect_value(t, err, btree.Error.None)
+	}
+
+	cnt, _ := btree.tree_count_rows(&ctx.tree)
+	testing.expect_value(t, cnt, 0)
+	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verify failed after all deletes")
+}
+
+@(test)
+test_reinsert_after_delete :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "reinsert")
+	defer teardown_tree(&ctx)
+
+	btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(1)})
+	btree.tree_delete(&ctx.tree, 10)
+
+	vals := []types.Value{types.value_int(999)}
+	err := btree.tree_insert(&ctx.tree, 10, vals)
+	testing.expect_value(t, err, btree.Error.None)
+
+	c, _ := btree.tree_find(&ctx.tree, 10, context.temp_allocator)
+	testing.expect_value(t, c.values[0].(i64), 999)
+	cnt, _ := btree.tree_count_rows(&ctx.tree)
+	testing.expect_value(t, cnt, 1)
+}
+
+@(test)
+test_empty_tree_cursor :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "empty_cursor")
+	defer teardown_tree(&ctx)
+
+	cursor, err := btree.cursor_start(&ctx.tree)
+	testing.expect_value(t, err, btree.Error.None)
+	defer btree.cursor_destroy(&cursor)
+
+	testing.expect(t, !cursor.is_valid, "Cursor on empty tree should be invalid")
+}
+
+@(test)
+test_max_fit_value :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "max_fit")
+	defer teardown_tree(&ctx)
+
+	payload := make_large_text(context.temp_allocator, 3000)
+	vals := []types.Value{types.value_int(1), types.value_text(payload)}
+	err := btree.tree_insert(&ctx.tree, 1, vals)
+	testing.expect_value(t, err, btree.Error.None)
+
+	c, _ := btree.tree_find(&ctx.tree, 1, context.temp_allocator)
+	testing.expect_value(t, c.values[1].(string), payload)
+	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verify failed after large insert")
+}
+
+@(test)
+test_overflow_value :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "overflow")
+	defer teardown_tree(&ctx)
+
+	payload := make_large_text(context.temp_allocator, 4096)
+	vals := []types.Value{types.value_int(1), types.value_text(payload)}
+	err := btree.tree_insert(&ctx.tree, 1, vals)
+	testing.expect(t, err != .None, "Oversized value should have failed")
+}
+
+@(test)
+test_load_node_page_zero :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "page0_tree")
+	defer teardown_tree(&ctx)
+
+	bad_tree := btree.init(ctx.tree.pager, 0)
+	_, err := btree.tree_find(&bad_tree, 1, context.temp_allocator)
+	testing.expect(t, err != .None, "tree_find on page 0 root should fail")
+}
+
+@(test)
+test_page_one_header_offset :: proc(t: ^testing.T) {
+	offset_1 := btree.get_page_header_offset(1)
+	offset_2 := btree.get_page_header_offset(2)
+	offset_3 := btree.get_page_header_offset(3)
+	testing.expect_value(t, offset_1, 100)
+	testing.expect_value(t, offset_2, 0)
+	testing.expect_value(t, offset_3, 0)
 }
