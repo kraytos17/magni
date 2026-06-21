@@ -94,49 +94,52 @@ Split_Result :: struct {
 
 @(private = "file")
 node_move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
-	if !is_leaf(src^) || !is_leaf(dst^) { return false }
+	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
 
 	src_ptrs := get_pointers(src.data, src.id)
 	if start_idx + count > len(src_ptrs) { return false }
+
+	hdr_sz := page_header_size(dst.header.page_type)
+	base := get_page_header_offset(dst.id)
+	dst_off := int(dst.header.cell_content_offset)
+
 	for i in 0 ..< count {
-		src_index := start_idx + i
-		src_ptr := src_ptrs[src_index]
-		cell_size, ok := cell.get_size(src.data, int(src_ptr))
+		idx := start_idx + i
+		src_ptr := int(src_ptrs[idx])
+		cell_sz, ok := cell.get_size(src.data, src_ptr)
 		if !ok { return false }
-
-		cell_bytes := src.data[int(src_ptr):int(src_ptr) + cell_size]
-		new_offset := int(dst.header.cell_content_offset) - cell_size
-		dst.header.cell_content_offset = u16le(new_offset)
-
-		copy(dst.data[new_offset:], cell_bytes)
-		header_size := page_header_size(dst.header.page_type)
-		base_offset := get_page_header_offset(dst.id)
-		ptr_loc := base_offset + header_size + int(dst.header.cell_count) * 2
-		utils.write_u16_le(dst.data, ptr_loc, u16(new_offset))
-		dst.header.cell_count += 1
+		dst_off -= cell_sz
+		copy(dst.data[dst_off:dst_off + cell_sz], src.data[src_ptr:src_ptr + cell_sz])
+		ptr_loc := base + hdr_sz + (int(dst.header.cell_count) + i) * 2
+		utils.write_u16_le(dst.data, ptr_loc, u16(dst_off))
 	}
+
+	dst.header.cell_content_offset = u16le(dst_off)
+	dst.header.cell_count = u16le(int(dst.header.cell_count) + count)
 	return true
 }
 
 @(private = "file")
 node_move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
-	if is_leaf(src^) || is_leaf(dst^) { return false }
+	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
 
 	ptrs := get_pointers(src.data, src.id)
-	for i in 0 ..< count {
-		off := ptrs[start_idx + i]
-		size := interior_cell_size_from_page(src.data, int(off))
-		dst_int := node_interior(dst^)
-		new_off := int(dst_int.cell_content_offset) - size
-		dst_int.cell_content_offset = u16le(new_off)
+	dst_int := node_interior(dst^)
+	hdr_sz := size_of(Interior_Header)
+	base := get_page_header_offset(dst.id)
+	dst_off := int(dst_int.cell_content_offset)
 
-		copy(dst.data[new_off:], src.data[int(off):int(off) + size])
-		hdr_sz := size_of(Interior_Header)
-		base := get_page_header_offset(dst.id)
-		ptr_loc := base + hdr_sz + int(dst_int.cell_count) * 2
-		utils.write_u16_le(dst.data, ptr_loc, u16(new_off))
-		dst_int.cell_count += 1
+	for i in 0 ..< count {
+		off := int(ptrs[start_idx + i])
+		size := interior_cell_size_from_page(src.data, off)
+		dst_off -= size
+		copy(dst.data[dst_off:dst_off + size], src.data[off:off + size])
+		ptr_loc := base + hdr_sz + (int(dst_int.cell_count) + i) * 2
+		utils.write_u16_le(dst.data, ptr_loc, u16(dst_off))
 	}
+
+	dst_int.cell_content_offset = u16le(dst_off)
+	dst_int.cell_count = u16le(int(dst_int.cell_count) + count)
 	return true
 }
 
@@ -152,22 +155,33 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	right_node, _ := node_from_bytes(new_page.page_num, new_page.data)
 	total := int(node_leaf(curr^).cell_count)
 	mid := total / 2
-	count_moving := total - mid
-	if !node_move_leaf_cells(curr, &right_node, mid, count_moving) {
+
+	// Move right half (mid..total) to right_node via node_move_leaf_cells
+	if !node_move_leaf_cells(curr, &right_node, mid, total - mid) {
 		return {}, .Serialization_Failed
 	}
 
-	temp_data, alloc_err := mem.alloc_bytes(PAGE_SIZE, mem.DEFAULT_ALIGNMENT, context.temp_allocator)
-	if alloc_err != .None { return {}, .Page_Full }
+	// Repack left half (0..mid) in-place on curr (no temp buffer needed)
+	if mid > 0 {
+		curr_ptrs := get_pointers(curr.data, curr.id)
+		hdr_sz := page_header_size(curr.header.page_type)
+		base := get_page_header_offset(curr.id)
+		dst_off := PAGE_SIZE
 
-	defer mem.free_bytes(temp_data, context.temp_allocator)
-	init_leaf_page(temp_data, curr.id)
-	temp_node, _ := node_from_bytes(curr.id, temp_data)
-	if !node_move_leaf_cells(curr, &temp_node, 0, mid) {
-		return {}, .Serialization_Failed
+		for i in 0 ..< mid {
+			src_ptr := int(curr_ptrs[i])
+			cell_sz, ok := cell.get_size(curr.data, src_ptr)
+			if !ok { return {}, .Serialization_Failed }
+			dst_off -= cell_sz
+			// copy handles overlapping regions (uses memmove)
+			copy(curr.data[dst_off:dst_off + cell_sz], curr.data[src_ptr:src_ptr + cell_sz])
+			ptr_loc := base + hdr_sz + i * 2
+			utils.write_u16_le(curr.data, ptr_loc, u16(dst_off))
+		}
+		curr.header.cell_content_offset = u16le(dst_off)
+		curr.header.cell_count = u16le(mid)
 	}
 
-	copy(curr.data, temp_data)
 	ptrs := get_pointers(right_node.data, right_node.id)
 	sep, ok := cell.get_rowid(right_node.data, int(ptrs[0]))
 	if !ok { return {}, .Invalid_Cell_Pointer }
@@ -204,17 +218,30 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 
 	orig_rightmost := get_right_ptr(curr.data, curr.id)
 	set_right_ptr(right_node.data, right_node.id, orig_rightmost)
-	temp_data, alloc_err := mem.alloc_bytes(PAGE_SIZE, mem.DEFAULT_ALIGNMENT, context.temp_allocator)
-	if alloc_err != .None { return {}, .Page_Full }
 
-	defer mem.free_bytes(temp_data, context.temp_allocator)
-	init_interior_page(temp_data, curr.id)
-	temp_node, _ := node_from_bytes(curr.id, temp_data)
+	// Repack left half (0..mid) in-place on curr
 	if mid > 0 {
-		node_move_interior_cells(curr, &temp_node, 0, mid)
+		hdr_sz := size_of(Interior_Header)
+		base := get_page_header_offset(curr.id)
+		dst_off := PAGE_SIZE
+
+		for i in 0 ..< mid {
+			off := int(ptrs[i])
+			size := interior_cell_size_from_page(curr.data, off)
+			dst_off -= size
+			copy(curr.data[dst_off:dst_off + size], curr.data[off:off + size])
+			ptr_loc := base + hdr_sz + i * 2
+			utils.write_u16_le(curr.data, ptr_loc, u16(dst_off))
+		}
+		curr_int := node_interior(curr^)
+		curr_int.cell_content_offset = u16le(dst_off)
+		curr_int.cell_count = u16le(mid)
+	} else {
+		// No left half — curr becomes empty with just the right pointer
+		curr.header.cell_content_offset = PAGE_SIZE
+		curr.header.cell_count = 0
 	}
 
-	copy(curr.data, temp_data)
 	set_right_ptr(curr.data, curr.id, child_from_mid_cell)
 	pager.mark_dirty(t.pager, curr.id)
 	pager.mark_dirty(t.pager, right_node.id)
@@ -255,6 +282,7 @@ split_leaf_root :: proc(t: ^Tree, root_page: u32) -> (new_root: u32, err: Error)
 	if !s_ok { return 0, .Invalid_Cell_Pointer }
 
 	init_interior_page(root_node.data, root_node.id)
+	pager.mark_dirty(t.pager, root_node.id)
 	unpin_node(t, root_node)
 
 	root_node, load_err = load_node(t, root_page)
@@ -292,6 +320,7 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 	old_right := get_right_ptr(root_node.data, root_node.id)
 	set_right_ptr(left_node.data, left_node.id, old_right)
 	init_interior_page(root_node.data, root_node.id)
+	pager.mark_dirty(t.pager, t.root)
 	unpin_node(t, root_node)
 
 	root_node, r_err = load_node(t, t.root)
@@ -355,7 +384,7 @@ node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, rowid: types.Row_ID, values: [
 		if idx < int(n.header.cell_count) {
 			copy(raw_ptrs[idx + 1:], raw_ptrs[idx:n.header.cell_count])
 		}
-		
+
 		raw_ptrs[idx] = Cell_Pointer(free_off)
 		n.header.cell_count += 1
 		pager.mark_dirty(t.pager, n.id)
@@ -712,12 +741,7 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	if cell_off == int(leaf_node.header.cell_content_offset) {
 		leaf_node.header.cell_content_offset += u16le(cell_sz)
 	} else if cell_sz >= FREEBLOCK_HDR_SIZE {
-		freeblock_insert(
-			leaf_node.data,
-			u16(cell_off),
-			u16(cell_sz),
-			&leaf_node.header.first_freeblock,
-		)
+		freeblock_insert(leaf_node.data, u16(cell_off), u16(cell_sz), &leaf_node.header.first_freeblock)
 	} else {
 		if cell_sz > 0 && cell_sz < 255 {
 			new_frag := u16(leaf_node.header.fragmented_bytes) + u16(cell_sz)

@@ -571,15 +571,18 @@ gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 
 		live[page] = true
 		if h.manifest_page != 0 { live[h.manifest_page] = true }
-		if h.schema_root != 0 { live[h.schema_root] = true }
-		if h.manifest_page != 0 {
+		if h.schema_root != 0 {
+			live[h.schema_root] = true
 			t := btree.init(p, h.schema_root)
-			_, roots, load_ok := load_manifest_tables(p, h.manifest_page, context.temp_allocator)
-			if load_ok {
-				for i in 0 ..< len(roots) {
-					if roots[i] != 0 {
-						live[roots[i]] = true
-						btree.collect_pages(&t, roots[i], &live)
+			btree.collect_pages(&t, h.schema_root, &live)
+			if h.manifest_page != 0 {
+				_, roots, load_ok := load_manifest_tables(p, h.manifest_page, context.temp_allocator)
+				if load_ok {
+					for i in 0 ..< len(roots) {
+						if roots[i] != 0 {
+							live[roots[i]] = true
+							btree.collect_pages(&t, roots[i], &live)
+						}
 					}
 				}
 			}

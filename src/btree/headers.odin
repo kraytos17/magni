@@ -272,7 +272,20 @@ freeblock_insert :: proc(data: []u8, cell_off: u16, cell_sz: u16, first: ^u16le)
 		}
 
 		end_prev := u16(prev) + u16(freeblock_read_size(data, u16(prev)))
-		if u16le(end_prev) >= co { return }
+		if u16le(end_prev) > co { return }
+		if u16le(end_prev) == co {
+			// Merge with prev
+			new_sz := freeblock_read_size(data, u16(prev)) + cs
+			if co + cs == nxt {
+				// Three-way merge: prev + new + next
+				new_sz += freeblock_read_size(data, u16(nxt))
+				freeblock_write_size(data, u16(prev), new_sz)
+				freeblock_write_next(data, u16(prev), freeblock_read_next(data, u16(nxt)))
+			} else {
+				freeblock_write_size(data, u16(prev), new_sz)
+			}
+			return
+		}
 		if co + cs == nxt {
 			sz := cs + freeblock_read_size(data, u16(nxt))
 			freeblock_write_size(data, cell_off, sz)

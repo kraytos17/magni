@@ -23,16 +23,21 @@ Transaction_State :: enum {
 // single-client use. True concurrent reads across coroutines would need
 // finer-grained locking.
 Database :: struct {
-	path:             string,
-	pager:            ^pager.Pager,
-	is_new:           bool,
-	mu:               sync.Mutex,
-	schema_root_page: u32,
-	latest_snapshot:  u32,
-	txn_state:        Transaction_State,
-	txn_snapshot_id:  u64,
-	snapshot_index:   map[u64]u32,
+	path:              string,
+	pager:             ^pager.Pager,
+	is_new:            bool,
+	mu:                sync.Mutex,
+	schema_root_page:  u32,
+	latest_snapshot:   u32,
+	txn_state:         Transaction_State,
+	txn_snapshot_id:   u64,
+	snapshot_index:    map[u64]u32,
+	gc_pending_count:  int,
+	table_roots:       map[string]u32,
+	table_roots_dirty: bool,
 }
+
+GC_INTERVAL :: 10
 
 Header :: struct #packed {
 	magic:                [13]u8,
@@ -75,6 +80,7 @@ open :: proc(path: string) -> (^Database, bool) {
 	db.txn_state = .NONE
 	db.txn_snapshot_id = 0
 	db.snapshot_index = make(map[u64]u32, 128)
+	db.table_roots = make(map[string]u32)
 	if db.is_new {
 		fmt.println("Initializing new database...")
 		if !initialize(db) {
@@ -129,6 +135,7 @@ close :: proc(db: ^Database) {
 		}
 	}
 	delete(db.snapshot_index)
+	delete(db.table_roots)
 	delete(db.path)
 	free(db)
 }
@@ -146,7 +153,7 @@ initialize :: proc(db: ^Database) -> bool {
 
 	header.page_size = u32le(types.PAGE_SIZE)
 	header.page_count = 1
-	header.schema_version = 1
+	header.schema_version = 2
 
 	schema_page, s_err := pager.allocate_page(db.pager)
 	if s_err != .None {
@@ -217,6 +224,18 @@ db_check :: proc(db: ^Database) -> bool {
 	return true
 }
 
+// Ensures the table_roots cache is populated. Caller must hold db.mu.
+ensure_table_roots :: proc(db: ^Database) {
+	if !db.table_roots_dirty && len(db.table_roots) > 0 { return }
+	st := schema_tree(db)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	clear(&db.table_roots)
+	for t in tables {
+		db.table_roots[t.name] = t.root_page
+	}
+	db.table_roots_dirty = false
+}
+
 execute :: proc(db: ^Database, sql: string) -> bool {
 	if !db_check(db) { return false }
 	sync.lock(&db.mu)
@@ -231,11 +250,11 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 	if txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt); is_txn {
 		switch txn_stmt.op {
 		case .BEGIN:
-			return begin(db)
+			return begin_impl(db)
 		case .COMMIT:
-			return commit(db)
+			return commit_impl(db)
 		case .ROLLBACK:
-			return rollback(db)
+			return rollback_impl(db)
 		}
 	}
 
@@ -270,23 +289,40 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 	if !as_of_override {
 		db.schema_root_page = new_root
 	}
-	if exec_ok && db.txn_state == .NONE && !as_of_override {
-		snap_op: snapshot.Snapshot_Operation
-		#partial switch s in stmt.type {
-		case parser.Insert_Stmt:
-			snap_op = .INSERT
-		case parser.Update_Stmt:
-			snap_op = .UPDATE
-		case parser.Delete_Stmt:
-			snap_op = .DELETE
-		case parser.Create_Stmt:
-			snap_op = .CREATE
-		case parser.Drop_Stmt:
-			snap_op = .DROP
-		}
+		if exec_ok && db.txn_state == .NONE && !as_of_override {
+			snap_op: snapshot.Snapshot_Operation
+			#partial switch s in stmt.type {
+			case parser.Insert_Stmt:
+				snap_op = .INSERT
+			case parser.Update_Stmt:
+				snap_op = .UPDATE
+			case parser.Delete_Stmt:
+				snap_op = .DELETE
+			case parser.Create_Stmt:
+				snap_op = .CREATE
+			case parser.Drop_Stmt:
+				snap_op = .DROP
+			}
 
-		tables := schema.list_tables(&st, context.temp_allocator)
-		manifest_page := snapshot.create_manifest(db.pager, tables)
+			// Update table_roots cache from executor's mutation report
+			mt := executor.mutated_table_info
+			if mt.name != "" {
+				if mt.root != 0 {
+					db.table_roots[mt.name] = mt.root
+				} else {
+					delete_key(&db.table_roots, mt.name)
+				}
+				executor.mutated_table_info = {}
+			} else if snap_op == .CREATE || snap_op == .DROP {
+				db.table_roots_dirty = true
+			}
+
+			ensure_table_roots(db)
+			tables := make([dynamic]types.Table, context.temp_allocator)
+			for name, root in db.table_roots {
+				append(&tables, types.Table{name = name, root_page = root})
+			}
+			manifest_page := snapshot.create_manifest(db.pager, tables[:])
 		defer if manifest_page != 0 {
 			pager.unpin_page(db.pager, manifest_page)
 		}
@@ -305,7 +341,11 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 			db.snapshot_index[snap_id] = snap_page
 			db.latest_snapshot = snap_page
 			snapshot.prune(db.pager, db.latest_snapshot, 100)
-			snapshot.gc(db.pager, db.latest_snapshot, 100)
+			db.gc_pending_count += 1
+			if db.gc_pending_count >= GC_INTERVAL {
+				snapshot.gc(db.pager, db.latest_snapshot, 100)
+				db.gc_pending_count = 0
+			}
 		}
 		pager.flush_all(db.pager)
 	}
@@ -393,12 +433,7 @@ checkpoint :: proc(db: ^Database) -> bool {
 	return true
 }
 
-// Begins a new transaction.
-begin :: proc(db: ^Database) -> bool {
-	if !db_check(db) { return false }
-	sync.lock(&db.mu)
-	defer sync.unlock(&db.mu)
-
+begin_impl :: proc(db: ^Database) -> bool {
 	if db.txn_state == .ACTIVE {
 		fmt.eprintln("Warning: Transaction already in progress")
 		return false
@@ -409,14 +444,7 @@ begin :: proc(db: ^Database) -> bool {
 	return true
 }
 
-// Commits the current transaction. Creates a snapshot page capturing the
-// current schema tree root, links it into the snapshot chain, and updates
-// the database header.
-commit :: proc(db: ^Database) -> bool {
-	if !db_check(db) { return false }
-	sync.lock(&db.mu)
-	defer sync.unlock(&db.mu)
-
+commit_impl :: proc(db: ^Database) -> bool {
 	if db.txn_state != .ACTIVE {
 		fmt.eprintln("Warning: No active transaction to commit")
 		return false
@@ -424,9 +452,12 @@ commit :: proc(db: ^Database) -> bool {
 
 	db.txn_snapshot_id += 1
 	snap_id := db.txn_snapshot_id
-	st := schema_tree(db)
-	tables := schema.list_tables(&st, context.temp_allocator)
-	manifest_page := snapshot.create_manifest(db.pager, tables)
+	ensure_table_roots(db)
+	tables := make([dynamic]types.Table, context.temp_allocator)
+	for name, root in db.table_roots {
+		append(&tables, types.Table{name = name, root_page = root})
+	}
+	manifest_page := snapshot.create_manifest(db.pager, tables[:])
 	defer if manifest_page != 0 {
 		pager.unpin_page(db.pager, manifest_page)
 	}
@@ -453,14 +484,7 @@ commit :: proc(db: ^Database) -> bool {
 	return true
 }
 
-// Rolls back the current transaction. The schema root reverts to the last
-// committed snapshot's root. COW'd pages from the aborted transaction remain
-// in the file but are no longer referenced.
-rollback :: proc(db: ^Database) -> bool {
-	if !db_check(db) { return false }
-	sync.lock(&db.mu)
-	defer sync.unlock(&db.mu)
-
+rollback_impl :: proc(db: ^Database) -> bool {
 	if db.txn_state != .ACTIVE {
 		fmt.eprintln("Warning: No active transaction to roll back")
 		return false
@@ -475,6 +499,30 @@ rollback :: proc(db: ^Database) -> bool {
 	db.txn_state = .NONE
 	fmt.println("ROLLBACK transaction")
 	return true
+}
+
+// Begins a new transaction.
+begin :: proc(db: ^Database) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	return begin_impl(db)
+}
+
+// Commits the current transaction.
+commit :: proc(db: ^Database) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	return commit_impl(db)
+}
+
+// Rolls back the current transaction.
+rollback :: proc(db: ^Database) -> bool {
+	if !db_check(db) { return false }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	return rollback_impl(db)
 }
 
 // Prints the snapshot chain for debugging.

@@ -181,17 +181,14 @@ test_snapshot_diff :: proc(t: ^testing.T) {
 	p := setup_snapshot_env(t, "diff")
 	defer teardown_snapshot_env(p, "diff")
 
-	tables_a := []types.Table {
-		{name = "users", root_page = 100},
-		{name = "orders", root_page = 200},
-	}
+	tables_a := []types.Table{{name = "users", root_page = 100}, {name = "orders", root_page = 200}}
 	man_a := snapshot.create_manifest(p, tables_a)
 	testing.expect(t, man_a > 0, "manifest A created")
 
 	tables_b := []types.Table {
-		{name = "users", root_page = 100},     // unchanged
-		{name = "orders", root_page = 300},     // modified
-		{name = "products", root_page = 400},   // created
+		{name = "users", root_page = 100}, // unchanged
+		{name = "orders", root_page = 300}, // modified
+		{name = "products", root_page = 400}, // created
 	}
 	man_b := snapshot.create_manifest(p, tables_b)
 	testing.expect(t, man_b > 0, "manifest B created")
@@ -246,15 +243,13 @@ test_snapshot_diff_snapshots :: proc(t: ^testing.T) {
 	p := setup_snapshot_env(t, "diff_snap")
 	defer teardown_snapshot_env(p, "diff_snap")
 
-	tables_a := []types.Table {
-		{name = "users", root_page = 100},
-	}
+	tables_a := []types.Table{{name = "users", root_page = 100}}
 	man_a := snapshot.create_manifest(p, tables_a)
 	testing.expect(t, man_a > 0, "manifest A created")
 
 	tables_b := []types.Table {
-		{name = "users", root_page = 200},     // modified
-		{name = "orders", root_page = 300},     // created
+		{name = "users", root_page = 200}, // modified
+		{name = "orders", root_page = 300}, // created
 	}
 	man_b := snapshot.create_manifest(p, tables_b)
 	testing.expect(t, man_b > 0, "manifest B created")

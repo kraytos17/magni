@@ -180,6 +180,7 @@ Column :: struct {
 	not_null:      bool,
 	pk:            bool,
 	default_value: Maybe(Value),
+	check_expr:    Maybe(string),
 }
 
 hash_string :: proc(s: string) -> u64 {
@@ -187,8 +188,15 @@ hash_string :: proc(s: string) -> u64 {
 }
 
 Table :: struct {
-	name:      string,
-	columns:   []Column,
-	root_page: u32, // Page number of B-tree root
-	sql:       string,
+	name:        string,
+	columns:     []Column,
+	root_page:   u32,
+	sql:         string,
+	foreign_keys: []Foreign_Key,
+}
+
+Foreign_Key :: struct {
+	col:       string,
+	ref_table: string,
+	ref_col:   string,
 }

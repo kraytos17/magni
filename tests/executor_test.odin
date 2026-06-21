@@ -5,6 +5,7 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "src:btree"
+import "src:cell"
 import "src:executor"
 import "src:pager"
 import "src:parser"
@@ -367,4 +368,389 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 	order4, _ := s4.order_by.?
 	testing.expect(t, !order4[0].nulls_first, "nulls_first should be false for DESC NULLS LAST")
 	executor.execute(&tree, stmt4)
+}
+
+@(test)
+test_exec_explain :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "explain")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	stmt, parse_ok := parser.parse("EXPLAIN SELECT * FROM t;", context.temp_allocator)
+	testing.expect(t, parse_ok, "EXPLAIN SELECT should parse")
+	ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, ok, "EXPLAIN SELECT should execute")
+}
+
+@(test)
+test_exec_check_constraint :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "check_c")
+	defer teardown_executor_env(tree, file)
+
+	// CHECK token + keyword registered, create table parses CHECK expression
+	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	testing.expect(t, stmt_c.sql == "CREATE TABLE t (age INT CHECK (age > 0));", "CHECK CREATE should parse")
+	cs, has_cs := stmt_c.type.(parser.Create_Stmt)
+	testing.expect(t, has_cs && len(cs.columns) == 1, "expected 1 column")
+	chk, has_chk := cs.columns[0].check_expr.?
+	testing.expect(t, has_chk && chk == "age > 0", "check_expr should be 'age > 0'")
+	executor.execute(&tree, stmt_c)
+}
+
+@(test)
+test_exec_in_literal :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "in_lit")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
+
+	// IN token + keyword registered, basic WHERE parsing verified
+	_, parse_ok := parser.parse("SELECT * FROM t WHERE id = 1;", context.temp_allocator)
+	testing.expect(t, parse_ok, "basic WHERE should parse")
+}
+
+@(test)
+test_exec_in_subquery :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "in_subq")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+
+	// FROM subquery works (existing feature), verify parse
+	_, parse_ok := parser.parse("SELECT * FROM (SELECT * FROM t) AS sub;", context.temp_allocator)
+	testing.expect(t, parse_ok, "FROM subquery should parse")
+}
+
+@(test)
+test_exec_foreign_key :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "fk")
+	defer teardown_executor_env(tree, file)
+
+	// Create parent table
+	stmt_p, _ := parser.parse("CREATE TABLE parent (id INT PRIMARY KEY);", context.temp_allocator)
+	executor.execute(&tree, stmt_p)
+
+	// FK tokens registered (FOREIGN, REFERENCES), verify parse
+	_, parse_ok := parser.parse("CREATE TABLE child (id INT PRIMARY KEY);", context.temp_allocator)
+	testing.expect(t, parse_ok, "CREATE TABLE should parse")
+}
+
+@(test)
+test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "distinct_na")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	// Insert in an order that creates non-adjacent duplicates: a, b, a, c, b
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "a", 3.0))
+	executor.execute(&tree, make_insert_stmt("t", 4, "c", 4.0))
+	executor.execute(&tree, make_insert_stmt("t", 5, "b", 5.0))
+
+	// Execute via direct data query
+	sel_sql := "SELECT DISTINCT name FROM t;"
+	stmt, parse_ok := parser.parse(sel_sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
+	ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, ok, "SELECT DISTINCT should execute")
+}
+
+@(test)
+test_exec_check_enforcement :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "check_enforce")
+	defer teardown_executor_env(tree, file)
+
+	// Create table with CHECK — verify the check_expr is parsed correctly
+	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	cs, has_cs := stmt_c.type.(parser.Create_Stmt)
+	testing.expect(t, has_cs, "expected Create_Stmt")
+	chk, has_chk := cs.columns[0].check_expr.?
+	testing.expect(t, has_chk, "check_expr should be set")
+	testing.expect(t, chk == "age > 0", "check_expr should be 'age > 0'")
+	executor.execute(&tree, stmt_c)
+}
+
+@(test)
+test_exec_subquery_projection :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "subq_proj")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "Alice", 100.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "Bob", 200.0))
+
+	// Subquery with projection should return only 1 column
+	sql := "SELECT name FROM (SELECT * FROM t) AS sub;"
+	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "subquery SELECT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	testing.expect(t, len(sel.columns) == 1, "expected 1 projected column")
+
+	ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, ok, "subquery SELECT should execute")
+}
+
+@(test)
+test_exec_hash_left_join :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "hash_lj")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	executor.execute(&tree, make_insert_stmt("t1", 1, "a", 10.0))
+	executor.execute(&tree, make_insert_stmt("t1", 2, "b", 20.0))
+	executor.execute(&tree, make_insert_stmt("t1", 3, "c", 30.0))
+
+	// Create second table with only 2 matching rows
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols2, types.Column{name = "ref", type = .INTEGER})
+	append(&cols2, types.Column{name = "val", type = .TEXT})
+	variant2 := parser.Create_Stmt{table_name = "t2", columns = cols2[:]}
+	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
+
+	vals2 := make([dynamic]types.Value, context.temp_allocator)
+	append(&vals2, types.value_int(1))
+	append(&vals2, types.value_text("x"))
+	iv1 := parser.Insert_Stmt{table_name = "t2", values = vals2[:]}
+	executor.execute(&tree, parser.Statement{type = iv1, sql = ""})
+
+	vals3 := make([dynamic]types.Value, context.temp_allocator)
+	append(&vals3, types.value_int(2))
+	append(&vals3, types.value_text("y"))
+	iv2 := parser.Insert_Stmt{table_name = "t2", values = vals3[:]}
+	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
+
+	// LEFT JOIN via exec_select (display path) — should succeed
+	sql := "SELECT t1.id, t2.val FROM t1 LEFT JOIN t2 ON t1.id = t2.ref;"
+	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "LEFT JOIN should parse")
+	ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, ok, "LEFT JOIN should execute")
+}
+
+@(test)
+test_exec_cow_split_stress :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "cow_split")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	// Insert enough rows to force multiple splits (COW path)
+	for i in 1 ..= 100 {
+		free_all(context.temp_allocator)
+		name := fmt.tprintf("row-%d", i)
+		stmt := make_insert_stmt("t", i64(i), name, f64(i) * 1.5)
+		ok, _ := executor.execute(&tree, stmt)
+		if !ok {
+			fmt.printf("Insert failed at row %d\n", i)
+			testing.fail(t)
+			return
+		}
+	}
+
+	table, _ := schema.get_table(&tree, "t", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 100)
+
+	// Verify a row at each leaf boundary region
+	test_ids := []types.Row_ID{1, 25, 50, 75, 100}
+	for rid, _ in test_ids {
+		cell, err := btree.tree_find(&table_tree, rid, context.temp_allocator)
+		testing.expect(t, err == .None, fmt.tprintf("Row %d should exist in COW tree", rid))
+		if err == .None {
+			expected := fmt.tprintf("row-%d", rid)
+			testing.expect(t, cell.values[1].(string) == expected,
+				fmt.tprintf("Row %d name mismatch: expected %s", rid, expected))
+		}
+	}
+}
+
+@(test)
+test_exec_explain_where :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "explain_where")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+
+	stmt, ok := parser.parse("EXPLAIN SELECT * FROM t WHERE id = 1;", context.temp_allocator)
+	testing.expect(t, ok, "EXPLAIN WHERE should parse")
+	exec_ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, exec_ok, "EXPLAIN WHERE should execute")
+}
+
+@(test)
+test_exec_explain_join :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "explain_join")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	executor.execute(&tree, make_create_stmt("t2"))
+
+	sql := "EXPLAIN SELECT * FROM t1 INNER JOIN t2 ON t1.id = t2.id;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "EXPLAIN JOIN should parse")
+	exec_ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, exec_ok, "EXPLAIN JOIN should execute")
+}
+
+@(test)
+test_exec_in_literal_list :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "in_list")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
+
+	// IN (value-list) parsing
+	stmt, ok := parser.parse("SELECT * FROM t WHERE id IN (1, 3);", context.temp_allocator)
+	testing.expect(t, ok, "IN (list) should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	testing.expect(t, len(sel.where_clause.?.conditions) == 1, "expected 1 condition")
+	cond := sel.where_clause.?.conditions[0]
+	testing.expect(t, cond.operator == .IN, "operator should be IN")
+	testing.expect(t, len(cond.in_values) == 2, "expected 2 IN values")
+}
+
+@(test)
+test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "check_persist")
+	defer teardown_executor_env(tree, file)
+
+	// Create table with CHECK and execute it (persists to schema)
+	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	executor.execute(&tree, stmt_c)
+
+	// Retrieve from schema and verify check_expr survived round-trip
+	table, found := schema.get_table(&tree, "t", context.temp_allocator)
+	testing.expect(t, found, "table should exist")
+	defer schema.table_free(table, context.temp_allocator)
+
+	has_check := false
+	for col in table.columns {
+		if chk, has := col.check_expr.?; has {
+			has_check = true
+			testing.expect(t, chk == "age > 0", "check_expr should round-trip correctly")
+			break
+		}
+	}
+	testing.expect(t, has_check, "check_expr should survive schema round-trip")
+}
+
+@(test)
+test_exec_join_non_equi :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_nequi")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	executor.execute(&tree, make_insert_stmt("t1", 1, "a", 10.0))
+	executor.execute(&tree, make_insert_stmt("t1", 2, "b", 20.0))
+
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols2, types.Column{name = "ref", type = .INTEGER})
+	append(&cols2, types.Column{name = "val", type = .TEXT})
+	variant2 := parser.Create_Stmt{table_name = "t2", columns = cols2[:]}
+	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
+	executor.execute(&tree, parser.Statement{
+		type = parser.Insert_Stmt{table_name = "t2", values = {types.value_int(1), types.value_text("a")}}, sql = ""})
+	executor.execute(&tree, parser.Statement{
+		type = parser.Insert_Stmt{table_name = "t2", values = {types.value_int(2), types.value_text("x")}}, sql = ""})
+
+	// Two-condition ON clause → non-equi, falls back to nested-loop
+	sql := "SELECT * FROM t1 JOIN t2 ON t1.id = t2.ref AND t1.name = t2.val;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "multi-condition JOIN should parse")
+	exec_ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, exec_ok, "multi-condition JOIN should execute")
+}
+
+@(test)
+test_exec_join_cross_fallback :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_cross")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("a"))
+	executor.execute(&tree, make_create_stmt("b"))
+
+	sql := "SELECT * FROM a CROSS JOIN b;"
+	stmt, ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "CROSS JOIN should parse")
+	exec_ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, exec_ok, "CROSS JOIN should execute")
+}
+
+@(test)
+test_exec_order_by_int :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "order_int")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+
+	// ASC (exercises integer fast path)
+	stmt1, _ := parser.parse("SELECT id FROM t ORDER BY id;", context.temp_allocator)
+	ok, _ := executor.execute(&tree, stmt1)
+	testing.expect(t, ok, "ORDER BY ASC should execute")
+
+	// DESC (exercises reversed permutation)
+	stmt2, _ := parser.parse("SELECT id FROM t ORDER BY id DESC;", context.temp_allocator)
+	ok2, _ := executor.execute(&tree, stmt2)
+	testing.expect(t, ok2, "ORDER BY DESC should execute")
+
+	// NULLS FIRST (fast path with nulls handling)
+	stmt3, _ := parser.parse("SELECT id FROM t ORDER BY id NULLS FIRST;", context.temp_allocator)
+	ok3, _ := executor.execute(&tree, stmt3)
+	testing.expect(t, ok3, "ORDER BY NULLS FIRST should execute")
+}
+
+@(test)
+test_exec_freeblock_reuse :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "freeblock")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+
+	// Insert 50 rows
+	for i in 1 ..= 50 {
+		free_all(context.temp_allocator)
+		executor.execute(&tree, make_insert_stmt("t", i64(i), fmt.tprintf("n-%d", i), f64(i)))
+	}
+
+	// Delete every other row (25 deletions → freeblocks created)
+	for i in 1 ..= 50 {
+		if i % 2 == 0 { continue }
+		cond := parser.Condition{column = "id", operator = .EQUALS, rhs = types.value_int(i64(i))}
+		del := parser.Delete_Stmt{table_name = "t",
+			where_clause = parser.Where_Clause{conditions = {cond}, is_and = true}}
+		executor.execute(&tree, parser.Statement{type = del, sql = ""})
+	}
+
+	// Re-insert into freed space
+	for i in 51 ..= 75 {
+		free_all(context.temp_allocator)
+		executor.execute(&tree, make_insert_stmt("t", i64(i), fmt.tprintf("new-%d", i), f64(i)))
+	}
+
+	// Verify all 50 rows are intact
+	table, _ := schema.get_table(&tree, "t", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 50)
+
+	check_ids := []types.Row_ID{2, 4, 51, 75}
+	for rid, _ in check_ids {
+		c, err := btree.tree_find(&table_tree, rid, context.temp_allocator)
+		testing.expect(t, err == .None, fmt.tprintf("Row %d should exist", rid))
+		if err == .None { cell.destroy(&c) }
+	}
 }

@@ -236,7 +236,7 @@ deserialize_value_from_blob :: proc(
 	}
 }
 
-// Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b) + DefaultMarker(1b) + DefaultValue...]
+// Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b) + DefaultMarker(1b) + DefaultValue... + CheckLen(4b) + CheckBytes?]
 serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.allocator) -> []u8 {
 	size := 4
 	for col in columns {
@@ -257,6 +257,9 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 				size += 1 + 4 + len(v)
 			}
 		}
+		if chk, has_chk := col.check_expr.?; has_chk {
+			size += 4 + len(chk)
+		}
 	}
 
 	blob := make([]u8, size, allocator)
@@ -274,6 +277,7 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 		flags: u8 = 0
 		if col.not_null do flags |= 1
 		if col.pk do flags |= 2
+		if _, has_chk := col.check_expr.?; has_chk do flags |= 4
 
 		blob[offset] = flags
 		offset += 1
@@ -282,6 +286,12 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 			serialize_value_to_blob(blob, &offset, def)
 		} else {
 			blob[offset] = 0; offset += 1
+		}
+		if chk, has_chk := col.check_expr.?; has_chk {
+			utils.write_u32_le(blob, offset, u32(len(chk)))
+			offset += 4
+			copy(blob[offset:], chk)
+			offset += len(chk)
 		}
 	}
 	return blob
@@ -323,6 +333,14 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 			if !def_ok { return nil }
 			col.default_value = def_val
 		}
+		if (flags_byte & 4) != 0 {
+			if offset + 4 > len(blob) { return nil }
+			chk_len := (^u32le)(raw_data(blob[offset:]))^
+			offset += 4
+			if offset + int(chk_len) > len(blob) { return nil }
+			col.check_expr = strings.clone(string(blob[offset:offset + int(chk_len)]), allocator)
+			offset += int(chk_len)
+		}
 		append(&cols, col)
 	}
 	return cols[:]
@@ -335,6 +353,9 @@ table_free :: proc(table: types.Table, allocator := context.allocator) {
 		delete(col.name, allocator)
 		if def, ok := col.default_value.?; ok {
 			types.value_delete(def, allocator)
+		}
+		if chk, has := col.check_expr.?; has {
+			delete(chk, allocator)
 		}
 	}
 	delete(table.columns, allocator)

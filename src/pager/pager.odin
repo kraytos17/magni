@@ -11,7 +11,7 @@ Page :: struct {
 	data:      []u8,
 	page_num:  u32,
 	dirty:     bool,
-	pin_count: u8,
+	pin_count: u32,
 }
 
 Page_Slot :: struct {
@@ -29,6 +29,7 @@ Pager :: struct {
 	allocator:       mem.Allocator,
 	first_free_page: u32,
 	slot_count:      u32,
+	cache_index:     map[u32]^Page_Slot,
 }
 
 Error :: enum {
@@ -42,19 +43,8 @@ Error :: enum {
 }
 
 @(private = "file")
-slot_hash :: proc(page_num: u32) -> u32 {
-	return page_num % PAGE_CACHE_SIZE
-}
-
-@(private = "file")
 find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot {
-	start := slot_hash(page_num)
-	for i := u32(0); i < PAGE_CACHE_SIZE; i += 1 {
-		idx := (start + i) % PAGE_CACHE_SIZE
-		slot := &p.slots[idx]
-		if slot.page.page_num == page_num { return slot }
-	}
-	return nil
+	return p.cache_index[page_num]
 }
 
 @(private = "file")
@@ -95,6 +85,7 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 					return err
 				}
 			}
+			delete_key(&p.cache_index, slot.page.page_num)
 			slot.page.page_num = 0
 			slot.page.data = nil
 			p.slot_count -= 1
@@ -111,6 +102,7 @@ open :: proc(path: string, max_pages: u32 = 256, allocator := context.allocator)
 	p.allocator = allocator
 	p.page_size = types.PAGE_SIZE
 	p.max_cache_pages = min(max_pages, PAGE_CACHE_SIZE)
+	p.cache_index = make(map[u32]^Page_Slot, PAGE_CACHE_SIZE, allocator)
 
 	flags := os.O_RDWR | os.O_CREATE
 	file, open_err := os.open(path, flags)
@@ -142,6 +134,7 @@ close :: proc(p: ^Pager) -> Error {
 		os.close(p.file)
 	}
 
+	delete(p.cache_index)
 	free(p, p.allocator)
 	return flush_err
 }
@@ -178,6 +171,7 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	slot.page.page_num = page_num
 	slot.page.pin_count = 1
 	slot.page.dirty = false
+	p.cache_index[page_num] = slot
 	return &slot.page, .None
 }
 
@@ -198,6 +192,7 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 	slot.page.page_num = new_page_num
 	slot.page.pin_count = 1
 	slot.page.dirty = true
+	p.cache_index[new_page_num] = slot
 	p.file_len += i64(p.page_size)
 	return &slot.page, .None
 }
@@ -224,6 +219,7 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 		slot.page.page_num = new_page_num
 		slot.page.pin_count = 1
 		slot.page.dirty = true
+		p.cache_index[new_page_num] = slot
 		p.file_len += i64(p.page_size)
 		return &slot.page, .None
 	}
@@ -330,6 +326,7 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	slot.page.page_num = free_page_num
 	slot.page.pin_count = 1
 	slot.page.dirty = true
+	p.cache_index[free_page_num] = slot
 	return &slot.page, .None
 }
 
@@ -347,6 +344,7 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 		if err := flush_page_unsafe(p, &slot.page); err != nil {
 			return
 		}
+		delete_key(&p.cache_index, page_num)
 		slot.page.page_num = 0
 		slot.page.data = nil
 		p.slot_count -= 1

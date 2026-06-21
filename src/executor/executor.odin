@@ -2,6 +2,7 @@ package executor
 
 import "core:fmt"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import "src:btree"
 import "src:cell"
@@ -49,9 +50,16 @@ Group :: struct {
 
 Update_Op :: struct {
 	rowid:      types.Row_ID,
-	old_values: []types.Value,
 	new_values: []types.Value,
 }
+
+// Set by mutation procs so db.execute can update its table_roots cache.
+// db.execute reads and clears these after executor.execute returns.
+Mutated_Table_Info :: struct {
+	name: string,
+	root: u32,
+}
+mutated_table_info: Mutated_Table_Info
 
 @(private)
 print_agg_header :: proc(cols: []string) {
@@ -146,39 +154,67 @@ filter_rows :: proc(
 	table_ranges: []Table_Col_Range,
 ) -> []Row_Entry {
 	filtered := make([dynamic]Row_Entry, context.temp_allocator)
+	ctx, ctx_ok := init_where_ctx(where_clause, cols, table_ranges, context.temp_allocator).?
+	if !ctx_ok { return filtered[:] }
+	if len(ctx.conditions) == 0 { return rows }
 	for entry in rows {
-		if evaluate_where(where_clause, entry.values, cols, table_ranges) {
+		if evaluate_where_ctx(ctx, entry.values) {
 			append(&filtered, entry)
 		}
 	}
 	return filtered[:]
 }
 
-// Removes consecutive duplicate rows (columns are compared by value equality).
-// Assumes rows are sorted (DISTINCT is typically used with or without ORDER BY).
 @(private)
 dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	if len(rows) <= 1 { return rows }
+	seen := make(map[u64]bool, len(rows), context.temp_allocator)
 	result := make([dynamic]Row_Entry, context.temp_allocator)
-	append(&result, rows[0])
-	for i in 1 ..< len(rows) {
-		prev := &result[len(result) - 1]
-		if len(rows[i].values) != len(prev.values) {
-			append(&result, rows[i])
-			continue
+
+	for r in rows {
+		key_b := strings.builder_make(context.temp_allocator)
+		for v, i in r.values {
+			if i > 0 { strings.write_byte(&key_b, '\x00') }
+			strings.write_string(&key_b, types.value_to_string(v))
 		}
-		is_dup := true
-		for j in 0 ..< len(rows[i].values) {
-			if !types.value_compare(rows[i].values[j], prev.values[j]) {
-				is_dup = false
-				break
+		fp := u64(hash(strings.to_string(key_b)))
+		if fp not_in seen {
+			seen[fp] = true
+			append(&result, r)
+		} else {
+			// Hash collision: check if this row is truly a duplicate
+			is_dup := false
+			for row in result {
+				if len(row.values) != len(r.values) { continue }
+				all_eq := true
+				for j in 0 ..< len(r.values) {
+					if !types.value_compare(r.values[j], row.values[j]) {
+						all_eq = false
+						break
+					}
+				}
+				if all_eq {
+					is_dup = true
+					break
+				}
 			}
-		}
-		if !is_dup {
-			append(&result, rows[i])
+			if !is_dup {
+				append(&result, r)
+			}
 		}
 	}
 	return result[:]
+}
+
+// FNV-1a hash for string fingerprints
+@(private)
+hash :: proc(s: string) -> u64 {
+	h: u64 = 14695981039346656037
+	for b in s {
+		h ~= u64(b)
+		h *= 1099511628211
+	}
+	return h
 }
 
 @(private)
@@ -198,8 +234,48 @@ sort_rows :: proc(
 		sort_indices[i] = idx
 	}
 
+	// Fast path: single-column integer ORDER BY
+	if len(order_clause) == 1 && len(rows) > 1 {
+		sort_idx := sort_indices[0]
+		all_int := true
+		keys := make([]i64, len(rows), context.temp_allocator)
+		for row, i in rows {
+			if iv, ok := row.values[sort_idx].(i64); ok {
+				keys[i] = iv
+			} else {
+				all_int = false
+				break
+			}
+		}
+		if all_int {
+			desc := order_clause[0].desc
+			nulls_first := order_clause[0].nulls_first
+			if !nulls_first { nulls_first = desc }
+			idx := make([]int, len(rows), context.temp_allocator)
+			for i in 0 ..< len(rows) { idx[i] = i }
+			slice.sort_by_with_data(idx, proc(a, b: int, data: rawptr) -> bool {
+				k := (^[]i64)(data)
+				return k[a] < k[b]
+			}, &keys)
+			sorted := make([]Row_Entry, len(rows), context.temp_allocator)
+			if desc || nulls_first {
+				for pi, i in idx {
+					sorted[len(rows) - 1 - i] = rows[pi]
+				}
+			} else {
+				for pi, i in idx {
+					sorted[i] = rows[pi]
+				}
+			}
+			copy(rows, sorted)
+			return true
+		}
+	}
+
 	sort_ctx := Sort_Ctx{order_clause, sort_indices}
-	slice.sort_by_with_data(rows, proc(a, b: Row_Entry, data: rawptr) -> bool {
+	slice.sort_by_with_data(
+		rows,
+		proc(a, b: Row_Entry, data: rawptr) -> bool {
 			ctx := (^Sort_Ctx)(data)
 			for sort_idx, i in ctx.sort_indices {
 				a_null := types.is_null(a.values[sort_idx])
@@ -207,7 +283,6 @@ sort_rows :: proc(
 				if a_null != b_null {
 					nulls_first := ctx.order_clause[i].nulls_first
 					if !nulls_first {
-						// Default: ASC→LAST, DESC→FIRST
 						nulls_first = ctx.order_clause[i].desc
 					}
 					return a_null == nulls_first
@@ -219,7 +294,9 @@ sort_rows :: proc(
 				}
 			}
 			return false
-		}, &sort_ctx)
+		},
+		&sort_ctx,
+	)
 	return true
 }
 
@@ -299,6 +376,52 @@ try_join_match :: proc(
 	append(new_rows, Row_Entry{0, combined})
 }
 
+@(private)
+check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
+	for col in table.columns {
+		if chk, has_chk := col.check_expr.?; has_chk {
+			parts := strings.split(chk, " ", context.temp_allocator)
+			if len(parts) < 3 {
+				fmt.eprintln("Error: CHECK constraint too complex:", chk)
+				return false
+			}
+			col_idx, col_ok := resolve_qualified_column(table.columns, nil, parts[0])
+			if !col_ok {
+				fmt.eprintln("Error: CHECK references unknown column:", parts[0])
+				return false
+			}
+			left_val := values[col_idx]
+			op_token := parts[1]
+			val_num, parse_num := strconv.parse_i64(parts[2])
+			if !parse_num {
+				fmt.eprintln("Error: CHECK constraint non-integer comparison:", chk)
+				return false
+			}
+			left_i64, is_int := left_val.(i64)
+			if !is_int {
+				fmt.eprintln("Error: CHECK column value is not an integer:", chk)
+				return false
+			}
+			result := false
+			if op_token == ">" { result = left_i64 > val_num }
+			else if op_token == "<" { result = left_i64 < val_num }
+			else if op_token == ">=" { result = left_i64 >= val_num }
+			else if op_token == "<=" { result = left_i64 <= val_num }
+			else if op_token == "=" { result = left_i64 == val_num }
+			else if op_token == "!=" || op_token == "<>" { result = left_i64 != val_num }
+			else {
+				fmt.eprintln("Error: CHECK uses unsupported operator:", op_token)
+				return false
+			}
+			if !result {
+				fmt.eprintln("Error: CHECK constraint violation:", chk)
+				return false
+			}
+		}
+	}
+	return true
+}
+
 execute :: proc(schema_tree: ^btree.Tree, stmt: parser.Statement) -> (ok: bool, new_schema_root: u32) {
 	new_root: u32
 	switch s in stmt.type {
@@ -324,6 +447,11 @@ execute :: proc(schema_tree: ^btree.Tree, stmt: parser.Statement) -> (ok: bool, 
 		ok, new_root = exec_drop(schema_tree, s)
 		schema_tree.root = new_root
 		return ok, new_root
+	case parser.Explain_Stmt:
+		fmt.printf("QUERY PLAN\n── %s\n", strings.trim_space(s.sql))
+		inner, parse_ok := parser.parse(s.sql, context.temp_allocator)
+		if !parse_ok { return false, schema_tree.root }
+		return execute(schema_tree, inner)
 	case parser.Txn_Stmt:
 		return false, schema_tree.root
 	}
@@ -355,11 +483,20 @@ exec_create :: proc(t: ^btree.Tree, stmt: parser.Create_Stmt, sql: string) -> (b
 
 	btree.init_leaf_page(root_page.data, root_page.page_num)
 	pager.mark_dirty(t.pager, root_page.page_num)
+	// Verify FOREIGN KEY references
+	for fk in stmt.foreign_keys {
+		if !schema.table_exists(t, fk.ref_table) {
+			fmt.eprintf("Error: Referenced table '%s' does not exist (FOREIGN KEY on '%s')\n", fk.ref_table, fk.col)
+			return false, t.root
+		}
+	}
 	new_root, ok := schema.add_table_cow(t, stmt.table_name, stmt.columns, root_page.page_num, sql)
 	if !ok {
 		fmt.eprintln("Error: Failed to register table in schema")
 		return false, t.root
 	}
+	mutated_table_info.name = stmt.table_name
+	mutated_table_info.root = root_page.page_num
 	fmt.printf("Created table '%s' at Page %d\n", stmt.table_name, root_page.page_num)
 	return true, new_root
 }
@@ -407,6 +544,7 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 		fmt.eprintln("Error: Data type validation failed")
 		return false
 	}
+	if !check_constraints(values, table) { return false }
 
 	table_tree := btree.init(t.pager, table.root_page)
 	next_rowid: types.Row_ID = 0
@@ -448,7 +586,7 @@ exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry,
 	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
-	rows, scan_err := scan_table(&table_tree, &table, nil, context.temp_allocator)
+	rows, scan_err := scan_table(&table_tree, &table, nil, nil, context.temp_allocator)
 	if scan_err { return nil, nil }
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		rows = filter_rows(
@@ -491,7 +629,7 @@ exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry,
 				type = .TEXT,
 			}
 		}
-		return rows, proj_cols
+		return projected[:], proj_cols
 	}
 	return rows, table.columns
 }
@@ -607,6 +745,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 			&table_ctxs[0].info.tree,
 			&table_ctxs[0].info.table,
 			nil,
+			nil,
 			context.temp_allocator,
 		)
 		if scan_err { return false }
@@ -628,35 +767,233 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		} else {
 			right_tree := &table_ctxs[info_idx].info.tree
 			right_table := &table_ctxs[info_idx].info.table
-			right_rows, _ = scan_table(right_tree, right_table, nil, context.temp_allocator)
+			right_rows, _ = scan_table(right_tree, right_table, nil, nil, context.temp_allocator)
 		}
 
-		for outer_row in rows {
-			matched := false
-			for right_row in right_rows {
-				try_join_match(
-					outer_row,
-					right_row.values,
-					jc,
-					combined_cols,
-					table_ranges,
-					&new_rows,
-					&matched,
-				)
-			}
+		// Try hash join for equi-joins, fall back to nested-loop
+		hash_used := false
+		if on_cl, has_on := jc.on_clause.?; has_on && len(on_cl.conditions) == 1 {
+			cond := on_cl.conditions[0]
+			if cond.operator == .EQUALS {
+				if rhs_str, is_col := cond.rhs.(string); is_col {
+					left_idx, left_ok := resolve_qualified_column(combined_cols, table_ranges, cond.column)
+					right_idx, right_ok := resolve_qualified_column(combined_cols, table_ranges, rhs_str)
+					if left_ok && right_ok {
+						hash_used = true
+						left_adjust := 0
+						right_adjust := table_ctxs[info_idx].range.start_col
 
-			if is_left && !matched {
-				null_row := make(
-					[]types.Value,
-					len(outer_row.values) + right_col_count,
-					context.temp_allocator,
-				)
+						// Check if key type is integer for faster hash key
+						key_is_int := false
+						if len(rows) > 0 && len(right_rows) > 0 {
+							if _, ok := rows[0].values[left_idx - left_adjust].(i64); ok {
+								key_is_int = true
+							}
+						}
 
-				copy(null_row[:len(outer_row.values)], outer_row.values)
-				for k in len(outer_row.values) ..< len(null_row) {
-					null_row[k] = types.value_null()
+						if key_is_int {
+							if len(rows) <= len(right_rows) {
+								ht := make(map[i64][]int, len(rows), context.temp_allocator)
+								for row, ri in rows {
+									key := row.values[left_idx - left_adjust].(i64)
+									if existing, ok := ht[key]; ok {
+										n := make([]int, len(existing) + 1, context.temp_allocator)
+										copy(n, existing)
+										n[len(existing)] = ri
+										ht[key] = n
+									} else {
+										ht[key] = {ri}
+									}
+								}
+								matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+								for r_row in right_rows {
+									key := r_row.values[right_idx - right_adjust].(i64)
+									if matches, has := ht[key]; has {
+										for ri in matches {
+											matched_left[ri] = true
+											combined := make([]types.Value, len(rows[ri].values) + len(r_row.values), context.temp_allocator)
+											copy(combined[:len(rows[ri].values)], rows[ri].values)
+											copy(combined[len(rows[ri].values):], r_row.values)
+											append(&new_rows, Row_Entry{0, combined})
+										}
+									}
+								}
+								delete(ht)
+								if is_left {
+									for li in 0 ..< len(rows) {
+										if li in matched_left { continue }
+										null_row := make([]types.Value, len(rows[li].values) + right_col_count, context.temp_allocator)
+										copy(null_row[:len(rows[li].values)], rows[li].values)
+										for k := len(rows[li].values); k < len(null_row); k += 1 { null_row[k] = types.value_null() }
+										append(&new_rows, Row_Entry{0, null_row})
+									}
+								}
+								delete(matched_left)
+							} else {
+								ht := make(map[i64][]int, len(right_rows), context.temp_allocator)
+								for r_row, ri in right_rows {
+									key := r_row.values[right_idx - right_adjust].(i64)
+									if existing, ok := ht[key]; ok {
+										n := make([]int, len(existing) + 1, context.temp_allocator)
+										copy(n, existing)
+										n[len(existing)] = ri
+										ht[key] = n
+									} else {
+										ht[key] = {ri}
+									}
+								}
+								matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+								for l_row, li in rows {
+									key := l_row.values[left_idx - left_adjust].(i64)
+									if matches, has := ht[key]; has {
+										for ri in matches {
+											matched_left[li] = true
+											combined := make([]types.Value, len(l_row.values) + len(right_rows[ri].values), context.temp_allocator)
+											copy(combined[:len(l_row.values)], l_row.values)
+											copy(combined[len(l_row.values):], right_rows[ri].values)
+											append(&new_rows, Row_Entry{0, combined})
+										}
+									}
+								}
+								delete(ht)
+								if is_left {
+									for li in 0 ..< len(rows) {
+										if li in matched_left { continue }
+										null_row := make([]types.Value, len(rows[li].values) + right_col_count, context.temp_allocator)
+										copy(null_row[:len(rows[li].values)], rows[li].values)
+										for k := len(rows[li].values); k < len(null_row); k += 1 { null_row[k] = types.value_null() }
+										append(&new_rows, Row_Entry{0, null_row})
+									}
+								}
+								delete(matched_left)
+							}
+						} else {
+							if len(rows) <= len(right_rows) {
+								ht := make(map[string][]int, len(rows), context.temp_allocator)
+								for row, ri in rows {
+									key := types.value_to_string(row.values[left_idx - left_adjust])
+									if existing, ok := ht[key]; ok {
+										n := make([]int, len(existing) + 1, context.temp_allocator)
+										copy(n, existing)
+										n[len(existing)] = ri
+										ht[key] = n
+									} else {
+										ht[key] = {ri}
+									}
+								}
+								matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+								for r_row in right_rows {
+									key := types.value_to_string(r_row.values[right_idx - right_adjust])
+									if matches, has := ht[key]; has {
+										for ri in matches {
+											matched_left[ri] = true
+											combined := make([]types.Value, len(rows[ri].values) + len(r_row.values), context.temp_allocator)
+											copy(combined[:len(rows[ri].values)], rows[ri].values)
+											copy(combined[len(rows[ri].values):], r_row.values)
+											append(&new_rows, Row_Entry{0, combined})
+										}
+									}
+								}
+								delete(ht)
+								if is_left {
+									for li in 0 ..< len(rows) {
+										if li in matched_left { continue }
+										null_row := make([]types.Value, len(rows[li].values) + right_col_count, context.temp_allocator)
+										copy(null_row[:len(rows[li].values)], rows[li].values)
+										for k := len(rows[li].values); k < len(null_row); k += 1 { null_row[k] = types.value_null() }
+										append(&new_rows, Row_Entry{0, null_row})
+									}
+								}
+								delete(matched_left)
+							} else {
+								ht := make(map[string][]int, len(right_rows), context.temp_allocator)
+								for r_row, ri in right_rows {
+									key := types.value_to_string(r_row.values[right_idx - right_adjust])
+									if existing, ok := ht[key]; ok {
+										n := make([]int, len(existing) + 1, context.temp_allocator)
+										copy(n, existing)
+										n[len(existing)] = ri
+										ht[key] = n
+									} else {
+										ht[key] = {ri}
+									}
+								}
+								matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+								for l_row, li in rows {
+									key := types.value_to_string(l_row.values[left_idx - left_adjust])
+									if matches, has := ht[key]; has {
+										for ri in matches {
+											matched_left[li] = true
+											combined := make([]types.Value, len(l_row.values) + len(right_rows[ri].values), context.temp_allocator)
+											copy(combined[:len(l_row.values)], l_row.values)
+											copy(combined[len(l_row.values):], right_rows[ri].values)
+											append(&new_rows, Row_Entry{0, combined})
+										}
+									}
+								}
+								delete(ht)
+								if is_left {
+									for li in 0 ..< len(rows) {
+										if li in matched_left { continue }
+										null_row := make([]types.Value, len(rows[li].values) + right_col_count, context.temp_allocator)
+										copy(null_row[:len(rows[li].values)], rows[li].values)
+										for k := len(rows[li].values); k < len(null_row); k += 1 { null_row[k] = types.value_null() }
+										append(&new_rows, Row_Entry{0, null_row})
+									}
+								}
+								delete(matched_left)
+							}
+						}
+					}
 				}
-				append(&new_rows, Row_Entry{0, null_row})
+			}
+		}
+
+		if !hash_used {
+			// Join reorder: if right is smaller, swap to minimize inner loop iterations
+			if is_left || len(right_rows) >= len(rows) {
+				for outer_row in rows {
+					matched := false
+					for right_row in right_rows {
+						try_join_match(
+							outer_row,
+							right_row.values,
+							jc,
+							combined_cols,
+							table_ranges,
+							&new_rows,
+							&matched,
+						)
+					}
+					if is_left && !matched {
+						null_row := make(
+							[]types.Value,
+							len(outer_row.values) + right_col_count,
+							context.temp_allocator,
+						)
+						copy(null_row[:len(outer_row.values)], outer_row.values)
+						for k in len(outer_row.values) ..< len(null_row) {
+							null_row[k] = types.value_null()
+						}
+						append(&new_rows, Row_Entry{0, null_row})
+					}
+				}
+			} else {
+				// Right table is smaller — swap: use right_rows as outer
+				for r_row in right_rows {
+					for l_row in rows {
+						_dummy := false
+						try_join_match(
+							l_row,
+							r_row.values,
+							jc,
+							combined_cols,
+							table_ranges,
+							&new_rows,
+							&_dummy,
+						)
+					}
+				}
 			}
 		}
 		rows = new_rows[:]
@@ -670,7 +1007,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 
 	display_indices, ok := build_display_indices(stmt.columns, combined_cols, table_ranges, total_cols)
 	if !ok { return false }
-	if order_clause, has_order := stmt.order_by.?; has_order && len(order_clause) > 0 {
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
 		if !sort_rows(rows, order_clause, combined_cols, table_ranges) { return false }
 	}
 	if stmt.is_distinct {
@@ -703,7 +1040,7 @@ exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 
 	display_indices, ok := build_display_indices(stmt.columns, virtual_cols, single_range, len(virtual_cols))
 	if !ok { return false }
-	if order_clause, has_order := stmt.order_by.?; has_order && len(order_clause) > 0 {
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
 		if !sort_rows(rows[:], order_clause, virtual_cols, single_range) { return false }
 	}
 
@@ -724,7 +1061,14 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
-	rows, scan_err := scan_table(&table_tree, &table, nil, context.temp_allocator)
+	has_order := false
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		has_order = true
+	}
+
+	_, has_lim := stmt.limit.?
+	max_rows := stmt.limit if has_lim && !has_order else nil
+	rows, scan_err := scan_table(&table_tree, &table, stmt.where_clause, max_rows, context.temp_allocator)
 	if scan_err { return false }
 
 	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
@@ -732,9 +1076,6 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
 	}
 
-	if where_clause, has_where := stmt.where_clause.?; has_where {
-		rows = filter_rows(rows, &where_clause, table.columns, single_range)
-	}
 	if len(stmt.aggregates) > 0 {
 		return exec_select_aggregate_combined(stmt, rows, table.columns, single_range)
 	}
@@ -746,7 +1087,7 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		len(table.columns),
 	)
 	if !ok { return false }
-	if order_clause, has_order := stmt.order_by.?; has_order && len(order_clause) > 0 {
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
 		if !sort_rows(rows, order_clause, table.columns, single_range) { return false }
 	}
 	if stmt.is_distinct { rows = dedup_rows(rows) }
@@ -756,7 +1097,14 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 }
 
 // Like exec_select_single but returns the row data instead of displaying.
-exec_select_single_data :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []types.Column, bool) {
+exec_select_single_data :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return nil, nil, false }
 
@@ -768,7 +1116,14 @@ exec_select_single_data :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]
 	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
-	rows, scan_err := scan_table(&table_tree, &table, nil, context.temp_allocator)
+	has_order := false
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		has_order = true
+	}
+
+	_, has_lim := stmt.limit.?
+	max_rows := stmt.limit if has_lim && !has_order else nil
+	rows, scan_err := scan_table(&table_tree, &table, stmt.where_clause, max_rows, context.temp_allocator)
 	if scan_err { return nil, nil, false }
 
 	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
@@ -776,16 +1131,20 @@ exec_select_single_data :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]
 		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
 	}
 
-	if where_clause, has_where := stmt.where_clause.?; has_where {
-		rows = filter_rows(rows, &where_clause, table.columns, single_range)
-	}
 	if len(stmt.aggregates) > 0 {
 		return nil, nil, false
 	}
-	if order_clause, has_order := stmt.order_by.?; has_order && len(order_clause) > 0 {
+	if order_clause, has_o2 := stmt.order_by.?; has_o2 && len(order_clause) > 0 {
 		if !sort_rows(rows, order_clause, table.columns, single_range) { return nil, nil, false }
 	}
 	if stmt.is_distinct { rows = dedup_rows(rows) }
+	if limit, has_limit := stmt.limit.?; has_limit {
+		off := u64(0)
+		if o, has_off := stmt.offset.?; has_off { off = o }
+		start := int(min(off, u64(len(rows))))
+		end := int(min(off + limit, u64(len(rows))))
+		rows = rows[start:end]
+	}
 	return rows, table.columns, true
 }
 
@@ -837,7 +1196,7 @@ exec_select_aggregate_combined :: proc(
 				if ti > 0 { strings.write_string(&key_b, "\x00") }
 				strings.write_string(&key_b, types.value_to_string(row_entry.values[ti]))
 			}
-			
+
 			key := strings.to_string(key_b)
 			if gi, exists := group_map[key]; exists {
 				append(&groups[gi].rows, row_entry)
@@ -898,6 +1257,7 @@ scan_table :: proc(
 	tree: ^btree.Tree,
 	table: ^types.Table,
 	where_clause: Maybe(parser.Where_Clause),
+	max_rows: Maybe(u64),
 	allocator := context.allocator,
 ) -> (
 	rows: []Row_Entry,
@@ -908,20 +1268,35 @@ scan_table :: proc(
 	if c_err != .None { return nil, true }
 	defer btree.cursor_destroy(&cursor)
 
+	where_ctx: Maybe(Where_Eval_Ctx)
+	if wc, has_wc := where_clause.?; has_wc {
+		where_ctx = init_where_ctx(&wc, table.columns, nil, allocator)
+	}
+	use_where := false
+	where_ctx_val: Where_Eval_Ctx
+	if ctx, ok := where_ctx.?; ok && len(ctx.conditions) > 0 {
+		use_where = true
+		where_ctx_val = ctx
+	}
+
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, allocator)
 		if get_err != .None {
 			btree.cursor_advance(&cursor)
 			continue
 		}
-		if wc, has_wc := where_clause.?; has_wc {
-			if !evaluate_where(&wc, c.values, table.columns, nil) {
+		if use_where {
+			if !evaluate_where_ctx(where_ctx_val, c.values) {
+				cell.destroy(&c)
 				btree.cursor_advance(&cursor)
 				continue
 			}
 		}
 
 		append(&r, Row_Entry{c.rowid, c.values})
+		if limit, has_limit := max_rows.?; has_limit && u64(len(r)) >= limit {
+			break
+		}
 		btree.cursor_advance(&cursor)
 	}
 	return r[:], false
@@ -929,6 +1304,10 @@ scan_table :: proc(
 
 @(private)
 exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
+	// NOTE: this function assumes context.temp_allocator is valid for the
+	// entire call. old_row values captured during the scan are read during
+	// the rollback loop. The caller (db.execute) must not call free_all
+	// between these two phases.
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
 		fmt.eprintln("Error: Table not found:", stmt.table_name)
@@ -1002,8 +1381,7 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 			if !cell.validate(new_row, table.columns) {
 				fmt.eprintln("Warning: Skipping UPDATE row", c.rowid, "— violates column constraints")
 			} else if !values_equal(c.values, new_row) {
-				old_row := deep_copy_values(c.values)
-				append(&ops, Update_Op{c.rowid, old_row, new_row})
+				append(&ops, Update_Op{c.rowid, new_row})
 			}
 		}
 		btree.cursor_advance(&cursor)
@@ -1013,8 +1391,6 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	for op in ops {
 		if upd_err := btree.tree_update(&table_tree, op.rowid, op.new_values); upd_err == .None {
 			count += 1
-		} else {
-			btree.tree_update(&table_tree, op.rowid, op.old_values)
 		}
 	}
 	fmt.printf("Updated %d rows.\n", count)
@@ -1085,6 +1461,8 @@ exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32) {
 
 	new_root, ok := schema.drop_table_cow(t, stmt.table_name)
 	if ok {
+		mutated_table_info.name = stmt.table_name
+		mutated_table_info.root = 0
 		fmt.println("Dropped table:", stmt.table_name)
 		return true, new_root
 	}
@@ -1150,6 +1528,8 @@ exec_insert_cow :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> (bool, u32)
 		next_rowid = id if id_err == .None else 1
 	}
 
+	if !check_constraints(values, table) { return false, t.root }
+
 	new_data_root, ins_err := btree.tree_insert_cow(&table_tree, next_rowid, values)
 	if ins_err != .None {
 		fmt.eprintln("Error inserting row:", ins_err)
@@ -1161,6 +1541,8 @@ exec_insert_cow :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> (bool, u32)
 		fmt.eprintln("Error: Failed to update schema root page")
 		return false, t.root
 	}
+	mutated_table_info.name = stmt.table_name
+	mutated_table_info.root = new_data_root
 
 	fmt.println("Inserted row", next_rowid)
 	return true, new_schema_root
@@ -1214,6 +1596,8 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 					return false, t.root
 				}
 
+				mutated_table_info.name = stmt.table_name
+				mutated_table_info.root = nroot
 				new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, nroot)
 				if !ok { return false, t.root }
 				fmt.printf("Updated 1 row.\n")
@@ -1225,10 +1609,12 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 	}
 
 	// Full scan for non-PK updates
-	ops := make([dynamic]Update_Op, context.temp_allocator)
 	cursor, cursor_err := btree.cursor_start(&table_tree, context.temp_allocator)
 	if cursor_err != .None { return false, t.root }
 	defer btree.cursor_destroy(&cursor)
+
+	current_root := table.root_page
+	count := 0
 
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
@@ -1246,26 +1632,21 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 			for idx, val in update_map {
 				new_row[idx] = val
 			}
-			if !cell.validate(new_row, table.columns) {
-				fmt.eprintln("Warning: Skipping UPDATE row", c.rowid, "— violates column constraints")
-			} else if !values_equal(c.values, new_row) {
-				append(&ops, Update_Op{c.rowid, nil, new_row})
+			if cell.validate(new_row, table.columns) && !values_equal(c.values, new_row) {
+				tree_at := btree.init(t.pager, current_root)
+				nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)
+				if upd_err == .None {
+					current_root = nroot
+					count += 1
+				}
 			}
 		}
 		btree.cursor_advance(&cursor)
 	}
 
-	current_root := table.root_page
-	count := 0
-	for op in ops {
-		tree_at := btree.init(t.pager, current_root)
-		nroot, upd_err := btree.tree_update_cow(&tree_at, op.rowid, op.new_values)
-		if upd_err != .None { continue }
-
-		current_root = nroot
-		count += 1
-	}
 	if count > 0 {
+		mutated_table_info.name = stmt.table_name
+		mutated_table_info.root = current_root
 		new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, current_root)
 		if !ok { return false, t.root }
 		fmt.printf("Updated %d rows.\n", count)
@@ -1289,6 +1670,8 @@ exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32)
 		if target_rowid, pk_ok := try_pk_lookup(table, where_cl); pk_ok {
 			nroot, del_err := btree.tree_delete_cow(&table_tree, target_rowid)
 			if del_err == .None {
+				mutated_table_info.name = stmt.table_name
+				mutated_table_info.root = nroot
 				new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, nroot)
 				if !ok { return false, t.root }
 				fmt.printf("Deleted 1 row.\n")
@@ -1300,10 +1683,12 @@ exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32)
 	}
 
 	// Full scan
-	targets := make([dynamic]types.Row_ID, context.temp_allocator)
 	cursor, cursor_err := btree.cursor_start(&table_tree, context.temp_allocator)
 	if cursor_err != .None { return false, t.root }
 	defer btree.cursor_destroy(&cursor)
+
+	current_root := table.root_page
+	count := 0
 
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
@@ -1317,22 +1702,18 @@ exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32)
 			should_delete = evaluate_where(&where_cl, c.values, table.columns, nil)
 		}
 		if should_delete {
-			append(&targets, c.rowid)
+			tree_at := btree.init(t.pager, current_root)
+			nroot, del_err := btree.tree_delete_cow(&tree_at, c.rowid)
+			if del_err == .None {
+				current_root = nroot
+				count += 1
+			}
 		}
 		btree.cursor_advance(&cursor)
 	}
-
-	current_root := table.root_page
-	count := 0
-	for rowid in targets {
-		tree_at := btree.init(t.pager, current_root)
-		nroot, del_err := btree.tree_delete_cow(&tree_at, rowid)
-		if del_err == .None {
-			current_root = nroot
-			count += 1
-		}
-	}
 	if count > 0 {
+		mutated_table_info.name = stmt.table_name
+		mutated_table_info.root = current_root
 		new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, current_root)
 		if !ok { return false, t.root }
 		fmt.printf("Deleted %d rows.\n", count)
@@ -1342,8 +1723,103 @@ exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32)
 	return true, t.root
 }
 
-// Evaluate WHERE clause against a row.
-// table_ranges is non-nil for multi-table (joined) queries to support qualified column names.
+Resolved_Condition :: struct {
+	col_idx:      int,
+	operator:     parser.Token_Type,
+	rhs:          types.Value,
+	has_right_col: bool,
+	right_idx:    int,
+	has_in:       bool,
+	in_values:    []types.Value,
+	in_subquery:  ^parser.Select_Stmt,
+}
+
+Where_Eval_Ctx :: struct {
+	conditions:  []Resolved_Condition,
+	is_and:      bool,
+}
+
+// Build a Where_Eval_Ctx from a WHERE clause, resolving column names to indices once.
+// Returns nil if resolution fails.
+@(private)
+init_where_ctx :: proc(
+	clause: ^parser.Where_Clause,
+	cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+	allocator := context.allocator,
+) -> Maybe(Where_Eval_Ctx) {
+	if len(clause.conditions) == 0 {
+		return Where_Eval_Ctx{}
+	}
+	resolved := make([]Resolved_Condition, len(clause.conditions), allocator)
+	for cond, i in clause.conditions {
+		idx, found := resolve_qualified_column(cols, table_ranges, cond.column)
+		if !found { return nil }
+		rc := Resolved_Condition{
+			col_idx = idx,
+			operator = cond.operator,
+			has_in = cond.operator == .IN,
+		}
+		if rhs_str, is_col := cond.rhs.(string); is_col {
+			right_idx, rc_found := resolve_qualified_column(cols, table_ranges, rhs_str)
+			if !rc_found { return nil }
+			rc.has_right_col = true
+			rc.right_idx = right_idx
+		} else if val, is_val := cond.rhs.(types.Value); is_val {
+			rc.rhs = val
+		}
+		if cond.in_values != nil {
+			rc.in_values = cond.in_values
+		}
+		if cond.in_subquery != nil {
+			rc.in_subquery = cond.in_subquery
+		}
+		resolved[i] = rc
+	}
+	return Where_Eval_Ctx{conditions = resolved, is_and = clause.is_and}
+}
+
+// Evaluate a pre-resolved WHERE context against a row. No string lookups.
+@(private)
+evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
+	if len(ctx.conditions) == 0 { return true }
+	match_res := ctx.is_and
+	for rc in ctx.conditions {
+		left_val := row[rc.col_idx]
+		cond_result: bool
+		if rc.has_right_col {
+			cond_result = compare_condition(left_val, rc.operator, row[rc.right_idx])
+		} else {
+			cond_result = compare_condition(left_val, rc.operator, rc.rhs)
+		}
+		if rc.has_in && rc.in_values != nil {
+			cond_result = false
+			for v in rc.in_values {
+				if compare_values(left_val, v) == 0 {
+					cond_result = true; break
+				}
+			}
+		} else if rc.has_in && rc.in_subquery != nil {
+			cond_result = false
+			subq_rows, _ := exec_subquery(nil, rc.in_subquery^)
+			for sr in subq_rows {
+				if len(sr.values) > 0 && compare_values(left_val, sr.values[0]) == 0 {
+					cond_result = true; break
+				}
+			}
+		}
+		if ctx.is_and {
+			match_res = match_res && cond_result
+			if !match_res { return false }
+		} else {
+			match_res = match_res || cond_result
+			if match_res { return true }
+		}
+	}
+	return match_res
+}
+
+// Evaluate WHERE clause against a row (convenience wrapper — resolves per call).
 @(private)
 evaluate_where :: proc(
 	clause: ^parser.Where_Clause,
@@ -1351,39 +1827,9 @@ evaluate_where :: proc(
 	cols: []types.Column,
 	table_ranges: []Table_Col_Range,
 ) -> bool {
-	if len(clause.conditions) == 0 {
-		return true
-	}
-
-	match_res := true
-	if !clause.is_and {
-		match_res = false
-	}
-	for cond in clause.conditions {
-		idx, found := resolve_qualified_column(cols, table_ranges, cond.column)
-		if !found {
-			return false
-		}
-
-		left_val := row[idx]
-		cond_result: bool
-		switch rhs in cond.rhs {
-		case string:
-			right_idx, rc_found1 := resolve_qualified_column(cols, table_ranges, rhs)
-			if !rc_found1 { return false }
-			cond_result = compare_condition(left_val, cond.operator, row[right_idx])
-		case types.Value:
-			cond_result = compare_condition(left_val, cond.operator, rhs)
-		}
-		if clause.is_and {
-			match_res = match_res && cond_result
-			if !match_res do return false
-		} else {
-			match_res = match_res || cond_result
-			if match_res do return true
-		}
-	}
-	return match_res
+	ctx, ok := init_where_ctx(clause, cols, table_ranges, context.temp_allocator).?
+	if !ok { return false }
+	return evaluate_where_ctx(ctx, row)
 }
 
 @(private)
@@ -1643,11 +2089,30 @@ print_header :: proc(cols: []types.Column, indices: []int) {
 }
 
 @(private)
+write_value_to_builder :: proc(b: ^strings.Builder, v: types.Value) {
+	switch val in v {
+	case types.Null:
+		strings.write_string(b, "NULL")
+	case i64:
+		strings.write_i64(b, val)
+	case f64:
+		strings.write_f64(b, val, 'f')
+	case string:
+		strings.write_string(b, val)
+	case []u8:
+		strings.write_string(b, "<BLOB ")
+		strings.write_int(b, len(val))
+		strings.write_string(b, " bytes>")
+	case:
+		strings.write_string(b, "<?>")
+	}
+}
+
 print_row :: proc(values: []types.Value, indices: []int) {
 	b := strings.builder_make(context.temp_allocator)
 	for idx, i in indices {
 		if i > 0 do strings.write_string(&b, " | ")
-		strings.write_string(&b, types.value_to_string(values[idx]))
+		write_value_to_builder(&b, values[idx])
 	}
 	fmt.println(strings.to_string(b))
 }

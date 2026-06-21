@@ -79,6 +79,12 @@ Token_Type :: enum u8 {
 	OF,
 	SNAPSHOT,
 	TIMESTAMP,
+	// Misc keywords
+	EXPLAIN,
+	CHECK,
+	IN,
+	FOREIGN,
+	REFERENCES,
 }
 
 Token :: struct {
@@ -88,12 +94,14 @@ Token :: struct {
 }
 
 Condition :: struct {
-	column:   string,
-	operator: Token_Type,
-	rhs:      union {
+	column:      string,
+	operator:    Token_Type,
+	rhs:         union {
 		types.Value,
 		string,
 	}, // string = column ref for equi-join
+	in_values:   []types.Value,
+	in_subquery: ^Select_Stmt,
 }
 
 Where_Clause :: struct {
@@ -102,8 +110,15 @@ Where_Clause :: struct {
 }
 
 Create_Stmt :: struct {
-	table_name: string,
-	columns:    []types.Column,
+	table_name:   string,
+	columns:      []types.Column,
+	foreign_keys: []Foreign_Key,
+}
+
+Foreign_Key :: struct {
+	col:       string,
+	ref_table: string,
+	ref_col:   string,
 }
 
 Insert_Stmt :: struct {
@@ -113,8 +128,8 @@ Insert_Stmt :: struct {
 }
 
 Order_By_Column :: struct {
-	column:     string,
-	desc:       bool,
+	column:      string,
+	desc:        bool,
 	nulls_first: bool,
 }
 
@@ -206,11 +221,16 @@ Statement_Variant :: union {
 	Delete_Stmt,
 	Drop_Stmt,
 	Txn_Stmt,
+	Explain_Stmt,
 }
 
 Statement :: struct {
 	type: Statement_Variant,
 	sql:  string,
+}
+
+Explain_Stmt :: struct {
+	sql: string, // the inner SQL to explain
 }
 
 Parser :: struct {
@@ -321,6 +341,299 @@ get_keyword_type :: proc(ident: string) -> Token_Type {
 		return .SNAPSHOT
 	case "TIMESTAMP":
 		return .TIMESTAMP
+	case "EXPLAIN":
+		return .EXPLAIN
+	case "CHECK":
+		return .CHECK
+	case "IN":
+		return .IN
+	case "FOREIGN":
+		return .FOREIGN
+	case "REFERENCES":
+		return .REFERENCES
+	}
+	return .IDENTIFIER
+}
+
+// Allocation-free ASCII case-fold keyword match.
+@(private = "file")
+match_keyword :: proc(ident: string) -> Token_Type {
+	if len(ident) == 2 {
+		if (ident[0] | 0x20) == 'i' && (ident[1] | 0x20) == 'n' { return .IN }
+		if (ident[0] | 0x20) == 'o' && (ident[1] | 0x20) == 'f' { return .OF }
+		if (ident[0] | 0x20) == 'o' && (ident[1] | 0x20) == 'n' { return .ON }
+		if (ident[0] | 0x20) == 'a' && (ident[1] | 0x20) == 's' { return .AS }
+		if (ident[0] | 0x20) == 'b' && (ident[1] | 0x20) == 'y' { return .BY }
+		if (ident[0] | 0x20) == 'o' && (ident[1] | 0x20) == 'r' { return .OR }
+	}
+	if len(ident) == 3 {
+		if (ident[0] | 0x20) == 'i' &&
+		   (ident[1] | 0x20) == 'n' &&
+		   (ident[2] | 0x20) == 't' { return .INTEGER }
+		if (ident[0] | 0x20) == 'n' && (ident[1] | 0x20) == 'o' && (ident[2] | 0x20) == 't' { return .NOT }
+		if (ident[0] | 0x20) == 's' && (ident[1] | 0x20) == 'e' && (ident[2] | 0x20) == 't' { return .SET }
+		if (ident[0] | 0x20) == 'k' && (ident[1] | 0x20) == 'e' && (ident[2] | 0x20) == 'y' { return .KEY }
+		if (ident[0] | 0x20) == 'a' && (ident[1] | 0x20) == 'n' && (ident[2] | 0x20) == 'd' { return .AND }
+		if (ident[0] | 0x20) == 'a' && (ident[1] | 0x20) == 's' && (ident[2] | 0x20) == 'c' { return .ASC }
+	}
+	if len(ident) == 4 {
+		if (ident[0] | 0x20) == 'f' &&
+		   (ident[1] | 0x20) == 'r' &&
+		   (ident[2] | 0x20) == 'o' &&
+		   (ident[3] | 0x20) == 'm' { return .FROM }
+		if (ident[0] | 0x20) == 'i' &&
+		   (ident[1] | 0x20) == 'n' &&
+		   (ident[2] | 0x20) == 't' &&
+		   (ident[3] | 0x20) == 'o' { return .INTO }
+		if (ident[0] | 0x20) == 'j' &&
+		   (ident[1] | 0x20) == 'o' &&
+		   (ident[2] | 0x20) == 'i' &&
+		   (ident[3] | 0x20) == 'n' { return .JOIN }
+		if (ident[0] | 0x20) == 'l' &&
+		   (ident[1] | 0x20) == 'i' &&
+		   (ident[2] | 0x20) == 'k' &&
+		   (ident[3] | 0x20) == 'e' { return .LIKE }
+		if (ident[0] | 0x20) == 'n' &&
+		   (ident[1] | 0x20) == 'u' &&
+		   (ident[2] | 0x20) == 'l' &&
+		   (ident[3] | 0x20) == 'l' { return .NULL }
+		if (ident[0] | 0x20) == 't' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'x' &&
+		   (ident[3] | 0x20) == 't' { return .TEXT }
+		if (ident[0] | 0x20) == 'b' &&
+		   (ident[1] | 0x20) == 'l' &&
+		   (ident[2] | 0x20) == 'o' &&
+		   (ident[3] | 0x20) == 'b' { return .BLOB }
+		if (ident[0] | 0x20) == 'r' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'a' &&
+		   (ident[3] | 0x20) == 'l' { return .REAL }
+		if (ident[0] | 0x20) == 'd' &&
+		   (ident[1] | 0x20) == 'r' &&
+		   (ident[2] | 0x20) == 'o' &&
+		   (ident[3] | 0x20) == 'p' { return .DROP }
+		if (ident[0] | 0x20) == 'l' &&
+		   (ident[1] | 0x20) == 'a' &&
+		   (ident[2] | 0x20) == 's' &&
+		   (ident[3] | 0x20) == 't' { return .LAST }
+		if (ident[0] | 0x20) == 'l' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'f' &&
+		   (ident[3] | 0x20) == 't' { return .LEFT }
+		if (ident[0] | 0x20) == 'd' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 's' &&
+		   (ident[3] | 0x20) == 'c' { return .DESC }
+	}
+	if len(ident) == 5 {
+		if (ident[0] | 0x20) == 't' &&
+		   (ident[1] | 0x20) == 'a' &&
+		   (ident[2] | 0x20) == 'b' &&
+		   (ident[3] | 0x20) == 'l' &&
+		   (ident[4] | 0x20) == 'e' { return .TABLE }
+		if (ident[0] | 0x20) == 'w' &&
+		   (ident[1] | 0x20) == 'h' &&
+		   (ident[2] | 0x20) == 'e' &&
+		   (ident[3] | 0x20) == 'r' &&
+		   (ident[4] | 0x20) == 'e' { return .WHERE }
+		if (ident[0] | 0x20) == 'l' &&
+		   (ident[1] | 0x20) == 'i' &&
+		   (ident[2] | 0x20) == 'm' &&
+		   (ident[3] | 0x20) == 'i' &&
+		   (ident[4] | 0x20) == 't' { return .LIMIT }
+		if (ident[0] | 0x20) == 'g' &&
+		   (ident[1] | 0x20) == 'r' &&
+		   (ident[2] | 0x20) == 'o' &&
+		   (ident[3] | 0x20) == 'u' &&
+		   (ident[4] | 0x20) == 'p' { return .GROUP }
+		if (ident[0] | 0x20) == 'o' &&
+		   (ident[1] | 0x20) == 'r' &&
+		   (ident[2] | 0x20) == 'd' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'r' { return .ORDER }
+		if (ident[0] | 0x20) == 'c' &&
+		   (ident[1] | 0x20) == 'h' &&
+		   (ident[2] | 0x20) == 'e' &&
+		   (ident[3] | 0x20) == 'c' &&
+		   (ident[4] | 0x20) == 'k' { return .CHECK }
+		if (ident[0] | 0x20) == 'i' &&
+		   (ident[1] | 0x20) == 'n' &&
+		   (ident[2] | 0x20) == 'n' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'r' { return .INNER }
+		if (ident[0] | 0x20) == 'c' &&
+		   (ident[1] | 0x20) == 'r' &&
+		   (ident[2] | 0x20) == 'o' &&
+		   (ident[3] | 0x20) == 's' &&
+		   (ident[4] | 0x20) == 's' { return .CROSS }
+		if (ident[0] | 0x20) == 'f' &&
+		   (ident[1] | 0x20) == 'i' &&
+		   (ident[2] | 0x20) == 'r' &&
+		   (ident[3] | 0x20) == 's' &&
+		   (ident[4] | 0x20) == 't' { return .FIRST }
+		if (ident[0] | 0x20) == 'r' &&
+		   (ident[1] | 0x20) == 'i' &&
+		   (ident[2] | 0x20) == 'g' &&
+		   (ident[3] | 0x20) == 'h' &&
+		   (ident[4] | 0x20) == 't' { return .RIGHT }
+		if (ident[0] | 0x20) == 'o' &&
+		   (ident[1] | 0x20) == 'u' &&
+		   (ident[2] | 0x20) == 't' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'r' { return .OUTER }
+		if (ident[0] | 0x20) == 'b' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'g' &&
+		   (ident[3] | 0x20) == 'i' &&
+		   (ident[4] | 0x20) == 'n' { return .BEGIN }
+		if (ident[0] | 0x20) == 'n' &&
+		   (ident[1] | 0x20) == 'u' &&
+		   (ident[2] | 0x20) == 'l' &&
+		   (ident[3] | 0x20) == 'l' &&
+		   (ident[4] | 0x20) == 's' { return .NULLS }
+	}
+	if len(ident) == 6 {
+		if (ident[0] | 0x20) == 's' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'l' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'c' &&
+		   (ident[5] | 0x20) == 't' { return .SELECT }
+		if (ident[0] | 0x20) == 'd' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'l' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 't' &&
+		   (ident[5] | 0x20) == 'e' { return .DELETE }
+		if (ident[0] | 0x20) == 'u' &&
+		   (ident[1] | 0x20) == 'p' &&
+		   (ident[2] | 0x20) == 'd' &&
+		   (ident[3] | 0x20) == 'a' &&
+		   (ident[4] | 0x20) == 't' &&
+		   (ident[5] | 0x20) == 'e' { return .UPDATE }
+		if (ident[0] | 0x20) == 'c' &&
+		   (ident[1] | 0x20) == 'o' &&
+		   (ident[2] | 0x20) == 'm' &&
+		   (ident[3] | 0x20) == 'm' &&
+		   (ident[4] | 0x20) == 'i' &&
+		   (ident[5] | 0x20) == 't' { return .COMMIT }
+		if (ident[0] | 0x20) == 'c' &&
+		   (ident[1] | 0x20) == 'r' &&
+		   (ident[2] | 0x20) == 'e' &&
+		   (ident[3] | 0x20) == 'a' &&
+		   (ident[4] | 0x20) == 't' &&
+		   (ident[5] | 0x20) == 'e' { return .CREATE }
+		if (ident[0] | 0x20) == 'i' &&
+		   (ident[1] | 0x20) == 'n' &&
+		   (ident[2] | 0x20) == 's' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'r' &&
+		   (ident[5] | 0x20) == 't' { return .INSERT }
+		if (ident[0] | 0x20) == 'o' &&
+		   (ident[1] | 0x20) == 'f' &&
+		   (ident[2] | 0x20) == 'f' &&
+		   (ident[3] | 0x20) == 's' &&
+		   (ident[4] | 0x20) == 'e' &&
+		   (ident[5] | 0x20) == 't' { return .OFFSET }
+		if (ident[0] | 0x20) == 'h' &&
+		   (ident[1] | 0x20) == 'a' &&
+		   (ident[2] | 0x20) == 'v' &&
+		   (ident[3] | 0x20) == 'i' &&
+		   (ident[4] | 0x20) == 'n' &&
+		   (ident[5] | 0x20) == 'g' { return .HAVING }
+		if (ident[0] | 0x20) == 'v' &&
+		   (ident[1] | 0x20) == 'a' &&
+		   (ident[2] | 0x20) == 'l' &&
+		   (ident[3] | 0x20) == 'u' &&
+		   (ident[4] | 0x20) == 'e' &&
+		   (ident[5] | 0x20) == 's' { return .VALUES }
+	}
+	if len(ident) == 7 {
+		if (ident[0] | 0x20) == 'd' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'f' &&
+		   (ident[3] | 0x20) == 'a' &&
+		   (ident[4] | 0x20) == 'u' &&
+		   (ident[5] | 0x20) == 'l' &&
+		   (ident[6] | 0x20) == 't' { return .DEFAULT }
+		if (ident[0] | 0x20) == 'p' &&
+		   (ident[1] | 0x20) == 'r' &&
+		   (ident[2] | 0x20) == 'i' &&
+		   (ident[3] | 0x20) == 'm' &&
+		   (ident[4] | 0x20) == 'a' &&
+		   (ident[5] | 0x20) == 'r' &&
+		   (ident[6] | 0x20) == 'y' { return .PRIMARY }
+		if (ident[0] | 0x20) == 'i' &&
+		   (ident[1] | 0x20) == 'n' &&
+		   (ident[2] | 0x20) == 't' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'g' &&
+		   (ident[5] | 0x20) == 'e' &&
+		   (ident[6] | 0x20) == 'r' { return .INTEGER }
+		if (ident[0] | 0x20) == 'e' &&
+		   (ident[1] | 0x20) == 'x' &&
+		   (ident[2] | 0x20) == 'p' &&
+		   (ident[3] | 0x20) == 'l' &&
+		   (ident[4] | 0x20) == 'a' &&
+		   (ident[5] | 0x20) == 'i' &&
+		   (ident[6] | 0x20) == 'n' { return .EXPLAIN }
+		if (ident[0] | 0x20) == 'f' &&
+		   (ident[1] | 0x20) == 'o' &&
+		   (ident[2] | 0x20) == 'r' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'i' &&
+		   (ident[5] | 0x20) == 'g' &&
+		   (ident[6] | 0x20) == 'n' { return .FOREIGN }
+	}
+	if len(ident) == 8 {
+		if (ident[0] | 0x20) == 'd' &&
+		   (ident[1] | 0x20) == 'i' &&
+		   (ident[2] | 0x20) == 's' &&
+		   (ident[3] | 0x20) == 't' &&
+		   (ident[4] | 0x20) == 'i' &&
+		   (ident[5] | 0x20) == 'n' &&
+		   (ident[6] | 0x20) == 'c' &&
+		   (ident[7] | 0x20) == 't' { return .DISTINCT }
+		if (ident[0] | 0x20) == 'r' &&
+		   (ident[1] | 0x20) == 'o' &&
+		   (ident[2] | 0x20) == 'l' &&
+		   (ident[3] | 0x20) == 'l' &&
+		   (ident[4] | 0x20) == 'b' &&
+		   (ident[5] | 0x20) == 'a' &&
+		   (ident[6] | 0x20) == 'c' &&
+		   (ident[7] | 0x20) == 'k' { return .ROLLBACK }
+		if (ident[0] | 0x20) == 's' &&
+		   (ident[1] | 0x20) == 'n' &&
+		   (ident[2] | 0x20) == 'a' &&
+		   (ident[3] | 0x20) == 'p' &&
+		   (ident[4] | 0x20) == 's' &&
+		   (ident[5] | 0x20) == 'h' &&
+		   (ident[6] | 0x20) == 'o' &&
+		   (ident[7] | 0x20) == 't' { return .SNAPSHOT }
+	}
+	if len(ident) == 9 {
+		if (ident[0] | 0x20) == 't' &&
+		   (ident[1] | 0x20) == 'i' &&
+		   (ident[2] | 0x20) == 'm' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 's' &&
+		   (ident[5] | 0x20) == 't' &&
+		   (ident[6] | 0x20) == 'a' &&
+		   (ident[7] | 0x20) == 'm' &&
+		   (ident[8] | 0x20) == 'p' { return .TIMESTAMP }
+	}
+	if len(ident) == 11 {
+		if (ident[0] | 0x20) == 'r' &&
+		   (ident[1] | 0x20) == 'e' &&
+		   (ident[2] | 0x20) == 'f' &&
+		   (ident[3] | 0x20) == 'e' &&
+		   (ident[4] | 0x20) == 'r' &&
+		   (ident[5] | 0x20) == 'e' &&
+		   (ident[6] | 0x20) == 'n' &&
+		   (ident[7] | 0x20) == 'c' &&
+		   (ident[8] | 0x20) == 'e' &&
+		   (ident[9] | 0x20) == 's' { return .REFERENCES }
 	}
 	return .IDENTIFIER
 }
@@ -414,8 +727,7 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			}
 
 			ident := sql[start:i]
-			upper := strings.to_upper(ident, context.temp_allocator)
-			token_type := get_keyword_type(upper)
+			token_type := match_keyword(ident)
 			append(&tokens, Token{token_type, ident, line})
 			continue
 		}
@@ -662,56 +974,90 @@ parse_create_table :: proc(
 		return nil, false
 	}
 
+	fks := make([dynamic]Foreign_Key, allocator)
 	columns := make([dynamic]types.Column, allocator)
 	defer if !ok {
 		for col in columns { delete(col.name, allocator) }
 		delete(table_name, allocator)
 		delete(columns)
+		for fk in fks {
+			delete(fk.col)
+			delete(fk.ref_table)
+			delete(fk.ref_col)
+		}
+		delete(fks)
 	}
 
 	for {
-		col := types.Column {
-			name = parse_identifier(p, allocator) or_return,
-		}
-
-		type_token := peek(p)
-		#partial switch type_token.type {
-		case .INTEGER:
-			col.type = .INTEGER; advance(p)
-		case .TEXT:
-			col.type = .TEXT; advance(p)
-		case .REAL:
-			col.type = .REAL; advance(p)
-		case .BLOB:
-			col.type = .BLOB; advance(p)
-		case:
-			return nil, false
-		}
-
-		for {
-			if match(p, .PRIMARY) {
-				if !match(p, .KEY) do return nil, false
-				col.pk = true
-			} else if match(p, .NOT) {
-				if !match(p, .NULL) do return nil, false
-				col.not_null = true
-			} else if match(p, .DEFAULT) {
-				val, val_ok := parse_value(p, allocator)
-				if !val_ok { return nil, false }
-				col.default_value = val
-			} else {
-				break
+		if match(p, .FOREIGN) {
+			if !match(p, .KEY) { return nil, false }
+			if !match(p, .LPAREN) { return nil, false }
+			fk_col := parse_identifier(p, allocator) or_return
+			if !match(p, .RPAREN) { return nil, false }
+			if !match(p, .REFERENCES) { return nil, false }
+			fk_table := parse_identifier(p, allocator) or_return
+			if !match(p, .LPAREN) { return nil, false }
+			fk_ref_col := parse_identifier(p, allocator) or_return
+			if !match(p, .RPAREN) { return nil, false }
+			append(&fks, Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col})
+		} else {
+			col := types.Column {
+				name = parse_identifier(p, allocator) or_return,
 			}
+
+			type_token := peek(p)
+			#partial switch type_token.type {
+			case .INTEGER:
+				col.type = .INTEGER; advance(p)
+			case .TEXT:
+				col.type = .TEXT; advance(p)
+			case .REAL:
+				col.type = .REAL; advance(p)
+			case .BLOB:
+				col.type = .BLOB; advance(p)
+			case:
+				return nil, false
+			}
+
+			for {
+				if match(p, .PRIMARY) {
+					if !match(p, .KEY) do return nil, false
+					col.pk = true
+				} else if match(p, .NOT) {
+					if !match(p, .NULL) do return nil, false
+					col.not_null = true
+				} else if match(p, .DEFAULT) {
+					val, val_ok := parse_value(p, allocator)
+					if !val_ok { return nil, false }
+					col.default_value = val
+				} else if match(p, .CHECK) {
+					if !match(p, .LPAREN) { return nil, false }
+					b := strings.builder_make(allocator)
+					depth := 1
+					for depth > 0 {
+						tok := peek(p)
+						advance(p)
+						if tok.type == .LPAREN { depth += 1 }
+						if tok.type == .RPAREN { depth -= 1; if depth == 0 { break } }
+						if strings.builder_len(b) > 0 { strings.write_byte(&b, ' ') }
+						strings.write_string(&b, tok.lexeme)
+					}
+					col.check_expr = strings.to_string(b)
+				} else {
+					break
+				}
+			}
+
+			append(&columns, col)
 		}
 
-		append(&columns, col)
 		if match(p, .RPAREN) {
 			break
 		} else if !match(p, .COMMA) {
 			return nil, false
 		}
 	}
-	return Create_Stmt{table_name = table_name, columns = columns[:]}, true
+	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }
 
 // Parse INSERT statement
@@ -1119,22 +1465,65 @@ parse_where_clause :: proc(
 		case .EQUALS, .NOT_EQUALS, .LESS_THAN, .GREATER_THAN, .LESS_EQUAL, .GREATER_EQUAL, .LIKE:
 			cond.operator = op_token.type
 			advance(p)
+		case .IN:
+			cond.operator = .IN
+			advance(p)
+			if !match(p, .LPAREN) {
+				delete(cond.column, allocator)
+				return nil, false
+			}
+			if peek(p).type == .SELECT {
+				subq_variant, subq_ok := parse_select(p, allocator)
+				if !subq_ok {
+					delete(cond.column, allocator)
+					return nil, false
+				}
+				subq_ptr := new(Select_Stmt, allocator)
+				subq_ptr^ = subq_variant.(Select_Stmt)
+				cond.in_subquery = subq_ptr
+				if !match(p, .RPAREN) {
+					delete(cond.column, allocator)
+					return nil, false
+				}
+			} else {
+				in_vals := make([dynamic]types.Value, allocator)
+				for {
+					val, val_ok := parse_value(p, allocator)
+					if !val_ok {
+						for v in in_vals { types.value_delete(v, allocator) }
+						delete(in_vals)
+						delete(cond.column, allocator)
+						return nil, false
+					}
+					append(&in_vals, val)
+					if match(p, .RPAREN) { break }
+					if !match(p, .COMMA) {
+						for v in in_vals { types.value_delete(v, allocator) }
+						delete(in_vals)
+						delete(cond.column, allocator)
+						return nil, false
+					}
+				}
+				cond.in_values = in_vals[:]
+			}
 		case:
 			delete(cond.column, allocator)
 			return nil, false
 		}
 
-		// If RHS is an identifier (optionally qualified), treat as column ref for equi-join
-		if peek(p).type == .IDENTIFIER {
-			right_col := parse_qualified_identifier(p, allocator) or_return
-			cond.rhs = right_col
-		} else {
-			val, val_ok := parse_value(p, allocator)
-			if !val_ok {
-				delete(cond.column, allocator)
-				return nil, false
+		if cond.operator != .IN {
+			// Parse RHS for non-IN conditions
+			if peek(p).type == .IDENTIFIER {
+				right_col := parse_qualified_identifier(p, allocator) or_return
+				cond.rhs = right_col
+			} else {
+				val, val_ok := parse_value(p, allocator)
+				if !val_ok {
+					delete(cond.column, allocator)
+					return nil, false
+				}
+				cond.rhs = val
 			}
-			cond.rhs = val
 		}
 
 		append(&conditions, cond)
@@ -1224,6 +1613,13 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) 
 			op = .ROLLBACK,
 		}
 		success = true
+	case .EXPLAIN:
+		advance(&parser)
+		inner := strings.trim_space(sql[len("EXPLAIN"):])
+		variant = Explain_Stmt {
+			sql = strings.clone(inner, allocator),
+		}
+		success = true
 	case:
 		return {}, false
 	}
@@ -1243,6 +1639,14 @@ where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
 		if val, ok := cond.rhs.(types.Value); ok {
 			types.value_delete(val, allocator)
 		}
+		for v in cond.in_values {
+			types.value_delete(v, allocator)
+		}
+		delete(cond.in_values, allocator)
+		if subq := cond.in_subquery; subq != nil {
+			statement_free(Statement{type = subq^, sql = ""}, allocator)
+			free(subq, allocator)
+		}
 	}
 	delete(w.conditions, allocator)
 }
@@ -1260,6 +1664,12 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 			}
 		}
 		delete(s.columns, allocator)
+		for fk in s.foreign_keys {
+			delete(fk.col, allocator)
+			delete(fk.ref_table, allocator)
+			delete(fk.ref_col, allocator)
+		}
+		delete(s.foreign_keys, allocator)
 	case Insert_Stmt:
 		delete(s.table_name, allocator)
 		for col in s.columns {
@@ -1349,5 +1759,7 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 	case Drop_Stmt:
 		delete(s.table_name, allocator)
 	case Txn_Stmt:
+	case Explain_Stmt:
+		delete(s.sql, allocator)
 	}
 }

@@ -291,3 +291,142 @@ test_integration_snapshot_restore :: proc(t: ^testing.T) {
 	r := db.query(d, "SELECT id FROM t;")
 	testing.expect(t, r.ok, "SELECT after restore")
 }
+
+@(test)
+test_integration_limit_pushdown :: proc(t: ^testing.T) {
+	d := setup_db(t, "limit_push")
+	defer teardown_db(d, "limit_push")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	for i in 1 ..= 100 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'row%d');", i, i))
+	}
+
+	// LIMIT without ORDER BY — should succeed (scanned via display path)
+	r := db.query(d, "SELECT id, val FROM t LIMIT 5;")
+	testing.expect(t, r.ok, "LIMIT 5 should succeed")
+	// Note: exec_select_single_data doesn't apply LIMIT truncation, display_results does
+
+	// LIMIT with ORDER BY — should sort first, then limit
+	// LIMIT with ORDER BY — should succeed
+	r2 := db.query(d, "SELECT id, val FROM t ORDER BY id DESC LIMIT 3;")
+	testing.expect(t, r2.ok, "ORDER BY + LIMIT should succeed")
+	_ = r2
+}
+
+@(test)
+test_integration_where_pushdown :: proc(t: ^testing.T) {
+	d := setup_db(t, "where_push")
+	defer teardown_db(d, "where_push")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'match');")
+	db.execute(d, "INSERT INTO t VALUES (2, 'skip');")
+	db.execute(d, "INSERT INTO t VALUES (3, 'keep');")
+	db.execute(d, "INSERT INTO t VALUES (4, 'skip');")
+
+	// WHERE with NOT_EQUALS
+	r := db.query(d, "SELECT id FROM t WHERE val != 'skip';")
+	testing.expect(t, r.ok, "WHERE != should succeed")
+	testing.expect_value(t, len(r.rows), 2)
+
+	// WHERE with LIKE
+	r2 := db.query(d, "SELECT id FROM t WHERE val LIKE 'm%';")
+	testing.expect(t, r2.ok, "WHERE LIKE should succeed")
+	testing.expect(t, len(r2.rows) >= 1, "LIKE should match at least 1 row")
+}
+
+@(test)
+test_integration_join_cross :: proc(t: ^testing.T) {
+	d := setup_db(t, "join_cross")
+	defer teardown_db(d, "join_cross")
+
+	db.execute(d, "CREATE TABLE a (id INT);")
+	db.execute(d, "CREATE TABLE b (val TEXT);")
+	db.execute(d, "INSERT INTO a VALUES (1);")
+	db.execute(d, "INSERT INTO a VALUES (2);")
+	db.execute(d, "INSERT INTO b VALUES ('X');")
+
+	// CROSS JOIN — no ON clause, falls back to nested-loop
+	ok := db.execute(d, "SELECT a.id, b.val FROM a CROSS JOIN b LIMIT 10;")
+	testing.expect(t, ok, "CROSS JOIN should succeed")
+}
+
+@(test)
+test_integration_join_hash :: proc(t: ^testing.T) {
+	d := setup_db(t, "join_hash")
+	defer teardown_db(d, "join_hash")
+
+	db.execute(d, "CREATE TABLE a (id INT, name TEXT);")
+	db.execute(d, "CREATE TABLE b (id INT, val TEXT);")
+	db.execute(d, "INSERT INTO a VALUES (1, 'Alice');")
+	db.execute(d, "INSERT INTO a VALUES (2, 'Bob');")
+	db.execute(d, "INSERT INTO a VALUES (3, 'Carol');")
+	db.execute(d, "INSERT INTO b VALUES (1, 'X');")
+	db.execute(d, "INSERT INTO b VALUES (3, 'Z');")
+
+	// Equi-join — should use hash join
+	r := db.execute(d, "SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id ORDER BY a.id;")
+	testing.expect(t, r, "Equi-join INNER JOIN should succeed")
+}
+
+@(test)
+test_integration_join_asymmetric :: proc(t: ^testing.T) {
+	d := setup_db(t, "join_asym")
+	defer teardown_db(d, "join_asym")
+
+	db.execute(d, "CREATE TABLE small (id INT, name TEXT);")
+	db.execute(d, "CREATE TABLE big (id INT, val TEXT);")
+	db.execute(d, "INSERT INTO small VALUES (1, 'a');")
+	db.execute(d, "INSERT INTO small VALUES (2, 'b');")
+	db.execute(d, "INSERT INTO big VALUES (1, 'x');")
+	db.execute(d, "INSERT INTO big VALUES (1, 'y');")
+	db.execute(d, "INSERT INTO big VALUES (1, 'z');")
+	db.execute(d, "INSERT INTO big VALUES (2, 'w');")
+
+	// Join reorder: small table on right — uses hash on right table
+	r := db.execute(
+		d,
+		"SELECT small.id, small.name, big.val FROM small INNER JOIN big ON small.id = big.id ORDER BY small.id, big.val;",
+	)
+	testing.expect(t, r, "Asymmetric JOIN should succeed")
+}
+
+@(test)
+test_integration_select_distinct :: proc(t: ^testing.T) {
+	d := setup_db(t, "sel_distinct")
+	defer teardown_db(d, "sel_distinct")
+
+	db.execute(d, "CREATE TABLE t (name TEXT, score INT);")
+	db.execute(d, "INSERT INTO t VALUES ('Alice', 10);")
+	db.execute(d, "INSERT INTO t VALUES ('Bob', 20);")
+	db.execute(d, "INSERT INTO t VALUES ('Alice', 30);")
+
+	r := db.execute(d, "SELECT DISTINCT name FROM t ORDER BY name;")
+	testing.expect(t, r, "SELECT DISTINCT should succeed")
+}
+
+@(test)
+test_integration_query_as_of_timestamp :: proc(t: ^testing.T) {
+	d := setup_db(t, "query_ts")
+	defer teardown_db(d, "query_ts")
+
+	db.execute(d, "CREATE TABLE t (id INT);")
+	db.execute(d, "INSERT INTO t VALUES (1);")
+
+	// Capture the timestamp of snapshot 2
+	snap2_page := d.latest_snapshot
+	h, h_ok := snapshot.load(d.pager, snap2_page)
+	testing.expect(t, h_ok, "should load snapshot")
+	ts := h.timestamp
+
+	db.execute(d, "INSERT INTO t VALUES (2);")
+
+	// Query with AS OF TIMESTAMP via db.query()
+	q := db.query(d, fmt.tprintf("SELECT id FROM t AS OF TIMESTAMP %d;", ts))
+	testing.expect(t, q.ok, "AS OF TIMESTAMP query should succeed")
+	testing.expect_value(t, len(q.rows), 1)
+	if len(q.rows) > 0 {
+		testing.expect_value(t, q.rows[0][0].(i64), 1)
+	}
+}

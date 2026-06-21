@@ -10,10 +10,14 @@ Cursor_Stack_Item :: struct {
 }
 
 Cursor :: struct {
-	tree:     ^Tree,
-	path:     [32]Cursor_Stack_Item,
-	depth:    u8,
-	is_valid: bool,
+	tree:              ^Tree,
+	path:              [32]Cursor_Stack_Item,
+	depth:             u8,
+	is_valid:          bool,
+	cached_page_id:    u32,
+	cached_page_data:  []u8,
+	cached_cell_count: u16,
+	cached_is_leaf:    bool,
 }
 
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
@@ -43,7 +47,11 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	return .None
 }
 
-cursor_destroy :: proc(c: ^Cursor) {  }
+cursor_destroy :: proc(c: ^Cursor) {
+	if c.cached_page_id != 0 {
+		pager.unpin_page(c.tree.pager, c.cached_page_id)
+	}
+}
 
 cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error) {
 	c := Cursor {
@@ -72,18 +80,50 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error
 	return c, .None
 }
 
+// Loads a node, caching the page in the cursor to avoid repeated loads.
+// The page stays pinned until the cursor moves to a different page or is destroyed.
+load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
+	if page_id == c.cached_page_id {
+		return node_from_bytes(page_id, c.cached_page_data)
+	}
+	if c.cached_page_id != 0 {
+		pager.unpin_page(c.tree.pager, c.cached_page_id)
+	}
+
+	page, err := pager.get_page(c.tree.pager, page_id)
+	if err != nil { return {}, .Page_Read_Failed }
+	c.cached_page_id = page_id
+	c.cached_page_data = page.data
+	n, n_err := node_from_bytes(page_id, page.data)
+	if n_err != .None { return {}, n_err }
+	c.cached_cell_count = u16(n.header.cell_count)
+	c.cached_is_leaf = is_leaf(n)
+	return n, .None
+}
+
 cursor_advance :: proc(c: ^Cursor) -> Error {
 	if !c.is_valid || c.depth == 0 {
 		return .None
 	}
-	for c.depth > 0 {
-		top_idx := c.depth - 1
-		item := &c.path[top_idx]
-		node, err := load_node(c.tree, item.page_id)
-		if err != .None {
-			return err
+
+	// Leaf fast path: use cached cell count to avoid load_cached_page
+	top_idx := c.depth - 1
+	item := &c.path[top_idx]
+	if c.cached_is_leaf {
+		item.cell_index += 1
+		if int(item.cell_index) < int(c.cached_cell_count) {
+			return .None
 		}
-		defer pager.unpin_page(c.tree.pager, node.id)
+		c.depth -= 1
+		if c.depth == 0 { c.is_valid = false; return .None }
+		// Fall through to walk up the stack
+	}
+
+	for c.depth > 0 {
+		top_idx = c.depth - 1
+		item = &c.path[top_idx]
+		node, err := load_cached_page(c, item.page_id)
+		if err != .None { return err }
 
 		item.cell_index += 1
 		limit := int(node.header.cell_count)
@@ -117,12 +157,10 @@ cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cel
 	}
 
 	item := c.path[c.depth - 1]
-	node, err := load_node(c.tree, item.page_id)
+	node, err := load_cached_page(c, item.page_id)
 	if err != .None {
 		return {}, err
 	}
-	defer pager.unpin_page(c.tree.pager, node.id)
-
 	if !is_leaf(node) {
 		return {}, .Invalid_Page_Header
 	}
