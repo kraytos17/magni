@@ -7,7 +7,6 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-@(private)
 resolve_qualified_column :: proc(
 	combined_cols: []types.Column,
 	table_ranges: []Table_Col_Range,
@@ -36,7 +35,6 @@ resolve_qualified_column :: proc(
 	return schema.find_column_index(combined_cols, name)
 }
 
-@(private)
 try_pk_lookup :: proc(table: types.Table, clause: parser.Where_Clause) -> (rowid: types.Row_ID, ok: bool) {
 	if len(clause.conditions) != 1 { return }
 	if !clause.is_and { return }
@@ -50,7 +48,6 @@ try_pk_lookup :: proc(table: types.Table, clause: parser.Where_Clause) -> (rowid
 	return types.Row_ID(val), true
 }
 
-@(private)
 values_equal :: proc(a, b: []types.Value) -> bool {
 	if len(a) != len(b) { return false }
 	for v, i in a {
@@ -59,7 +56,6 @@ values_equal :: proc(a, b: []types.Value) -> bool {
 	return true
 }
 
-@(private)
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	new_values := make([]types.Value, len(values), context.temp_allocator)
 	for v, i in values {
@@ -68,7 +64,6 @@ deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	return new_values
 }
 
-@(private)
 try_join_match :: proc(
 	outer_row: Row_Entry,
 	inner_values: []types.Value,
@@ -91,7 +86,6 @@ try_join_match :: proc(
 	append(new_rows, Row_Entry{0, combined})
 }
 
-@(private)
 check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 	for col in table.columns {
 		if chk, has_chk := col.check_expr.?; has_chk {
@@ -137,7 +131,6 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 	return true
 }
 
-@(private)
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	if types.is_null(a) && types.is_null(b) do return 0
 	if types.is_null(a) do return -1

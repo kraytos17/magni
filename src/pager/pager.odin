@@ -34,10 +34,8 @@ Pager :: struct {
 
 Error :: enum { None, File_Open_Failed, IO_Error, Out_Of_Memory, Cache_Full, Page_Not_Found, Invalid_Page_Num }
 
-@(private)
 find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return p.cache_index[page_num] }
 
-@(private)
 find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 	if p.slot_count >= p.max_cache_pages { if err := evict_one_slot(p); err != .None { return nil } }
 	for i in 0 ..< PAGE_CACHE_SIZE {
@@ -52,7 +50,6 @@ find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 	return nil
 }
 
-@(private)
 evict_one_slot :: proc(p: ^Pager) -> Error {
 	for i in 0 ..< PAGE_CACHE_SIZE {
 		slot := &p.slots[i]
@@ -173,7 +170,6 @@ page_in_cache :: proc(p: ^Pager, page_num: u32) -> bool {
 	return find_slot(p, page_num) != nil
 }
 
-@(private)
 flush_page_unsafe :: proc(p: ^Pager, page: ^Page) -> Error {
 	if !page.dirty { return .None }
 	_, err := os.write_at(p.file, page.data, i64(page.page_num - 1) * i64(p.page_size))

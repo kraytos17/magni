@@ -81,7 +81,6 @@ get_tag :: proc(p: ^pager.Pager, snapshot_page: u32) -> string {
 	return string(data[:length])
 }
 
-@(private)
 walk_chain :: proc(p: ^pager.Pager, start_page: u32, data: rawptr, callback: proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool) {
 	page := start_page
 	for page != 0 {

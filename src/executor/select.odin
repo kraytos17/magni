@@ -8,7 +8,6 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-@(private)
 exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []types.Column) {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return nil, nil }
@@ -50,7 +49,6 @@ exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry,
 	return rows, table.columns
 }
 
-@(private)
 exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	_, is_subq := stmt.from.(^parser.Select_Stmt)
 	if is_subq { return exec_select_subquery(t, stmt) }
@@ -225,7 +223,6 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	return true
 }
 
-@(private)
 exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	subq, subq_ok := stmt.from.(^parser.Select_Stmt)
 	if !subq_ok { return false }
@@ -251,7 +248,6 @@ exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	return true
 }
 
-@(private)
 exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return false }
@@ -326,7 +322,6 @@ exec_query :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []
 	return nil, nil, ok
 }
 
-@(private)
 exec_select_aggregate_combined :: proc(
 	stmt: parser.Select_Stmt,
 	rows: []Row_Entry,
@@ -391,7 +386,6 @@ exec_select_aggregate_combined :: proc(
 	return true
 }
 
-@(private)
 scan_table :: proc(
 	tree: ^btree.Tree,
 	table: ^types.Table,
@@ -421,7 +415,7 @@ scan_table :: proc(
 		if get_err != .None { btree.cursor_advance(&cursor); continue }
 		if use_where {
 			if !evaluate_where_ctx(where_ctx_val, c.values) {
-				cell.destroy(&c); btree.cursor_advance(&cursor); continue
+			cell.destroy(&c, allocator); btree.cursor_advance(&cursor); continue
 			}
 		}
 		append(&r, Row_Entry{c.rowid, c.values})

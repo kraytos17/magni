@@ -2,7 +2,7 @@ package schema
 
 import "core:strings"
 import "src:types"
-import "src:utils"
+import "core:encoding/endian"
 
 // Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b) + DefaultMarker(1b) + DefaultValue... + CheckLen(4b) + CheckBytes?]
 serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.allocator) -> []u8 {
@@ -22,12 +22,12 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 	}
 	blob := make([]u8, size, allocator)
 	offset := 0
-	utils.write_u32_le(blob, offset, u32(len(columns))); offset += 4
+	endian.put_u32(blob[offset:], .Little, u32(len(columns))); offset += 4
 	for col in columns {
-		utils.write_u32_le(blob, offset, u32(len(col.name))); offset += 4
+		endian.put_u32(blob[offset:], .Little, u32(len(col.name))); offset += 4
 		copy(blob[offset:], col.name); offset += len(col.name)
 		blob[offset] = u8(col.type); offset += 1
-		flags: u8 = 0
+		flags: u8
 		if col.not_null do flags |= 1
 		if col.pk do flags |= 2
 		if _, has_chk := col.check_expr.?; has_chk do flags |= 4
@@ -37,7 +37,7 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 			serialize_value_to_blob(blob, &offset, def)
 		} else { blob[offset] = 0; offset += 1 }
 		if chk, has_chk := col.check_expr.?; has_chk {
-			utils.write_u32_le(blob, offset, u32(len(chk))); offset += 4
+			endian.put_u32(blob[offset:], .Little, u32(len(chk))); offset += 4
 			copy(blob[offset:], chk); offset += len(chk)
 		}
 	}
@@ -47,10 +47,10 @@ serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.
 deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
 	if len(blob) < 4 { return nil }
 	offset := 0
-	count, ok := utils.read_u32_le(blob, offset); if !ok { return nil }; offset += 4
+	count, ok := endian.get_u32(blob[offset:], .Little); if !ok { return nil }; offset += 4
 	cols := make([dynamic]types.Column, 0, count, allocator)
 	for _ in 0 ..< count {
-		name_len, ok_len := utils.read_u32_le(blob, offset); if !ok_len { return nil }; offset += 4
+		name_len, ok_len := endian.get_u32(blob[offset:], .Little); if !ok_len { return nil }; offset += 4
 		if offset + int(name_len) + 3 > len(blob) { return nil }
 		name_str := string(blob[offset:offset + int(name_len)]); offset += int(name_len)
 		type_byte := blob[offset]; offset += 1
@@ -79,10 +79,10 @@ serialize_value_to_blob :: proc(dest: []u8, offset: ^int, val: types.Value) {
 	v := val
 	#partial switch vv in v {
 	case types.Null: dest[offset^] = 0; offset^ += 1
-	case i64: dest[offset^] = 1; offset^ += 1; utils.write_u64_le(dest, offset^, u64(vv)); offset^ += 8
-	case f64: dest[offset^] = 2; offset^ += 1; utils.write_f64_be(dest, offset^, vv); offset^ += 8
-	case string: dest[offset^] = 3; offset^ += 1; utils.write_u32_le(dest, offset^, u32(len(vv))); offset^ += 4; copy(dest[offset^:], vv); offset^ += len(vv)
-	case []u8: dest[offset^] = 4; offset^ += 1; utils.write_u32_le(dest, offset^, u32(len(vv))); offset^ += 4; copy(dest[offset^:], vv); offset^ += len(vv)
+	case i64: dest[offset^] = 1; offset^ += 1; endian.put_u64(dest[offset^:], .Little, u64(vv)); offset^ += 8
+	case f64: dest[offset^] = 2; offset^ += 1; endian.put_f64(dest[offset^:], .Big, vv); offset^ += 8
+	case string: dest[offset^] = 3; offset^ += 1; endian.put_u32(dest[offset^:], .Little, u32(len(vv))); offset^ += 4; copy(dest[offset^:], vv); offset^ += len(vv)
+	case []u8: dest[offset^] = 4; offset^ += 1; endian.put_u32(dest[offset^:], .Little, u32(len(vv))); offset^ += 4; copy(dest[offset^:], vv); offset^ += len(vv)
 	}
 }
 
@@ -93,19 +93,19 @@ deserialize_value_from_blob :: proc(src: []u8, offset: ^int, allocator := contex
 	case 0: return types.value_null(), true
 	case 1:
 		if offset^ + 8 > len(src) { return {}, false }
-		val, _ := utils.read_u64_le(src, offset^); offset^ += 8; return types.value_int(i64(val)), true
+		val, _ := endian.get_u64(src[offset^:], .Little); offset^ += 8; return types.value_int(i64(val)), true
 	case 2:
 		if offset^ + 8 > len(src) { return {}, false }
-		val, _ := utils.read_f64_be(src, offset^); offset^ += 8; return types.value_real(val), true
+		val, _ := endian.get_f64(src[offset^:], .Big); offset^ += 8; return types.value_real(val), true
 	case 3:
 		if offset^ + 4 > len(src) { return {}, false }
-		len_val, _ := utils.read_u32_le(src, offset^); offset^ += 4
+		len_val, _ := endian.get_u32(src[offset^:], .Little); offset^ += 4
 		if offset^ + int(len_val) > len(src) { return {}, false }
 		str_val := string(src[offset^:offset^ + int(len_val)]); offset^ += int(len_val)
 		return types.value_text(strings.clone(str_val, allocator)), true
 	case 4:
 		if offset^ + 4 > len(src) { return {}, false }
-		len_val, _ := utils.read_u32_le(src, offset^); offset^ += 4
+		len_val, _ := endian.get_u32(src[offset^:], .Little); offset^ += 4
 		if offset^ + int(len_val) > len(src) { return {}, false }
 		blob := make([]u8, int(len_val), allocator); copy(blob, src[offset^:offset^ + int(len_val)]); offset^ += int(len_val)
 		return types.value_blob(blob), true

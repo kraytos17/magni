@@ -12,7 +12,7 @@ snapshot chain with time-travel queries, and ACID-ish transactions.
 # Build and run REPL
 make run
 
-# Run all 142 tests
+# Run all 169 tests
 make test
 
 # Run full vet suite
@@ -39,6 +39,11 @@ CREATE TABLE users (
 
 -- Drop table
 DROP TABLE users;
+
+-- Table with CHECK constraint
+CREATE TABLE products (
+    price INT CHECK (price > 0)
+);
 ```
 
 ### DML
@@ -68,6 +73,8 @@ SELECT DISTINCT name FROM users;
 -- Filtering
 SELECT * FROM users WHERE score > 50 AND name != 'Bob';
 SELECT * FROM users WHERE name LIKE 'A%';
+SELECT * FROM users WHERE id IN (1, 3, 5);
+SELECT * FROM users WHERE name IN (SELECT name FROM active_users);
 
 -- Sorting & pagination
 SELECT * FROM users ORDER BY score DESC;
@@ -86,6 +93,10 @@ SELECT t1.x, t2.y FROM t1, t2 WHERE t1.x = t2.y;
 
 -- Subqueries
 SELECT * FROM (SELECT * FROM t WHERE x > 1) AS sub;
+
+-- EXPLAIN
+EXPLAIN SELECT * FROM users WHERE id = 1;
+EXPLAIN SELECT * FROM t1 INNER JOIN t2 ON t1.x = t2.y;
 
 -- Aliases
 SELECT a.x FROM t AS a;
@@ -174,41 +185,29 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 
 ## Features
 
-### Storage Engine
+## Features
+
+### Highlights
 - **Copy-on-write (COW) B+tree**: every mutation creates new pages along the path.
   Old pages remain readable for time-travel queries. No WAL or MVCC needed.
 - **Single-traversal mutations**: `tree_update_cow` does delete + re-insert in one
   root-to-leaf traversal. Halves page writes vs delete-then-insert.
+- **SQL feature set**: CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE with AND/OR/LIKE/IN,
+  JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY with NULLS FIRST/LAST, LIMIT/OFFSET,
+  DISTINCT, subqueries, aggregate functions (COUNT/SUM/AVG/MIN/MAX), CHECK constraints,
+  FOREIGN KEY validation, EXPLAIN, transactions (BEGIN/COMMIT/ROLLBACK).
+- **Time-travel**: `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`.
+- **Snapshot system**: append-only chain with O(1) lookup, tagging, diff, restore, GC.
 - **Slab page cache**: 256 pages in a contiguous 1MB array. Zero per-page heap
-  allocations. Open-addressing hash lookup with linear probe.
+  allocations. `map[u32]` for O(1) lookup.
 - **Freeblock chain**: SQLite-compatible freeblock list. Deleted cell space is
   tracked and reused. Coalesces adjacent free blocks.
-- **Header-only zero on allocation**: only 100 bytes zeroed, not 4KB.
-
-### Snapshot System
-- **Append-only chain**: each mutation creates an immutable snapshot. The chain
-  is never modified — `snapshot_restore` appends a new `.RESTORE` snapshot.
-- **O(1) snapshot lookup**: in-memory `map[snapshot_id]page_number` built on
-  open, updated on every create/prune.
-- **Tags**: human-readable labels stored in unused page space.
-- **Time-travel**: `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`.
-- **Garbage collection**: mark-sweep frees pages unreachable from the latest N
-  snapshots. Walks manifests and B-tree pages via `btree.collect_pages`.
-
-### Concurrency
-- `Database.mu` (`sync.Mutex`) serializes all statement execution.
-- Pager uses `sync.RW_Mutex`: `page_count` and `page_in_cache` use shared
-  (read) locks; all other operations use exclusive locks.
-
-### Memory Management
-- All per-statement allocations use `context.temp_allocator`, bulk-freed via
-  `free_all()` at end of `db.execute()`. No per-node freeing during parse.
-- Cursor path is a fixed-size `[32]` stack array. No heap allocation per cursor.
-- Cell serialization uses inline `[MAX_COLS]u64` array. Zero heap allocs.
+- **Hash join**: integer-key hash join avoids allocation per row; string-key fallback.
+- **Pre-resolved WHERE**: column indices resolved once, not per row.
 
 ---
 
-## Test Coverage (142 tests)
+## Test Coverage (169 tests)
 
 | Package | Tests | What's tested |
 |---|---|---|
@@ -241,29 +240,51 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 
 ```
 src/
-├── main.odin          CLI entry, REPL, dot-commands
+├── main.odin              CLI entry, REPL, dot-commands
 ├── btree/
-│   ├── tree.odin      B+tree: insert, find, delete, update, COW variants
-│   ├── headers.odin   Page headers, freeblock helpers
-│   └── cursor.odin    In-order row cursor (fixed path stack)
+│   ├── cow.odin           COW insert/find/delete/update
+│   ├── cursor.odin        In-order row cursor (fixed path stack)
+│   ├── headers.odin       Page headers, freeblock helpers
+│   ├── split.odin         Leaf/interior/root split operations
+│   └── tree.odin          B+tree: insert, find, delete, update, verify
 ├── cell/
-│   └── cell.odin      Row serialization, validation
+│   └── cell.odin          Row serialization, varint, validation
 ├── db/
-│   └── db.odin        Database handle, execute/query, snapshot index
+│   ├── admin.odin         Stats, dump, describe, checkpoint, integrity
+│   ├── db.odin            Database handle, open/close
+│   ├── execute.odin       Statement execution, query API
+│   ├── snapshot_cmds.odin Snapshot restore, diff, tag, list
+│   └── txn.odin           Begin/commit/rollback
 ├── executor/
-│   └── executor.odin  SQL execution, WHERE, JOINs, aggregates
+│   ├── display.odin       Result formatting, aggregates
+│   ├── dml.odin           INSERT/UPDATE/DELETE (legacy + COW)
+│   ├── executor.odin      Statement dispatch
+│   ├── select.odin        SELECT, JOIN, subqueries, scan_table
+│   ├── sort.odin          Sorting, DISTINCT
+│   ├── types.odin         Shared type definitions
+│   ├── util.odin          Helpers: qualified columns, CHECK, compare
+│   └── where.odin         WHERE clause evaluation, LIKE
 ├── parser/
-│   └── parser.odin    Lexer + recursive-descent parser
+│   ├── free.odin          AST memory cleanup
+│   ├── parse_ddl.odin     CREATE/DROP TABLE
+│   ├── parse_dml.odin     INSERT/UPDATE/DELETE
+│   ├── parse_select.odin  SELECT, JOIN, identifiers
+│   ├── parse_where.odin   WHERE clause, IN, value parsing
+│   ├── parser.odin        Token types, parse dispatcher
+│   ├── tokenizer.odin     Lexer, keyword matching
+│   └── types.odin         AST node types
 ├── pager/
-│   └── pager.odin     Slab page cache, file I/O, freelist
+│   ├── freelist.odin      Free-page linked list
+│   └── pager.odin         Page cache, file I/O, eviction
 ├── schema/
-│   └── schema.odin    Table metadata (schema B-tree)
+│   ├── schema.odin        Table metadata, add/find/drop
+│   └── serialize.odin     Column blob serialization
 ├── snapshot/
-│   └── snapshot.odin  Snapshot chain, manifests, tags, GC, diff
-├── types/
-│   └── types.odin     Core types: Value, Column, Table, SerialType
-└── utils/
-    └── utils.odin     Varint, endian I/O helpers
+│   ├── gc.odin            Prune + garbage collect
+│   ├── manifest.odin      Manifest creation, diff
+│   └── snapshot.odin      Snapshot chain, tags, walk
+└── types/
+    └── types.odin         Core types: Value, Column, Table, SerialType
 tests/
 ├── parser_test.odin
 ├── executor_test.odin
@@ -282,8 +303,7 @@ tests/
 - No secondary indexes (only the primary-key B-tree)
 - No WAL / crash recovery
 - No `UNION`, `INTERSECT`, `EXCEPT`
-- No `FOREIGN KEY` enforcement
-- No `CHECK` constraints beyond type validation
-- No nested subqueries in WHERE (`IN (SELECT ...)`)
+- No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
 - No B-tree rebalancing on delete (pages may fragment)
+- `CHECK` expression limited to integer comparisons (col > 0, col < 100)

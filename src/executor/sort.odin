@@ -1,12 +1,12 @@
 package executor
 
 import "core:fmt"
+import "core:hash"
 import "core:slice"
 import "core:strings"
 import "src:parser"
 import "src:types"
 
-@(private)
 dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	if len(rows) <= 1 { return rows }
 	seen := make(map[u64]bool, len(rows), context.temp_allocator)
@@ -17,7 +17,7 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 			if i > 0 { strings.write_byte(&key_b, '\x00') }
 			strings.write_string(&key_b, types.value_to_string(v))
 		}
-		fp := u64(hash(strings.to_string(key_b)))
+		fp := hash.fnv64(transmute([]u8)strings.to_string(key_b))
 		if fp not_in seen {
 			seen[fp] = true
 			append(&result, r)
@@ -45,17 +45,6 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	return result[:]
 }
 
-@(private)
-hash :: proc(s: string) -> u64 {
-	h: u64 = 14695981039346656037
-	for b in s {
-		h ~= u64(b)
-		h *= 1099511628211
-	}
-	return h
-}
-
-@(private)
 sort_rows :: proc(
 	rows: []Row_Entry,
 	order_clause: []parser.Order_By_Column,

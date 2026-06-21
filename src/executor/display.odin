@@ -6,7 +6,6 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-@(private)
 print_agg_header :: proc(cols: []string) {
 	b := strings.builder_make(context.temp_allocator)
 	for col, i in cols {
@@ -21,7 +20,6 @@ print_agg_header :: proc(cols: []string) {
 	fmt.println(strings.to_string(b))
 }
 
-@(private)
 display_results :: proc(
 	rows: []Row_Entry,
 	cols: []types.Column,
@@ -44,7 +42,6 @@ display_results :: proc(
 	fmt.printf("(%d rows)\n", row_count)
 }
 
-@(private)
 build_display_indices :: proc(
 	columns: []string,
 	cols: []types.Column,
@@ -72,7 +69,6 @@ build_display_indices :: proc(
 	return indices[:], true
 }
 
-@(private)
 compute_aggregates :: proc(
 	rows: [][]types.Value,
 	aggregates: []parser.Aggregate_Expr,
@@ -101,7 +97,7 @@ compute_aggregates :: proc(
 				results[i] = types.value_int(i64(count))
 			}
 		case .SUM:
-			sum: f64 = 0
+			sum: f64
 			for row_vals in rows {
 				if col_idx >= 0 && !types.is_null(row_vals[col_idx]) {
 					#partial switch v in row_vals[col_idx] {
@@ -114,7 +110,7 @@ compute_aggregates :: proc(
 			}
 			results[i] = types.value_real(sum)
 		case .AVG:
-			sum: f64 = 0
+			sum: f64
 			count := 0
 			for row_vals in rows {
 				if col_idx >= 0 && !types.is_null(row_vals[col_idx]) {
@@ -158,7 +154,6 @@ compute_aggregates :: proc(
 	return results
 }
 
-@(private)
 evaluate_where_having :: proc(
 	clause: parser.Where_Clause,
 	group_keys: []types.Value,
@@ -206,7 +201,6 @@ evaluate_where_having :: proc(
 	return match
 }
 
-@(private)
 print_header :: proc(cols: []types.Column, indices: []int) {
 	b := strings.builder_make(context.temp_allocator)
 	for idx, i in indices {
@@ -223,7 +217,6 @@ print_header :: proc(cols: []types.Column, indices: []int) {
 	fmt.println(strings.to_string(b))
 }
 
-@(private)
 write_value_to_builder :: proc(b: ^strings.Builder, v: types.Value) {
 	switch val in v {
 	case types.Null:

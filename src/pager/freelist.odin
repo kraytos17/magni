@@ -6,7 +6,6 @@ import "core:sync"
 import "src:types"
 
 // Allocates a page from the free-page linked list. Caller must hold p.mutex.
-@(private)
 alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	free_page_num := p.first_free_page
 	slot := find_empty_slot(p)

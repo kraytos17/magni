@@ -8,7 +8,6 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-@(private)
 exec_create :: proc(t: ^btree.Tree, stmt: parser.Create_Stmt, sql: string) -> (bool, u32) {
 	if ok, msg := schema.validate_columns(stmt.columns); !ok {
 		fmt.eprintln("Schema Error:", msg)
@@ -48,7 +47,6 @@ exec_create :: proc(t: ^btree.Tree, stmt: parser.Create_Stmt, sql: string) -> (b
 	return true, new_root
 }
 
-@(private)
 exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -91,7 +89,7 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	}
 	if !check_constraints(values, table) { return false }
 	table_tree := btree.init(t.pager, table.root_page)
-	next_rowid: types.Row_ID = 0
+	next_rowid: types.Row_ID
 	pk_idx, has_pk := schema.get_pk_column(table.columns)
 	if has_pk {
 		if val, is_int := values[pk_idx].(i64); is_int {
@@ -116,7 +114,6 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	return true
 }
 
-@(private)
 exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -199,7 +196,6 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	return true
 }
 
-@(private)
 exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -247,7 +243,6 @@ exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 	return true
 }
 
-@(private)
 exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32) {
 	if !schema.table_exists(t, stmt.table_name) {
 		fmt.eprintln("Error: Table not found:", stmt.table_name)
@@ -263,7 +258,6 @@ exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32) {
 	return false, t.root
 }
 
-@(private)
 exec_insert_cow :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> (bool, u32) {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -305,7 +299,7 @@ exec_insert_cow :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> (bool, u32)
 		return false, t.root
 	}
 	table_tree := btree.init(t.pager, table.root_page)
-	next_rowid: types.Row_ID = 0
+	next_rowid: types.Row_ID
 	pk_idx, has_pk := schema.get_pk_column(table.columns)
 	if has_pk {
 		if val, is_int := values[pk_idx].(i64); is_int {
@@ -335,7 +329,6 @@ exec_insert_cow :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> (bool, u32)
 	return true, new_schema_root
 }
 
-@(private)
 exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32) {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -433,7 +426,6 @@ exec_update_cow :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> (bool, u32)
 	return true, t.root
 }
 
-@(private)
 exec_delete_cow :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> (bool, u32) {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {

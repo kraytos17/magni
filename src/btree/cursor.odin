@@ -1,8 +1,8 @@
 package btree
 
+import "core:encoding/endian"
 import "src:cell"
 import "src:pager"
-import "src:utils"
 
 Cursor_Stack_Item :: struct {
 	page_id:    u32,
@@ -27,6 +27,7 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 			page_id    = curr,
 			cell_index = 0,
 		}
+
 		c.depth += 1
 		node, err := load_node(c.tree, curr)
 		if err != .None {
@@ -37,7 +38,7 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 		if is_leaf(node) { break }
 		if node.header.cell_count > 0 {
 			ptrs := get_pointers(node.data, curr)
-			child, ok := utils.read_u32_be(node.data, int(ptrs[0]))
+			child, ok := endian.get_u32(node.data[int(ptrs[0]):], .Big)
 			if !ok { return .Invalid_Cell_Pointer }
 			curr = child
 		} else {
@@ -92,10 +93,12 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 
 	page, err := pager.get_page(c.tree.pager, page_id)
 	if err != nil { return {}, .Page_Read_Failed }
+
 	c.cached_page_id = page_id
 	c.cached_page_data = page.data
 	n, n_err := node_from_bytes(page_id, page.data)
 	if n_err != .None { return {}, n_err }
+
 	c.cached_cell_count = u16(n.header.cell_count)
 	c.cached_is_leaf = is_leaf(n)
 	return n, .None
@@ -114,11 +117,11 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 		if int(item.cell_index) < int(c.cached_cell_count) {
 			return .None
 		}
+
 		c.depth -= 1
 		if c.depth == 0 { c.is_valid = false; return .None }
 		// Fall through to walk up the stack
 	}
-
 	for c.depth > 0 {
 		top_idx = c.depth - 1
 		item = &c.path[top_idx]
@@ -140,7 +143,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 				} else {
 					ptrs := get_pointers(node.data, item.page_id)
 					cell_ptr := ptrs[item.cell_index]
-					child_page, _ = utils.read_u32_be(node.data, int(cell_ptr))
+					child_page, _ = endian.get_u32(node.data[int(cell_ptr):], .Big)
 				}
 				return drill_down_leftmost(c, child_page)
 			}

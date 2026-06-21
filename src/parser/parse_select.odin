@@ -69,7 +69,6 @@ parse_single_join :: proc(p: ^Parser, allocator := context.allocator, join_type:
 	return Join_Clause{join_type = join_type, source = js.source, alias = js.alias, on_clause = on_cl}, true
 }
 
-@(private)
 parse_select_columns :: proc(p: ^Parser, columns: ^[dynamic]string, aggregates: ^[dynamic]Aggregate_Expr, allocator := context.allocator) -> bool {
 	if match(p, .ASTERISK) { } else {
 		for {
@@ -110,7 +109,6 @@ parse_select_columns :: proc(p: ^Parser, columns: ^[dynamic]string, aggregates: 
 	return true
 }
 
-@(private)
 parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynamic]Join_Clause {
 	joins := make([dynamic]Join_Clause, allocator)
 	for {

@@ -2,7 +2,6 @@ package parser
 
 import "core:unicode"
 
-@(private)
 match_keyword :: proc(ident: string) -> Token_Type {
 	if len(ident) == 2 {
 		if (ident[0] | 0x20) == 'i' && (ident[1] | 0x20) == 'n' { return .IN }

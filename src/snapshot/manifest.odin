@@ -81,7 +81,6 @@ load_manifest :: proc(p: ^pager.Pager, manifest_page: u32, allocator := context.
 	return entries
 }
 
-@(private)
 load_manifest_tables :: proc(p: ^pager.Pager, manifest_page: u32, allocator := context.allocator) -> (names: []string, roots: []u32, ok: bool) {
 	if manifest_page == 0 { return {}, {}, true }
 	page, err := pager.get_page(p, manifest_page)

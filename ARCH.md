@@ -546,14 +546,14 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 
 | Package | Tests | Coverage |
 |---|---|---|
-| `parser` | 38 | Tokenization, all SQL forms, JOINs, subqueries, error handling |
-| `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates |
+| `parser` | 52 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
+| `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates, DISTINCT, CHECK, EXPLAIN, subquery projection |
 | `btree` | 20 | Insert/find/delete/update, cursor, split, persistence, duplicates |
 | `cell` | 11 | Serialization roundtrip, zero-copy, edge cases |
 | `pager` | 12 | Open/close, caching, pinning, eviction |
-| `schema` | 10 | Column blob, add/find/drop/list |
+| `schema` | 10 | Column blob with CHECK, add/find/drop/list |
 | `snapshot` | 12 | Chain, manifest, diff, tags, timestamp lookup, GC |
-| `integration` | 16 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence |
+| `integration` | 23 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, query API, freeblock reuse |
 
 ---
 
@@ -599,11 +599,10 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 
 ## Limitations
 
-- **No `DISTINCT`**: Not yet implemented.
 - **No `UNION` / `INTERSECT` / `EXCEPT`**: Set operations absent.
-- **No `FOREIGN KEY` enforcement**: Declared in DDL but not enforced.
+- **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
 - **No indexes**: Only the implicit primary-key B-tree exists.
 - **No WAL / crash recovery**: Single-file, `os.sync` only on flush.
 - **No B-tree rebalancing**: Deletes fragment pages without merging.
-- **No nested WHERE subqueries**: `IN (SELECT ...)` not supported.
+- **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
 - **Mixed AND/OR WHERE**: Not supported.

@@ -3,7 +3,6 @@ package snapshot
 import "src:btree"
 import "src:pager"
 
-@(private)
 walk_chain_data :: struct {
 	p:         ^pager.Pager,
 	max_keep:  int,

@@ -3,7 +3,6 @@ package executor
 import "src:parser"
 import "src:types"
 
-@(private)
 filter_rows :: proc(
 	rows: []Row_Entry,
 	where_clause: ^parser.Where_Clause,
@@ -22,7 +21,6 @@ filter_rows :: proc(
 	return filtered[:]
 }
 
-@(private)
 init_where_ctx :: proc(
 	clause: ^parser.Where_Clause,
 	cols: []types.Column,
@@ -60,7 +58,6 @@ init_where_ctx :: proc(
 	return Where_Eval_Ctx{conditions = resolved, is_and = clause.is_and}
 }
 
-@(private)
 evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 	if len(ctx.conditions) == 0 { return true }
 	match_res := ctx.is_and
@@ -99,7 +96,6 @@ evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 	return match_res
 }
 
-@(private)
 evaluate_where :: proc(
 	clause: ^parser.Where_Clause,
 	row: []types.Value,
@@ -111,7 +107,6 @@ evaluate_where :: proc(
 	return evaluate_where_ctx(ctx, row)
 }
 
-@(private)
 compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types.Value) -> bool {
 	if op == .LIKE {
 		text, text_ok := val.(string)

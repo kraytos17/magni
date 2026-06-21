@@ -11,6 +11,8 @@ import "src:types"
 
 Transaction_State :: enum { NONE, ACTIVE }
 
+GC_INTERVAL :: 10
+
 Database :: struct {
 	path:              string,
 	pager:             ^pager.Pager,
@@ -25,8 +27,6 @@ Database :: struct {
 	table_roots:       map[string]u32,
 	table_roots_dirty: bool,
 }
-
-GC_INTERVAL :: 10
 
 Header :: struct #packed {
 	magic:                [13]u8,

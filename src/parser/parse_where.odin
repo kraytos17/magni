@@ -33,7 +33,6 @@ parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.V
 	return {}, false
 }
 
-@(private)
 cleanup_where_conditions :: proc(conditions: [dynamic]Condition, allocator := context.allocator) {
 	for cond in conditions {
 		delete(cond.column, allocator)

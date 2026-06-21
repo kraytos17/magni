@@ -1,8 +1,9 @@
 package btree
 
+import "core:encoding/endian"
 import "core:mem"
+import "src:cell"
 import "src:types"
-import "src:utils"
 
 PAGE_HEADER_OFFSET_ROOT :: 100
 #assert(PAGE_HEADER_OFFSET_ROOT == types.DATABASE_HEADER_SIZE)
@@ -132,7 +133,7 @@ find_interior_cell_for_child :: proc(data: []u8, page_id: u32, child_page: u32) 
 	pointers := get_pointers(data, page_id)
 	for ptr, i in pointers {
 		off := int(ptr)
-		stored_child, _ := utils.read_u32_be(data, off)
+		stored_child, _ := endian.get_u32(data[off:], .Big)
 		if stored_child == child_page {
 			return i
 		}
@@ -140,14 +141,13 @@ find_interior_cell_for_child :: proc(data: []u8, page_id: u32, child_page: u32) 
 	return -1
 }
 
-@(private)
 interior_lower_bound :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> (int, bool) {
 	pointers := get_pointers(data, page_id)
 	left := 0
 	right := len(pointers)
 	for left < right {
 		mid := left + (right - left) / 2
-		sep_val, _, ok := utils.varint_decode(data, int(pointers[mid]) + 4)
+		sep_val, _, ok := cell.varint_decode(data, int(pointers[mid]) + 4)
 		if !ok { return left, false }
 		if key >= types.Row_ID(sep_val) {
 			left = mid + 1
@@ -164,11 +164,11 @@ find_interior_insert_index :: proc(data: []u8, page_id: u32, key: types.Row_ID) 
 }
 
 interior_cell_size :: proc(key: types.Row_ID) -> int {
-	return 4 + utils.varint_size(u64(key))
+	return 4 + cell.varint_size(u64(key))
 }
 
 interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
-	_, n, ok := utils.varint_decode(data, offset + 4)
+	_, n, ok := cell.varint_decode(data, offset + 4)
 	if !ok { return 0 }
 	return 4 + n
 }
@@ -188,8 +188,8 @@ insert_interior_cell :: proc(data: []u8, page_id: u32, child_page: u32, key: typ
 
 	new_offset := content_start - size
 	header.cell_content_offset = u16le(new_offset)
-	utils.write_u32_be(data, new_offset, child_page)
-	utils.varint_encode(data[new_offset + 4:], u64(key))
+	endian.put_u32(data[new_offset:], .Big, child_page)
+	cell.varint_encode(data[new_offset + 4:], u64(key))
 	insert_idx := find_interior_insert_index(data, page_id, key)
 
 	ptr_start_idx := base_off + hdr_sz
@@ -204,7 +204,7 @@ insert_interior_cell :: proc(data: []u8, page_id: u32, child_page: u32, key: typ
 	return true
 }
 
-// Freeblock format (SQLite-compatible):
+// Freeblock format:
 //   [offset+0]: next freeblock offset (u16le, 0 = end of list)
 //   [offset+2]: block size        (u16le, total bytes including header)
 FREEBLOCK_HDR_SIZE :: 4

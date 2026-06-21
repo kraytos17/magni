@@ -751,6 +751,6 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 	for rid, _ in check_ids {
 		c, err := btree.tree_find(&table_tree, rid, context.temp_allocator)
 		testing.expect(t, err == .None, fmt.tprintf("Row %d should exist", rid))
-		if err == .None { cell.destroy(&c) }
+		if err == .None { cell.destroy(&c, context.temp_allocator) }
 	}
 }
