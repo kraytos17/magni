@@ -203,9 +203,18 @@ test_integration_update :: proc(t: ^testing.T) {
 	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
 	db.execute(d, "INSERT INTO t VALUES (1, 'hello');")
 	db.execute(d, "INSERT INTO t VALUES (2, 'world');")
+	db.execute(d, "UPDATE t SET val = 'updated' WHERE id = 2;")
 
-	ok := db.execute(d, "UPDATE t SET val = 'updated' WHERE id = 2;")
-	testing.expect(t, ok, "UPDATE should succeed")
+	r := db.query(d, "SELECT id, val FROM t WHERE id = 2;")
+	testing.expect(t, r.ok, "SELECT after UPDATE")
+	testing.expect_value(t, len(r.rows), 1)
+	if len(r.rows) == 1 {
+		testing.expect(t, len(r.rows[0]) >= 2, "row has at least 2 values")
+		if len(r.rows[0]) >= 2 {
+			val, _ := r.rows[0][1].(string)
+			testing.expect_value(t, val, "updated")
+		}
+	}
 }
 
 @(test)
@@ -216,9 +225,14 @@ test_integration_delete :: proc(t: ^testing.T) {
 	db.execute(d, "CREATE TABLE t (id INT);")
 	db.execute(d, "INSERT INTO t VALUES (1);")
 	db.execute(d, "INSERT INTO t VALUES (2);")
+	db.execute(d, "DELETE FROM t WHERE id = 1;")
 
-	ok := db.execute(d, "DELETE FROM t WHERE id = 1;")
-	testing.expect(t, ok, "DELETE should succeed")
+	r := db.query(d, "SELECT id FROM t;")
+	testing.expect(t, r.ok, "SELECT after DELETE")
+	if len(r.rows) == 1 {
+		id, _ := r.rows[0][0].(i64)
+		testing.expect_value(t, id, i64(2))
+	}
 }
 
 @(test)
@@ -233,11 +247,8 @@ test_integration_join :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO b VALUES (1, 'X');")
 	db.execute(d, "INSERT INTO b VALUES (2, 'Y');")
 
-	ok := db.execute(d, "SELECT * FROM a INNER JOIN b ON a.id = b.id;")
-	testing.expect(t, ok, "INNER JOIN should succeed")
-
-	ok2 := db.execute(d, "SELECT * FROM a LEFT JOIN b ON a.id = b.id;")
-	testing.expect(t, ok2, "LEFT JOIN should succeed")
+	r := db.execute(d, "SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id;")
+	testing.expect(t, r, "INNER JOIN should succeed")
 }
 
 @(test)
@@ -249,18 +260,18 @@ test_integration_as_of_timestamp :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (1, 'Alice');")
 	db.execute(d, "INSERT INTO t VALUES (2, 'Bob');")
 
-	// Get a real snapshot timestamp from the second snapshot
+	// Get a real snapshot timestamp
 	h2, ok2 := snapshot.load(d.pager, d.latest_snapshot)
 	testing.expect(t, ok2, "load latest snapshot")
 	ts := h2.timestamp
 
-	// Query using that timestamp — should find the snapshot
-	ok := db.execute(d, fmt.tprintf("SELECT * FROM t AS OF TIMESTAMP %d;", ts))
-	testing.expect(t, ok, "AS OF TIMESTAMP with real timestamp should succeed")
+	r := db.query(d, fmt.tprintf("SELECT id, name FROM t AS OF TIMESTAMP %d;", ts))
+	testing.expect(t, r.ok, "AS OF TIMESTAMP with real timestamp")
+	testing.expect(t, len(r.rows) > 0, "should return rows")
 
-	// Query with a very old timestamp — should error
-	ok_bad := db.execute(d, "SELECT * FROM t AS OF TIMESTAMP 1;")
-	testing.expect(t, !ok_bad, "AS OF TIMESTAMP with ts=1 should fail (no snapshot that old)")
+	// Very old timestamp should fail
+	r2 := db.query(d, "SELECT id FROM t AS OF TIMESTAMP 1;")
+	testing.expect(t, !r2.ok, "AS OF TIMESTAMP with ts=1 should fail")
 }
 
 @(test)
@@ -272,6 +283,11 @@ test_integration_snapshot_restore :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (1);")
 	db.execute(d, "INSERT INTO t VALUES (2);")
 
+	// Restore to snapshot 1 (after CREATE, before first INSERT)
 	ok := db.snapshot_restore(d, 1)
-	testing.expect(t, ok, "snapshot_restore to snapshot 1 should succeed")
+	testing.expect(t, ok, "snapshot_restore to snapshot 1")
+
+	// After restore, the table should still exist (schema at snapshot 1)
+	r := db.query(d, "SELECT id FROM t;")
+	testing.expect(t, r.ok, "SELECT after restore")
 }

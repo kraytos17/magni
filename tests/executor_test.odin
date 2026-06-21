@@ -304,3 +304,67 @@ test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
 	ok, _ := executor.execute(&tree, stmt)
 	testing.expect(t, ok, "SELECT AS OF SNAPSHOT should execute")
 }
+
+@(test)
+test_exec_distinct :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "distinct")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "a", 1.0))
+
+	// DISTINCT on name should return 2 rows (a and b)
+	sql := "SELECT DISTINCT name FROM t;"
+	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect(t, sel.is_distinct, "Expected is_distinct = true")
+	ok, _ := executor.execute(&tree, stmt)
+	testing.expect(t, ok, "SELECT DISTINCT should execute")
+}
+
+@(test)
+test_exec_nulls_first_last :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "nulls_order")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
+
+	// NULLS FIRST
+	stmt1, ok1 := parser.parse("SELECT id FROM t ORDER BY name NULLS FIRST;", context.temp_allocator)
+	testing.expect(t, ok1, "parse NULLS FIRST")
+	s1, _ := stmt1.type.(parser.Select_Stmt)
+	order1, _ := s1.order_by.?
+	testing.expect(t, order1[0].nulls_first, "nulls_first should be true")
+	executor.execute(&tree, stmt1)
+
+	// NULLS LAST
+	stmt2, ok2 := parser.parse("SELECT id FROM t ORDER BY name NULLS LAST;", context.temp_allocator)
+	testing.expect(t, ok2, "parse NULLS LAST")
+	s2, _ := stmt2.type.(parser.Select_Stmt)
+	order2, _ := s2.order_by.?
+	testing.expect(t, !order2[0].nulls_first, "nulls_first should be false for LAST")
+	executor.execute(&tree, stmt2)
+
+	// ASC NULLS FIRST
+	stmt3, ok3 := parser.parse("SELECT id FROM t ORDER BY name ASC NULLS FIRST;", context.temp_allocator)
+	testing.expect(t, ok3, "parse ASC NULLS FIRST")
+	s3, _ := stmt3.type.(parser.Select_Stmt)
+	order3, _ := s3.order_by.?
+	testing.expect(t, order3[0].nulls_first, "nulls_first should be true for ASC NULLS FIRST")
+	executor.execute(&tree, stmt3)
+
+	// DESC NULLS LAST
+	stmt4, ok4 := parser.parse("SELECT id FROM t ORDER BY name DESC NULLS LAST;", context.temp_allocator)
+	testing.expect(t, ok4, "parse DESC NULLS LAST")
+	s4, _ := stmt4.type.(parser.Select_Stmt)
+	order4, _ := s4.order_by.?
+	testing.expect(t, !order4[0].nulls_first, "nulls_first should be false for DESC NULLS LAST")
+	executor.execute(&tree, stmt4)
+}

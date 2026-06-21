@@ -24,6 +24,7 @@ Token_Type :: enum u8 {
 	INTO,
 	VALUES,
 	SELECT,
+	DISTINCT,
 	FROM,
 	WHERE,
 	UPDATE,
@@ -48,6 +49,9 @@ Token_Type :: enum u8 {
 	BY,
 	ASC,
 	DESC,
+	NULLS,
+	FIRST,
+	LAST,
 	GROUP,
 	HAVING,
 	// Operators
@@ -109,8 +113,9 @@ Insert_Stmt :: struct {
 }
 
 Order_By_Column :: struct {
-	column: string,
-	desc:   bool,
+	column:     string,
+	desc:       bool,
+	nulls_first: bool,
 }
 
 Aggregate_Func :: enum {
@@ -156,6 +161,7 @@ Select_Stmt :: struct {
 	joins:           []Join_Clause,
 	columns:         []string,
 	aggregates:      []Aggregate_Expr,
+	is_distinct:     bool,
 	where_clause:    Maybe(Where_Clause),
 	order_by:        Maybe([]Order_By_Column),
 	limit:           Maybe(u64),
@@ -227,6 +233,8 @@ get_keyword_type :: proc(ident: string) -> Token_Type {
 		return .VALUES
 	case "SELECT":
 		return .SELECT
+	case "DISTINCT":
+		return .DISTINCT
 	case "FROM":
 		return .FROM
 	case "WHERE":
@@ -275,6 +283,12 @@ get_keyword_type :: proc(ident: string) -> Token_Type {
 		return .ASC
 	case "DESC":
 		return .DESC
+	case "NULLS":
+		return .NULLS
+	case "FIRST":
+		return .FIRST
+	case "LAST":
+		return .LAST
 	case "GROUP":
 		return .GROUP
 	case "HAVING":
@@ -862,6 +876,8 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 	aggregates := make([dynamic]Aggregate_Expr, allocator)
 	defer if !ok do delete(aggregates)
 
+	is_distinct := match(p, .DISTINCT)
+
 	if !parse_select_columns(p, &columns, &aggregates, allocator) {
 		return nil, false
 	}
@@ -917,8 +933,10 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 		for {
 			col := parse_qualified_identifier(p, allocator) or_return
 			desc := false
+			nulls_first := false
 			if match(p, .ASC) {  } else if match(p, .DESC) { desc = true }
-			append(&order_cols, Order_By_Column{column = col, desc = desc})
+			if match(p, .NULLS) { if match(p, .FIRST) { nulls_first = true } else { match(p, .LAST) } }
+			append(&order_cols, Order_By_Column{column = col, desc = desc, nulls_first = nulls_first})
 			if !match(p, .COMMA) do break
 		}
 		order_by = order_cols[:]
@@ -943,6 +961,7 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 			joins = joins[:],
 			columns = columns[:],
 			aggregates = aggregates[:],
+			is_distinct = is_distinct,
 			where_clause = where_clause,
 			order_by = order_by,
 			limit = limit,

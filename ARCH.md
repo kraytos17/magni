@@ -108,6 +108,11 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 | `try_join_match` | Combine rows + ON evaluation | Uses temp_allocator only on match |
 | `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | Aggregator per group |
 | `display_results` | Pretty-printed output | LIMIT/OFFSET applied here |
+| `exec_query` | Return row data as struct (for db.query) | Same path as exec_select, no display |
+| `exec_select_single_data` | Single-table SELECT returning []Row_Entry | Used by db.query() for precise tests |
+
+**GROUP BY** uses `map[string]int` keyed on serialized group-by values for O(rows) lookups
+(was O(rows × groups) linear scan).
 
 ### 2. Storage Engine — `btree/`, `cell/`, `pager/`, `schema/`, `db/`
 
@@ -145,7 +150,23 @@ Node :: struct {
 ```
 
 `leaf`/`interior` sub-headers are computed on demand via `node_leaf()` / `node_interior()` —
-no redundant pointer storage (was 48 bytes, now 24).
+no redundant pointer storage.
+
+**Freeblock chain:**
+
+Deleted cell space is tracked in a SQLite-compatible freeblock list for reuse:
+
+```
+Page_Header.first_freeblock → [next: u16le] [size: u16le] [unused...] → [next: u16le] [...] → 0
+```
+
+- `freeblock_insert` — adds a freed cell to the chain, sorted by offset, coalescing adjacent blocks.
+- `freeblock_alloc` — first-fit search for a block ≥ requested size. Splits larger blocks; exact-fit
+  removes from chain.
+- Minimum freeblock size: 4 bytes (2 for next, 2 for size). Cells smaller than 4 bytes fall back to
+  `fragmented_bytes`.
+- `delete_from_leaf` creates freeblocks for middle-page deletions (was permanently wasted space).
+- `node_insert_leaf_cell` checks the freeblock chain before allocating from the end of page.
 
 **B-tree operations:**
 
@@ -157,12 +178,12 @@ no redundant pointer storage (was 48 bytes, now 24).
 | `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
 
-**Cursor** — fixed-size path stack `[32]Cursor_Stack_Item` (no heap allocation):
+**Cursor** — fixed-size path stack `[32]Cursor_Stack_Item`:
 
 ```odin
 Cursor_Stack_Item :: struct {
     page_id:    u32,
-    cell_index: u16,       // was int (8 bytes), now u16 (2 bytes)
+    cell_index: u16,
 }
 ```
 
@@ -213,7 +234,7 @@ Pager:
 - **Concurrency**: `RW_Mutex` — read-only operations (`page_count`, `page_in_cache`)
   use shared locks; all mutations use exclusive locks.
 - **Zero-on-alloc**: Only the first 100 bytes (header region) are zeroed. Callers overwrite
-  as needed (was full 4096-byte memset).
+  as needed.
 
 #### Table Metadata (`schema/schema.odin`)
 
@@ -231,7 +252,7 @@ Schema is stored as a B-tree on page 1:
 
 All mutations (`add_table_cow`, `drop_table_cow`, `update_root_page_cow`) use COW and
 return a new schema root. `get_table` passes the caller's allocator directly through to
-`find_table` (no double-clone — was allocating on temp_allocator then cloning to permanent).
+`find_table`.
 
 #### Database Coordinator (`db/db.odin`)
 
@@ -429,9 +450,18 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 ### Public `db` API
 
 ```odin
-open(path: string)                 -> ^Database, bool
+open(path: string)                  -> ^Database, bool
 close(db: ^Database)
-execute(db: ^Database, sql: string) -> bool
+execute(db: ^Database, sql: string)  -> bool
+query(db: ^Database, sql: string)    -> Query_Result  // returns structured row data
+
+Query_Result :: struct {
+    columns:  []string,
+    col_types: []types.Column_Type,
+    rows:     [][]types.Value,   // nil for DML
+    ok:       bool,
+}
+
 checkpoint(db: ^Database)           -> bool
 begin(db: ^Database)                -> bool
 commit(db: ^Database)               -> bool
@@ -512,7 +542,7 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 | `vet-all` | `odin build + odin test` with `-vet*` flags | Full CI check |
 | `check` | Parse + type check only | Fast pre-commit |
 
-### Test Coverage (142 tests)
+### Test Coverage
 
 | Package | Tests | Coverage |
 |---|---|---|
@@ -556,6 +586,15 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 | Branch mispredictions | ~depth × 2 | ~depth × 3 |
 | Code complexity | Moderate (new recursive function) | Low (two existing functions) |
 
+### Freeblock chain vs Fragmentation bucket
+
+| Aspect | Freeblock chain (chosen) | `fragmented_bytes` (previous) |
+|---|---|---|
+| Space reuse from middle-page deletes | Full reuse via linked list | Capped at 255 bytes, then permanent waste |
+| Insert from freeblock | First-fit search O(freeblocks) | Always from end of page |
+| Code complexity | ~120 lines (helpers + integration) | ~10 lines |
+| Minimum tracked cell size | 4 bytes (freeblock header) | 1 byte |
+
 ---
 
 ## Limitations
@@ -568,5 +607,3 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 - **No B-tree rebalancing**: Deletes fragment pages without merging.
 - **No nested WHERE subqueries**: `IN (SELECT ...)` not supported.
 - **Mixed AND/OR WHERE**: Not supported.
-- **GROUP BY linear scan**: Groups compared via linear search instead of hash map.
-  Fine for low cardinality; degrades for hundreds of distinct groups.

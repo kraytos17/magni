@@ -340,6 +340,29 @@ node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, rowid: types.Row_ID, values: [
 	}
 
 	cinfo := cell.compute_info(rowid, values)
+	// Try freeblock first
+	free_off := freeblock_alloc(
+		n.data,
+		n.header.first_freeblock,
+		u16(cinfo.total_size),
+		&n.header.first_freeblock,
+	)
+	if free_off != 0 {
+		bytes_written, ok := cell.serialize(n.data[int(free_off):], rowid, values, cinfo)
+		if !ok || bytes_written != cinfo.total_size { return .Serialization_Failed }
+
+		raw_ptrs := get_raw_pointers(n.data, n.id)
+		if idx < int(n.header.cell_count) {
+			copy(raw_ptrs[idx + 1:], raw_ptrs[idx:n.header.cell_count])
+		}
+		
+		raw_ptrs[idx] = Cell_Pointer(free_off)
+		n.header.cell_count += 1
+		pager.mark_dirty(t.pager, n.id)
+		return .None
+	}
+
+	// No freeblock — allocate from end
 	base_offset := get_page_header_offset(n.id)
 	header_size := page_header_size(n.header.page_type)
 	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * size_of(Cell_Pointer)
@@ -688,6 +711,13 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	leaf_node.header.cell_count -= 1
 	if cell_off == int(leaf_node.header.cell_content_offset) {
 		leaf_node.header.cell_content_offset += u16le(cell_sz)
+	} else if cell_sz >= FREEBLOCK_HDR_SIZE {
+		freeblock_insert(
+			leaf_node.data,
+			u16(cell_off),
+			u16(cell_sz),
+			&leaf_node.header.first_freeblock,
+		)
 	} else {
 		if cell_sz > 0 && cell_sz < 255 {
 			new_frag := u16(leaf_node.header.fragmented_bytes) + u16(cell_sz)

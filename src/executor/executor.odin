@@ -154,6 +154,33 @@ filter_rows :: proc(
 	return filtered[:]
 }
 
+// Removes consecutive duplicate rows (columns are compared by value equality).
+// Assumes rows are sorted (DISTINCT is typically used with or without ORDER BY).
+@(private)
+dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
+	if len(rows) <= 1 { return rows }
+	result := make([dynamic]Row_Entry, context.temp_allocator)
+	append(&result, rows[0])
+	for i in 1 ..< len(rows) {
+		prev := &result[len(result) - 1]
+		if len(rows[i].values) != len(prev.values) {
+			append(&result, rows[i])
+			continue
+		}
+		is_dup := true
+		for j in 0 ..< len(rows[i].values) {
+			if !types.value_compare(rows[i].values[j], prev.values[j]) {
+				is_dup = false
+				break
+			}
+		}
+		if !is_dup {
+			append(&result, rows[i])
+		}
+	}
+	return result[:]
+}
+
 @(private)
 sort_rows :: proc(
 	rows: []Row_Entry,
@@ -175,6 +202,16 @@ sort_rows :: proc(
 	slice.sort_by_with_data(rows, proc(a, b: Row_Entry, data: rawptr) -> bool {
 			ctx := (^Sort_Ctx)(data)
 			for sort_idx, i in ctx.sort_indices {
+				a_null := types.is_null(a.values[sort_idx])
+				b_null := types.is_null(b.values[sort_idx])
+				if a_null != b_null {
+					nulls_first := ctx.order_clause[i].nulls_first
+					if !nulls_first {
+						// Default: ASC→LAST, DESC→FIRST
+						nulls_first = ctx.order_clause[i].desc
+					}
+					return a_null == nulls_first
+				}
 				cmp := compare_values(a.values[sort_idx], b.values[sort_idx])
 				if cmp != 0 {
 					if ctx.order_clause[i].desc { return cmp > 0 }
@@ -636,6 +673,9 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	if order_clause, has_order := stmt.order_by.?; has_order && len(order_clause) > 0 {
 		if !sort_rows(rows, order_clause, combined_cols, table_ranges) { return false }
 	}
+	if stmt.is_distinct {
+		rows = dedup_rows(rows)
+	}
 
 	display_results(rows, combined_cols, display_indices[:], stmt.limit, stmt.offset)
 	return true
@@ -709,9 +749,59 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	if order_clause, has_order := stmt.order_by.?; has_order && len(order_clause) > 0 {
 		if !sort_rows(rows, order_clause, table.columns, single_range) { return false }
 	}
+	if stmt.is_distinct { rows = dedup_rows(rows) }
 
 	display_results(rows, table.columns, display_indices, stmt.limit, stmt.offset)
 	return true
+}
+
+// Like exec_select_single but returns the row data instead of displaying.
+exec_select_single_data :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []types.Column, bool) {
+	tbl_name, name_ok := stmt.from.(string)
+	if !name_ok { return nil, nil, false }
+
+	table, found := schema.get_table(t, tbl_name, context.temp_allocator)
+	if !found {
+		fmt.eprintln("Error: Table not found:", tbl_name)
+		return nil, nil, false
+	}
+	defer schema.table_free(table, context.temp_allocator)
+
+	table_tree := btree.init(t.pager, table.root_page)
+	rows, scan_err := scan_table(&table_tree, &table, nil, context.temp_allocator)
+	if scan_err { return nil, nil, false }
+
+	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
+	single_range := []Table_Col_Range {
+		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
+	}
+
+	if where_clause, has_where := stmt.where_clause.?; has_where {
+		rows = filter_rows(rows, &where_clause, table.columns, single_range)
+	}
+	if len(stmt.aggregates) > 0 {
+		return nil, nil, false
+	}
+	if order_clause, has_order := stmt.order_by.?; has_order && len(order_clause) > 0 {
+		if !sort_rows(rows, order_clause, table.columns, single_range) { return nil, nil, false }
+	}
+	if stmt.is_distinct { rows = dedup_rows(rows) }
+	return rows, table.columns, true
+}
+
+// Runs a SELECT query and returns the result data without displaying.
+// Returns (rows, column_defs, ok).
+exec_query :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []types.Column, bool) {
+	_, is_subq := stmt.from.(^parser.Select_Stmt)
+	if is_subq {
+		inner_rows, inner_cols := exec_subquery(t, stmt)
+		return inner_rows, inner_cols, inner_rows != nil
+	}
+	if len(stmt.joins) == 0 {
+		return exec_select_single_data(t, stmt)
+	}
+	ok := exec_select(t, stmt)
+	return nil, nil, ok
 }
 
 @(private)
@@ -732,6 +822,9 @@ exec_select_aggregate_combined :: proc(
 	}
 
 	groups := make([dynamic]Group, context.temp_allocator)
+	group_map := make(map[string]int, context.temp_allocator)
+	defer delete(group_map)
+
 	for row_entry, _ in rows {
 		if len(group_by_indices) == 0 {
 			if len(groups) == 0 {
@@ -739,22 +832,16 @@ exec_select_aggregate_combined :: proc(
 			}
 			append(&groups[0].rows, row_entry)
 		} else {
-			group_found := false
-			for gi in 0 ..< len(groups) {
-				match := true
-				for ti, pi in group_by_indices {
-					if compare_values(groups[gi].key_values[pi], row_entry.values[ti]) != 0 {
-						match = false
-						break
-					}
-				}
-				if match {
-					append(&groups[gi].rows, row_entry)
-					group_found = true
-					break
-				}
+			key_b := strings.builder_make(context.temp_allocator)
+			for ti, _ in group_by_indices {
+				if ti > 0 { strings.write_string(&key_b, "\x00") }
+				strings.write_string(&key_b, types.value_to_string(row_entry.values[ti]))
 			}
-			if !group_found {
+			
+			key := strings.to_string(key_b)
+			if gi, exists := group_map[key]; exists {
+				append(&groups[gi].rows, row_entry)
+			} else {
 				key_vals := make([]types.Value, len(group_by_indices), context.temp_allocator)
 				for ti, pi in group_by_indices {
 					key_vals[pi] = row_entry.values[ti]
@@ -762,6 +849,7 @@ exec_select_aggregate_combined :: proc(
 
 				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
 				append(&new_grp_rows, row_entry)
+				group_map[key] = len(groups)
 				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
 			}
 		}
@@ -834,7 +922,6 @@ scan_table :: proc(
 		}
 
 		append(&r, Row_Entry{c.rowid, c.values})
-		c.values = nil
 		btree.cursor_advance(&cursor)
 	}
 	return r[:], false
