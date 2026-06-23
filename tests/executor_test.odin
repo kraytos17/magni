@@ -510,19 +510,28 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	cols2 := make([dynamic]types.Column, context.temp_allocator)
 	append(&cols2, types.Column{name = "ref", type = .INTEGER})
 	append(&cols2, types.Column{name = "val", type = .TEXT})
-	variant2 := parser.Create_Stmt{table_name = "t2", columns = cols2[:]}
+	variant2 := parser.Create_Stmt {
+		table_name = "t2",
+		columns    = cols2[:],
+	}
 	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
 
 	vals2 := make([dynamic]types.Value, context.temp_allocator)
 	append(&vals2, types.value_int(1))
 	append(&vals2, types.value_text("x"))
-	iv1 := parser.Insert_Stmt{table_name = "t2", values = vals2[:]}
+	iv1 := parser.Insert_Stmt {
+		table_name = "t2",
+		values     = vals2[:],
+	}
 	executor.execute(&tree, parser.Statement{type = iv1, sql = ""})
 
 	vals3 := make([dynamic]types.Value, context.temp_allocator)
 	append(&vals3, types.value_int(2))
 	append(&vals3, types.value_text("y"))
-	iv2 := parser.Insert_Stmt{table_name = "t2", values = vals3[:]}
+	iv2 := parser.Insert_Stmt {
+		table_name = "t2",
+		values     = vals3[:],
+	}
 	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
 
 	// LEFT JOIN via exec_select (display path) — should succeed
@@ -564,8 +573,11 @@ test_exec_cow_split_stress :: proc(t: ^testing.T) {
 		testing.expect(t, err == .None, fmt.tprintf("Row %d should exist in COW tree", rid))
 		if err == .None {
 			expected := fmt.tprintf("row-%d", rid)
-			testing.expect(t, cell.values[1].(string) == expected,
-				fmt.tprintf("Row %d name mismatch: expected %s", rid, expected))
+			testing.expect(
+				t,
+				cell.values[1].(string) == expected,
+				fmt.tprintf("Row %d name mismatch: expected %s", rid, expected),
+			)
 		}
 	}
 }
@@ -657,12 +669,31 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 	cols2 := make([dynamic]types.Column, context.temp_allocator)
 	append(&cols2, types.Column{name = "ref", type = .INTEGER})
 	append(&cols2, types.Column{name = "val", type = .TEXT})
-	variant2 := parser.Create_Stmt{table_name = "t2", columns = cols2[:]}
+	variant2 := parser.Create_Stmt {
+		table_name = "t2",
+		columns    = cols2[:],
+	}
 	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
-	executor.execute(&tree, parser.Statement{
-		type = parser.Insert_Stmt{table_name = "t2", values = {types.value_int(1), types.value_text("a")}}, sql = ""})
-	executor.execute(&tree, parser.Statement{
-		type = parser.Insert_Stmt{table_name = "t2", values = {types.value_int(2), types.value_text("x")}}, sql = ""})
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "t2",
+				values = {types.value_int(1), types.value_text("a")},
+			},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "t2",
+				values = {types.value_int(2), types.value_text("x")},
+			},
+			sql = "",
+		},
+	)
 
 	// Two-condition ON clause → non-equi, falls back to nested-loop
 	sql := "SELECT * FROM t1 JOIN t2 ON t1.id = t2.ref AND t1.name = t2.val;"
@@ -729,9 +760,15 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 	// Delete every other row (25 deletions → freeblocks created)
 	for i in 1 ..= 50 {
 		if i % 2 == 0 { continue }
-		cond := parser.Condition{column = "id", operator = .EQUALS, rhs = types.value_int(i64(i))}
-		del := parser.Delete_Stmt{table_name = "t",
-			where_clause = parser.Where_Clause{conditions = {cond}, is_and = true}}
+		cond := parser.Condition {
+			column   = "id",
+			operator = .EQUALS,
+			rhs      = types.value_int(i64(i)),
+		}
+		del := parser.Delete_Stmt {
+			table_name = "t",
+			where_clause = parser.Where_Clause{conditions = {cond}, is_and = true},
+		}
 		executor.execute(&tree, parser.Statement{type = del, sql = ""})
 	}
 

@@ -309,13 +309,11 @@ test_snapshot_find_by_timestamp :: proc(t: ^testing.T) {
 	p := setup_snapshot_env(t, "find_ts")
 	defer teardown_snapshot_env(p, "find_ts")
 
-	p1, _ := snapshot.create(p, 1, 0, 100)
-	p2, _ := snapshot.create(p, 2, p1, 200)
-
-	h1, _ := snapshot.load(p, p1)
+	p1, _ := snapshot.create(p, 1, 0, 0, 0, .UNKNOWN, 100)
+	p2, _ := snapshot.create(p, 2, p1, 0, 0, .UNKNOWN, 200)
 
 	// Find by timestamp between the two
-	found, ts_ok := snapshot.find_by_timestamp(p, p2, h1.timestamp)
+	found, ts_ok := snapshot.find_by_timestamp(p, p2, 150)
 	testing.expect(t, ts_ok, "find_by_timestamp should find snapshot at or before ts")
 	testing.expect_value(t, found.snapshot_id, u64(1))
 

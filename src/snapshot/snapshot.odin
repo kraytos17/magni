@@ -63,6 +63,7 @@ create :: proc(
 	schema_root: u32,
 	manifest_page: u32 = 0,
 	operation: Snapshot_Operation = .UNKNOWN,
+	timestamp: u64 = 0,
 ) -> (
 	snapshot_page: u32,
 	ok: bool,
@@ -77,7 +78,7 @@ create :: proc(
 	h := (^Snapshot_Header)(raw_data(page.data))
 	copy(h.magic[:], SNAPSHOT_MAGIC)
 	h.snapshot_id = snapshot_id; h.prev_snapshot = prev_snapshot
-	h.timestamp = u64(time.now()._nsec / 1000)
+	h.timestamp = timestamp if timestamp != 0 else u64(time.now()._nsec / 1000)
 
 	h.schema_root = schema_root; h.manifest_page = manifest_page
 	h.state = u8(Snapshot_State.COMMITTED); h.operation = u8(operation)
