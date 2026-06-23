@@ -225,12 +225,10 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 	if is_leaf(root_node) { unpin_node(t, root_node); return .Invalid_Page_Header }
 
 	total := int(node_interior(root_node).cell_count)
-	if !node_move_interior_cells(
-		&root_node,
-		&left_node,
-		0,
-		total,
-	) { unpin_node(t, root_node); return .Serialization_Failed }
+	if !node_move_interior_cells(&root_node, &left_node, 0, total) {
+		unpin_node(t, root_node)
+		return .Serialization_Failed
+	}
 
 	old_right := get_right_ptr(root_node.data, root_node.id)
 	set_right_ptr(left_node.data, left_node.id, old_right)

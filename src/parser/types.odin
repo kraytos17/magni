@@ -11,7 +11,10 @@ Token :: struct {
 Condition :: struct {
 	column:      string,
 	operator:    Token_Type,
-	rhs:         union { types.Value, string },
+	rhs:         union {
+		types.Value,
+		string,
+	},
 	in_values:   []types.Value,
 	in_subquery: ^Select_Stmt,
 }
@@ -45,14 +48,24 @@ Order_By_Column :: struct {
 	nulls_first: bool,
 }
 
-Aggregate_Func :: enum { COUNT, SUM, AVG, MIN, MAX }
+Aggregate_Func :: enum {
+	COUNT,
+	SUM,
+	AVG,
+	MIN,
+	MAX,
+}
 
 Aggregate_Expr :: struct {
 	func:   Aggregate_Func,
 	column: string,
 }
 
-Join_Type :: enum { INNER, CROSS, LEFT }
+Join_Type :: enum {
+	INNER,
+	CROSS,
+	LEFT,
+}
 
 Join_Clause :: struct {
 	join_type: Join_Type,
@@ -61,7 +74,10 @@ Join_Clause :: struct {
 	on_clause: Maybe(Where_Clause),
 }
 
-From_Source :: union { string, ^Select_Stmt }
+From_Source :: union {
+	string,
+	^Select_Stmt,
+}
 
 Join_Source_Result :: struct {
 	source:  From_Source,
@@ -102,14 +118,25 @@ Drop_Stmt :: struct {
 	table_name: string,
 }
 
-Txn_Op :: enum { BEGIN, COMMIT, ROLLBACK }
+Txn_Op :: enum {
+	BEGIN,
+	COMMIT,
+	ROLLBACK,
+}
 
-Txn_Stmt :: struct { op: Txn_Op }
+Txn_Stmt :: struct {
+	op: Txn_Op,
+}
 
 Statement_Variant :: union {
-	Create_Stmt, Insert_Stmt, Select_Stmt,
-	Update_Stmt, Delete_Stmt, Drop_Stmt,
-	Txn_Stmt, Explain_Stmt,
+	Create_Stmt,
+	Insert_Stmt,
+	Select_Stmt,
+	Update_Stmt,
+	Delete_Stmt,
+	Drop_Stmt,
+	Txn_Stmt,
+	Explain_Stmt,
 }
 
 Statement :: struct {

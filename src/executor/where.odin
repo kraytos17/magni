@@ -30,15 +30,22 @@ init_where_ctx :: proc(
 	if len(clause.conditions) == 0 {
 		return Where_Eval_Ctx{}
 	}
+
 	resolved := make([]Resolved_Condition, len(clause.conditions), allocator)
 	for cond, i in clause.conditions {
 		idx, found := resolve_qualified_column(cols, table_ranges, cond.column)
 		if !found { return nil }
-		rc := Resolved_Condition{
-			col_idx = idx,
-			operator = cond.operator,
-			has_in = cond.operator == .IN,
+
+		rc := Resolved_Condition {
+			col_idx       = idx,
+			operator      = cond.operator,
+			has_in        = cond.operator == .IN,
+			has_right_col = false,
+			right_idx     = 0,
+			in_values     = nil,
+			in_subquery   = nil,
 		}
+
 		if rhs_str, is_col := cond.rhs.(string); is_col {
 			right_idx, rc_found := resolve_qualified_column(cols, table_ranges, rhs_str)
 			if !rc_found { return nil }
@@ -47,6 +54,7 @@ init_where_ctx :: proc(
 		} else if val, is_val := cond.rhs.(types.Value); is_val {
 			rc.rhs = val
 		}
+
 		if cond.in_values != nil {
 			rc.in_values = cond.in_values
 		}
@@ -114,6 +122,7 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 		if !text_ok || !pat_ok { return false }
 		return like_match(pattern, text)
 	}
+
 	cmp := compare_values(val, target)
 	#partial switch op {
 	case .EQUALS:

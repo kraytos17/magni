@@ -134,9 +134,7 @@ node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, rowid: types.Row_ID, values: [
 	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * size_of(Cell_Pointer)
 
 	if ptr_area_end >= int(n.header.cell_content_offset) { return .Page_Full }
-	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end {
-		return .Page_Full
-	}
+	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end { return .Page_Full }
 
 	new_offset := int(n.header.cell_content_offset) - cinfo.total_size
 	bytes_written, ok := cell.serialize(n.data[new_offset:], rowid, values, cinfo)
@@ -356,16 +354,16 @@ node_find_child_data :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> u32
 	child, _ := endian.get_u32(data[int(pointers[idx]):], .Big); return child
 }
 
-descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {return get_right_ptr(
-		data,
-		page_id,
-	)}
+descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
+	return get_right_ptr(data, page_id)
+}
 
 tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator := context.allocator) -> (cell.Cell, Error) {
 	k := key
 	leaf, err := descend_to_leaf(t, descend_by_key, &k)
 	if err != .None { return {}, err }
 	defer unpin_node(t, leaf)
+
 	pointers := get_pointers(leaf.data, leaf.id)
 	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key)
 	if !ok { return {}, .Invalid_Cell_Pointer }
@@ -389,6 +387,7 @@ tree_next_rowid :: proc(t: ^Tree) -> (types.Row_ID, Error) {
 	if err != .None { return 0, err }
 	defer unpin_node(t, leaf)
 	if leaf.header.cell_count == 0 { return 1, .None }
+
 	pointers := get_pointers(leaf.data, leaf.id)
 	last_ptr := pointers[leaf.header.cell_count - 1]
 	last_id, ok := cell.get_rowid(leaf.data, int(last_ptr))
@@ -403,13 +402,18 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (int, Error) {
 	if err != .None { return 0, err }
 	defer unpin_node(t, node)
 	if is_leaf(node) { return int(node.header.cell_count), .None }
+
 	total := 0
 	pointers := get_pointers(node.data, page_id)
-	for ptr in pointers {child_id, ok := endian.get_u32(node.data[int(ptr):], .Big)
+	for ptr in pointers {
+		child_id, ok := endian.get_u32(node.data[int(ptr):], .Big)
 		if !ok { return 0, .Invalid_Cell_Pointer }
+
 		count, c_err := count_recursive(t, child_id)
 		if c_err != .None { return 0, c_err }
-		total += count}
+		total += count
+	}
+
 	right_count, r_err := count_recursive(t, get_right_ptr(node.data, page_id))
 	if r_err != .None { return 0, r_err }
 	return total + right_count, .None
@@ -422,17 +426,30 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	idx, ok := leaf_lower_bound(leaf_node.data, leaf_node.id, key)
 	if ok && idx < limit {
 		rid, ok2 := cell.get_rowid(leaf_node.data, int(pointers[idx]))
-		if ok2 &&
-		   rid ==
-			   key { delete_idx = idx; cell_off = int(pointers[idx]); sz, ok3 := cell.get_size(leaf_node.data, cell_off); if ok3 { cell_sz = sz } }
+		if ok2 && rid == key {
+			delete_idx = idx
+			cell_off = int(pointers[idx])
+			sz, ok3 := cell.get_size(leaf_node.data, cell_off)
+			if ok3 { cell_sz = sz }
+		}
 	}
-	if delete_idx == -1 { return .Cell_Not_Found }
-	if delete_idx < limit - 1 { copy(pointers[delete_idx:], pointers[delete_idx + 1:limit]) }
+	if delete_idx == -1 {
+		return .Cell_Not_Found
+	}
+	if delete_idx < limit - 1 {
+		copy(pointers[delete_idx:], pointers[delete_idx + 1:limit])
+	}
+
 	leaf_node.header.cell_count -= 1
-	if cell_off ==
-	   int(
-		   leaf_node.header.cell_content_offset,
-	   ) { leaf_node.header.cell_content_offset += u16le(cell_sz) } else if cell_sz >= FREEBLOCK_HDR_SIZE { freeblock_insert(leaf_node.data, u16(cell_off), u16(cell_sz), &leaf_node.header.first_freeblock) } else if cell_sz > 0 && cell_sz < 255 { leaf_node.header.fragmented_bytes = u8(min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), 255)) }
+	if cell_off == int(leaf_node.header.cell_content_offset) {
+		leaf_node.header.cell_content_offset += u16le(cell_sz)
+	} else if cell_sz >= FREEBLOCK_HDR_SIZE {
+		freeblock_insert(leaf_node.data, u16(cell_off), u16(cell_sz), &leaf_node.header.first_freeblock)
+	} else if cell_sz > 0 && cell_sz < 255 {
+		leaf_node.header.fragmented_bytes = u8(
+			min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), 255),
+		)
+	}
 	pager.mark_dirty(t.pager, leaf_node.id)
 	return .None
 }
@@ -478,16 +495,20 @@ foreach_recursive :: proc(
 				cell.Config{allocator = t.config.allocator, zero_copy = t.config.zero_copy},
 			)
 			if !ok { return .Cell_Deserialize_Failed }
+
 			continue_iter := cb(&c, ud)
 			if !t.config.zero_copy { cell.destroy(&c) }
 			if !continue_iter { return .None }
 		}
 		return .None
 	}
+
 	ptrs := get_pointers(node.data, page_id)
-	for ptr in ptrs {child, ok := endian.get_u32(node.data[int(ptr):], .Big)
+	for ptr in ptrs {
+		child, ok := endian.get_u32(node.data[int(ptr):], .Big)
 		if !ok { return .Invalid_Cell_Pointer }
-		if e := foreach_recursive(t, child, cb, ud); e != .None { return e }}
+		if e := foreach_recursive(t, child, cb, ud); e != .None { return e }
+	}
 	return foreach_recursive(t, get_right_ptr(node.data, page_id), cb, ud)
 }
 
@@ -502,6 +523,7 @@ tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 		node.header.cell_content_offset,
 		node.header.fragmented_bytes,
 	)
+
 	pointers := get_pointers(node.data, page_id)
 	for ptr, i in pointers {
 		c, _, ok := cell.deserialize(
@@ -509,7 +531,10 @@ tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 			int(ptr),
 			cell.Config{allocator = t.config.allocator, zero_copy = false},
 		)
-		if !ok { fmt.printf("  Cell %d: [Error Deserializing]\n", i); continue }
+		if !ok {
+			fmt.printf("  Cell %d: [Error Deserializing]\n", i)
+			continue
+		}
 		fmt.printf("  Cell %d: ", i); cell.debug_print(c); cell.destroy(&c)
 	}
 }
@@ -529,38 +554,66 @@ verify_recursive :: proc(
 	visited: ^map[u32]bool,
 ) -> bool {
 	if page_id == 0 { return false }
-	if page_id in visited { fmt.printf("Cycle detected: page %d revisited\n", page_id); return false }
-	if depth >
-	   MAX_TREE_DEPTH { fmt.printf("Tree too deep (depth=%d), possible cycle\n", depth); return false }
+	if page_id in visited {
+		fmt.printf("Cycle detected: page %d revisited\n", page_id)
+		return false
+	}
+	if depth > MAX_TREE_DEPTH {
+		fmt.printf("Tree too deep (depth=%d), possible cycle\n", depth)
+		return false
+	}
+
 	visited[page_id] = true
 	node, err := load_node(t, page_id)
-	if err != .None { fmt.printf("Failed to load page %d\n", page_id); return false }
+	if err != .None {
+		fmt.printf("Failed to load page %d\n", page_id)
+		return false
+	}
 	defer unpin_node(t, node)
+
 	indent := strings.repeat("  ", depth, context.temp_allocator)
 	fmt.printf("%sPage %d [%v] count=%d\n", indent, page_id, node.header.page_type, node.header.cell_count)
 	if is_leaf(node) {
 		ptrs := get_pointers(node.data, page_id); prev := min_k
 		for ptr in ptrs {
 			rowid, ok := cell.get_rowid(node.data, int(ptr))
-			if !ok { fmt.printf("Corrupt cell at offset %d\n", int(ptr)); return false }
-			if rowid <
-			   prev { fmt.printf("Leaf key disorder: %d came after %d\n", rowid, prev); return false }
-			if rowid > max_k { fmt.printf("Leaf key %d > max %d\n", rowid, max_k); return false }
+			if !ok {
+				fmt.printf("Corrupt cell at offset %d\n", int(ptr))
+				return false
+			}
+			if rowid < prev {
+				fmt.printf("Leaf key disorder: %d came after %d\n", rowid, prev)
+				return false
+			}
+			if rowid > max_k {
+				fmt.printf("Leaf key %d > max %d\n", rowid, max_k)
+				return false
+			}
 			prev = rowid
 		}
 		return true
 	}
+
 	ptrs := get_pointers(node.data, page_id); prev_k := min_k
 	for ptr in ptrs {
 		offset := int(ptr)
 		child, r_ok := endian.get_u32(node.data[offset:], .Big)
-		if !r_ok { fmt.printf("Corrupt interior cell at offset %d\n", offset); return false }
+		if !r_ok {
+			fmt.printf("Corrupt interior cell at offset %d\n", offset)
+			return false
+		}
+
 		sep_val, _, v_ok := cell.varint_decode(node.data, offset + 4)
-		if !v_ok { fmt.printf("Corrupt separator key at offset %d\n", offset + 4); return false }
+		if !v_ok {
+			fmt.printf("Corrupt separator key at offset %d\n", offset + 4)
+			return false
+		}
+
 		key := types.Row_ID(sep_val)
-		if key < prev_k ||
-		   key >
-			   max_k { fmt.printf("Interior key %d out of bounds [%d, %d]\n", key, prev_k, max_k); return false }
+		if key < prev_k || key > max_k {
+			fmt.printf("Interior key %d out of bounds [%d, %d]\n", key, prev_k, max_k)
+			return false
+		}
 		if !verify_recursive(t, child, prev_k, key, depth + 1, visited) { return false }
 		prev_k = key
 	}
@@ -574,8 +627,13 @@ collect_pages :: proc(t: ^Tree, root: u32, pages: ^map[u32]bool) {
 	if err != .None { return }
 	defer unpin_node(t, node)
 	if is_leaf(node) { return }
+
 	pointers := get_pointers(node.data, node.id)
-	for ptr in pointers {child, _ := endian.get_u32(node.data[int(ptr):], .Big)
-		collect_pages(t, child, pages)}
-	if right_ptr := get_right_ptr(node.data, node.id); right_ptr != 0 { collect_pages(t, right_ptr, pages) }
+	for ptr in pointers {
+		child, _ := endian.get_u32(node.data[int(ptr):], .Big)
+		collect_pages(t, child, pages)
+	}
+	if right_ptr := get_right_ptr(node.data, node.id); right_ptr != 0 {
+		collect_pages(t, right_ptr, pages)
+	}
 }

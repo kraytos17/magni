@@ -17,7 +17,8 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 			if i > 0 { strings.write_byte(&key_b, '\x00') }
 			strings.write_string(&key_b, types.value_to_string(v))
 		}
-		fp := hash.fnv64(transmute([]u8)strings.to_string(key_b))
+
+		fp := hash.fnv64a(transmute([]u8)strings.to_string(key_b))
 		if fp not_in seen {
 			seen[fp] = true
 			append(&result, r)
@@ -79,9 +80,10 @@ sort_rows :: proc(
 			idx := make([]int, len(rows), context.temp_allocator)
 			for i in 0 ..< len(rows) { idx[i] = i }
 			slice.sort_by_with_data(idx, proc(a, b: int, data: rawptr) -> bool {
-				k := (^[]i64)(data)
-				return k[a] < k[b]
-			}, &keys)
+					k := (^[]i64)(data)
+					return k[a] < k[b]
+				}, &keys)
+
 			sorted := make([]Row_Entry, len(rows), context.temp_allocator)
 			if desc || nulls_first {
 				for pi, i in idx {
@@ -96,10 +98,9 @@ sort_rows :: proc(
 			return true
 		}
 	}
+
 	sort_ctx := Sort_Ctx{order_clause, sort_indices}
-	slice.sort_by_with_data(
-		rows,
-		proc(a, b: Row_Entry, data: rawptr) -> bool {
+	slice.sort_by_with_data(rows, proc(a, b: Row_Entry, data: rawptr) -> bool {
 			ctx := (^Sort_Ctx)(data)
 			for sort_idx, i in ctx.sort_indices {
 				a_null := types.is_null(a.values[sort_idx])
@@ -111,6 +112,7 @@ sort_rows :: proc(
 					}
 					return a_null == nulls_first
 				}
+
 				cmp := compare_values(a.values[sort_idx], b.values[sort_idx])
 				if cmp != 0 {
 					if ctx.order_clause[i].desc { return cmp > 0 }
@@ -118,8 +120,6 @@ sort_rows :: proc(
 				}
 			}
 			return false
-		},
-		&sort_ctx,
-	)
+		}, &sort_ctx)
 	return true
 }

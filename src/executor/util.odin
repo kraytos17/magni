@@ -38,11 +38,14 @@ resolve_qualified_column :: proc(
 try_pk_lookup :: proc(table: types.Table, clause: parser.Where_Clause) -> (rowid: types.Row_ID, ok: bool) {
 	if len(clause.conditions) != 1 { return }
 	if !clause.is_and { return }
+
 	cond := clause.conditions[0]
 	if cond.operator != .EQUALS { return }
+
 	pk_idx, has_pk := schema.get_pk_column(table.columns)
 	if !has_pk { return }
 	if table.columns[pk_idx].name != cond.column { return }
+
 	val, is_int := cond.rhs.(types.Value).(i64)
 	if !is_int { return }
 	return types.Row_ID(val), true
@@ -79,9 +82,11 @@ try_join_match :: proc(
 		copy(tmp[len(outer_row.values):], inner_values)
 		if !evaluate_where(&on_cl, tmp, combined_cols, table_ranges) { return }
 	}
+
 	combined := make([]types.Value, len(outer_row.values) + len(inner_values), context.temp_allocator)
 	copy(combined[:len(outer_row.values)], outer_row.values)
 	copy(combined[len(outer_row.values):], inner_values)
+
 	matched^ = true
 	append(new_rows, Row_Entry{0, combined})
 }
@@ -94,11 +99,13 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 				fmt.eprintln("Error: CHECK constraint too complex:", chk)
 				return false
 			}
+
 			col_idx, col_ok := resolve_qualified_column(table.columns, nil, parts[0])
 			if !col_ok {
 				fmt.eprintln("Error: CHECK references unknown column:", parts[0])
 				return false
 			}
+
 			left_val := values[col_idx]
 			op_token := parts[1]
 			val_num, parse_num := strconv.parse_i64(parts[2])
@@ -106,19 +113,27 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 				fmt.eprintln("Error: CHECK constraint non-integer comparison:", chk)
 				return false
 			}
+
 			left_i64, is_int := left_val.(i64)
 			if !is_int {
 				fmt.eprintln("Error: CHECK column value is not an integer:", chk)
 				return false
 			}
+
 			result := false
-			if op_token == ">" { result = left_i64 > val_num }
-			else if op_token == "<" { result = left_i64 < val_num }
-			else if op_token == ">=" { result = left_i64 >= val_num }
-			else if op_token == "<=" { result = left_i64 <= val_num }
-			else if op_token == "=" { result = left_i64 == val_num }
-			else if op_token == "!=" || op_token == "<>" { result = left_i64 != val_num }
-			else {
+			if op_token == ">" {
+				result = left_i64 > val_num
+			} else if op_token == "<" {
+				result = left_i64 < val_num
+			} else if op_token == ">=" {
+				result = left_i64 >= val_num
+			} else if op_token == "<=" {
+				result = left_i64 <= val_num
+			} else if op_token == "=" {
+				result = left_i64 == val_num
+			} else if op_token == "!=" || op_token == "<>" {
+				result = left_i64 != val_num
+			} else {
 				fmt.eprintln("Error: CHECK uses unsupported operator:", op_token)
 				return false
 			}

@@ -184,14 +184,14 @@ Column :: struct {
 }
 
 hash_string :: proc(s: string) -> u64 {
-	return hash.fnv64(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
+	return hash.fnv64a(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
 }
 
 Table :: struct {
-	name:        string,
-	columns:     []Column,
-	root_page:   u32,
-	sql:         string,
+	name:         string,
+	columns:      []Column,
+	root_page:    u32,
+	sql:          string,
 	foreign_keys: []Foreign_Key,
 }
 

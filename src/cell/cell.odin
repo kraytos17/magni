@@ -1,10 +1,10 @@
 package cell
 
+import "core:encoding/endian"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "src:types"
-import "core:encoding/endian"
 
 // Cell represents a serialized row (Record).
 //
@@ -75,9 +75,7 @@ compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serializatio
 	}
 
 	header_bytes :=
-		varint_size(u64(rowid)) +
-		varint_size(u64(info.serial_types_size)) +
-		info.serial_types_size
+		varint_size(u64(rowid)) + varint_size(u64(info.serial_types_size)) + info.serial_types_size
 	total_payload := header_bytes + info.payload_size
 	info.total_size = varint_size(u64(total_payload)) + total_payload
 	return info
@@ -100,9 +98,7 @@ serialize :: proc(
 
 	offset := 0
 	header_bytes :=
-		varint_size(u64(rowid)) +
-		varint_size(u64(info.serial_types_size)) +
-		info.serial_types_size
+		varint_size(u64(rowid)) + varint_size(u64(info.serial_types_size)) + info.serial_types_size
 
 	total_payload := header_bytes + info.payload_size
 	offset += varint_encode(dest[offset:], u64(total_payload))
@@ -297,8 +293,7 @@ varint_encode :: proc(dest: []u8, value: u64) -> int {
 		if i >= len(dest) { return 0 }
 		b := u8(v & 0x7F)
 		v >>= 7
-		if v != 0 { dest[i] = b | 0x80; i += 1 }
-		else { dest[i] = b; i += 1; break }
+		if v != 0 { dest[i] = b | 0x80; i += 1 } else { dest[i] = b; i += 1; break }
 	}
 	return i
 }
@@ -309,9 +304,11 @@ varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: in
 	shift: u32; pos := offset
 	for shift < 64 {
 		if pos >= len(src) { return 0, 0, false }
+
 		b := u64(src[pos]); pos += 1; bytes_read += 1
 		value |= (b & 0x7F) << shift
 		if (b & 0x80) == 0 { return value, bytes_read, true }
+
 		shift += 7
 		if bytes_read >= 9 { return 0, 0, false }
 	}
@@ -321,15 +318,24 @@ varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: in
 // Calculate SQLite varint size for a given value.
 varint_size :: proc(v: u64) -> int {
 	switch {
-	case v < (1 << 7):  return 1
-	case v < (1 << 14): return 2
-	case v < (1 << 21): return 3
-	case v < (1 << 28): return 4
-	case v < (1 << 35): return 5
-	case v < (1 << 42): return 6
-	case v < (1 << 49): return 7
-	case v < (1 << 56): return 8
-	case: return 9
+	case v < (1 << 7):
+		return 1
+	case v < (1 << 14):
+		return 2
+	case v < (1 << 21):
+		return 3
+	case v < (1 << 28):
+		return 4
+	case v < (1 << 35):
+		return 5
+	case v < (1 << 42):
+		return 6
+	case v < (1 << 49):
+		return 7
+	case v < (1 << 56):
+		return 8
+	case:
+		return 9
 	}
 }
 
@@ -337,20 +343,24 @@ varint_size :: proc(v: u64) -> int {
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
 	if offset + size > len(data) { return 0, false }
 	switch size {
-	case 1: return i64(i8(data[offset])), true
-	case 2: return i64(i16(endian.get_u16(data[offset:], .Little) or_return)), true
+	case 1:
+		return i64(i8(data[offset])), true
+	case 2:
+		return i64(i16(endian.get_u16(data[offset:], .Little) or_return)), true
 	case 3:
-		v := i64(data[offset]) | (i64(data[offset+1]) << 8) | (i64(data[offset+2]) << 16)
+		v := i64(data[offset]) | (i64(data[offset + 1]) << 8) | (i64(data[offset + 2]) << 16)
 		if v & 0x800000 != 0 { v |= ~i64(0xFFFFFF) }
 		return v, true
-	case 4: return i64(i32(endian.get_u32(data[offset:], .Little) or_return)), true
+	case 4:
+		return i64(i32(endian.get_u32(data[offset:], .Little) or_return)), true
 	case 6:
 		lo := endian.get_u32(data[offset:], .Little) or_return
-		hi := endian.get_u16(data[offset+4:], .Little) or_return
+		hi := endian.get_u16(data[offset + 4:], .Little) or_return
 		v := i64(lo) | (i64(hi) << 32)
 		if v & 0x8000_0000_0000 != 0 { v |= ~i64(0xFFFF_FFFF_FFFF) }
 		return v, true
-	case 8: return i64(endian.get_u64(data[offset:], .Little) or_return), true
+	case 8:
+		return i64(endian.get_u64(data[offset:], .Little) or_return), true
 	}
 	return 0, false
 }
@@ -359,12 +369,20 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> bool {
 	if offset + size > len(dest) { return false }
 	switch size {
-	case 1: dest[offset] = u8(value); return true
-	case 2: return endian.put_u16(dest[offset:], .Little, u16(value))
-	case 3: endian.put_u16(dest[offset:], .Little, u16(value)); dest[offset + 2] = u8(value >> 16); return true
-	case 4: return endian.put_u32(dest[offset:], .Little, u32(value))
-	case 6: endian.put_u32(dest[offset:], .Little, u32(value)); endian.put_u16(dest[offset+4:], .Little, u16(value >> 32)); return true
-	case 8: return endian.put_u64(dest[offset:], .Little, u64(value))
+	case 1:
+		dest[offset] = u8(value); return true
+	case 2:
+		return endian.put_u16(dest[offset:], .Little, u16(value))
+	case 3:
+		endian.put_u16(dest[offset:], .Little, u16(value)); dest[offset + 2] = u8(value >> 16); return true
+	case 4:
+		return endian.put_u32(dest[offset:], .Little, u32(value))
+	case 6:
+		endian.put_u32(dest[offset:], .Little, u32(value))
+		endian.put_u16(dest[offset + 4:], .Little, u16(value >> 32))
+		return true
+	case 8:
+		return endian.put_u64(dest[offset:], .Little, u64(value))
 	}
 	return false
 }
@@ -372,25 +390,39 @@ write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> boo
 // Determine SQLite serial type for a Value.
 serial_type_for_value :: proc(v: types.Value) -> u64 {
 	switch val in v {
-	case types.Null: return u64(types.Serial_Type.NULL)
+	case types.Null:
+		return u64(types.Serial_Type.NULL)
 	case i64:
 		switch {
-		case val == 0: return u64(types.Serial_Type.ZERO)
-		case val == 1: return u64(types.Serial_Type.ONE)
+		case val == 0:
+			return u64(types.Serial_Type.ZERO)
+		case val == 1:
+			return u64(types.Serial_Type.ONE)
 		}
+
 		abs_val := abs(val)
 		switch {
-		case abs_val < (1 << 7):  return u64(types.Serial_Type.INT8)
-		case abs_val < (1 << 15): return u64(types.Serial_Type.INT16)
-		case abs_val < (1 << 23): return u64(types.Serial_Type.INT24)
-		case abs_val < (1 << 31): return u64(types.Serial_Type.INT32)
-		case abs_val < (1 << 47): return u64(types.Serial_Type.INT48)
-		case: return u64(types.Serial_Type.INT64)
+		case abs_val < (1 << 7):
+			return u64(types.Serial_Type.INT8)
+		case abs_val < (1 << 15):
+			return u64(types.Serial_Type.INT16)
+		case abs_val < (1 << 23):
+			return u64(types.Serial_Type.INT24)
+		case abs_val < (1 << 31):
+			return u64(types.Serial_Type.INT32)
+		case abs_val < (1 << 47):
+			return u64(types.Serial_Type.INT48)
+		case:
+			return u64(types.Serial_Type.INT64)
 		}
-	case f64:   return u64(types.Serial_Type.FLOAT64)
-	case string: return u64(len(val) * 2 + 13)
-	case []u8:   return u64(len(val) * 2 + 12)
-	case: return u64(types.Serial_Type.NULL)
+	case f64:
+		return u64(types.Serial_Type.FLOAT64)
+	case string:
+		return u64(len(val) * 2 + 13)
+	case []u8:
+		return u64(len(val) * 2 + 12)
+	case:
+		return u64(types.Serial_Type.NULL)
 	}
 }
 

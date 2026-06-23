@@ -12,6 +12,7 @@ print_agg_header :: proc(cols: []string) {
 		if i > 0 do strings.write_string(&b, " | ")
 		strings.write_string(&b, col)
 	}
+
 	strings.write_byte(&b, '\n')
 	for col, i in cols {
 		if i > 0 do strings.write_string(&b, "-+-")
@@ -28,13 +29,22 @@ display_results :: proc(
 ) {
 	skip_count := u64(0)
 	if off, has_off := offset.?; has_off { skip_count = off }
+
 	limit_count := u64(0)
 	has_limit := false
-	if lim, has_lim := limit.?; has_lim { limit_count = lim; has_limit = true }
+	if lim, has_lim := limit.?; has_lim {
+		limit_count = lim
+		has_limit = true
+	}
+
 	print_header(cols, display_indices)
 	row_count := 0
 	for entry in rows {
-		if skip_count > 0 { skip_count -= 1; continue }
+		if skip_count > 0 {
+			skip_count -= 1
+			continue
+		}
+
 		print_row(entry.values, display_indices)
 		row_count += 1
 		if has_limit && u64(row_count) >= limit_count { break }
@@ -178,11 +188,16 @@ evaluate_where_having :: proc(
 			for agg, i in aggregates {
 				name := ""
 				switch agg.func {
-				case .COUNT: name = "COUNT"
-				case .SUM:   name = "SUM"
-				case .AVG:   name = "AVG"
-				case .MIN:   name = "MIN"
-				case .MAX:   name = "MAX"
+				case .COUNT:
+					name = "COUNT"
+				case .SUM:
+					name = "SUM"
+				case .AVG:
+					name = "AVG"
+				case .MIN:
+					name = "MIN"
+				case .MAX:
+					name = "MAX"
 				}
 				if cond.column == name && rhs_is_val {
 					cond_result = compare_condition(agg_values[i], cond.operator, rhs_val)
@@ -207,6 +222,7 @@ print_header :: proc(cols: []types.Column, indices: []int) {
 		if i > 0 do strings.write_string(&b, " | ")
 		strings.write_string(&b, cols[idx].name)
 	}
+
 	strings.write_byte(&b, '\n')
 	for _, i in indices {
 		if i > 0 do strings.write_string(&b, "-+-")
