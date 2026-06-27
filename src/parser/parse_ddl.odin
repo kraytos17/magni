@@ -92,7 +92,13 @@ parse_create_table :: proc(
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }
 
-parse_drop_table :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
+parse_drop_table :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
 	if !match(p, .TABLE) do return nil, false
 	table_name := parse_identifier(p, allocator) or_return
 	return Drop_Stmt{table_name = table_name}, true

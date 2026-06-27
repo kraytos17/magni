@@ -16,7 +16,7 @@ Page_Type :: enum u8 {
 
 Cell_Pointer :: distinct u16le
 
-Page_Header :: struct #packed {
+Page_Header :: struct #packed #simple {
 	page_type:           Page_Type, // Byte 0
 	first_freeblock:     u16le, // Bytes 1-2
 	cell_count:          u16le, // Bytes 3-4
@@ -25,13 +25,13 @@ Page_Header :: struct #packed {
 }
 #assert(size_of(Page_Header) == 8)
 
-Interior_Header :: struct #packed {
+Interior_Header :: struct #packed #simple {
 	using common:  Page_Header,
 	rightmost_ptr: u32be,
 }
 #assert(size_of(Interior_Header) == 12)
 
-Leaf_Header :: struct #packed {
+Leaf_Header :: struct #packed #simple {
 	using common: Page_Header,
 }
 #assert(size_of(Leaf_Header) == 8)
@@ -173,7 +173,12 @@ interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
 	return 4 + n
 }
 
-insert_interior_cell :: proc(data: []u8, page_id: u32, child_page: u32, key: types.Row_ID) -> bool {
+insert_interior_cell :: proc(
+	data: []u8,
+	page_id: u32,
+	child_page: u32,
+	key: types.Row_ID,
+) -> bool {
 	header := get_interior_header(data, page_id)
 	if header == nil { return false }
 

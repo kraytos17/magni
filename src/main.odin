@@ -89,7 +89,10 @@ repl :: proc(database: ^db.Database) {
 		strings.write_string(&query_buffer, line)
 		if strings.has_suffix(trimmed, ";") {
 			full_sql := strings.to_string(query_buffer)
-			is_select := strings.has_prefix(strings.to_upper(strings.trim_space(full_sql)), "SELECT")
+			is_select := strings.has_prefix(
+				strings.to_upper(strings.trim_space(full_sql)),
+				"SELECT",
+			)
 			if db.execute(database, full_sql) {
 				if !is_select {
 					fmt.println("Query executed successfully.")

@@ -100,7 +100,7 @@ snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> bool {
 		fmt.eprintln("Error: Failed to create restore snapshot")
 		return false
 	}
-	
+
 	db.snapshot_index[new_id] = new_page
 	db.latest_snapshot = new_page
 	db.schema_root_page = snap_h.schema_root

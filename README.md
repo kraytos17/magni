@@ -72,6 +72,7 @@ SELECT DISTINCT name FROM users;
 
 -- Filtering
 SELECT * FROM users WHERE score > 50 AND name != 'Bob';
+SELECT * FROM users WHERE score > 50 AND name <> 'Bob';  -- != or <>
 SELECT * FROM users WHERE name LIKE 'A%';
 SELECT * FROM users WHERE id IN (1, 3, 5);
 SELECT * FROM users WHERE name IN (SELECT name FROM active_users);
@@ -82,6 +83,7 @@ SELECT * FROM users ORDER BY name ASC LIMIT 5 OFFSET 10;
 
 -- Aggregates & grouping
 SELECT COUNT(*), AVG(score), MIN(score), MAX(score), SUM(score) FROM users;
+SELECT COUNT(score) FROM users;  -- COUNT(non-NULL values)
 SELECT name, COUNT(*) FROM users GROUP BY name HAVING count > 1;
 
 -- JOINs
@@ -100,6 +102,9 @@ EXPLAIN SELECT * FROM t1 INNER JOIN t2 ON t1.x = t2.y;
 
 -- Aliases
 SELECT a.x FROM t AS a;
+
+-- Multi-column ORDER BY
+SELECT * FROM users ORDER BY score DESC, name ASC;
 ```
 
 ### Time-Travel Queries
@@ -126,10 +131,12 @@ ROLLBACK;
 ### Dot-Commands (REPL)
 
 | Command | Description |
-|---|---|
+|---|---|---|
 | `.exit` / `.quit` | Exit |
+| `.help` | Print help message |
 | `.tables` | List all tables |
 | `.schema` | Show CREATE TABLE statements |
+| `.debug_schema` | Show low-level schema details (root pages, flags) |
 | `.desc <table>` | Describe table columns |
 | `.dump <table>` | Dump all rows |
 | `.stats` | Database statistics |
@@ -185,16 +192,17 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 
 ## Features
 
-## Features
-
 ### Highlights
 - **Copy-on-write (COW) B+tree**: every mutation creates new pages along the path.
   Old pages remain readable for time-travel queries. No WAL or MVCC needed.
 - **Single-traversal mutations**: `tree_update_cow` does delete + re-insert in one
   root-to-leaf traversal. Halves page writes vs delete-then-insert.
+- **Stream COW mutations**: UPDATE/DELETE apply mutations immediately in the scan
+  loop instead of batch-collecting ops first — O(1) peak memory per operation.
 - **SQL feature set**: CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE with AND/OR/LIKE/IN,
-  JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY with NULLS FIRST/LAST, LIMIT/OFFSET,
-  DISTINCT, subqueries, aggregate functions (COUNT/SUM/AVG/MIN/MAX), CHECK constraints,
+  JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY with NULLS FIRST/LAST, NULLS LAST,
+  multi-column ORDER BY, LIMIT/OFFSET, DISTINCT, subqueries, aggregate functions
+  (COUNT/SUM/AVG/MIN/MAX, including COUNT(col)), CHECK constraints,
   FOREIGN KEY validation, EXPLAIN, transactions (BEGIN/COMMIT/ROLLBACK).
 - **Time-travel**: `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`.
 - **Snapshot system**: append-only chain with O(1) lookup, tagging, diff, restore, GC.
@@ -204,10 +212,15 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
   tracked and reused. Coalesces adjacent free blocks.
 - **Hash join**: integer-key hash join avoids allocation per row; string-key fallback.
 - **Pre-resolved WHERE**: column indices resolved once, not per row.
+- **LIMIT pushdown**: LIMIT without ORDER BY stops the table scan early.
+- **GC throttling**: garbage collection runs every 10 DMLs (skipped for under 512 pages).
+- **Inline deserialize buffer**: `[dynamic; MAX_COLS]T` avoids heap alloc per row decode.
+- **`@(fast_math)` aggregate loops**: SUM/AVG/MIN/MAX compute with IEEE-relaxed ops.
+- **`#simple` / `#all_or_none`**: applied to page headers, snapshot headers, and result structs for safety.
 
 ---
 
-## Test Coverage (169 tests)
+## Test Coverage
 
 | Package | Tests | What's tested |
 |---|---|---|
@@ -218,7 +231,7 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 | `pager` | 12 | Page cache, I/O, pinning, eviction |
 | `schema` | 10 | Column blob, add/find/drop/list |
 | `snapshot` | 12 | Chain, manifests, diff, tags, timestamp lookup, GC |
-| `integration` | 16 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore |
+| `integration` | 23 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, query API, freeblock reuse |
 
 ---
 
@@ -306,4 +319,4 @@ tests/
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
 - No B-tree rebalancing on delete (pages may fragment)
-- `CHECK` expression limited to integer comparisons (col > 0, col < 100)
+- `CHECK` expression limited to simple integer comparisons (col > 0, col < 100)

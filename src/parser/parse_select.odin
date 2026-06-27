@@ -10,7 +10,13 @@ parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: st
 	return strings.clone(tok.lexeme, allocator), true
 }
 
-parse_qualified_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: string, ok: bool) {
+parse_qualified_identifier :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	str: string,
+	ok: bool,
+) {
 	first := parse_identifier(p, allocator) or_return
 	if match(p, .DOT) {
 		second := parse_identifier(p, allocator) or_return
@@ -93,7 +99,13 @@ parse_single_join :: proc(
 		if !ok { return {}, false }
 	}
 
-	return Join_Clause{join_type = join_type, source = js.source, alias = js.alias, on_clause = on_cl}, true
+	return Join_Clause {
+			join_type = join_type,
+			source = js.source,
+			alias = js.alias,
+			on_clause = on_cl,
+		},
+		true
 }
 
 parse_select_columns :: proc(
@@ -190,7 +202,13 @@ parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynam
 	return joins
 }
 
-parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
+parse_select :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
 	columns := make([dynamic]string, allocator)
 	defer if !ok do delete(columns)
 
@@ -248,7 +266,10 @@ parse_select :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 				if match(p, .FIRST) { nulls_first = true } else { match(p, .LAST) }
 			}
 
-			append(&order_cols, Order_By_Column{column = col, desc = desc, nulls_first = nulls_first})
+			append(
+				&order_cols,
+				Order_By_Column{column = col, desc = desc, nulls_first = nulls_first},
+			)
 			if !match(p, .COMMA) { break }
 		}
 		order_by = order_cols[:]

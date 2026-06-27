@@ -5,7 +5,13 @@ import "core:strings"
 import "src:btree"
 import "src:parser"
 
-execute :: proc(schema_tree: ^btree.Tree, stmt: parser.Statement) -> (ok: bool, new_schema_root: u32) {
+execute :: proc(
+	schema_tree: ^btree.Tree,
+	stmt: parser.Statement,
+) -> (
+	ok: bool,
+	new_schema_root: u32,
+) {
 	new_root: u32
 	switch s in stmt.type {
 	case parser.Create_Stmt:

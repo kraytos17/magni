@@ -28,7 +28,7 @@ prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 		p        = p,
 		max_keep = max_keep,
 	}
-	
+
 	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
 		d := cast(^walk_chain_data)data
 		if Snapshot_State(h.state) == .COMMITTED {
@@ -45,17 +45,22 @@ prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 	})
 }
 
+GC_MIN_PAGES :: 512
+
 gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
+	max_page := pager.page_count(p)
+	if max_page < GC_MIN_PAGES { return }
+
 	live := make(map[u32]bool, context.temp_allocator)
 	defer delete(live)
-	
+
 	live[1] = true
 	count := 0
 	page := latest_page
 	for page != 0 && count < keep_count {
 		h, ok := load(p, page)
 		if !ok { break }
-		
+
 		live[page] = true
 		if h.manifest_page != 0 { live[h.manifest_page] = true }
 		if h.schema_root != 0 {
@@ -63,18 +68,21 @@ gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 			t := btree.init(p, h.schema_root)
 			btree.collect_pages(&t, h.schema_root, &live)
 			if h.manifest_page != 0 {
-				_, roots, load_ok := load_manifest_tables(p, h.manifest_page, context.temp_allocator)
+				_, roots, load_ok := load_manifest_tables(
+					p,
+					h.manifest_page,
+					context.temp_allocator,
+				)
 				if load_ok {
 					for i in 0 ..< len(roots) {
-						if roots[i] != 0 { live[roots[i]] = true; btree.collect_pages(&t, roots[i], &live) }
+						if roots[i] !=
+						   0 { live[roots[i]] = true; btree.collect_pages(&t, roots[i], &live) }
 					}
 				}
 			}
 		}
 		count += 1; page = h.prev_snapshot
 	}
-	
-	max_page := pager.page_count(p)
 	for pn := u32(2); pn <= max_page; pn += 1 {
 		if pn not_in live { pager.free_page(p, pn) }
 	}

@@ -373,123 +373,6 @@ match_keyword :: proc(ident: string) -> Token_Type {
 	return .IDENTIFIER
 }
 
-// Maps string literals to their corresponding keyword Token_Type.
-get_keyword_type :: proc(ident: string) -> Token_Type {
-	switch ident {
-	case "CREATE":
-		return .CREATE
-	case "TABLE":
-		return .TABLE
-	case "INSERT":
-		return .INSERT
-	case "INTO":
-		return .INTO
-	case "VALUES":
-		return .VALUES
-	case "SELECT":
-		return .SELECT
-	case "DISTINCT":
-		return .DISTINCT
-	case "FROM":
-		return .FROM
-	case "WHERE":
-		return .WHERE
-	case "UPDATE":
-		return .UPDATE
-	case "SET":
-		return .SET
-	case "DELETE":
-		return .DELETE
-	case "DROP":
-		return .DROP
-	case "INT", "INTEGER":
-		return .INTEGER
-	case "TEXT":
-		return .TEXT
-	case "REAL":
-		return .REAL
-	case "BLOB":
-		return .BLOB
-	case "PRIMARY":
-		return .PRIMARY
-	case "KEY":
-		return .KEY
-	case "NOT":
-		return .NOT
-	case "NULL":
-		return .NULL
-	case "AND":
-		return .AND
-	case "OR":
-		return .OR
-	case "DEFAULT":
-		return .DEFAULT
-	case "LIKE":
-		return .LIKE
-	case "LIMIT":
-		return .LIMIT
-	case "OFFSET":
-		return .OFFSET
-	case "ORDER":
-		return .ORDER
-	case "BY":
-		return .BY
-	case "ASC":
-		return .ASC
-	case "DESC":
-		return .DESC
-	case "NULLS":
-		return .NULLS
-	case "FIRST":
-		return .FIRST
-	case "LAST":
-		return .LAST
-	case "GROUP":
-		return .GROUP
-	case "HAVING":
-		return .HAVING
-	case "JOIN":
-		return .JOIN
-	case "INNER":
-		return .INNER
-	case "CROSS":
-		return .CROSS
-	case "LEFT":
-		return .LEFT
-	case "RIGHT":
-		return .RIGHT
-	case "ON":
-		return .ON
-	case "AS":
-		return .AS
-	case "OUTER":
-		return .OUTER
-	case "BEGIN":
-		return .BEGIN
-	case "COMMIT":
-		return .COMMIT
-	case "ROLLBACK":
-		return .ROLLBACK
-	case "OF":
-		return .OF
-	case "SNAPSHOT":
-		return .SNAPSHOT
-	case "TIMESTAMP":
-		return .TIMESTAMP
-	case "EXPLAIN":
-		return .EXPLAIN
-	case "CHECK":
-		return .CHECK
-	case "IN":
-		return .IN
-	case "FOREIGN":
-		return .FOREIGN
-	case "REFERENCES":
-		return .REFERENCES
-	}
-	return .IDENTIFIER
-}
-
 tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
 	tokens := make([dynamic]Token, allocator)
 	i := 0
@@ -527,7 +410,8 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			append(&tokens, Token{.BLOB_LITERAL, sql[start:i], line})
 			i += 1; continue
 		}
-		if unicode.is_digit(c) || (c == '-' && i + 1 < len(sql) && unicode.is_digit(rune(sql[i + 1]))) {
+		if unicode.is_digit(c) ||
+		   (c == '-' && i + 1 < len(sql) && unicode.is_digit(rune(sql[i + 1]))) {
 			start := i
 			if c == '-' do i += 1
 			has_dot := false

@@ -41,12 +41,12 @@ Group :: struct {
 	rows:       [dynamic]Row_Entry,
 }
 
-Update_Op :: struct {
+Update_Op :: struct #all_or_none {
 	rowid:      types.Row_ID,
 	new_values: []types.Value,
 }
 
-Mutated_Table_Info :: struct {
+Mutated_Table_Info :: struct #all_or_none {
 	name: string,
 	root: u32,
 }
@@ -64,6 +64,7 @@ Resolved_Condition :: struct {
 }
 
 Where_Eval_Ctx :: struct {
-	conditions: []Resolved_Condition,
-	is_and:     bool,
+	conditions:  []Resolved_Condition,
+	is_and:      bool,
+	schema_tree: ^btree.Tree,
 }

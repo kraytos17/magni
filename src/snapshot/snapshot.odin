@@ -18,7 +18,7 @@ Snapshot_Operation :: enum u8 {
 	RESTORE = 7,
 }
 
-Snapshot_Header :: struct #packed {
+Snapshot_Header :: struct #packed #all_or_none #simple {
 	magic:         [8]u8,
 	snapshot_id:   u64,
 	prev_snapshot: u32,
@@ -169,7 +169,14 @@ find_by_id :: proc(p: ^pager.Pager, start_page: u32, target_id: u64) -> (Snapsho
 	return result, found
 }
 
-find_by_timestamp :: proc(p: ^pager.Pager, start_page: u32, target_ts: u64) -> (Snapshot_Header, bool) {
+find_by_timestamp :: proc(
+	p: ^pager.Pager,
+	start_page: u32,
+	target_ts: u64,
+) -> (
+	Snapshot_Header,
+	bool,
+) {
 	result: Snapshot_Header; found := false
 	d := Find_Ts_Data{&result, &found, target_ts}
 

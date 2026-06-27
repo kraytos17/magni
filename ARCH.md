@@ -81,6 +81,12 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 5. **Slab allocation for hot data** — Page cache uses a fixed-size inline slab rather than a
    heap-allocated map. Zero per-page heap allocations.
 
+6. **`#simple` / `#all_or_none`** — Page/snapshot headers use `#simple` for memcmp-safe equality;
+   result/configuration structs use `#all_or_none` to catch partial-init bugs at compile time.
+
+7. **Inline scratch buffers** — `[dynamic; N]T` replaces heap `make([dynamic]T)` for bounded
+   collections (cell deserialization, ≤10 columns), eliminating per-operation allocs.
+
 ---
 
 ## Layer Architecture
@@ -92,27 +98,37 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 - Recursive-descent parser: one function per grammar rule (`parse_create_table`,
   `parse_insert`, `parse_select`, `parse_update`, `parse_delete`, `parse_drop_table`).
 - `Select_Stmt` supports `AS OF SNAPSHOT <id>` and `AS OF TIMESTAMP <micros>`.
-- `Token_Type` is `enum u8` (compact — 1 byte per token tag).
+- `Token_Type` is `enum u8` (compact — 1 byte per token tag). 78 token types total.
 - All AST nodes allocated on caller-provided allocator; no per-node cleanup needed.
+- `LIMIT` without `ORDER BY` uses pushdown: `scan_table` stops early when `max_rows` is reached.
 
 **Executor** (`executor.odin`):
 - Entry: `execute(schema_tree, stmt) -> (ok, new_schema_root)`.
 - DML dispatch (CREATE, INSERT, SELECT, UPDATE, DELETE, DROP).
+- Stream COW: UPDATE/DELETE apply mutations directly in the scan loop instead of
+  batch-collecting all ops first — O(1) peak memory per operation regardless of row count.
 - Key subroutines:
 
 | Subroutine | Role | Performance note |
 |---|---|---|
 | `scan_table` | Full table scan via cursor | Moves cell values directly (no deep copy) |
 | `try_pk_lookup` | Fast-path: `WHERE pk = literal` | O(log n) tree_find vs full scan |
-| `evaluate_where` | Filter rows against WHERE clause | Supports qualified names (t.col) |
+| `evaluate_where_ctx` | Filter rows (pre-resolved column indices) | Index resolution done once, not per row |
+| `filter_rows` | Post-scan WHERE on materialized rows | Used when scan_table cannot push down |
 | `try_join_match` | Combine rows + ON evaluation | Uses temp_allocator only on match |
-| `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | Aggregator per group |
+| `dedup_rows` | DISTINCT via hash-set (FNV fingerprint) | O(n), non-adjacent duplicates handled |
+| `sort_rows` | ORDER BY with integer fast path | Single-column int: `[]i64` + index sort |
+| `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | `@(fast_math)` on f64 reduction loops for auto-vectorization |
+| `check_constraints` | CHECK enforcement on INSERT/UPDATE | Fail-closed: rejects non-integer, unknown col |
 | `display_results` | Pretty-printed output | LIMIT/OFFSET applied here |
 | `exec_query` | Return row data as struct (for db.query) | Same path as exec_select, no display |
 | `exec_select_single_data` | Single-table SELECT returning []Row_Entry | Used by db.query() for precise tests |
 
 **GROUP BY** uses `map[string]int` keyed on serialized group-by values for O(rows) lookups
 (was O(rows × groups) linear scan).
+
+**HAVING** evaluates against both group-key values and computed aggregate values. Supports
+aggregate function references (e.g., `HAVING count > 1`) as well as group-by column comparisons.
 
 ### 2. Storage Engine — `btree/`, `cell/`, `pager/`, `schema/`, `db/`
 
@@ -227,7 +243,7 @@ Pager:
 ```
 
 - **Zero per-page heap allocations**: All 256 page buffers are inline in the slab.
-- **Lookup**: Open-addressing from `page_num % 256` with linear probe + full scan fallback.
+- **Lookup**: `map[u32]^Page_Slot` — O(1) average via Odin's Robin Hood map.
 - **Eviction**: Linear scan for first unpinned slot (simple clock-hand approximation).
 - **Freelist**: Linked list stored in-page (first 4 bytes = next free page). `first_free_page`
   persisted in database header.
@@ -270,6 +286,10 @@ Database :: struct {
 }
 ```
 
+The `table_roots` field (`map[string]u32`) is an incremental cache of table → root-page
+mappings, updated via `mutated_table_info` (set by COW DML operations). This avoids scanning
+the schema tree on every `list_tables` / `describe_table` call.
+
 Responsibility: coordinate the full lifecycle of a query.
 
 ```
@@ -280,8 +300,10 @@ execute(db, sql):
   db.schema_root_page = new_root
   if ok && !readonly:
     create_snapshot()
-    run_prune()
-    run_gc()
+    if gc_pending_count >= 10:  // throttled: every 10 DMLs
+      run_prune()
+      run_gc()
+      gc_pending_count = 0
   free_all(temp_allocator)
   unlock(mu)
 ```
@@ -336,7 +358,7 @@ entry = [name_hash: u64, root_page: u32, name_len: u16, name_bytes: name_len]
 | `find_by_timestamp` | O(n) chain | Walk chain for newest `timestamp ≤ target` |
 | `diff_manifests` | O(n*m) | Compare two manifests (n, m = table count) |
 | `prune` | O(chain) | Mark old snapshots as ABANDONED |
-| `gc` | O(pages_in_chain) | Mark-and-sweep: free unreachable pages |
+| `gc` | O(pages_in_chain) | Mark-and-sweep: free unreachable pages (skipped if page_count < 512) |
 | `set_tag` / `get_tag` | O(1) | Read/write 64 bytes at page offset 40 |
 
 ### GC Algorithm
@@ -403,6 +425,7 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 |---|---|---|---|
 | Page struct + data buffer | 0 (inline slab) | 2 (heap Page + heap []u8) | -100% |
 | Cell (per row scanned) | 0 (if moving values) | 1 (deep_copy_values) | -100% |
+| Cell deserialize buffer | 0 (`[dynamic; MAX_COLS]T` inline) | 1 (`make([dynamic]T)`) | -100% |
 | `Serialization_Info.serial_types` | 0 (inline compute) | 1 (`make([]u64)`) | -100% |
 | Cell.allocator | 0 (removed) | 1 (16 bytes) | -100% |
 | Cursor path | 0 (`[32]` stack) | 1 (`make([dynamic]`) | -100% |
@@ -606,3 +629,4 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 - **No B-tree rebalancing**: Deletes fragment pages without merging.
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
 - **Mixed AND/OR WHERE**: Not supported.
+- **Max 10 columns per table**: Enforced by `MAX_COLS` constant.

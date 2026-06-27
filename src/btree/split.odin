@@ -5,7 +5,7 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
-Split_Result :: struct {
+Split_Result :: struct #all_or_none {
 	did_split:  bool,
 	right_page: u32,
 	split_key:  types.Row_ID,

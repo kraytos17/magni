@@ -5,7 +5,10 @@ import "core:strings"
 import "src:types"
 
 // Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b) + DefaultMarker(1b) + DefaultValue... + CheckLen(4b) + CheckBytes?]
-serialize_columns_to_blob :: proc(columns: []types.Column, allocator := context.allocator) -> []u8 {
+serialize_columns_to_blob :: proc(
+	columns: []types.Column,
+	allocator := context.allocator,
+) -> []u8 {
 	size := 4
 	for col in columns { size += 4 + len(col.name) + 1 + 1 + 1 }
 	for col in columns {
@@ -102,17 +105,30 @@ serialize_value_to_blob :: proc(dest: []u8, offset: ^int, val: types.Value) {
 	v := val
 	#partial switch vv in v {
 	case types.Null:
-		dest[offset^] = 0; offset^ += 1
+		dest[offset^] = 0
+		offset^ += 1
 	case i64:
-		dest[offset^] = 1; offset^ += 1; endian.put_u64(dest[offset^:], .Little, u64(vv)); offset^ += 8
+		dest[offset^] = 1
+		offset^ += 1
+		endian.put_u64(dest[offset^:], .Little, u64(vv))
+		offset^ += 8
 	case f64:
-		dest[offset^] = 2; offset^ += 1; endian.put_f64(dest[offset^:], .Big, vv); offset^ += 8
+		dest[offset^] = 2
+		offset^ += 1
+		endian.put_f64(dest[offset^:], .Big, vv)
+		offset^ += 8
 	case string:
-		dest[offset^] = 3; offset^ += 1; endian.put_u32(dest[offset^:], .Little, u32(len(vv))); offset^ += 4
+		dest[offset^] = 3
+		offset^ += 1
+		endian.put_u32(dest[offset^:], .Little, u32(len(vv)))
+		offset^ += 4
 		copy(dest[offset^:], vv)
 		offset^ += len(vv)
 	case []u8:
-		dest[offset^] = 4; offset^ += 1; endian.put_u32(dest[offset^:], .Little, u32(len(vv))); offset^ += 4
+		dest[offset^] = 4
+		offset^ += 1
+		endian.put_u32(dest[offset^:], .Little, u32(len(vv)))
+		offset^ += 4
 		copy(dest[offset^:], vv)
 		offset^ += len(vv)
 	}
@@ -128,7 +144,8 @@ deserialize_value_from_blob :: proc(
 ) {
 	if offset^ >= len(src) { return {}, false }
 
-	type_byte := src[offset^]; offset^ += 1
+	type_byte := src[offset^]
+	offset^ += 1
 	switch type_byte {
 	case 0:
 		return types.value_null(), true
@@ -145,7 +162,8 @@ deserialize_value_from_blob :: proc(
 		return types.value_real(val), true
 	case 3:
 		if offset^ + 4 > len(src) { return {}, false }
-		len_val, _ := endian.get_u32(src[offset^:], .Little); offset^ += 4
+		len_val, _ := endian.get_u32(src[offset^:], .Little)
+		offset^ += 4
 		if offset^ + int(len_val) > len(src) { return {}, false }
 
 		str_val := string(src[offset^:offset^ + int(len_val)])
@@ -153,7 +171,8 @@ deserialize_value_from_blob :: proc(
 		return types.value_text(strings.clone(str_val, allocator)), true
 	case 4:
 		if offset^ + 4 > len(src) { return {}, false }
-		len_val, _ := endian.get_u32(src[offset^:], .Little); offset^ += 4
+		len_val, _ := endian.get_u32(src[offset^:], .Little)
+		offset^ += 4
 		if offset^ + int(len_val) > len(src) { return {}, false }
 		blob := make([]u8, int(len_val), allocator)
 

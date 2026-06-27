@@ -24,7 +24,7 @@ VET_FLAGS     := -vet -vet-shadowing -warnings-as-errors -strict-style
 
 CHECK_FLAGS   := -warnings-as-errors
 
-.PHONY: all build run release test test-verbose clean rebuild \
+.PHONY: all build run release test test-verbose test-single clean rebuild \
         check vet vet-shadowing vet-style vet-all vet-cast vet-unused \
         check-vet help
 
@@ -52,6 +52,14 @@ test-verbose:
 	@echo "Running tests (verbose)..."
 	$(ODIN) test $(TEST_DIR) $(COLLECTIONS) $(TEST_FLAGS) \
 	        -define:ODIN_TEST_FANCY=false
+
+test-single:
+	@echo "Running single test: $(filter-out $@,$(MAKECMDGOALS))"
+	$(ODIN) test $(TEST_DIR) $(COLLECTIONS) $(TEST_FLAGS) \
+	        -test-name "$(filter-out $@,$(MAKECMDGOALS))"
+
+%:
+	@true
 
 test-cli: build
 	@echo "Running CLI integration tests..."

@@ -174,7 +174,12 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 
 		flat_rows := make([][]types.Value, len(rows), context.temp_allocator)
 		for entry, i in rows { flat_rows[i] = entry.values }
-		return Query_Result{columns = col_names, col_types = col_types, rows = flat_rows, ok = true}
+		return Query_Result {
+			columns = col_names,
+			col_types = col_types,
+			rows = flat_rows,
+			ok = true,
+		}
 	}
 	fmt.eprintln("Error: query() only supports SELECT statements")
 	return r

@@ -2,7 +2,13 @@ package parser
 
 import "src:types"
 
-parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
+parse_insert :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
 	if !match(p, .INTO) do return nil, false
 	table_name := parse_identifier(p, allocator) or_return
 	columns := make([dynamic]string, allocator)
@@ -37,7 +43,13 @@ parse_insert :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 	return Insert_Stmt{table_name = table_name, columns = columns[:], values = values[:]}, true
 }
 
-parse_update :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
+parse_update :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
 	table_name := parse_identifier(p, allocator) or_return
 	if !match(p, .SET) {
 		delete(table_name, allocator)
@@ -73,7 +85,13 @@ parse_update :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: State
 		true
 }
 
-parse_delete :: proc(p: ^Parser, allocator := context.allocator) -> (stmt: Statement_Variant, ok: bool) {
+parse_delete :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
 	if !match(p, .FROM) do return nil, false
 	table_name := parse_identifier(p, allocator) or_return
 	defer if !ok do delete(table_name, allocator)

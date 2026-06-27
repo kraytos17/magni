@@ -175,9 +175,7 @@ deserialize :: proc(
 		pos += n4
 	}
 
-	values := make([dynamic]types.Value, 0, serial_count, alloc)
-	defer if !ok { delete(values) }
-
+	scratch: [dynamic; types.MAX_COLS]types.Value
 	for st_idx in 0 ..< serial_count {
 		st := serial_types[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
@@ -186,36 +184,36 @@ deserialize :: proc(
 			return {}, 0, false
 		}
 		if type_code == .ZERO {
-			append(&values, types.value_int(0))
+			append(&scratch, types.value_int(0))
 		} else if type_code == .ONE {
-			append(&values, types.value_int(1))
+			append(&scratch, types.value_int(1))
 		} else if st == u64(types.Serial_Type.NULL) {
-			append(&values, types.value_null())
+			append(&scratch, types.value_null())
 		} else if st >= u64(types.Serial_Type.INT8) && st <= u64(types.Serial_Type.INT64) {
 			int_val, _ := read_int_by_size(src, pos, content_size)
-			append(&values, types.value_int(int_val))
+			append(&scratch, types.value_int(int_val))
 			pos += content_size
 		} else if type_code == .FLOAT64 {
 			float_val, _ := endian.get_f64(src[pos:], .Big)
-			append(&values, types.value_real(float_val))
+			append(&scratch, types.value_real(float_val))
 			pos += 8
 		} else if is_text_serial(st) {
 			text_bytes := src[pos:pos + content_size]
 			if config.zero_copy {
-				append(&values, types.value_text(string(text_bytes)))
+				append(&scratch, types.value_text(string(text_bytes)))
 			} else {
 				str := strings.clone_from(text_bytes, alloc)
-				append(&values, types.value_text(str))
+				append(&scratch, types.value_text(str))
 			}
 			pos += content_size
 		} else if is_blob_serial(st) {
 			blob_bytes := src[pos:pos + content_size]
 			if config.zero_copy {
-				append(&values, types.value_blob(blob_bytes))
+				append(&scratch, types.value_blob(blob_bytes))
 			} else {
 				blob_copy := make([]u8, content_size, alloc)
 				copy(blob_copy, blob_bytes)
-				append(&values, types.value_blob(blob_copy))
+				append(&scratch, types.value_blob(blob_copy))
 			}
 			pos += content_size
 		} else {
@@ -223,9 +221,11 @@ deserialize :: proc(
 		}
 	}
 
+	result_values := make([]types.Value, len(scratch), alloc)
+	copy(result_values, scratch[:])
 	cell = Cell {
 		rowid     = types.Row_ID(rowid_val),
-		values    = values[:],
+		values    = result_values,
 		owns_data = !config.zero_copy,
 	}
 	return cell, pos - offset, true
@@ -374,7 +374,9 @@ write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> boo
 	case 2:
 		return endian.put_u16(dest[offset:], .Little, u16(value))
 	case 3:
-		endian.put_u16(dest[offset:], .Little, u16(value)); dest[offset + 2] = u8(value >> 16); return true
+		endian.put_u16(dest[offset:], .Little, u16(value))
+		dest[offset + 2] = u8(value >> 16)
+		return true
 	case 4:
 		return endian.put_u32(dest[offset:], .Little, u32(value))
 	case 6:

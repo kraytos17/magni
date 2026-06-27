@@ -90,7 +90,11 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 		values = reordered
 	}
 	if len(values) != len(table.columns) {
-		fmt.eprintfln("Error: Column count mismatch. Expected %d, got %d", len(table.columns), len(values))
+		fmt.eprintfln(
+			"Error: Column count mismatch. Expected %d, got %d",
+			len(table.columns),
+			len(values),
+		)
 		return false
 	}
 	if !cell.validate(values, table.columns) {
@@ -195,7 +199,11 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 				new_row[idx] = val
 			}
 			if !cell.validate(new_row, table.columns) {
-				fmt.eprintln("Warning: Skipping UPDATE row", c.rowid, "— violates column constraints")
+				fmt.eprintln(
+					"Warning: Skipping UPDATE row",
+					c.rowid,
+					"— violates column constraints",
+				)
 			} else if !values_equal(c.values, new_row) {
 				append(&ops, Update_Op{c.rowid, new_row})
 			}
@@ -315,7 +323,11 @@ exec_insert_cow :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> (bool, u32)
 		values = reordered
 	}
 	if len(values) != len(table.columns) {
-		fmt.eprintfln("Error: Column count mismatch. Expected %d, got %d", len(table.columns), len(values))
+		fmt.eprintfln(
+			"Error: Column count mismatch. Expected %d, got %d",
+			len(table.columns),
+			len(values),
+		)
 		return false, t.root
 	}
 	if !cell.validate(values, table.columns) {

@@ -67,7 +67,12 @@ tree_insert_cow :: proc(
 
 		init_interior_page(new_root_page.data, new_root_page.page_num)
 		set_right_ptr(new_root_page.data, new_root_page.page_num, result.right_page)
-		insert_interior_cell(new_root_page.data, new_root_page.page_num, result.new_page, result.split_key)
+		insert_interior_cell(
+			new_root_page.data,
+			new_root_page.page_num,
+			result.new_page,
+			result.split_key,
+		)
 
 		pager.mark_dirty(t.pager, new_root_page.page_num)
 		pager.unpin_page(t.pager, new_root_page.page_num)

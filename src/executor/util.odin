@@ -35,7 +35,13 @@ resolve_qualified_column :: proc(
 	return schema.find_column_index(combined_cols, name)
 }
 
-try_pk_lookup :: proc(table: types.Table, clause: parser.Where_Clause) -> (rowid: types.Row_ID, ok: bool) {
+try_pk_lookup :: proc(
+	table: types.Table,
+	clause: parser.Where_Clause,
+) -> (
+	rowid: types.Row_ID,
+	ok: bool,
+) {
 	if len(clause.conditions) != 1 { return }
 	if !clause.is_and { return }
 
@@ -77,13 +83,23 @@ try_join_match :: proc(
 	matched: ^bool,
 ) {
 	if on_cl, has_on := jc.on_clause.?; has_on {
-		tmp := make([]types.Value, len(outer_row.values) + len(inner_values), context.temp_allocator)
+		tmp := make(
+			[]types.Value,
+			len(outer_row.values) + len(inner_values),
+			context.temp_allocator,
+		)
+		
 		copy(tmp[:len(outer_row.values)], outer_row.values)
 		copy(tmp[len(outer_row.values):], inner_values)
 		if !evaluate_where(&on_cl, tmp, combined_cols, table_ranges) { return }
 	}
 
-	combined := make([]types.Value, len(outer_row.values) + len(inner_values), context.temp_allocator)
+	combined := make(
+		[]types.Value,
+		len(outer_row.values) + len(inner_values),
+		context.temp_allocator,
+	)
+	
 	copy(combined[:len(outer_row.values)], outer_row.values)
 	copy(combined[len(outer_row.values):], inner_values)
 
@@ -146,6 +162,7 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 	return true
 }
 
+@(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	if types.is_null(a) && types.is_null(b) do return 0
 	if types.is_null(a) do return -1

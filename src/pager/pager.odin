@@ -45,7 +45,8 @@ Error :: enum {
 find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return p.cache_index[page_num] }
 
 find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
-	if p.slot_count >= p.max_cache_pages { if err := evict_one_slot(p); err != .None { return nil } }
+	if p.slot_count >=
+	   p.max_cache_pages { if err := evict_one_slot(p); err != .None { return nil } }
 	for i in 0 ..< PAGE_CACHE_SIZE {
 		slot := &p.slots[i]
 		if slot.page.page_num == 0 {
@@ -80,7 +81,14 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 	return .Cache_Full
 }
 
-open :: proc(path: string, max_pages: u32 = 256, allocator := context.allocator) -> (^Pager, Error) {
+open :: proc(
+	path: string,
+	max_pages: u32 = 256,
+	allocator := context.allocator,
+) -> (
+	^Pager,
+	Error,
+) {
 	p := new(Pager, allocator)
 	if p == nil { return nil, .Out_Of_Memory }
 
@@ -224,6 +232,7 @@ page_in_cache :: proc(p: ^Pager, page_num: u32) -> bool {
 	return find_slot(p, page_num) != nil
 }
 
+// Caller must hold p.mutex.
 flush_page_unsafe :: proc(p: ^Pager, page: ^Page) -> Error {
 	if !page.dirty { return .None }
 	_, err := os.write_at(p.file, page.data, i64(page.page_num - 1) * i64(p.page_size))

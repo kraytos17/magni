@@ -56,7 +56,8 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 			case string:
 				delete(j_src, allocator)
 			case ^Select_Stmt:
-				statement_free(Statement{type = j_src^, sql = ""}, allocator); free(j_src, allocator)
+				statement_free(Statement{type = j_src^, sql = ""}, allocator)
+				free(j_src, allocator)
 			}
 
 			if j.alias != "" { delete(j.alias, allocator) }

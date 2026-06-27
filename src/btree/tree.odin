@@ -11,6 +11,8 @@ import "src:types"
 MAX_TREE_DEPTH :: 1000
 
 DEFAULT_CONFIG := Config {
+	allocator        = {},
+	zero_copy        = false,
 	check_duplicates = true,
 }
 
@@ -20,7 +22,7 @@ Tree :: struct {
 	config: Config,
 }
 
-Config :: struct {
+Config :: struct #all_or_none {
 	allocator:        mem.Allocator,
 	zero_copy:        bool,
 	check_duplicates: bool,
@@ -45,7 +47,7 @@ Node :: struct {
 	header: ^Page_Header,
 }
 
-Insert_COW_Result :: struct {
+Insert_COW_Result :: struct #all_or_none {
 	new_page:   u32,
 	did_split:  bool,
 	right_page: u32,
@@ -96,7 +98,12 @@ node_find_child :: proc(n: ^Node, key: types.Row_ID) -> u32 {
 	return node_find_child_data(n.data, n.id, key)
 }
 
-node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, rowid: types.Row_ID, values: []types.Value) -> Error {
+node_insert_leaf_cell :: proc(
+	t: ^Tree,
+	n: ^Node,
+	rowid: types.Row_ID,
+	values: []types.Value,
+) -> Error {
 	if !is_leaf(n^) { return .Invalid_Page_Header }
 	pointers := get_pointers(n.data, n.id)
 	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid)
@@ -131,7 +138,8 @@ node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, rowid: types.Row_ID, values: [
 
 	base_offset := get_page_header_offset(n.id)
 	header_size := page_header_size(n.header.page_type)
-	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * size_of(Cell_Pointer)
+	ptr_area_end :=
+		base_offset + header_size + int(n.header.cell_count + 1) * size_of(Cell_Pointer)
 
 	if ptr_area_end >= int(n.header.cell_content_offset) { return .Page_Full }
 	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end { return .Page_Full }
@@ -218,7 +226,13 @@ insert_recursive :: proc(
 				},
 				.None
 		}
-		return Insert_COW_Result{new_page = new_page_num}, e
+		return Insert_COW_Result {
+				new_page = new_page_num,
+				did_split = false,
+				right_page = 0,
+				split_key = 0,
+			},
+			e
 	}
 
 	child_id := node_find_child(&curr, rowid)
@@ -229,7 +243,13 @@ insert_recursive :: proc(
 	}
 	if !child_result.did_split {
 		pager.mark_dirty(t.pager, curr.id)
-		return Insert_COW_Result{new_page = new_page_num}, .None
+		return Insert_COW_Result {
+				new_page = new_page_num,
+				did_split = false,
+				right_page = 0,
+				split_key = 0,
+			},
+			.None
 	}
 
 	is_rightmost := child_id == get_right_ptr(curr.data, curr.id)
@@ -257,7 +277,13 @@ insert_recursive :: proc(
 	if ok {
 		if is_rightmost { set_right_ptr(curr.data, curr.id, child_result.right_page) }
 		pager.mark_dirty(t.pager, curr.id)
-		return Insert_COW_Result{new_page = new_page_num}, .None
+		return Insert_COW_Result {
+				new_page = new_page_num,
+				did_split = false,
+				right_page = 0,
+				split_key = 0,
+			},
+			.None
 	}
 
 	interior_split, split_err := split_interior_node(t, &curr)
@@ -358,7 +384,14 @@ descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	return get_right_ptr(data, page_id)
 }
 
-tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator := context.allocator) -> (cell.Cell, Error) {
+tree_find :: proc(
+	t: ^Tree,
+	key: types.Row_ID,
+	allocator := context.allocator,
+) -> (
+	cell.Cell,
+	Error,
+) {
 	k := key
 	leaf, err := descend_to_leaf(t, descend_by_key, &k)
 	if err != .None { return {}, err }
@@ -444,7 +477,12 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	if cell_off == int(leaf_node.header.cell_content_offset) {
 		leaf_node.header.cell_content_offset += u16le(cell_sz)
 	} else if cell_sz >= FREEBLOCK_HDR_SIZE {
-		freeblock_insert(leaf_node.data, u16(cell_off), u16(cell_sz), &leaf_node.header.first_freeblock)
+		freeblock_insert(
+			leaf_node.data,
+			u16(cell_off),
+			u16(cell_sz),
+			&leaf_node.header.first_freeblock,
+		)
 	} else if cell_sz > 0 && cell_sz < 255 {
 		leaf_node.header.fragmented_bytes = u8(
 			min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), 255),
@@ -572,7 +610,13 @@ verify_recursive :: proc(
 	defer unpin_node(t, node)
 
 	indent := strings.repeat("  ", depth, context.temp_allocator)
-	fmt.printf("%sPage %d [%v] count=%d\n", indent, page_id, node.header.page_type, node.header.cell_count)
+	fmt.printf(
+		"%sPage %d [%v] count=%d\n",
+		indent,
+		page_id,
+		node.header.page_type,
+		node.header.cell_count,
+	)
 	if is_leaf(node) {
 		ptrs := get_pointers(node.data, page_id); prev := min_k
 		for ptr in ptrs {
@@ -617,7 +661,14 @@ verify_recursive :: proc(
 		if !verify_recursive(t, child, prev_k, key, depth + 1, visited) { return false }
 		prev_k = key
 	}
-	return verify_recursive(t, get_right_ptr(node.data, page_id), prev_k, max_k, depth + 1, visited)
+	return verify_recursive(
+		t,
+		get_right_ptr(node.data, page_id),
+		prev_k,
+		max_k,
+		depth + 1,
+		visited,
+	)
 }
 
 collect_pages :: proc(t: ^Tree, root: u32, pages: ^map[u32]bool) {

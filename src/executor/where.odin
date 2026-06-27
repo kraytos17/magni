@@ -1,5 +1,6 @@
 package executor
 
+import "src:btree"
 import "src:parser"
 import "src:types"
 
@@ -10,7 +11,7 @@ filter_rows :: proc(
 	table_ranges: []Table_Col_Range,
 ) -> []Row_Entry {
 	filtered := make([dynamic]Row_Entry, context.temp_allocator)
-	ctx, ctx_ok := init_where_ctx(where_clause, cols, table_ranges, context.temp_allocator).?
+	ctx, ctx_ok := init_where_ctx(where_clause, cols, table_ranges, nil, context.temp_allocator).?
 	if !ctx_ok { return filtered[:] }
 	if len(ctx.conditions) == 0 { return rows }
 	for entry in rows {
@@ -25,6 +26,7 @@ init_where_ctx :: proc(
 	clause: ^parser.Where_Clause,
 	cols: []types.Column,
 	table_ranges: []Table_Col_Range,
+	schema_tree: ^btree.Tree,
 	allocator := context.allocator,
 ) -> Maybe(Where_Eval_Ctx) {
 	if len(clause.conditions) == 0 {
@@ -63,7 +65,7 @@ init_where_ctx :: proc(
 		}
 		resolved[i] = rc
 	}
-	return Where_Eval_Ctx{conditions = resolved, is_and = clause.is_and}
+	return Where_Eval_Ctx{conditions = resolved, is_and = clause.is_and, schema_tree = schema_tree}
 }
 
 evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
@@ -86,7 +88,7 @@ evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 			}
 		} else if rc.has_in && rc.in_subquery != nil {
 			cond_result = false
-			subq_rows, _ := exec_subquery(nil, rc.in_subquery^)
+			subq_rows, _ := exec_subquery(ctx.schema_tree, rc.in_subquery^)
 			for sr in subq_rows {
 				if len(sr.values) > 0 && compare_values(left_val, sr.values[0]) == 0 {
 					cond_result = true; break
@@ -110,7 +112,7 @@ evaluate_where :: proc(
 	cols: []types.Column,
 	table_ranges: []Table_Col_Range,
 ) -> bool {
-	ctx, ok := init_where_ctx(clause, cols, table_ranges, context.temp_allocator).?
+	ctx, ok := init_where_ctx(clause, cols, table_ranges, nil, context.temp_allocator).?
 	if !ok { return false }
 	return evaluate_where_ctx(ctx, row)
 }

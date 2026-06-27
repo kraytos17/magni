@@ -5,7 +5,10 @@ import "core:strings"
 import "src:btree"
 import "src:types"
 
-init :: proc(t: ^btree.Tree) -> bool { _, err := btree.load_node(t, t.root); return err == .None }
+init :: proc(t: ^btree.Tree) -> bool {
+	_, err := btree.load_node(t, t.root)
+	return err == .None
+}
 
 add_table :: proc(
 	t: ^btree.Tree,
@@ -121,12 +124,23 @@ drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
 }
 
 table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
-	_, err := btree.tree_find(t, types.Row_ID(types.hash_string(table_name)), context.temp_allocator)
+	_, err := btree.tree_find(
+		t,
+		types.Row_ID(types.hash_string(table_name)),
+		context.temp_allocator,
+	)
 	return err == .None
 }
 
-table_from_values :: proc(values: []types.Value, allocator := context.allocator) -> (types.Table, bool) {
+table_from_values :: proc(
+	values: []types.Value,
+	allocator := context.allocator,
+) -> (
+	types.Table,
+	bool,
+) {
 	if len(values) < 6 { return {}, false }
+	
 	name_str, ok1 := values[1].(string)
 	root_page, ok2 := values[3].(i64)
 	sql_stmt, ok3 := values[4].(string)

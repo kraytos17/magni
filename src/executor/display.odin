@@ -79,6 +79,15 @@ build_display_indices :: proc(
 	return indices[:], true
 }
 
+@(fast_math = {
+	.Allow_Reassoc,
+	.No_NaNs,
+	.No_Infs,
+	.No_Signed_Zeros,
+	.Allow_Reciprocal,
+	.Allow_Contract,
+	.Approx_Func,
+})
 compute_aggregates :: proc(
 	rows: [][]types.Value,
 	aggregates: []parser.Aggregate_Expr,

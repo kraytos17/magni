@@ -1,9 +1,27 @@
 package parser
 
 import "core:encoding/hex"
+import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "src:types"
+
+unescape_sql_string :: proc(s: string, allocator: mem.Allocator) -> string {
+	if !strings.contains(s, "''") { return strings.clone(s, allocator) }
+
+	b := strings.builder_make(allocator)
+	i := 0
+	for i < len(s) {
+		if i + 1 < len(s) && s[i] == '\'' && s[i + 1] == '\'' {
+			strings.write_byte(&b, '\'')
+			i += 2
+		} else {
+			strings.write_byte(&b, s[i])
+			i += 1
+		}
+	}
+	return strings.to_string(b)
+}
 
 parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.Value, ok: bool) {
 	token := peek(p)
@@ -18,7 +36,8 @@ parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.V
 			return types.value_int(v), true
 		}
 	case .STRING:
-		advance(p); return types.value_text(strings.clone(token.lexeme, allocator)), true
+		advance(p)
+		return types.value_text(unescape_sql_string(token.lexeme, allocator)), true
 	case .BLOB_LITERAL:
 		advance(p)
 		bytes, decode_ok := hex.decode(transmute([]u8)token.lexeme, allocator)
