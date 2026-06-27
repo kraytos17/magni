@@ -414,8 +414,6 @@ debug_print_all :: proc(t: ^btree.Tree) {
 print_ddl :: proc(t: ^btree.Tree) {
 	tables := list_tables(t, context.temp_allocator)
 	for table in tables {
-		fmt.println(table.sql)
-		fmt.print(";")
-		fmt.println()
+		fmt.printfln("%s;", strings.trim_space(table.sql))
 	}
 }

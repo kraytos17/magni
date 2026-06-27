@@ -13,7 +13,7 @@ print_snapshots :: proc(db: ^Database) {
 		fmt.println("No snapshots.")
 		return
 	}
-	snapshot.debug_print_chain(db.pager, db.latest_snapshot)
+	snapshot.print_chain(db.pager, db.latest_snapshot)
 }
 
 snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> bool {
@@ -39,7 +39,7 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> bool {
 		return true
 	}
 
-	fmt.printf("=== Snapshot Diff: %d → %d ===\n", older_id, newer_id)
+	fmt.printf("Snapshot diff: %d → %d\n", older_id, newer_id)
 	for e in entries {
 		switch e.change {
 		case .CREATED:

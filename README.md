@@ -131,9 +131,10 @@ ROLLBACK;
 ### Dot-Commands (REPL)
 
 | Command | Description |
-|---|---|---|
+|---|---|
 | `.exit` / `.quit` | Exit |
 | `.help` | Print help message |
+| `.version` | Print version |
 | `.tables` | List all tables |
 | `.schema` | Show CREATE TABLE statements |
 | `.debug_schema` | Show low-level schema details (root pages, flags) |
@@ -149,6 +150,14 @@ ROLLBACK;
 | `.snapshot restore <id>` | Restore to historical state |
 | `.rollforward` | Advance current state to the most recent snapshot |
 | `.begin` / `.commit` / `.rollback` | Transaction control |
+
+### CLI Flags
+
+| Flag | Description |
+|---|---|
+| `--help` | Print usage |
+| `--version` | Print version and exit |
+| `--stop-on-error` | Exit on first SQL error in script/pipe mode |
 
 ### CLI Modes
 
@@ -249,15 +258,15 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 
 | Package | Tests | What's tested |
 |---|---|---|
-| `parser` | 38 | Tokenization, all SQL forms, JOINs, subqueries, errors |
+| `parser` | 39 | Tokenization, all SQL forms, JOINs, subqueries, errors |
 | `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, GROUP BY, JOINs, aggregates |
 | `btree` | 22 | Insert/find/delete/update, cursor, splits, persistence, rebalance merge, byte accounting |
 | `cell` | 11 | Serialization roundtrip, zero-copy, validation |
 | `pager` | 20 | Page cache, I/O, pinning, eviction, WAL, bitmap, checksum |
 | `schema` | 12 | Column blob, add/find/drop/list, row round-trip, hash collision |
 | `snapshot` | 12 | Chain, manifests, diff, tags, timestamp lookup, GC |
-| `integration` | 26 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads, columnar mutation |
-| **Total** | **205** | |
+| `integration` | 28 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads, columnar mutation, semicolon-in-string, multi-statement |
+| **Total** | **208** | |
 
 ---
 

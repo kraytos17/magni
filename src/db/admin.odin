@@ -23,37 +23,30 @@ checkpoint :: proc(db: ^Database) -> bool {
 integrity_check :: proc(db: ^Database) -> bool {
 	if !db_check(db) { return false }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	fmt.println("=== Integrity Check ===")
 	if !verify_header(db) {
-		fmt.println("✗ Database header is corrupted")
+		fmt.println("Error: Database header is corrupted")
 		return false
 	}
 
-	fmt.println("✓ Database header is valid")
 	_, err := pager.get_page(db.pager, db.schema_root_page)
 	if err != .None {
-		fmt.println("✗ Schema page is missing")
+		fmt.println("Error: Schema page is missing")
 		return false
 	}
 	defer pager.unpin_page(db.pager, db.schema_root_page)
 
-	fmt.println("✓ Schema page exists")
 	st := schema_tree(db)
 	tables := schema.list_tables(&st, context.temp_allocator)
-	fmt.printf("✓ Found %d table(s)\n", len(tables))
 	for table in tables {
 		_, page_err := pager.get_page(db.pager, table.root_page)
 		if page_err != .None {
-			fmt.printf("✗ Table '%s' root page %d is missing\n", table.name, table.root_page)
+			fmt.printf("Error: Table '%s' root page %d is missing\n", table.name, table.root_page)
 			return false
 		}
-
 		defer pager.unpin_page(db.pager, table.root_page)
-		fmt.printf("✓ Table '%s' is valid\n", table.name)
 	}
 
-	fmt.println("======================")
-	fmt.println("Integrity check passed!")
+	fmt.println("Integrity check passed.")
 	return true
 }
 
@@ -61,7 +54,15 @@ list_tables :: proc(db: ^Database) {
 	if !db_check(db) { return }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	st := schema_tree(db)
-	schema.debug_print_all(&st)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	if len(tables) == 0 {
+		fmt.println("No tables found.")
+		return
+	}
+	fmt.println("Tables:")
+	for table in tables {
+		fmt.printf("  %s\n", table.name)
+	}
 }
 
 describe_table :: proc(db: ^Database, table_name: string) -> bool {
@@ -75,18 +76,26 @@ describe_table :: proc(db: ^Database, table_name: string) -> bool {
 		fmt.eprintln("Error: Table not found:", table_name)
 		return false
 	}
-	schema.debug_print_entry(table)
+	fmt.printf("%-20s %-8s %-3s %-4s %s\n", "name", "type", "pk", "null", "default")
+	fmt.println("-------------------- -------- --- ---- -------")
+	for col in table.columns {
+		def := "NULL"
+		if d, ok := col.default_value.?; ok {
+			def = types.value_to_string(d, context.temp_allocator)
+		}
+		pk_str := "yes" if col.pk else ""
+		nn_str := "no" if col.not_null else ""
+		fmt.printf("%-20s %-8s %-3s %-4s %s\n", col.name, col.type, pk_str, nn_str, def)
+	}
 	return true
 }
 
 stats :: proc(db: ^Database) {
 	if !db_check(db) { return }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	fmt.println("=== Database Statistics ===")
+	page_count := pager.page_count(db.pager)
 	fmt.printf("Path: %s\n", db.path)
 	fmt.printf("Page size: %d bytes\n", types.PAGE_SIZE)
-
-	page_count := pager.page_count(db.pager)
 	fmt.printf("Total pages: %d\n", page_count)
 	fmt.printf(
 		"Database size: %d bytes (%.2f KB)\n",
@@ -97,7 +106,6 @@ stats :: proc(db: ^Database) {
 	st := schema_tree(db)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	fmt.printf("Total tables: %d\n", len(tables))
-	fmt.println("===========================")
 }
 
 dump_table :: proc(db: ^Database, table_name: string) {
@@ -110,7 +118,6 @@ dump_table :: proc(db: ^Database, table_name: string) {
 		return
 	}
 
-	fmt.printf("=== Dumping Table: %s (Root Page: %d) ===\n", table.name, table.root_page)
 	table_tree := btree.init(db.pager, table.root_page)
 	cursor, err := btree.cursor_start(&table_tree, context.temp_allocator)
 	if err != .None {
@@ -119,29 +126,36 @@ dump_table :: proc(db: ^Database, table_name: string) {
 	}
 	defer btree.cursor_destroy(&cursor)
 
+	// Print column header
+	for i in 0 ..< len(table.columns) {
+		if i > 0 { fmt.print(" | ") }
+		fmt.print(table.columns[i].name)
+	}
+	fmt.println()
+	for i in 0 ..< len(table.columns) {
+		if i > 0 { fmt.print("-+-") } else { fmt.print("-") }
+		for _ in 0 ..< len(table.columns[i].name) { fmt.print("-") }
+	}
+	fmt.println()
+
 	row_count := 0
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
-			fmt.printf("Error reading cell: %v\n", get_err)
 			btree.cursor_advance(&cursor)
 			continue
 		}
 
-		fmt.printf("Row %d [RowID=%d]: ", row_count + 1, c.rowid)
-		for val, i in c.values {
-			if i > 0 do fmt.print(", ")
-			col_name := "?"
-			if i < len(table.columns) { col_name = table.columns[i].name }
-			val_str := types.value_to_string(val, context.temp_allocator)
-			fmt.printf("%s=%s", col_name, val_str)
+		for vi in 0 ..< len(c.values) {
+			if vi > 0 { fmt.print(" | ") }
+			val_str := types.value_to_string(c.values[vi], context.temp_allocator)
+			fmt.print(val_str)
 		}
-
 		fmt.println()
 		btree.cursor_advance(&cursor)
 		row_count += 1
 	}
-	fmt.printf("=== Total: %d rows ===\n", row_count)
+	fmt.printf("(%d rows)\n", row_count)
 }
 
 print_schema :: proc(db: ^Database) {

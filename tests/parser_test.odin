@@ -1,6 +1,7 @@
 package tests
 
 import "core:fmt"
+import "core:strings"
 import "core:testing"
 import "src:parser"
 import "src:types"
@@ -41,7 +42,7 @@ test_tokenize_literals :: proc(t: ^testing.T) {
 @(test)
 test_parse_create_table :: proc(t: ^testing.T) {
 	sql := "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL);"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	create_stmt, is_create := stmt.type.(parser.Create_Stmt)
@@ -68,7 +69,7 @@ test_parse_create_table :: proc(t: ^testing.T) {
 @(test)
 test_parse_insert :: proc(t: ^testing.T) {
 	sql := "INSERT INTO users VALUES (1, 'Alice', NULL, 99.9);"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	insert_stmt, is_insert := stmt.type.(parser.Insert_Stmt)
@@ -93,7 +94,7 @@ test_parse_insert :: proc(t: ^testing.T) {
 @(test)
 test_parse_select_star :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM data;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	sel, is_select := stmt.type.(parser.Select_Stmt)
@@ -108,7 +109,7 @@ test_parse_select_star :: proc(t: ^testing.T) {
 @(test)
 test_parse_select_specific :: proc(t: ^testing.T) {
 	sql := "SELECT id, name, age FROM users;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	sel, is_select := stmt.type.(parser.Select_Stmt)
@@ -122,7 +123,7 @@ test_parse_select_specific :: proc(t: ^testing.T) {
 @(test)
 test_parse_select_where :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM users WHERE age >= 18 AND status = 'active';"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	sel, is_select := stmt.type.(parser.Select_Stmt)
@@ -149,7 +150,7 @@ test_parse_select_where :: proc(t: ^testing.T) {
 @(test)
 test_parse_update :: proc(t: ^testing.T) {
 	sql := "UPDATE employees SET salary = 50000, rank = 2 WHERE id = 10;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	upd, is_update := stmt.type.(parser.Update_Stmt)
@@ -167,7 +168,7 @@ test_parse_update :: proc(t: ^testing.T) {
 @(test)
 test_parse_delete :: proc(t: ^testing.T) {
 	sql := "DELETE FROM logs WHERE date < '2023-01-01';"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	del, is_delete := stmt.type.(parser.Delete_Stmt)
@@ -182,7 +183,7 @@ test_parse_delete :: proc(t: ^testing.T) {
 @(test)
 test_parse_drop :: proc(t: ^testing.T) {
 	sql := "DROP TABLE old_data;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed")
 
 	drop, is_drop := stmt.type.(parser.Drop_Stmt)
@@ -193,21 +194,39 @@ test_parse_drop :: proc(t: ^testing.T) {
 @(test)
 test_parse_error_mixed_logic :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t WHERE a=1 AND b=2 OR c=3;"
-	_, ok := parser.parse(sql, context.temp_allocator)
+	_, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, !ok, "Should fail on mixed AND/OR logic")
 }
 
 @(test)
 test_parse_error_syntax :: proc(t: ^testing.T) {
 	sql := "CREATE user (id INT);"
-	_, ok := parser.parse(sql, context.temp_allocator)
+	_, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, !ok, "Should fail on bad syntax (missing TABLE keyword)")
+}
+
+@(test)
+test_parse_error_messages :: proc(t: ^testing.T) {
+	tests := []struct{ sql: string, contains: string }{
+		{"CREATE TABLE test;", "column definition"},
+		{"INSERT INTO test;", "VALUES"},
+		{"INSERT test VALUES (1);", "INTO"},
+		{"DELETE test;", "FROM"},
+	}
+	for test in tests {
+		_, ok, err_msg := parser.parse(test.sql, context.temp_allocator)
+		testing.expect(t, !ok, fmt.tprintf("'%s' should fail to parse", test.sql))
+		if test.contains != "" {
+			testing.expect(t, strings.contains(err_msg, test.contains),
+				fmt.tprintf("error '%s' should contain '%s'", err_msg, test.contains))
+		}
+	}
 }
 
 @(test)
 test_parse_or_clause :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t WHERE a = 1 OR b = 2;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "OR clause parse failed")
 	sel, is_select := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_select, "Expected Select_Stmt")
@@ -220,7 +239,7 @@ test_parse_or_clause :: proc(t: ^testing.T) {
 @(test)
 test_parse_not_equals :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t WHERE x != 5;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parse failed for !=")
 	sel, is_select := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_select, "Expected Select_Stmt")
@@ -230,16 +249,16 @@ test_parse_not_equals :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_empty_sql :: proc(t: ^testing.T) {
-	_, ok := parser.parse("", context.temp_allocator)
+	_, ok, _ := parser.parse("", context.temp_allocator)
 	testing.expect(t, !ok, "Empty SQL should fail")
-	_, ok2 := parser.parse("   ;", context.temp_allocator)
+	_, ok2, _ := parser.parse("   ;", context.temp_allocator)
 	testing.expect(t, !ok2, "Whitespace-only SQL should fail")
 }
 
 @(test)
 test_parse_update_no_where :: proc(t: ^testing.T) {
 	sql := "UPDATE t SET x = 1;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "UPDATE without WHERE should parse")
 	_, is_update := stmt.type.(parser.Update_Stmt)
 	testing.expect(t, is_update, "Expected Update_Stmt")
@@ -248,7 +267,7 @@ test_parse_update_no_where :: proc(t: ^testing.T) {
 @(test)
 test_parse_delete_no_where :: proc(t: ^testing.T) {
 	sql := "DELETE FROM t;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "DELETE without WHERE should parse")
 	_, is_delete := stmt.type.(parser.Delete_Stmt)
 	testing.expect(t, is_delete, "Expected Delete_Stmt")
@@ -257,7 +276,7 @@ test_parse_delete_no_where :: proc(t: ^testing.T) {
 @(test)
 test_parse_blob_literal :: proc(t: ^testing.T) {
 	sql := "INSERT INTO t VALUES (1, X'DEADBEEF');"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "INSERT with BLOB literal should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
@@ -273,7 +292,7 @@ test_parse_blob_literal :: proc(t: ^testing.T) {
 @(test)
 test_parse_blob_literal_lowercase :: proc(t: ^testing.T) {
 	sql := "INSERT INTO t VALUES (1, x'deadbeef');"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Lowercase x'...' should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
@@ -285,7 +304,7 @@ test_parse_blob_literal_lowercase :: proc(t: ^testing.T) {
 @(test)
 test_parse_blob_literal_empty :: proc(t: ^testing.T) {
 	sql := "INSERT INTO t VALUES (1, X'');"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Empty BLOB literal should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
@@ -297,14 +316,14 @@ test_parse_blob_literal_empty :: proc(t: ^testing.T) {
 @(test)
 test_parse_blob_literal_invalid_hex :: proc(t: ^testing.T) {
 	sql := "INSERT INTO t VALUES (1, X'ZZZZ');"
-	_, ok := parser.parse(sql, context.temp_allocator)
+	_, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, !ok, "Invalid hex in BLOB literal should fail")
 }
 
 @(test)
 test_parse_insert_column_list :: proc(t: ^testing.T) {
 	sql := "INSERT INTO t (id, name) VALUES (1, 'Alice');"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "INSERT with column list should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
@@ -317,7 +336,7 @@ test_parse_insert_column_list :: proc(t: ^testing.T) {
 @(test)
 test_parse_insert_column_list_order :: proc(t: ^testing.T) {
 	sql := "INSERT INTO t (score, name, id) VALUES (99.5, 'Bob', 42);"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "INSERT with reordered columns should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
@@ -330,7 +349,7 @@ test_parse_insert_column_list_order :: proc(t: ^testing.T) {
 @(test)
 test_parse_insert_no_column_list :: proc(t: ^testing.T) {
 	sql := "INSERT INTO t VALUES (1, 'Alice', 99.5);"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "INSERT without column list should still parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
@@ -340,7 +359,7 @@ test_parse_insert_no_column_list :: proc(t: ^testing.T) {
 @(test)
 test_parse_default_value :: proc(t: ^testing.T) {
 	sql := "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'anon', score REAL DEFAULT 0.0);"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "CREATE TABLE with DEFAULT should parse")
 	create, is_create := stmt.type.(parser.Create_Stmt)
 	testing.expect(t, is_create, "Expected Create_Stmt")
@@ -362,7 +381,7 @@ test_parse_default_value :: proc(t: ^testing.T) {
 @(test)
 test_parse_default_value_null :: proc(t: ^testing.T) {
 	sql := "CREATE TABLE t (x INTEGER DEFAULT NULL);"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "DEFAULT NULL should parse")
 	create, is_create := stmt.type.(parser.Create_Stmt)
 	testing.expect(t, is_create, "Expected Create_Stmt")
@@ -374,7 +393,7 @@ test_parse_default_value_null :: proc(t: ^testing.T) {
 @(test)
 test_parse_like_where :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t WHERE name LIKE '%foo%';"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "SELECT with LIKE should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -392,7 +411,7 @@ test_parse_like_where :: proc(t: ^testing.T) {
 @(test)
 test_parse_limit_offset :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t LIMIT 5 OFFSET 10;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "SELECT with LIMIT/OFFSET should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -407,7 +426,7 @@ test_parse_limit_offset :: proc(t: ^testing.T) {
 @(test)
 test_parse_limit_only :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t LIMIT 3;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "SELECT with LIMIT only should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -421,7 +440,7 @@ test_parse_limit_only :: proc(t: ^testing.T) {
 @(test)
 test_parse_order_by :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t ORDER BY name;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "SELECT with ORDER BY should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -435,7 +454,7 @@ test_parse_order_by :: proc(t: ^testing.T) {
 @(test)
 test_parse_order_by_desc :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t ORDER BY score DESC;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "ORDER BY DESC should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -448,7 +467,7 @@ test_parse_order_by_desc :: proc(t: ^testing.T) {
 @(test)
 test_parse_order_by_multi :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t ORDER BY score DESC, name ASC;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Multi-column ORDER BY should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -464,7 +483,7 @@ test_parse_order_by_multi :: proc(t: ^testing.T) {
 @(test)
 test_parse_aggregate_count_star :: proc(t: ^testing.T) {
 	sql := "SELECT COUNT(*) FROM t;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "SELECT COUNT(*) should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -477,7 +496,7 @@ test_parse_aggregate_count_star :: proc(t: ^testing.T) {
 @(test)
 test_parse_aggregate_sum :: proc(t: ^testing.T) {
 	sql := "SELECT SUM(score) FROM t;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "SELECT SUM(col) should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -489,7 +508,7 @@ test_parse_aggregate_sum :: proc(t: ^testing.T) {
 @(test)
 test_parse_select_group_by :: proc(t: ^testing.T) {
 	sql := "SELECT name, COUNT(*) FROM t GROUP BY name;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "SELECT with GROUP BY should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -501,7 +520,7 @@ test_parse_select_group_by :: proc(t: ^testing.T) {
 @(test)
 test_parse_cross_join :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM a CROSS JOIN b;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "CROSS JOIN should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -516,7 +535,7 @@ test_parse_cross_join :: proc(t: ^testing.T) {
 @(test)
 test_parse_inner_join :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t1 INNER JOIN t2 ON t1.id = 1;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "INNER JOIN should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -534,7 +553,7 @@ test_parse_inner_join :: proc(t: ^testing.T) {
 @(test)
 test_parse_multiple_joins :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM a INNER JOIN b ON a.x=1 JOIN c ON b.y=2;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Multiple JOINs should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -548,7 +567,7 @@ test_parse_multiple_joins :: proc(t: ^testing.T) {
 @(test)
 test_parse_equi_join :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t1 INNER JOIN t2 ON t1.x = t2.y;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Equi-join should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -567,7 +586,7 @@ test_parse_equi_join :: proc(t: ^testing.T) {
 @(test)
 test_parse_left_join :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM a LEFT JOIN b ON a.x = b.y;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "LEFT JOIN should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -582,7 +601,7 @@ test_parse_left_join :: proc(t: ^testing.T) {
 @(test)
 test_parse_left_outer_join :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM a LEFT OUTER JOIN b ON a.x = b.y;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "LEFT OUTER JOIN should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -593,7 +612,7 @@ test_parse_left_outer_join :: proc(t: ^testing.T) {
 @(test)
 test_parse_table_alias_as :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t AS a;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Table alias with AS should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -603,7 +622,7 @@ test_parse_table_alias_as :: proc(t: ^testing.T) {
 @(test)
 test_parse_table_alias_implicit :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t a;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Implicit table alias should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -613,7 +632,7 @@ test_parse_table_alias_implicit :: proc(t: ^testing.T) {
 @(test)
 test_parse_join_alias :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t1 AS a JOIN t2 AS b ON a.x = b.y;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "JOIN with aliases should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -624,7 +643,7 @@ test_parse_join_alias :: proc(t: ^testing.T) {
 @(test)
 test_parse_subquery :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM (SELECT a, b FROM t) AS sub;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Subquery should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -641,7 +660,7 @@ test_parse_subquery :: proc(t: ^testing.T) {
 @(test)
 test_parse_subquery_no_as :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM (SELECT x FROM t) sub;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Subquery without AS should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -653,7 +672,7 @@ test_parse_subquery_no_as :: proc(t: ^testing.T) {
 @(test)
 test_parse_int_alias :: proc(t: ^testing.T) {
 	sql := "CREATE TABLE t (x INT);"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "CREATE TABLE with INT alias should parse")
 	create, is_create := stmt.type.(parser.Create_Stmt)
 	testing.expect(t, is_create, "Expected Create_Stmt")
@@ -664,7 +683,7 @@ test_parse_int_alias :: proc(t: ^testing.T) {
 @(test)
 test_parse_as_of_snapshot :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t AS OF SNAPSHOT 5;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "AS OF SNAPSHOT should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -676,7 +695,7 @@ test_parse_as_of_snapshot :: proc(t: ^testing.T) {
 @(test)
 test_parse_as_of_snapshot_no_as :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t OF SNAPSHOT 3;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "Parses as SELECT without AS OF (unconsumed tokens)")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -687,7 +706,7 @@ test_parse_as_of_snapshot_no_as :: proc(t: ^testing.T) {
 @(test)
 test_parse_as_of_snapshot_with_where :: proc(t: ^testing.T) {
 	sql := "SELECT id, name FROM t AS OF SNAPSHOT 2 WHERE id > 1;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "AS OF SNAPSHOT with WHERE should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -701,7 +720,7 @@ test_parse_as_of_snapshot_with_where :: proc(t: ^testing.T) {
 @(test)
 test_parse_as_of_snapshot_with_limit :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t AS OF SNAPSHOT 1 LIMIT 10;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "AS OF SNAPSHOT with LIMIT should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -716,7 +735,7 @@ test_parse_as_of_snapshot_with_limit :: proc(t: ^testing.T) {
 @(test)
 test_parse_as_of_snapshot_snapshot_as_table_name :: proc(t: ^testing.T) {
 	sql := "SELECT snapshot FROM t;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "snapshot as column name should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")

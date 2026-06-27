@@ -10,10 +10,10 @@ parse_create_table :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !match(p, .TABLE) do return nil, false
+	if !expect_match(p, .TABLE, "Expected TABLE after CREATE") do return nil, false
 
 	table_name := parse_identifier(p, allocator) or_return
-	if !match(p, .LPAREN) {
+	if !expect_match(p, .LPAREN, "CREATE TABLE requires at least one column definition") {
 		delete(table_name, allocator)
 		return nil, false
 	}
@@ -28,18 +28,18 @@ parse_create_table :: proc(
 	}
 	for {
 		if match(p, .FOREIGN) {
-			if !match(p, .KEY) { return nil, false }
-			if !match(p, .LPAREN) { return nil, false }
+			if !expect_match(p, .KEY, "Expected KEY after FOREIGN") { return nil, false }
+			if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") { return nil, false }
 
 			fk_col := parse_identifier(p, allocator) or_return
-			if !match(p, .RPAREN) { return nil, false }
-			if !match(p, .REFERENCES) { return nil, false }
+			if !expect_match(p, .RPAREN, "Expected ) after foreign key column") { return nil, false }
+			if !expect_match(p, .REFERENCES, "Expected REFERENCES after FOREIGN KEY") { return nil, false }
 
 			fk_table := parse_identifier(p, allocator) or_return
-			if !match(p, .LPAREN) { return nil, false }
+			if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") { return nil, false }
 
 			fk_ref_col := parse_identifier(p, allocator) or_return
-			if !match(p, .RPAREN) { return nil, false }
+			if !expect_match(p, .RPAREN, "Expected ) after referenced column") { return nil, false }
 			append(&fks, Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col})
 		} else {
 			col := types.Column {
@@ -57,24 +57,23 @@ parse_create_table :: proc(
 			case .BLOB:
 				col.type = .BLOB; advance(p)
 			case:
-				return nil, false
+				return err(p, "Expected column type (INTEGER, TEXT, REAL, or BLOB)")
 			}
 
 			for {
 				if match(p, .PRIMARY) {
-					if !match(p, .KEY) { return nil, false }
+					if !expect_match(p, .KEY, "Expected KEY after PRIMARY") { return nil, false }
 					col.pk = true
 				} else if match(p, .NOT) {
-					if !match(p, .NULL) { return nil, false }
+					if !expect_match(p, .NULL, "Expected NULL after NOT") { return nil, false }
 					col.not_null = true
 				} else if match(p, .DEFAULT) {
 					val, val_ok := parse_value(p, allocator)
-					if !val_ok { return nil, false }
+					if !val_ok { return err(p, "Invalid DEFAULT value") }
 					col.default_value = val
 				} else if match(p, .CHECK) {
-					if !match(p, .LPAREN) { return nil, false }
+					if !expect_match(p, .LPAREN, "Expected ( after CHECK") { return nil, false }
 					b := strings.builder_make(allocator)
-					// Track parenthesis depth to handle nested parens in CHECK expressions.
 					depth := 1
 					for depth > 0 {
 						tok := peek(p); advance(p)
@@ -88,7 +87,7 @@ parse_create_table :: proc(
 			}
 			append(&columns, col)
 		}
-		if match(p, .RPAREN) { break } else if !match(p, .COMMA) { return nil, false }
+		if match(p, .RPAREN) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column definition") { return nil, false }
 	}
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }
@@ -100,7 +99,7 @@ parse_drop_table :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !match(p, .TABLE) do return nil, false
+	if !expect_match(p, .TABLE, "Expected TABLE after DROP") do return nil, false
 	table_name := parse_identifier(p, allocator) or_return
 	return Drop_Stmt{table_name = table_name}, true
 }

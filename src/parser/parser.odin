@@ -3,6 +3,17 @@ package parser
 
 import "core:strings"
 
+err :: proc(p: ^Parser, msg: string) -> (Statement_Variant, bool) {
+	if p.err_msg == "" { p.err_msg = msg }
+	return nil, false
+}
+
+expect_match :: proc(p: ^Parser, tt: Token_Type, msg: string) -> bool {
+	if match(p, tt) { return true }
+	if p.err_msg == "" { p.err_msg = msg }
+	return false
+}
+
 Token_Type :: enum u8 {
 	EOF,
 	IDENTIFIER,
@@ -78,9 +89,10 @@ Token_Type :: enum u8 {
 	REFERENCES,
 }
 
-parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) {
+parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, string) {
 	tokens, ok := tokenize(sql, context.temp_allocator)
-	if !ok { return {}, false }
+	if !ok { return {}, false, "Tokenizer error" }
+
 	parser := Parser {
 		tokens  = tokens,
 		current = 0,
@@ -121,9 +133,13 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool) 
 			sql = strings.clone(inner, allocator),
 		}; success = true
 	case:
-		return {}, false
+		if parser.err_msg == "" { parser.err_msg = "Unexpected token" }
+		return {}, false, parser.err_msg
 	}
 
-	if !success { return {}, false }
-	return Statement{type = variant, sql = strings.clone(sql, allocator)}, true
+	if !success {
+		if parser.err_msg == "" { parser.err_msg = "Syntax error" }
+		return {}, false, parser.err_msg
+	}
+	return Statement{type = variant, sql = strings.clone(sql, allocator)}, true, ""
 }

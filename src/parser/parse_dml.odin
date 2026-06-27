@@ -9,7 +9,7 @@ parse_insert :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !match(p, .INTO) do return nil, false
+	if !expect_match(p, .INTO, "Expected INTO after INSERT") do return nil, false
 	table_name := parse_identifier(p, allocator) or_return
 	columns := make([dynamic]string, allocator)
 	defer if !ok { for c in columns do delete(c, allocator); delete(columns) }
@@ -20,11 +20,11 @@ parse_insert :: proc(
 			advance(p)
 			for {
 				col := parse_identifier(p, allocator) or_return; append(&columns, col)
-				if match(p, .RPAREN) { break } else if !match(p, .COMMA) { return nil, false }
+				if match(p, .RPAREN) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column") { return nil, false }
 			}
 		}
 	}
-	if !match(p, .VALUES) || !match(p, .LPAREN) {
+	if !expect_match(p, .VALUES, "Expected VALUES after INSERT") || !expect_match(p, .LPAREN, "Expected ( after VALUES") {
 		delete(table_name, allocator)
 		return nil, false
 	}
@@ -36,9 +36,9 @@ parse_insert :: proc(
 		delete(values)
 	}
 	for {
-		val, val_ok := parse_value(p, allocator); if !val_ok { return nil, false }
+		val, val_ok := parse_value(p, allocator); if !val_ok { return err(p, "Invalid value in INSERT") }
 		append(&values, val)
-		if match(p, .RPAREN) { break } else if !match(p, .COMMA) { return nil, false }
+		if match(p, .RPAREN) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") { return nil, false }
 	}
 	return Insert_Stmt{table_name = table_name, columns = columns[:], values = values[:]}, true
 }
@@ -51,7 +51,7 @@ parse_update :: proc(
 	ok: bool,
 ) {
 	table_name := parse_identifier(p, allocator) or_return
-	if !match(p, .SET) {
+	if !expect_match(p, .SET, "Expected SET after UPDATE table") {
 		delete(table_name, allocator)
 		return nil, false
 	}
@@ -65,10 +65,10 @@ parse_update :: proc(
 	}
 	for {
 		append(&columns, parse_identifier(p, allocator) or_return)
-		if !match(p, .EQUALS) { return nil, false }
+		if !expect_match(p, .EQUALS, "Expected = after column in SET") { return nil, false }
 
 		val, val_ok := parse_value(p, allocator)
-		if !val_ok { return nil, false }
+		if !val_ok { return err(p, "Invalid value in SET") }
 
 		append(&values, val)
 		if !match(p, .COMMA) { break }
@@ -92,7 +92,7 @@ parse_delete :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !match(p, .FROM) do return nil, false
+	if !expect_match(p, .FROM, "Expected FROM after DELETE") do return nil, false
 	table_name := parse_identifier(p, allocator) or_return
 	defer if !ok do delete(table_name, allocator)
 

@@ -605,8 +605,11 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 | Command | Action | Implementation |
 |---|---|---|
 | `.exit` / `.quit` | Exit | `os.exit(0)` |
+| `.help` | Show help | `print_help()` |
+| `.version` | Print version | `APP_VERSION` |
 | `.tables` | List tables | `db.list_tables()` |
 | `.schema` | Show DDL | `db.print_schema()` |
+| `.debug_schema` | Show verbose schema dump | `db.print_schema_debug()` |
 | `.dump <table>` | Dump rows | `db.dump_table()` |
 | `.desc <table>` | Describe columns | `db.describe_table()` |
 | `.stats` | DB statistics | `db.stats()` |
@@ -639,15 +642,15 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 
 | Package | Tests | Coverage |
 |---|---|---|
-| `parser` | 38 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
+| `parser` | 39 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
 | `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates, DISTINCT, CHECK, EXPLAIN, subquery projection |
 | `btree` | 22 | Insert/find/delete/update, cursor, split, persistence, duplicates, rebalance merge, byte accounting |
 | `cell` | 11 | Serialization roundtrip, zero-copy, edge cases |
 | `pager` | 20 | Page cache, WAL, crash recovery, bitmap, pinning, eviction, checksum |
 | `schema` | 12 | Column blob with CHECK, add/find/drop/list, row round-trip, hash collision |
 | `snapshot` | 12 | Chain, manifest, diff, tags, timestamp lookup, GC |
-| `integration` | 26 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, columnar integration, columnar mutation |
-| **Total** | **205** | |
+| `integration` | 28 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, columnar integration, columnar mutation, semicolon-in-string, multi-statement |
+| **Total** | **208** | |
 
 ---
 

@@ -14,9 +14,9 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 	if !db_check(db) { return false }
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, err_msg := parser.parse(sql, context.temp_allocator)
 	if !ok {
-		fmt.eprintln("Error: Failed to parse SQL statement")
+		if err_msg != "" { fmt.eprintln("Error:", err_msg) } else { fmt.eprintln("Error: Failed to parse SQL statement") }
 		return false
 	}
 	if txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt); is_txn {
@@ -151,9 +151,9 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	stmt, parse_ok, err_msg := parser.parse(sql, context.temp_allocator)
 	if !parse_ok {
-		fmt.eprintln("Error: Failed to parse SQL statement")
+		if err_msg != "" { fmt.eprintln("Error:", err_msg) } else { fmt.eprintln("Error: Failed to parse SQL statement") }
 		return r
 	}
 

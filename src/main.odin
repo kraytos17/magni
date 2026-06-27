@@ -16,9 +16,11 @@ PROMPT :: "magni> "
 CONT_PROMPT :: "   ...> "
 
 CLI :: struct {
-	database: string `args:"pos=0,usage=Database file path (default: test.db)"`,
-	file:     string `args:"name=file,usage=Execute SQL from file and exit"`,
-	eval:     string `args:"name=eval,usage=Execute a single SQL statement and exit"`,
+	database:      string `args:"pos=0,usage=Database file path (default: test.db)"`,
+	file:          string `args:"name=file,usage=Execute SQL from file and exit"`,
+	eval:          string `args:"name=eval,usage=Execute a single SQL statement and exit"`,
+	stop_on_error: bool   `args:"name=stop-on-error,usage=Exit on first SQL error in script mode"`,
+	version:       bool   `args:"name=version,usage=Print version and exit"`,
 }
 
 main :: proc() {
@@ -36,6 +38,11 @@ main :: proc() {
 		return
 	}
 
+	if cli.version {
+		fmt.printf("MagniDB v%s\n", APP_VERSION)
+		return
+	}
+
 	database, ok := db.open(cli.database)
 	if !ok {
 		fmt.eprintf("Fatal: Could not open database '%s'.\n", cli.database)
@@ -43,15 +50,17 @@ main :: proc() {
 	}
 	defer db.close(database)
 
+	stop_on_error := cli.stop_on_error
+
 	if len(cli.file) > 0 {
-		execute_script_file(database, cli.file)
+		execute_script_file(database, cli.file, stop_on_error)
 	} else if len(cli.eval) > 0 {
-		execute_sql(database, cli.eval)
+		execute_sql(database, cli.eval, stop_on_error)
 	} else if os.is_tty(os.stdin) {
 		fmt.printf("MagniDB v%s\nEnter .help for usage hints.\n", APP_VERSION)
 		repl(database)
 	} else {
-		execute_script_stream(database)
+		execute_script_stream(database, stop_on_error)
 	}
 }
 
@@ -92,15 +101,7 @@ repl :: proc(database: ^db.Database) {
 		strings.write_string(&query_buffer, line)
 		if strings.has_suffix(trimmed, ";") {
 			full_sql := strings.to_string(query_buffer)
-			is_select := strings.has_prefix(
-				strings.to_upper(strings.trim_space(full_sql)),
-				"SELECT",
-			)
-			if db.execute(database, full_sql) {
-				if !is_select {
-					fmt.println("Query executed successfully.")
-				}
-			}
+			db.execute(database, full_sql)
 			strings.builder_reset(&query_buffer)
 		}
 	}
@@ -113,13 +114,13 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
 		os.exit(0)
 	case ".help":
 		print_help()
+	case ".version":
+		fmt.printf("MagniDB v%s\n", APP_VERSION)
 	case ".tables":
-		fmt.println("--- List of Tables ---")
 		db.list_tables(database)
 	case ".schema":
 		db.print_schema(database)
 	case ".debug_schema":
-		fmt.println("--- Full Schema Dump (Debug) ---")
 		db.print_schema_debug(database)
 	case ".stats":
 		db.stats(database)
@@ -215,33 +216,34 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
 	}
 }
 
-execute_script_file :: proc(database: ^db.Database, path: string) {
+execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error: bool = false) {
 	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
 	if err != nil {
 		fmt.eprintf("Error: Could not read file '%s'\n", path)
 		return
 	}
-	execute_sql(database, string(data))
+	execute_sql(database, string(data), stop_on_error)
 }
 
-execute_script_stream :: proc(database: ^db.Database) {
+execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = false) {
 	data, err := os.read_entire_file_from_file(os.stdin, context.temp_allocator)
 	if err != nil {
 		fmt.eprintf("Error: Could not read from stdin\n")
 		return
 	}
-	execute_sql(database, string(data))
+	execute_sql(database, string(data), stop_on_error)
 }
 
-execute_sql :: proc(database: ^db.Database, sql: string) {
+execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = false) {
 	statements := split_statements(sql)
 	for stmt in statements {
 		trimmed := strings.trim_space(stmt)
 		if len(trimmed) == 0 { continue }
 		if !db.execute(database, trimmed) {
-			display_len := len(trimmed)
-			if display_len > 80 { display_len = 80 }
-			fmt.eprintf("Error near: %s\n", trimmed[:display_len])
+			if stop_on_error {
+				fmt.eprintf("Error: %s\n", trimmed[:min(len(trimmed), 80)])
+				os.exit(1)
+			}
 		}
 	}
 }
@@ -249,8 +251,11 @@ execute_sql :: proc(database: ^db.Database, sql: string) {
 split_statements :: proc(sql: string) -> []string {
 	result := make([dynamic]string, context.temp_allocator)
 	start := 0
+	in_string := false
 	for i in 0 ..< len(sql) {
-		if sql[i] == ';' {
+		if sql[i] == '\'' {
+			in_string = !in_string
+		} else if sql[i] == ';' && !in_string {
 			append(&result, sql[start:i + 1])
 			start = i + 1
 		}
@@ -266,50 +271,35 @@ split_statements :: proc(sql: string) -> []string {
 
 print_help :: proc() {
 	fmt.println("Commands:")
-	fmt.println("  .exit, .quit        Exit the application")
-	fmt.println("  .tables             List all tables")
-	fmt.println("  .schema             Show CREATE TABLE statements")
-	fmt.println("  .debug_schema       Show low-level schema (root pages, flags)")
-	fmt.println("  .dump <table_name>  Print all raw rows in a table")
-	fmt.println("  .desc <table_name>  Describe table columns")
-	fmt.println("  .begin              Begin a transaction")
-	fmt.println("  .commit             Commit the current transaction (creates a snapshot)")
-	fmt.println("  .rollback           Roll back the current transaction")
-	fmt.println("  .snapshots          Show the snapshot chain")
-	fmt.println("  .snapdiff <old> <new>  Show diff between two snapshots")
-	fmt.println("  .snapshot tag <id> <label>  Tag a snapshot with a label")
-	fmt.println("  .snapshot restore <id>  Restore database to a historical snapshot")
-	fmt.println("  .rollforward            Advance current state to the most recent snapshot")
-	fmt.println(
-		fmt.tprintf(
-			"  .expire [keep]          Expire old snapshots (keep default %d) and garbage collect",
-			db.DEFAULT_KEEP,
-		),
-	)
-	fmt.println("  .stats              Show database file statistics")
-	fmt.println("  .integrity          Run consistency checks")
-	fmt.println("  .checkpoint         Flush WAL/Pages to disk")
-	fmt.println("\nSQL Support:")
-	fmt.println("  DDL:")
-	fmt.println("    CREATE TABLE name (col type [PRIMARY KEY] [NOT NULL] [DEFAULT val], ...);")
-	fmt.println("    DROP TABLE name;")
-	fmt.println("  DML:")
-	fmt.println("    INSERT INTO name [(col1, col2, ...)] VALUES (val1, val2, ...);")
-	fmt.printf("    SELECT col1, col2, ... FROM name [WHERE cond]")
-	fmt.printf(" [ORDER BY col [ASC|DESC]] [LIMIT n [OFFSET m]];\n")
-	fmt.println("    SELECT func(col) FROM name [WHERE ...] [GROUP BY col [HAVING cond]];")
-	fmt.println("    SELECT * FROM t1 [INNER|CROSS|LEFT [OUTER]] JOIN t2 ON condition;")
-	fmt.println("    SELECT * FROM (SELECT ...) AS alias [WHERE ...] [ORDER BY ...];")
-	fmt.println("    SELECT t1.col, t2.col FROM t1, t2 [WHERE t1.x = t2.y];")
-	fmt.println("    SELECT ... FROM name AS OF SNAPSHOT <id> [WHERE ...];")
-	fmt.println("    SELECT ... FROM name AS OF TIMESTAMP <micros> [WHERE ...];")
-	fmt.println("    UPDATE name SET col = val, ... [WHERE cond];")
-	fmt.println("    DELETE FROM name [WHERE cond];")
-	fmt.println("  WHERE:")
-	fmt.println("    col = val, col != val, col <> val, col < val, col <= val")
-	fmt.println("    col LIKE pattern (% = any, _ = single char)")
-	fmt.println("    col AND/OR col  (simple AND/OR, no nesting)")
-	fmt.println("  Functions: COUNT(*), SUM(col), AVG(col), MIN(col), MAX(col)")
-	fmt.println("  Literals:  integers, reals, strings ('text'), BLOBs (X'DEAD')")
-	fmt.println("\nNote: End SQL commands with a semicolon (;).")
+	fmt.println("  .tables                   List all tables")
+	fmt.println("  .schema                   Show CREATE TABLE statements")
+	fmt.println("  .debug_schema             Show low-level schema details")
+	fmt.println("  .desc <table>             Describe table columns")
+	fmt.println("  .dump <table>             Dump all rows")
+	fmt.println("  .stats                    Database statistics")
+	fmt.println("  .integrity                Verify all B-trees")
+	fmt.println("  .checkpoint               Flush pages + garbage collect")
+	fmt.println()
+	fmt.println("Transactions:")
+	fmt.println("  .begin                    Begin a transaction")
+	fmt.println("  .commit                   Commit the current transaction")
+	fmt.println("  .rollback                 Roll back the current transaction")
+	fmt.println()
+	fmt.println("Snapshots:")
+	fmt.println("  .snapshots                Show snapshot chain")
+	fmt.println("  .snapdiff <a> <b>         Diff two snapshots")
+	fmt.println("  .snapshot tag <id> <lbl>  Tag a snapshot")
+	fmt.println("  .snapshot restore <id>    Restore to a snapshot")
+	fmt.println("  .expire [keep]            Expire old snapshots (default 100)")
+	fmt.println("  .rollforward              Advance to latest snapshot")
+	fmt.println()
+	fmt.println("General:")
+	fmt.println("  .exit / .quit             Exit")
+	fmt.println("  .help                     This message")
+	fmt.println()
+	fmt.println("Flags:")
+	fmt.println("  --version                 Print version and exit")
+	fmt.println("  --stop-on-error           Exit on first SQL error in script mode")
+	fmt.println()
+	fmt.println("See README.md or ARCH.md for SQL reference.")
 }

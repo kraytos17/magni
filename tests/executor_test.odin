@@ -260,7 +260,7 @@ test_exec_select_empty_table :: proc(t: ^testing.T) {
 
 	executor.execute(&tree, make_create_stmt("empty_tbl"))
 	sel_sql := "SELECT * FROM empty_tbl;"
-	sel_stmt, _ := parser.parse(sel_sql, context.temp_allocator)
+	sel_stmt, _, _ := parser.parse(sel_sql, context.temp_allocator)
 	ok, _, _ := executor.execute(&tree, sel_stmt)
 	testing.expect(t, ok, "SELECT on empty table should succeed (not crash)")
 }
@@ -309,7 +309,7 @@ test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("snap_tbl", 20, "Y", 2.0))
 
 	sql := "SELECT * FROM snap_tbl AS OF SNAPSHOT 42;"
-	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "AS OF SNAPSHOT should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -332,7 +332,7 @@ test_exec_distinct :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 3, "a", 1.0))
 
 	sql := "SELECT DISTINCT name FROM t;"
-	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "Expected Select_Stmt")
@@ -351,7 +351,7 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
-	stmt1, ok1 := parser.parse(
+	stmt1, ok1, _ := parser.parse(
 		"SELECT id FROM t ORDER BY name NULLS FIRST;",
 		context.temp_allocator,
 	)
@@ -361,7 +361,7 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 	testing.expect(t, order1[0].nulls_first, "nulls_first should be true")
 	executor.execute(&tree, stmt1)
 
-	stmt2, ok2 := parser.parse(
+	stmt2, ok2, _ := parser.parse(
 		"SELECT id FROM t ORDER BY name NULLS LAST;",
 		context.temp_allocator,
 	)
@@ -371,7 +371,7 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 	testing.expect(t, !order2[0].nulls_first, "nulls_first should be false for LAST")
 	executor.execute(&tree, stmt2)
 
-	stmt3, ok3 := parser.parse(
+	stmt3, ok3, _ := parser.parse(
 		"SELECT id FROM t ORDER BY name ASC NULLS FIRST;",
 		context.temp_allocator,
 	)
@@ -381,7 +381,7 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 	testing.expect(t, order3[0].nulls_first, "nulls_first should be true for ASC NULLS FIRST")
 	executor.execute(&tree, stmt3)
 
-	stmt4, ok4 := parser.parse(
+	stmt4, ok4, _ := parser.parse(
 		"SELECT id FROM t ORDER BY name DESC NULLS LAST;",
 		context.temp_allocator,
 	)
@@ -398,7 +398,7 @@ test_exec_explain :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-	stmt, parse_ok := parser.parse("EXPLAIN SELECT * FROM t;", context.temp_allocator)
+	stmt, parse_ok, _ := parser.parse("EXPLAIN SELECT * FROM t;", context.temp_allocator)
 	testing.expect(t, parse_ok, "EXPLAIN SELECT should parse")
 	ok, _, _ := executor.execute(&tree, stmt)
 	testing.expect(t, ok, "EXPLAIN SELECT should execute")
@@ -409,7 +409,7 @@ test_exec_check_constraint :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_c")
 	defer teardown_executor_env(tree, file)
 
-	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	stmt_c, _, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
 	testing.expect(
 		t,
 		stmt_c.sql == "CREATE TABLE t (age INT CHECK (age > 0));",
@@ -432,7 +432,7 @@ test_exec_in_literal :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
-	_, parse_ok := parser.parse("SELECT * FROM t WHERE id = 1;", context.temp_allocator)
+	_, parse_ok, _ := parser.parse("SELECT * FROM t WHERE id = 1;", context.temp_allocator)
 	testing.expect(t, parse_ok, "basic WHERE should parse")
 }
 
@@ -444,7 +444,10 @@ test_exec_in_subquery :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_create_stmt("t"))
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 
-	_, parse_ok := parser.parse("SELECT * FROM (SELECT * FROM t) AS sub;", context.temp_allocator)
+	_, parse_ok, _ := parser.parse(
+		"SELECT * FROM (SELECT * FROM t) AS sub;",
+		context.temp_allocator,
+	)
 	testing.expect(t, parse_ok, "FROM subquery should parse")
 }
 
@@ -453,10 +456,13 @@ test_exec_foreign_key :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "fk")
 	defer teardown_executor_env(tree, file)
 
-	stmt_p, _ := parser.parse("CREATE TABLE parent (id INT PRIMARY KEY);", context.temp_allocator)
+	stmt_p, _, _ := parser.parse("CREATE TABLE parent (id INT PRIMARY KEY);", context.temp_allocator)
 	executor.execute(&tree, stmt_p)
 
-	_, parse_ok := parser.parse("CREATE TABLE child (id INT PRIMARY KEY);", context.temp_allocator)
+	_, parse_ok, _ := parser.parse(
+		"CREATE TABLE child (id INT PRIMARY KEY);",
+		context.temp_allocator,
+	)
 	testing.expect(t, parse_ok, "CREATE TABLE should parse")
 }
 
@@ -473,7 +479,7 @@ test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 5, "b", 5.0))
 
 	sel_sql := "SELECT DISTINCT name FROM t;"
-	stmt, parse_ok := parser.parse(sel_sql, context.temp_allocator)
+	stmt, parse_ok, _ := parser.parse(sel_sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
 	ok, _, _ := executor.execute(&tree, stmt)
 	testing.expect(t, ok, "SELECT DISTINCT should execute")
@@ -484,7 +490,7 @@ test_exec_check_enforcement :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_enforce")
 	defer teardown_executor_env(tree, file)
 
-	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	stmt_c, _, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
 	cs, has_cs := stmt_c.type.(parser.Create_Stmt)
 	testing.expect(t, has_cs, "expected Create_Stmt")
 	chk, has_chk := cs.columns[0].check_expr.?
@@ -503,7 +509,7 @@ test_exec_subquery_projection :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "Bob", 200.0))
 
 	sql := "SELECT name FROM (SELECT * FROM t) AS sub;"
-	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "subquery SELECT should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
@@ -551,7 +557,7 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
 
 	sql := "SELECT t1.id, t2.val FROM t1 LEFT JOIN t2 ON t1.id = t2.ref;"
-	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "LEFT JOIN should parse")
 	ok, _, _ := executor.execute(&tree, stmt)
 	testing.expect(t, ok, "LEFT JOIN should execute")
@@ -603,7 +609,7 @@ test_exec_explain_where :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_create_stmt("t"))
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 
-	stmt, ok := parser.parse("EXPLAIN SELECT * FROM t WHERE id = 1;", context.temp_allocator)
+	stmt, ok, _ := parser.parse("EXPLAIN SELECT * FROM t WHERE id = 1;", context.temp_allocator)
 	testing.expect(t, ok, "EXPLAIN WHERE should parse")
 	exec_ok, _, _ := executor.execute(&tree, stmt)
 	testing.expect(t, exec_ok, "EXPLAIN WHERE should execute")
@@ -618,7 +624,7 @@ test_exec_explain_join :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_create_stmt("t2"))
 
 	sql := "EXPLAIN SELECT * FROM t1 INNER JOIN t2 ON t1.id = t2.id;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "EXPLAIN JOIN should parse")
 	exec_ok, _, _ := executor.execute(&tree, stmt)
 	testing.expect(t, exec_ok, "EXPLAIN JOIN should execute")
@@ -634,7 +640,7 @@ test_exec_in_literal_list :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
-	stmt, ok := parser.parse("SELECT * FROM t WHERE id IN (1, 3);", context.temp_allocator)
+	stmt, ok, _ := parser.parse("SELECT * FROM t WHERE id IN (1, 3);", context.temp_allocator)
 	testing.expect(t, ok, "IN (list) should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
@@ -649,7 +655,7 @@ test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_persist")
 	defer teardown_executor_env(tree, file)
 
-	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	stmt_c, _, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
 	executor.execute(&tree, stmt_c)
 
 	table, found := schema.get_table(&tree, "t", context.temp_allocator)
@@ -706,7 +712,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 	)
 
 	sql := "SELECT * FROM t1 JOIN t2 ON t1.id = t2.ref AND t1.name = t2.val;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "multi-condition JOIN should parse")
 	exec_ok, _, _ := executor.execute(&tree, stmt)
 	testing.expect(t, exec_ok, "multi-condition JOIN should execute")
@@ -721,7 +727,7 @@ test_exec_join_cross_fallback :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_create_stmt("b"))
 
 	sql := "SELECT * FROM a CROSS JOIN b;"
-	stmt, ok := parser.parse(sql, context.temp_allocator)
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "CROSS JOIN should parse")
 	exec_ok, _, _ := executor.execute(&tree, stmt)
 	testing.expect(t, exec_ok, "CROSS JOIN should execute")
@@ -737,15 +743,15 @@ test_exec_order_by_int :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 
-	stmt1, _ := parser.parse("SELECT id FROM t ORDER BY id;", context.temp_allocator)
+	stmt1, _, _ := parser.parse("SELECT id FROM t ORDER BY id;", context.temp_allocator)
 	ok, _, _ := executor.execute(&tree, stmt1)
 	testing.expect(t, ok, "ORDER BY ASC should execute")
 
-	stmt2, _ := parser.parse("SELECT id FROM t ORDER BY id DESC;", context.temp_allocator)
+	stmt2, _, _ := parser.parse("SELECT id FROM t ORDER BY id DESC;", context.temp_allocator)
 	ok2, _, _ := executor.execute(&tree, stmt2)
 	testing.expect(t, ok2, "ORDER BY DESC should execute")
 
-	stmt3, _ := parser.parse("SELECT id FROM t ORDER BY id NULLS FIRST;", context.temp_allocator)
+	stmt3, _, _ := parser.parse("SELECT id FROM t ORDER BY id NULLS FIRST;", context.temp_allocator)
 	ok3, _, _ := executor.execute(&tree, stmt3)
 	testing.expect(t, ok3, "ORDER BY NULLS FIRST should execute")
 }

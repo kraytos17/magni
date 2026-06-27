@@ -152,4 +152,5 @@ Explain_Stmt :: struct {
 Parser :: struct {
 	tokens:  []Token,
 	current: int,
+	err_msg: string,
 }

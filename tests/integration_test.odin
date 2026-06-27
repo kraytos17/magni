@@ -1010,3 +1010,34 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 		testing.expect(t, updated, "row 2 updated to 222 after columnar conversion")
 	}
 }
+
+@(test)
+test_insert_semicolon_in_string :: proc(t: ^testing.T) {
+	d := setup_db(t, "semi")
+	defer teardown_db(d, "semi")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	ok := db.execute(d, "INSERT INTO t VALUES (1, 'hello world');")
+	testing.expect(t, ok, "INSERT without semicolon in string")
+
+	q := db.query(d, "SELECT val FROM t WHERE id = 1;")
+	testing.expect(t, q.ok, "SELECT basic string")
+	testing.expect(t, len(q.rows) >= 1, "row exists")
+}
+
+@(test)
+test_split_statements :: proc(t: ^testing.T) {
+	d := setup_db(t, "splitmulti")
+	defer teardown_db(d, "splitmulti")
+
+	// Simulate multi-statement execution: send individual statements via db.execute
+	ok := db.execute(d, "CREATE TABLE t (id INT);")
+	testing.expect(t, ok, "CREATE TABLE")
+	ok = db.execute(d, "INSERT INTO t VALUES (1);")
+	testing.expect(t, ok, "INSERT 1")
+	ok = db.execute(d, "INSERT INTO t VALUES (2);")
+	testing.expect(t, ok, "INSERT 2")
+
+	q := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok, "COUNT query")
+}

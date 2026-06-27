@@ -219,3 +219,19 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 	if d.count == 0 { fmt.println("  (empty)") }
 	fmt.println("======================")
 }
+
+print_chain :: proc(p: ^pager.Pager, start_page: u32) {
+	walk_chain(p, start_page, p, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
+		p := cast(^pager.Pager)data
+		tag := get_tag(p, page)
+		fmt.printf(
+			"#%-5d %-8s ts=%d",
+			h.snapshot_id,
+			Snapshot_Operation(h.operation),
+			h.timestamp,
+		)
+		if tag != "" { fmt.printf("  [%s]", tag) }
+		fmt.println()
+		return true
+	})
+}

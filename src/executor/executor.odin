@@ -40,7 +40,7 @@ execute :: proc(
 		return ok, new_root, mutated
 	case parser.Explain_Stmt:
 		fmt.printf("QUERY PLAN\n── %s\n", strings.trim_space(s.sql))
-		inner, parse_ok := parser.parse(s.sql, context.temp_allocator)
+		inner, parse_ok, _ := parser.parse(s.sql, context.temp_allocator)
 		if !parse_ok { return false, schema_tree.root, {} }
 		return execute(schema_tree, inner)
 	case parser.Txn_Stmt:
