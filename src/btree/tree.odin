@@ -8,7 +8,7 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
-MAX_TREE_DEPTH :: 1000
+MAX_TREE_DEPTH :: 64
 
 DEFAULT_CONFIG := Config {
 	allocator        = {},

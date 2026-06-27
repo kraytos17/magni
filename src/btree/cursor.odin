@@ -11,7 +11,7 @@ Cursor_Stack_Item :: struct {
 
 Cursor :: struct {
 	tree:              ^Tree,
-	path:              [32]Cursor_Stack_Item, // fixed-size stack; no heap alloc
+	path:              [MAX_TREE_DEPTH]Cursor_Stack_Item, // fixed-size stack; no heap alloc
 	depth:             u8,
 	is_valid:          bool,
 	// Cached leaf page info — avoids pager lookup across adjacent cell reads
@@ -24,6 +24,7 @@ Cursor :: struct {
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	curr := start_page
 	for {
+		if int(c.depth) >= MAX_TREE_DEPTH { return .Invalid_Page_Header }
 		c.path[c.depth] = Cursor_Stack_Item {
 			page_id    = curr,
 			cell_index = 0,
@@ -183,7 +184,7 @@ cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cel
 	if is_columnar(node.data, item.page_id) {
 		num_cols, found := detect_columnar_col_count(node.data, item.page_id)
 		if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
-		
+
 		boff := get_page_header_offset(item.page_id)
 		cc, cc_ok := cell.read_columnar_cell(
 			node.data,

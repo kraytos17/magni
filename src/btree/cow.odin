@@ -13,24 +13,32 @@ copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 		hdr := get_header(new_page.data, 1)
 		if hdr == nil { return 0, .Invalid_Page_Header }
 
-		hdr_sz := page_header_size(hdr.page_type)
-		cell_count := int(hdr.cell_count)
-		ptr_sz := cell_count * size_of(Cell_Pointer)
-
 		SRC_HDR_OFF :: types.DATABASE_HEADER_SIZE
 		DST_HDR_OFF :: 0
 
-		if ptr_sz > 0 {
-			ptr_copy := make([]u8, ptr_sz, context.temp_allocator)
-			copy(ptr_copy, new_page.data[SRC_HDR_OFF + hdr_sz:])
-			mem.zero_slice(new_page.data[SRC_HDR_OFF + hdr_sz:SRC_HDR_OFF + hdr_sz + ptr_sz])
-			copy(new_page.data[DST_HDR_OFF + hdr_sz:], ptr_copy)
-		}
+		if is_columnar(new_page.data, 1) {
+			// Columnar page: move entire data area (header + column directory + data) from offset 100 to 0
+			data_sz := types.PAGE_SIZE - SRC_HDR_OFF
+			tmp := make([]u8, data_sz, context.temp_allocator)
+			copy(tmp, new_page.data[SRC_HDR_OFF:])
+			mem.zero_slice(new_page.data[SRC_HDR_OFF:])
+			copy(new_page.data[DST_HDR_OFF:], tmp)
+		} else {
+			hdr_sz := page_header_size(hdr.page_type)
+			cell_count := int(hdr.cell_count)
+			ptr_sz := cell_count * size_of(Cell_Pointer)
+			if ptr_sz > 0 {
+				ptr_copy := make([]u8, ptr_sz, context.temp_allocator)
+				copy(ptr_copy, new_page.data[SRC_HDR_OFF + hdr_sz:])
+				mem.zero_slice(new_page.data[SRC_HDR_OFF + hdr_sz:SRC_HDR_OFF + hdr_sz + ptr_sz])
+				copy(new_page.data[DST_HDR_OFF + hdr_sz:], ptr_copy)
+			}
 
-		hdr_copy := make([]u8, hdr_sz, context.temp_allocator)
-		copy(hdr_copy, new_page.data[SRC_HDR_OFF:])
-		mem.zero_slice(new_page.data[SRC_HDR_OFF:SRC_HDR_OFF + hdr_sz])
-		copy(new_page.data[DST_HDR_OFF:], hdr_copy)
+			hdr_copy := make([]u8, hdr_sz, context.temp_allocator)
+			copy(hdr_copy, new_page.data[SRC_HDR_OFF:])
+			mem.zero_slice(new_page.data[SRC_HDR_OFF:SRC_HDR_OFF + hdr_sz])
+			copy(new_page.data[DST_HDR_OFF:], hdr_copy)
+		}
 	}
 	return new_page.page_num, .None
 }

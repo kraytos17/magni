@@ -68,6 +68,21 @@ add_table :: proc(
 	root_page: u32,
 	sql_stmt: string,
 ) -> bool {
+	rowid := types.Row_ID(types.hash_string(table_name))
+	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
+		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
+			fmt.eprintln("[Schema] Table already exists:", table_name)
+		} else {
+			fmt.eprintf(
+				"[Schema] Hash collision: '%s' collides with '%s' at key %v\n",
+				table_name,
+				existing_name,
+				rowid,
+			)
+		}
+		return false
+	}
+
 	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
 	r := Schema_Row {
 		kind         = "table",
@@ -78,7 +93,6 @@ add_table :: proc(
 	}
 
 	values := schema_row_to_values(r)
-	rowid := types.Row_ID(types.hash_string(table_name))
 	err := btree.tree_insert(t, rowid, values)
 	if err != .None {
 		fmt.eprintln("[Schema] add_table failed:", err)
@@ -97,6 +111,21 @@ add_table_cow :: proc(
 	u32,
 	bool,
 ) {
+	rowid := types.Row_ID(types.hash_string(table_name))
+	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
+		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
+			fmt.eprintln("[Schema] Table already exists:", table_name)
+		} else {
+			fmt.eprintf(
+				"[Schema] Hash collision: '%s' collides with '%s' at key %v\n",
+				table_name,
+				existing_name,
+				rowid,
+			)
+		}
+		return t.root, false
+	}
+
 	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
 	r := Schema_Row {
 		kind         = "table",
@@ -107,7 +136,6 @@ add_table_cow :: proc(
 	}
 
 	values := schema_row_to_values(r)
-	rowid := types.Row_ID(types.hash_string(table_name))
 	new_root, err := btree.tree_insert_cow(t, rowid, values)
 	if err != .None {
 		fmt.eprintln("[Schema] add_table_cow failed:", err)

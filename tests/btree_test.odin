@@ -447,3 +447,76 @@ test_tree_update_cow :: proc(t: ^testing.T) {
 	val, ok := c.values[0].(string)
 	testing.expect(t, ok && val == "updated", "cow update value")
 }
+
+@(test)
+test_rebalance_merge :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "rebal_merge")
+	defer teardown_tree(&ctx)
+
+	// Insert 500 rows to ensure multiple leaf pages (each small int cell ~12 bytes,
+	// 500 * 12 = 6000 bytes, more than one 4096-byte page can hold with overhead)
+	for i in 1 ..= 500 {
+		val := []types.Value{types.value_int(i64(i))}
+		btree.tree_insert(&ctx.tree, types.Row_ID(i), val)
+	}
+
+	count_leaves :: proc(t: ^btree.Tree) -> int {
+		count := 0
+		infos := make([dynamic]btree.Leaf_Info, context.temp_allocator)
+		btree.collect_leaf_info(t, t.root, &infos)
+		for info in infos {
+			if info.cell_count > 0 { count += 1 }
+		}
+		return count
+	}
+
+	leaves_before := count_leaves(&ctx.tree)
+	testing.expect(
+		t,
+		leaves_before > 1,
+		fmt.tprintf("multiple leaf pages (%d) before rebalance", leaves_before),
+	)
+
+	// Delete 80% of rows to create sparse pages
+	for i := 1; i <= 500; i += 1 {
+		if i % 5 != 0 {
+			btree.tree_delete(&ctx.tree, types.Row_ID(i))
+		}
+	}
+
+	btree.rebalance(&ctx.tree)
+
+	leaves_after := count_leaves(&ctx.tree)
+	testing.expect(t, leaves_after <= leaves_before, "rebalance reduced or maintained leaf count")
+	testing.expect(t, leaves_after <= 2, fmt.tprintf("100 rows fit in %d leaves", leaves_after))
+
+	// Verify remaining rows accessible
+	for i := 5; i <= 500; i += 5 {
+		c, err := btree.tree_find(&ctx.tree, types.Row_ID(i), context.temp_allocator)
+		testing.expect(t, err == .None, fmt.tprintf("row %d accessible after rebalance", i))
+		if err == .None {
+			v, _ := c.values[0].(i64)
+			testing.expect(t, v == i64(i), fmt.tprintf("row %d value correct", i))
+		}
+	}
+}
+
+@(test)
+test_rebalance_byte_accounting :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "rebal_bytes")
+	defer teardown_tree(&ctx)
+
+	val := []types.Value{types.value_int(42)}
+	btree.tree_insert(&ctx.tree, 1, val)
+
+	infos := make([dynamic]btree.Leaf_Info, context.temp_allocator)
+	btree.collect_leaf_info(&ctx.tree, ctx.tree.root, &infos)
+
+	for info in infos {
+		if info.cell_count > 0 {
+			// Single small int cell: header(100) + pointer(2) + cell(~12) = ~114, but <200
+			testing.expect(t, info.used_bytes > 20, "used_bytes > 20 (header + pointer + cell)")
+			testing.expect(t, info.used_bytes < 200, "used_bytes < 200 for single small cell")
+		}
+	}
+}

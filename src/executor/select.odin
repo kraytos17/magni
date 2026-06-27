@@ -732,7 +732,7 @@ exec_select_aggregate_combined :: proc(
 	}
 
 	groups := make([dynamic]Group, context.temp_allocator)
-	group_map := make(map[string]int, context.temp_allocator)
+	group_map := make(map[u64]int, context.temp_allocator)
 	defer delete(group_map)
 
 	for row_entry, _ in rows {
@@ -742,14 +742,18 @@ exec_select_aggregate_combined :: proc(
 			}
 			append(&groups[0].rows, row_entry)
 		} else {
-			key_b := strings.builder_make(context.temp_allocator)
-			for i, col_idx in group_by_indices {
-				if i > 0 { strings.write_string(&key_b, "\x00") }
-				strings.write_string(&key_b, types.value_to_string(row_entry.values[col_idx]))
+			hash := group_key_hash(row_entry.values, group_by_indices)
+			gi, exists := group_map[hash]
+			if exists {
+				if !values_equal_by_indices(
+					row_entry.values,
+					groups[gi].key_values,
+					group_by_indices,
+				) {
+					exists = false
+				}
 			}
-
-			key := strings.to_string(key_b)
-			if gi, exists := group_map[key]; exists {
+			if exists {
 				append(&groups[gi].rows, row_entry)
 			} else {
 				key_vals := make([]types.Value, len(group_by_indices), context.temp_allocator)
@@ -759,7 +763,7 @@ exec_select_aggregate_combined :: proc(
 
 				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
 				append(&new_grp_rows, row_entry)
-				group_map[key] = len(groups)
+				group_map[hash] = len(groups)
 				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
 			}
 		}

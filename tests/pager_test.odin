@@ -600,7 +600,11 @@ test_bitmap_allocate_sets_bit :: proc(t: ^testing.T) {
 
 	testing.expect(t, pn > 1, "test page should be > 1")
 	testing.expect(t, len(p.page_bitmap) > 0, "bitmap should exist")
-	testing.expect(t, pager.bitmap_test(p.page_bitmap, pn), fmt.tprintf("bit %d should be set after alloc", pn))
+	testing.expect(
+		t,
+		pager.bitmap_test(p.page_bitmap, pn),
+		fmt.tprintf("bit %d should be set after alloc", pn),
+	)
 }
 
 @(test)
@@ -617,7 +621,11 @@ test_bitmap_free_clears_bit :: proc(t: ^testing.T) {
 
 	pager.unpin_page(p, pn)
 	pager.free_page(p, pn)
-	testing.expect(t, !pager.bitmap_test(p.page_bitmap, pn), fmt.tprintf("bit %d should be cleared after free", pn))
+	testing.expect(
+		t,
+		!pager.bitmap_test(p.page_bitmap, pn),
+		fmt.tprintf("bit %d should be cleared after free", pn),
+	)
 }
 
 @(test)
@@ -644,8 +652,11 @@ test_bitmap_grows_on_allocate :: proc(t: ^testing.T) {
 	}
 
 	bitmap_len_now := len(p.page_bitmap)
-	testing.expect(t, bitmap_len_now > initial_len,
-		fmt.tprintf("bitmap should grow (was %d, now %d)", initial_len, bitmap_len_now))
+	testing.expect(
+		t,
+		bitmap_len_now > initial_len,
+		fmt.tprintf("bitmap should grow (was %d, now %d)", initial_len, bitmap_len_now),
+	)
 	testing.expect(t, pager.bitmap_test(p.page_bitmap, last_pn), "last page bit should be set")
 }
 
@@ -670,4 +681,82 @@ test_bitmap_64_range :: proc(t: ^testing.T) {
 	testing.expect(t, !pager.bitmap_test(bm, 64), "bit 64 should be 0 after clear")
 	testing.expect(t, pager.bitmap_test(bm, 63), "bit 63 should still be 1")
 	testing.expect(t, pager.bitmap_test(bm, 65), "bit 65 should still be 1")
+}
+
+@(test)
+test_wal_checksum :: proc(t: ^testing.T) {
+	filename := "test_wal_checksum.db"
+	wal_name := fmt.tprintf("%s-wal", filename)
+	os.remove(filename)
+	os.remove(wal_name)
+	defer os.remove(filename)
+	defer os.remove(wal_name)
+
+	p, err := pager.open(filename)
+	testing.expect(t, err == .None, "open for write")
+
+	pg, aerr := pager.allocate_page(p)
+	testing.expect(t, aerr == .None, "allocate page")
+	pg.dirty = true
+	pager.unpin_page(p, pg.page_num)
+
+	pager.wal_begin_txn(p)
+	pager.wal_commit_txn(p)
+
+	pager.close(p)
+
+	p2, err2 := pager.open(filename)
+	testing.expect(t, err2 == .None, "reopen with valid checksums")
+	pager.close(p2)
+}
+
+@(test)
+test_wal_checksum_corruption :: proc(t: ^testing.T) {
+	filename := "test_wal_cksum_corrupt.db"
+	wal_name := fmt.tprintf("%s-wal", filename)
+	os.remove(filename)
+	os.remove(wal_name)
+	defer os.remove(filename)
+	defer os.remove(wal_name)
+
+	// Create a database with one page and commit
+	p, err := pager.open(filename)
+	testing.expect(t, err == .None, "open for write")
+
+	pg, aerr := pager.allocate_page(p)
+	testing.expect(t, aerr == .None, "allocate page")
+	pg.dirty = true
+	pager.unpin_page(p, pg.page_num)
+
+	pager.wal_begin_txn(p)
+	pager.wal_commit_txn(p)
+	pager.close(p)
+
+	// Corrupt the first frame's page data in the WAL
+	wal_file, werr := os.open(wal_name, os.O_RDWR)
+	testing.expect(t, werr == nil, "open WAL for corruption")
+	if werr == nil {
+		// Seek past WAL header + frame header to page data, flip one byte
+		offset := types.WAL_HEADER_SIZE + types.WAL_FRAME_HEADER_SIZE
+		corrupt_byte: u8 = 0xFF
+		os.write_at(wal_file, []u8{corrupt_byte}, i64(offset))
+		os.close(wal_file)
+	}
+
+	// Reopen — recovery should detect checksum mismatch and skip the corrupted frame
+	p2, err2 := pager.open(filename)
+	testing.expect(
+		t,
+		err2 == .None,
+		"reopen after corruption (still opens, corrupted frame skipped)",
+	)
+
+	// No frames should have been committed — wal_recover's second pass breaks on checksum mismatch
+	// The database file has the 4096-byte DB header page but no recovered data pages
+	testing.expect(
+		t,
+		p2.file_len == types.PAGE_SIZE,
+		"only header page exists (no recovered data)",
+	)
+	pager.close(p2)
 }

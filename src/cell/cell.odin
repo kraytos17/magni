@@ -177,7 +177,7 @@ deserialize :: proc(
 		pos += n4
 	}
 
-	scratch: [dynamic; types.MAX_COLS]types.Value
+	result_values := make([]types.Value, serial_count, alloc)
 	for st_idx in 0 ..< serial_count {
 		st := serial_types[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
@@ -186,36 +186,36 @@ deserialize :: proc(
 			return {}, 0, false
 		}
 		if type_code == .ZERO {
-			append(&scratch, types.value_int(0))
+			result_values[st_idx] = types.value_int(0)
 		} else if type_code == .ONE {
-			append(&scratch, types.value_int(1))
+			result_values[st_idx] = types.value_int(1)
 		} else if st == u64(types.Serial_Type.NULL) {
-			append(&scratch, types.value_null())
+			result_values[st_idx] = types.value_null()
 		} else if st >= u64(types.Serial_Type.INT8) && st <= u64(types.Serial_Type.INT64) {
 			int_val, _ := read_int_by_size(src, pos, content_size)
-			append(&scratch, types.value_int(int_val))
+			result_values[st_idx] = types.value_int(int_val)
 			pos += content_size
 		} else if type_code == .FLOAT64 {
 			float_val, _ := endian.get_f64(src[pos:], .Big)
-			append(&scratch, types.value_real(float_val))
+			result_values[st_idx] = types.value_real(float_val)
 			pos += 8
 		} else if is_text_serial(st) {
 			text_bytes := src[pos:pos + content_size]
 			if config.zero_copy {
-				append(&scratch, types.value_text(string(text_bytes)))
+				result_values[st_idx] = types.value_text(string(text_bytes))
 			} else {
 				str := strings.clone_from(text_bytes, alloc)
-				append(&scratch, types.value_text(str))
+				result_values[st_idx] = types.value_text(str)
 			}
 			pos += content_size
 		} else if is_blob_serial(st) {
 			blob_bytes := src[pos:pos + content_size]
 			if config.zero_copy {
-				append(&scratch, types.value_blob(blob_bytes))
+				result_values[st_idx] = types.value_blob(blob_bytes)
 			} else {
 				blob_copy := make([]u8, content_size, alloc)
 				copy(blob_copy, blob_bytes)
-				append(&scratch, types.value_blob(blob_copy))
+				result_values[st_idx] = types.value_blob(blob_copy)
 			}
 			pos += content_size
 		} else {
@@ -223,8 +223,6 @@ deserialize :: proc(
 		}
 	}
 
-	result_values := make([]types.Value, len(scratch), alloc)
-	copy(result_values, scratch[:])
 	cell = Cell {
 		rowid     = types.Row_ID(rowid_val),
 		values    = result_values,

@@ -129,8 +129,11 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 | `exec_query` | Return row data as struct (for db.query) | Same path as exec_select, no display |
 | `exec_select_single_data` | Single-table SELECT returning []Row_Entry | Used by db.query() for precise tests |
 
-**GROUP BY** uses `map[string]int` keyed on serialized group-by values for O(rows) lookups
-(was O(rows × groups) linear scan).
+**GROUP BY** uses direct FNV-1a hashing of `Value` union data (raw bit pattern for `f64`,
+`u64` for `i64`, FNV of bytes for strings/blobs) keyed on `map[u64]int` with a collision
+fallback equality check — no stringification, no allocation per row, and no float-precision
+loss (the previous `%f`-based formatting collapsed distinct floats at >6 decimal places).
+Groups are printed using the original `key_values` `[]types.Value` stored in each `Group` struct.
 
 **HAVING** evaluates against both group-key values and computed aggregate values. Supports
 aggregate function references (e.g., `HAVING count > 1`) as well as group-by column comparisons.
@@ -199,7 +202,10 @@ Page_Header.first_freeblock → [next: u16le] [size: u16le] [unused...] → [nex
 | `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
 
-**Cursor** — fixed-size path stack `[32]Cursor_Stack_Item`:
+**Cursor** — fixed-size path stack `[MAX_TREE_DEPTH]Cursor_Stack_Item` (64 entries, ~512 bytes).
+A bounds assertion in `drill_down_leftmost` catches depth overflow with a clean error rather than
+silent memory corruption. `MAX_TREE_DEPTH :: 64` is the single source of truth referenced by both
+the cursor stack size and the recursive operation depth guard.
 
 ```odin
 Cursor_Stack_Item :: struct {
@@ -228,8 +234,9 @@ Serial types encode type + byte size in a single u64:
 | BLOB | 12 + 2*N | N bytes |
 
 `Serialization_Info` computes serial types inline from the `values` slice (no heap alloc —
-was `make([]u64)` per call). `cell.deserialize` decodes into a fixed `[MAX_COLS]u64` array
-(was `[dynamic]u64` — 0 heap allocs per row).
+was `make([]u64)` per call). `cell.deserialize` pre‑allocates the result slice once `serial_count`
+is known (after parsing the serial-type header) and writes decoded values directly via index —
+no scratch-buffer `append` + trailing `copy`.
 
 #### Page Cache (`pager/pager.odin`)
 
@@ -259,8 +266,11 @@ Pager:
 - **Zero-on-alloc**: Only the first DATABASE_HEADER_SIZE bytes (100B) are zeroed. Callers overwrite
   as needed.
 - **WAL**: All writes go to a `-wal` sidecar file. Commits append a commit frame + `fsync`.
-  `wal_recover` replays committed frames on open. `wal_abort_txn` discards uncommitted
-  frames. `wal_checkpoint` writes WAL frames back to the main file and truncates the WAL.
+  Each frame carries a 64-bit FNV checksum (split across `checksum1`/`checksum2` in
+  `WAL_Frame_Header`). `wal_recover` verifies checksums on the second pass — a mismatched
+  frame stops collection at that point, frames before it are still replayed. `wal_abort_txn`
+  discards uncommitted frames. `wal_checkpoint` writes WAL frames back to the main file and
+  truncates the WAL. Frame checksums are computed incrementally (no temp buffer allocation).
 - **Page bitmap**: `[]u64` tracks ever-allocated pages. Maintained by `allocate_page`/`free_page`.
   GC sweep skips zero 64-bit words (all 64 pages free) in O(1).
 
@@ -292,6 +302,10 @@ Packed byte bits: 0-2 = type, 3 = not_null, 4 = pk, 5 = has_check, 6 = has_defau
 All mutations (`add_table_cow`, `drop_table_cow`, `update_root_page_cow`, `update_skip_root_cow`) use COW and
 return a new schema root. Schema row construction/destruction goes through `Schema_Row` struct and
 `schema_row_to_values` / `schema_row_from_values` helpers.
+
+Both `add_table` and `add_table_cow` call `tree_find` at the candidate hash key before inserting.
+If a row already exists with a different name, a hash collision is reported and the insert is
+rejected — preventing silent overwrite of an unrelated table's schema row.
 
 #### Database Coordinator (`db/db.odin`)
 
@@ -467,10 +481,10 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 |---|---|---|---|
 | Page struct + data buffer | 0 (inline slab) | 2 (heap Page + heap []u8) | -100% |
 | Cell (per row scanned) | 0 (if moving values) | 1 (deep_copy_values) | -100% |
-| Cell deserialize buffer | 0 (`[dynamic; MAX_COLS]T` inline) | 1 (`make([dynamic]T)`) | -100% |
+| Cell deserialize buffer | 0 (pre‑allocated result + direct index) | 1 (`make` + `copy`) | -100% |
 | `Serialization_Info.serial_types` | 0 (inline compute) | 1 (`make([]u64)`) | -100% |
 | Cell.allocator | 0 (removed) | 1 (16 bytes) | -100% |
-| Cursor path | 0 (`[32]` stack) | 1 (`make([dynamic]`) | -100% |
+| Cursor path | 0 (`[MAX_TREE_DEPTH]` stack) | 1 (`make([dynamic]`) | -100% |
 | Pager slot lookup | 0 (free-list pop) | O(n) scan across 256 slots | -100% |
 | AST nodes | many (temp_allocator) | many (temp_allocator) | Same (bulk-freed) |
 
@@ -627,13 +641,13 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 |---|---|---|
 | `parser` | 38 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
 | `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates, DISTINCT, CHECK, EXPLAIN, subquery projection |
-| `btree` | 20 | Insert/find/delete/update, cursor, split, persistence, duplicates |
+| `btree` | 22 | Insert/find/delete/update, cursor, split, persistence, duplicates, rebalance merge, byte accounting |
 | `cell` | 11 | Serialization roundtrip, zero-copy, edge cases |
-| `pager` | 19 | Page cache, WAL, crash recovery, bitmap, pinning, eviction |
-| `schema` | 11 | Column blob with CHECK, add/find/drop/list, row round-trip |
+| `pager` | 20 | Page cache, WAL, crash recovery, bitmap, pinning, eviction, checksum |
+| `schema` | 12 | Column blob with CHECK, add/find/drop/list, row round-trip, hash collision |
 | `snapshot` | 12 | Chain, manifest, diff, tags, timestamp lookup, GC |
-| `integration` | 22 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, columnar integration |
-| **Total** | **197** | |
+| `integration` | 26 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, columnar integration, columnar mutation |
+| **Total** | **205** | |
 
 ---
 
@@ -656,8 +670,9 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 |---|---|---|
 | Per-page heap alloc | 0 | 2 (Page struct + data buffer) |
 | Cache locality | Contiguous 1MB | Fragmented across heap |
-| Eviction | Linear scan, O(cache_size) | HashMap iteration, O(entries) |
-| Resizing | Fixed at 256 slots | Configurable via `max_cache_pages` |
+| Slot allocation | O(1) — free-list pop | O(cache_size) linear scan |
+| Eviction | Rotating-hand scan, O(cache_size) | HashMap iteration, O(entries) |
+| Resizing | Fixed at 256 slots | Configurable at open time |
 
 ### Single traversal vs Delete+Insert
 
@@ -683,7 +698,6 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 - **No `UNION` / `INTERSECT` / `EXCEPT`**: Set operations absent.
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
 - **No indexes**: Only the implicit primary-key B-tree exists.
-- **No B-tree rebalancing**: Deletes fragment pages without merging.
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
 - **Mixed AND/OR WHERE**: Not supported.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (constrained by inline `[dynamic; N]T` scratch buffer in deserializer — avoids heap alloc per row).

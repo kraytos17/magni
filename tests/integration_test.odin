@@ -665,7 +665,11 @@ test_integration_skip_index :: proc(t: ^testing.T) {
 test_columnar_integration :: proc(t: ^testing.T) {
 	columns := []types.Column{{type = .INTEGER, name = "id"}, {type = .INTEGER, name = "score"}}
 	rowids := []types.Row_ID{10, 20, 30}
-	rows := [][]types.Value{{types.value_int(1), types.value_int(100)}, {types.value_int(2), types.value_int(200)}, {types.value_int(3), types.value_int(300)}}
+	rows := [][]types.Value {
+		{types.value_int(1), types.value_int(100)},
+		{types.value_int(2), types.value_int(200)},
+		{types.value_int(3), types.value_int(300)},
+	}
 
 	buf: [4096]u8
 	// Use page_id=2 (non-page-1) to avoid database header offset
@@ -683,7 +687,12 @@ test_columnar_integration :: proc(t: ^testing.T) {
 
 	// Read back individual rows via read_columnar_cell
 	for i in 0 ..< 3 {
-		cc, cc_ok := cell.read_columnar_cell(buf[:], 2, i, cell.Config{allocator = context.temp_allocator})
+		cc, cc_ok := cell.read_columnar_cell(
+			buf[:],
+			2,
+			i,
+			cell.Config{allocator = context.temp_allocator},
+		)
 		testing.expect(t, cc_ok, fmt.tprintf("read columnar cell %d", i))
 		if cc_ok {
 			testing.expect_value(t, types.Row_ID(cc.rowid), rowids[i])
@@ -708,7 +717,11 @@ test_columnar_integration :: proc(t: ^testing.T) {
 		ptrs := btree.get_pointers(buf[:], page_id)
 		testing.expect(t, i < len(ptrs), fmt.tprintf("cell pointer %d exists", i))
 		if i < len(ptrs) {
-			c, _, des_ok := cell.deserialize(buf[:], int(ptrs[i]), cell.Config{allocator = context.temp_allocator})
+			c, _, des_ok := cell.deserialize(
+				buf[:],
+				int(ptrs[i]),
+				cell.Config{allocator = context.temp_allocator},
+			)
 			testing.expect(t, des_ok, fmt.tprintf("deserialize cell %d", i))
 			if des_ok {
 				testing.expect_value(t, types.Row_ID(c.rowid), rowids[i])
@@ -736,13 +749,19 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 	defer pager.unpin_page(ctx.pager, 1)
 
 	// Read current data from row-major page
-	original_rows := make([dynamic]struct{rid: types.Row_ID, vals: []types.Value}, context.temp_allocator)
+	original_rows := make([dynamic]struct {
+			rid:  types.Row_ID,
+			vals: []types.Value,
+		}, context.temp_allocator)
 	{
 		c, _ := btree.cursor_start(&ctx.tree)
 		defer btree.cursor_destroy(&c)
 		for c.is_valid {
 			cell_val, _ := btree.cursor_get_cell(&c)
-			append(&original_rows, struct{rid: types.Row_ID, vals: []types.Value}{cell_val.rowid, cell_val.values})
+			append(&original_rows, struct {
+				rid:  types.Row_ID,
+				vals: []types.Value,
+			}{cell_val.rowid, cell_val.values})
 			btree.cursor_advance(&c)
 		}
 	}
@@ -825,5 +844,169 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 			btree.cursor_advance(&c)
 		}
 		testing.expect(t, found, "inserted row 99 was found")
+	}
+}
+
+@(test)
+test_columnar_insert_conversion :: proc(t: ^testing.T) {
+	// Test that INSERT on a columnar page triggers columnar→row-major conversion
+	ctx := setup_tree(t, "colinsert")
+	defer teardown_tree(&ctx)
+
+	for i in 1 ..= 3 {
+		val := []types.Value{types.value_int(i64(i * 100))}
+		btree.tree_insert(&ctx.tree, types.Row_ID(i), val)
+	}
+
+	// Read original rows via cursor
+	orig := make([dynamic]struct {
+			rid:  types.Row_ID,
+			vals: []types.Value,
+		}, context.temp_allocator)
+	{
+		c, _ := btree.cursor_start(&ctx.tree)
+		defer btree.cursor_destroy(&c)
+		for c.is_valid {
+			cell_val, _ := btree.cursor_get_cell(&c)
+			append(&orig, struct {
+				rid:  types.Row_ID,
+				vals: []types.Value,
+			}{cell_val.rowid, cell_val.values})
+			btree.cursor_advance(&c)
+		}
+	}
+	testing.expect(t, len(orig) == 3, "3 original rows")
+
+	// Convert the root page to columnar
+	off := btree.get_page_header_offset(1)
+	pg, pg_err := pager.get_page(ctx.pager, 1)
+	testing.expect(t, pg_err == .None, "get page 1")
+	defer pager.unpin_page(ctx.pager, 1)
+
+	rowids := make([]types.Row_ID, len(orig), context.temp_allocator)
+	vals := make([][]types.Value, len(orig), context.temp_allocator)
+	for i in 0 ..< len(orig) {
+		rowids[i] = orig[i].rid
+		vals[i] = orig[i].vals
+	}
+	cols := []types.Column{{name = "val", type = .INTEGER}}
+	cell.serialize_columnar(pg.data[off:], rowids, vals, cols)
+
+	hdr := btree.get_leaf_header(pg.data, 1)
+	hdr.page_type = .LEAF_TABLE_COLUMNAR
+	hdr.cell_count = u16le(3)
+	hdr.cell_content_offset = u16le(8 + len(cols) * 12)
+	pager.mark_dirty(ctx.pager, 1)
+
+	// Verify cursor still reads correctly
+	{
+		c, _ := btree.cursor_start(&ctx.tree)
+		defer btree.cursor_destroy(&c)
+		count := 0
+		for c.is_valid {
+			cell_val, g_err := btree.cursor_get_cell(&c)
+			testing.expect(t, g_err == .None, "cursor get cell on columnar")
+			if g_err == .None && cell_val.rowid >= 1 && cell_val.rowid <= 3 {
+				count += 1
+			}
+			btree.cursor_advance(&c)
+		}
+		testing.expect(t, count == 3, "cursor reads 3 rows from columnar page")
+	}
+
+	// INSERT triggers conversion to row-major
+	{
+		new_val := []types.Value{types.value_int(999)}
+		new_root, ins_err := btree.tree_insert_cow(&ctx.tree, 99, new_val)
+		testing.expect(t, ins_err == .None, "insert on columnar page succeeds")
+		ctx.tree.root = new_root
+
+		c, _ := btree.cursor_start(&ctx.tree)
+		defer btree.cursor_destroy(&c)
+		found := false
+		total := 0
+		for c.is_valid {
+			cell_val, _ := btree.cursor_get_cell(&c)
+			total += 1
+			if cell_val.rowid == 99 { found = true }
+			btree.cursor_advance(&c)
+		}
+		testing.expect(t, found, "inserted row 99 found after columnar conversion")
+		testing.expect(t, total == 4, "4 rows total after insert")
+	}
+}
+
+@(test)
+test_columnar_update_conversion :: proc(t: ^testing.T) {
+	// Test that UPDATE on a columnar page triggers columnar→row-major conversion
+	ctx := setup_tree(t, "colupdate")
+	defer teardown_tree(&ctx)
+
+	for i in 1 ..= 3 {
+		val := []types.Value{types.value_int(i64(i))}
+		btree.tree_insert(&ctx.tree, types.Row_ID(i), val)
+	}
+
+	// Convert root page to columnar
+	orig_rows := make([dynamic]struct {
+			rid:  types.Row_ID,
+			vals: []types.Value,
+		}, context.temp_allocator)
+	{
+		c, _ := btree.cursor_start(&ctx.tree)
+		defer btree.cursor_destroy(&c)
+		for c.is_valid {
+			cell_val, _ := btree.cursor_get_cell(&c)
+			append(&orig_rows, struct {
+				rid:  types.Row_ID,
+				vals: []types.Value,
+			}{cell_val.rowid, cell_val.values})
+			btree.cursor_advance(&c)
+		}
+	}
+
+	off := btree.get_page_header_offset(1)
+	pg, pg_err := pager.get_page(ctx.pager, 1)
+	testing.expect(t, pg_err == .None, "get page 1")
+	defer pager.unpin_page(ctx.pager, 1)
+
+	rowids := make([]types.Row_ID, len(orig_rows), context.temp_allocator)
+	vals := make([][]types.Value, len(orig_rows), context.temp_allocator)
+	for i in 0 ..< len(orig_rows) {
+		rowids[i] = orig_rows[i].rid
+		vals[i] = orig_rows[i].vals
+	}
+	cols := []types.Column{{name = "val", type = .INTEGER}}
+	cell.serialize_columnar(pg.data[off:], rowids, vals, cols)
+
+	hdr := btree.get_leaf_header(pg.data, 1)
+	hdr.page_type = .LEAF_TABLE_COLUMNAR
+	hdr.cell_count = u16le(3)
+	hdr.cell_content_offset = u16le(8 + len(cols) * 12)
+	pager.mark_dirty(ctx.pager, 1)
+
+	// UPDATE row 2 via COW — triggers conversion
+	{
+		table_tree := btree.init(ctx.pager, 1)
+		new_vals := []types.Value{types.value_int(222)}
+		nroot, upd_err := btree.tree_update_cow(&table_tree, 2, new_vals)
+		testing.expect(t, upd_err == .None, "update on columnar page succeeds")
+
+		// Verify through cursor
+		table_tree.root = nroot
+		c, _ := btree.cursor_start(&table_tree)
+		defer btree.cursor_destroy(&c)
+		updated := false
+		for c.is_valid {
+			cell_val, _ := btree.cursor_get_cell(&c)
+			if cell_val.rowid == 2 {
+				if len(cell_val.values) > 0 {
+					v, _ := cell_val.values[0].(i64)
+					updated = v == 222
+				}
+			}
+			btree.cursor_advance(&c)
+		}
+		testing.expect(t, updated, "row 2 updated to 222 after columnar conversion")
 	}
 }

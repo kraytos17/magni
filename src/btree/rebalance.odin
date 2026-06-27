@@ -11,6 +11,7 @@ MERGE_MAX_OCCUPANCY_PCT :: 70
 Leaf_Info :: struct {
 	page_id:    u32,
 	cell_count: int,
+	used_bytes: int,
 	first_key:  types.Row_ID,
 	last_key:   types.Row_ID,
 }
@@ -23,9 +24,15 @@ collect_leaf_info :: proc(t: ^Tree, page_id: u32, infos: ^[dynamic]Leaf_Info) ->
 	if is_leaf(node) {
 		pointers := get_pointers(node.data, node.id)
 		if len(pointers) == 0 {
-			append(infos, Leaf_Info{page_id = page_id, cell_count = 0})
+			append(infos, Leaf_Info{page_id = page_id, cell_count = 0, used_bytes = 0})
 			return .None
 		}
+
+		off := get_page_header_offset(node.id)
+		hdr_sz := page_header_size(node.header.page_type)
+		cell_data := types.PAGE_SIZE - int(node.header.cell_content_offset)
+		overhead := off + hdr_sz + int(node.header.cell_count) * int(size_of(Cell_Pointer))
+		used_bytes := cell_data + overhead
 
 		fk, _ := cell.get_rowid(node.data, int(pointers[0]))
 		lk, _ := cell.get_rowid(node.data, int(pointers[len(pointers) - 1]))
@@ -34,6 +41,7 @@ collect_leaf_info :: proc(t: ^Tree, page_id: u32, infos: ^[dynamic]Leaf_Info) ->
 			Leaf_Info {
 				page_id = page_id,
 				cell_count = int(node.header.cell_count),
+				used_bytes = used_bytes,
 				first_key = fk,
 				last_key = lk,
 			},
@@ -57,10 +65,12 @@ rebalance :: proc(t: ^Tree) -> Error {
 		if infos[i].cell_count == 0 { continue }
 		if i + 1 >= len(infos) { break }
 
-		combined := infos[i].cell_count + infos[i + 1].cell_count
-		if combined <= MERGE_MAX_OCCUPANCY_PCT * types.PAGE_SIZE / 100 / 64 {
+		combined := infos[i].used_bytes + infos[i + 1].used_bytes
+		capacity := MERGE_MAX_OCCUPANCY_PCT * types.PAGE_SIZE / 100
+		if combined <= capacity {
 			if merge_leaf_pages(t, infos[i].page_id, infos[i + 1].page_id) {
-				infos[i].cell_count = combined
+				infos[i].cell_count = infos[i].cell_count + infos[i + 1].cell_count
+				infos[i].used_bytes = combined
 				infos[i].last_key = infos[i + 1].last_key
 				ordered_remove(&infos, i + 1)
 			}

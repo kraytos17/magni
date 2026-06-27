@@ -210,7 +210,9 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 - **Snapshot system**: append-only chain with O(1) lookup, tagging, diff, restore, refs page,
   rollforward log, and `rollforward`/`expire` operations.
 - **WAL (Write-Ahead Log)**: sequential append + single fsync per commit; crash recovery replays
-  committed frames on open; checkpoint writes WAL frames back to the main file.
+  committed frames on open; checkpoint writes WAL frames back to the main file. Frames carry
+  64-bit FNV checksums (split across `checksum1`/`checksum2`) that are verified on recovery — corrupt
+  frames are detected and skipped rather than replayed.
 - **Slab page cache**: 256 pages in a contiguous 1MB array. Zero per-page heap
   allocations. `map[u32]` for O(1) lookup.
 - **Freeblock chain**: SQLite-compatible freeblock list. Deleted cell space is
@@ -226,10 +228,20 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 - **Column blob**: `0xFE`-marked versioned format with varint-encoded lengths and a packed
   byte encoding type, not_null, pk, has_check, and has_default in a single byte.
 - **Pager free-list**: O(1) slot allocation instead of linear scan across 256 cache slots.
-- **WAL (Write-Ahead Log)**: sequential append + single fsync per commit; crash recovery replays committed frames.
+- **GROUP BY hash**: Direct FNV-1a hashing of `Value` union instead of stringification —
+  eliminates allocs per row and fixes a float-precision bug where `%f` formatting collapsed
+  distinct `f64` values differing beyond 6 decimal places into the same group.
+- **Cell deserialize hot path**: Pre‑allocates result slice once and writes directly — removes
+  the redundant scratch-buffer `append` + final `copy` from every row decode.
+- **Leaf-merge byte accounting**: Merge decisions use real per-page byte counts instead of a
+  magic `cell_count / 64` heuristic — correct for variable-width rows.
+- **Schema hash-collision guard**: `add_table` / `add_table_cow` call `tree_find` before writing
+  and reject if a different-named row already occupies the same hash key.
+- **WAL checksums**: 64-bit FNV checksum written per frame, verified on recovery.
 - **`@(fast_math)` aggregate loops**: SUM/AVG/MIN/MAX compute with IEEE-relaxed ops.
 - **`#simple` / `#all_or_none`**: applied to page headers, snapshot headers, and result structs for safety.
-- **`types.Storage_Config`**: shared config struct (`allocator` + `zero_copy`) aliased by both `btree.Config` and `cell.Config`, removing duplicate definitions.
+- **`types.Storage_Config`**: shared config struct (`allocator` + `zero_copy`) aliased by both
+  `btree.Config` and `cell.Config`, removing duplicate definitions.
 
 ---
 
@@ -239,13 +251,13 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 |---|---|---|
 | `parser` | 38 | Tokenization, all SQL forms, JOINs, subqueries, errors |
 | `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, GROUP BY, JOINs, aggregates |
-| `btree` | 20 | Insert/find/delete/update, cursor, splits, persistence |
+| `btree` | 22 | Insert/find/delete/update, cursor, splits, persistence, rebalance merge, byte accounting |
 | `cell` | 11 | Serialization roundtrip, zero-copy, validation |
-| `pager` | 19 | Page cache, I/O, pinning, eviction, WAL, bitmap |
-| `schema` | 11 | Column blob, add/find/drop/list, row round-trip |
+| `pager` | 20 | Page cache, I/O, pinning, eviction, WAL, bitmap, checksum |
+| `schema` | 12 | Column blob, add/find/drop/list, row round-trip, hash collision |
 | `snapshot` | 12 | Chain, manifests, diff, tags, timestamp lookup, GC |
-| `integration` | 22 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads |
-| **Total** | **197** | |
+| `integration` | 26 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads, columnar mutation |
+| **Total** | **205** | |
 
 ---
 
@@ -333,5 +345,4 @@ tests/
 - No `UNION`, `INTERSECT`, `EXCEPT`
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
-- No B-tree rebalancing on delete (pages may fragment)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100)

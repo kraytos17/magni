@@ -1,6 +1,7 @@
 package executor
 
 import "core:fmt"
+import "core:hash"
 import "core:strconv"
 import "core:strings"
 import "src:parser"
@@ -63,6 +64,46 @@ values_equal :: proc(a, b: []types.Value) -> bool {
 		if !types.value_compare(v, b[i]) { return false }
 	}
 	return true
+}
+
+values_equal_by_indices :: proc(
+	values: []types.Value,
+	key: []types.Value,
+	indices: []int,
+) -> bool {
+	if len(key) != len(indices) { return false }
+	for i, col_idx in indices {
+		if !types.value_compare(key[i], values[col_idx]) { return false }
+	}
+	return true
+}
+
+group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
+	h: u64 = 0xcbf29ce484222325
+	FNV_PRIME :: 0x100000001b3
+	for col_idx in indices {
+		v := values[col_idx]
+		switch val in v {
+		case types.Null:
+			h = h ~ 0
+			h *= FNV_PRIME
+		case i64:
+			h = h ~ u64(val)
+			h *= FNV_PRIME
+		case f64:
+			h = h ~ transmute(u64)val
+			h *= FNV_PRIME
+		case string:
+			hv := hash.fnv64a(transmute([]u8)val)
+			h = h ~ hv
+			h *= FNV_PRIME
+		case []u8:
+			hv := hash.fnv64a(val)
+			h = h ~ hv
+			h *= FNV_PRIME
+		}
+	}
+	return h
 }
 
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {

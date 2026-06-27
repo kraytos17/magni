@@ -790,3 +790,62 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 		if err == .None { cell.destroy(&c, context.temp_allocator) }
 	}
 }
+
+@(test)
+test_group_key_hash :: proc(t: ^testing.T) {
+	// Float-precision regression: values differing beyond %f's 6 decimal places
+	// must produce different hashes (the old stringification approach collapsed them).
+	v1 := []types.Value{types.value_real(1.0000000001), types.value_int(1)}
+	v2 := []types.Value{types.value_real(1.0000000002), types.value_int(1)}
+	indices := []int{0, 1}
+
+	h1 := executor.group_key_hash(v1, indices)
+	h2 := executor.group_key_hash(v2, indices)
+	testing.expect(t, h1 != h2, "hashes differ for floats differing by 1e-10")
+
+	// Same values → same hash
+	v3 := []types.Value{types.value_real(3.14159), types.value_text("hello")}
+	v4 := []types.Value{types.value_real(3.14159), types.value_text("hello")}
+	h3 := executor.group_key_hash(v3, indices[:1])
+	h4 := executor.group_key_hash(v4, indices[:1])
+	testing.expect_value(t, h3, h4)
+
+	// NULL
+	v5 := []types.Value{types.value_null()}
+	v6 := []types.Value{types.value_null()}
+	h5 := executor.group_key_hash(v5, []int{0})
+	h6 := executor.group_key_hash(v6, []int{0})
+	testing.expect_value(t, h5, h6)
+
+	// i64
+	v7 := []types.Value{types.value_int(42)}
+	v8 := []types.Value{types.value_int(42)}
+	h7 := executor.group_key_hash(v7, []int{0})
+	h8 := executor.group_key_hash(v8, []int{0})
+	testing.expect_value(t, h7, h8)
+
+	// string
+	v9 := []types.Value{types.value_text("foo")}
+	v10 := []types.Value{types.value_text("foo")}
+	h9 := executor.group_key_hash(v9, []int{0})
+	h10 := executor.group_key_hash(v10, []int{0})
+	testing.expect_value(t, h9, h10)
+
+	// Different values → different hashes
+	v13 := []types.Value{types.value_int(1)}
+	v14 := []types.Value{types.value_int(2)}
+	h13 := executor.group_key_hash(v13, []int{0})
+	h14 := executor.group_key_hash(v14, []int{0})
+	testing.expect(t, h13 != h14, "different i64 values differ")
+
+	// values_equal_by_indices
+	a1 := []types.Value{types.value_int(10), types.value_text("x")}
+	a2 := []types.Value{types.value_int(10), types.value_text("x")}
+	testing.expect(t, executor.values_equal_by_indices(a1, a2, []int{0, 1}), "same values match")
+	a3 := []types.Value{types.value_int(10), types.value_text("y")}
+	testing.expect(
+		t,
+		!executor.values_equal_by_indices(a1, a3, []int{0, 1}),
+		"different values differ",
+	)
+}

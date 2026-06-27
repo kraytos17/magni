@@ -43,10 +43,13 @@ Wal_State :: struct {
 }
 
 wal_frame_hash :: proc(h: ^WAL_Frame_Header, page_data: []u8) -> u64 {
-	data := make([]u8, types.WAL_FRAME_HEADER_SIZE + len(page_data), context.temp_allocator)
-	mem.copy_non_overlapping(raw_data(data[:]), h, types.WAL_FRAME_HEADER_SIZE)
-	copy(data[types.WAL_FRAME_HEADER_SIZE:], page_data)
-	return hash.fnv64(data)
+	// Hash header with checksum fields forced to zero (checksums can't include themselves)
+	h.checksum1 = 0
+	h.checksum2 = 0
+	hdr_bytes := transmute([types.WAL_FRAME_HEADER_SIZE]u8)h^
+	hv := hash.fnv64(hdr_bytes[:])
+	hv = hash.fnv64(page_data, hv)
+	return hv
 }
 
 wal_open :: proc(p: ^Pager, db_path: string) -> Error {
@@ -188,6 +191,10 @@ wal_append_frame :: proc(
 		page_data = scratch[:]
 	}
 
+	fhv := wal_frame_hash(&fh, page_data)
+	fh.checksum1 = u32le(u32(fhv))
+	fh.checksum2 = u32le(u32(fhv >> 32))
+
 	full_frame := make([]u8, types.WAL_FRAME_SIZE, context.temp_allocator)
 	mem.copy_non_overlapping(raw_data(full_frame[:]), &fh, types.WAL_FRAME_HEADER_SIZE)
 	copy(full_frame[types.WAL_FRAME_HEADER_SIZE:], page_data)
@@ -326,6 +333,21 @@ wal_recover :: proc(p: ^Pager) -> Error {
 		if _, r_err := os.read_at(ws.file, fh_buf[:], offset); r_err != nil { break }
 
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
+		// Verify checksum if present (non-zero)
+		if u32(fh.checksum1) != 0 || u32(fh.checksum2) != 0 {
+			page_buf: [types.PAGE_SIZE]u8
+			_, data_err := os.read_at(ws.file, page_buf[:], offset + types.WAL_FRAME_HEADER_SIZE)
+			if data_err != nil { break }
+
+			cs1 := fh.checksum1
+			cs2 := fh.checksum2
+			fhv := wal_frame_hash(&fh, page_buf[:])
+			if u32(fhv) != u32(cs1) || u32(fhv >> 32) != u32(cs2) {
+				fmt.eprintln("WAL: checksum mismatch at offset", offset)
+				break
+			}
+		}
+
 		append(&valid_frames, Page_Offset{u32(fh.page_num), offset})
 		offset += types.WAL_FRAME_SIZE
 	}

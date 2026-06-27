@@ -201,11 +201,63 @@ test_duplicate_table_name :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_schema_hash_collision :: proc(t: ^testing.T) {
+	tree, file := setup_schema_env(t, "hashcol")
+	defer teardown_schema_env(tree, file)
+
+	cols := []types.Column{{name = "id", type = .INTEGER}}
+
+	// Normal add succeeds
+	ok1 := schema.add_table(&tree, "mytable", cols, 42, "")
+	testing.expect(t, ok1, "First add succeeds")
+
+	// Same name again fails (duplicate detection)
+	ok_dup := schema.add_table(&tree, "mytable", cols, 99, "")
+	testing.expect(t, !ok_dup, "Duplicate name rejected")
+
+	// Force a hash collision: manually insert a row at "mytable"'s hash with a different name.
+	// This simulates what happens if two different table names hash to the same value.
+	target_hash := types.Row_ID(types.hash_string("mytable"))
+	collision_vals := []types.Value {
+		types.value_text("table"),
+		types.value_text("intruder"),
+		types.value_text("intruder"),
+		types.value_int(999),
+		types.value_text(""),
+		types.value_blob({}),
+		types.value_int(0),
+	}
+	btree.tree_delete(&tree, target_hash)
+	btree.tree_insert(&tree, target_hash, collision_vals)
+
+	// The original "mytable" row was overwritten by the collision row (same hash key).
+	// get_table("mytable") should fail because the row at that hash now has name "intruder".
+	_, found_mytable := schema.get_table(&tree, "mytable")
+	testing.expect(t, !found_mytable, "mytable overwritten by collision row")
+
+	// The collision row can be found by reading the schema tree at the hash key directly.
+	// It has name "intruder" but lives at hash("mytable"), so get_table("intruder") won't find it.
+	_, found_intruder := schema.get_table(&tree, "intruder")
+	testing.expect(t, !found_intruder, "intruder not accessible by name (lives at different hash)")
+
+	// Verify the collision row is physically present at the hash key
+	c, find_err := btree.tree_find(&tree, target_hash, context.temp_allocator)
+	testing.expect(t, find_err == .None, "row exists at target hash")
+	if find_err == .None {
+		stored_name, _ := c.values[1].(string)
+		testing.expect_value(t, stored_name, "intruder")
+	}
+}
+
+@(test)
 test_schema_row_roundtrip :: proc(t: ^testing.T) {
-	r := schema.Schema_Row{
-		kind = "table", name = "test_tbl",
-		root_page = 42, sql = "CREATE TABLE test_tbl (id INT)",
-		columns_blob = []u8{1, 2, 3, 4}, skip_root = 7,
+	r := schema.Schema_Row {
+		kind         = "table",
+		name         = "test_tbl",
+		root_page    = 42,
+		sql          = "CREATE TABLE test_tbl (id INT)",
+		columns_blob = []u8{1, 2, 3, 4},
+		skip_root    = 7,
 	}
 
 	// New format with skip_root: produces 6 values (kind byte + 5 fields)
@@ -237,12 +289,20 @@ test_schema_row_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, is_int && v0 == 0, "values[0] is i64(0)")
 
 	// Invalid: too few values
-	_, bad := schema.schema_row_from_values([]types.Value{types.value_int(0), types.value_text("x")})
+	_, bad := schema.schema_row_from_values(
+		[]types.Value{types.value_int(0), types.value_text("x")},
+	)
 	testing.expect(t, !bad, "<5 values rejected")
 
 	// Invalid: wrong type at values[0]
 	_, bad2 := schema.schema_row_from_values(
-		[]types.Value{types.value_text("table"), types.value_text("x"), types.value_int(1), types.value_text(""), types.value_blob({})},
+		[]types.Value {
+			types.value_text("table"),
+			types.value_text("x"),
+			types.value_int(1),
+			types.value_text(""),
+			types.value_blob({}),
+		},
 	)
 	testing.expect(t, !bad2, "string at values[0] rejected")
 }

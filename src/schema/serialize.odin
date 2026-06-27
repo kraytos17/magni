@@ -69,7 +69,7 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 	offset := 2
 	count, _, cnt_ok := cell.varint_decode(blob, offset)
 	if !cnt_ok || count == 0 { return nil }
-	
+
 	offset += cell.varint_size(count)
 	cols := make([dynamic]types.Column, 0, int(count), allocator)
 	for _ in 0 ..< count {
@@ -97,7 +97,7 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 		if (packed & 0x20) != 0 {
 			chk_len, _, chk_ok := cell.varint_decode(blob, offset)
 			if !chk_ok || chk_len == 0 { return nil }
-			
+
 			offset += cell.varint_size(chk_len)
 			if offset + int(chk_len) > len(blob) { return nil }
 			col.check_expr = strings.clone(string(blob[offset:offset + int(chk_len)]), allocator)
