@@ -1,3 +1,4 @@
+// Package cell handles serialization/deserialization of rows (cells) to/from binary format.
 package cell
 
 import "core:encoding/endian"
@@ -85,6 +86,8 @@ calculate_size :: proc(rowid: types.Row_ID, values: []types.Value) -> int {
 	return compute_info(rowid, values).total_size
 }
 
+// Serialize a row into the binary cell format at dest. Info must come from compute_info.
+// Returns bytes written and ok=false if dest is too small.
 serialize :: proc(
 	dest: []u8,
 	rowid: types.Row_ID,
@@ -132,6 +135,8 @@ serialize :: proc(
 	return offset, true
 }
 
+// Deserialize a binary cell from src at offset. Config controls allocator and zero-copy mode.
+// Returns the Cell + bytes consumed. ok=false on invalid input.
 deserialize :: proc(
 	src: []u8,
 	offset := 0,
@@ -285,7 +290,6 @@ validate :: proc(values: []types.Value, columns: []types.Column) -> bool {
 	return true
 }
 
-// SQLite varint encoding. Returns number of bytes written.
 varint_encode :: proc(dest: []u8, value: u64) -> int {
 	v := value
 	i := 0
@@ -298,7 +302,6 @@ varint_encode :: proc(dest: []u8, value: u64) -> int {
 	return i
 }
 
-// SQLite varint decoding. Returns (value, bytes_read, ok).
 varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: int, ok: bool) {
 	if offset >= len(src) { return 0, 0, false }
 	shift: u32; pos := offset
@@ -315,7 +318,6 @@ varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: in
 	return 0, 0, false
 }
 
-// Calculate SQLite varint size for a given value.
 varint_size :: proc(v: u64) -> int {
 	switch {
 	case v < (1 << 7):
@@ -339,7 +341,6 @@ varint_size :: proc(v: u64) -> int {
 	}
 }
 
-// Read integer based on SQLite serial type size.
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
 	if offset + size > len(data) { return 0, false }
 	switch size {
@@ -365,7 +366,6 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 	return 0, false
 }
 
-// Write integer based on SQLite serial type size.
 write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> bool {
 	if offset + size > len(dest) { return false }
 	switch size {
@@ -389,7 +389,6 @@ write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> boo
 	return false
 }
 
-// Determine SQLite serial type for a Value.
 serial_type_for_value :: proc(v: types.Value) -> u64 {
 	switch val in v {
 	case types.Null:

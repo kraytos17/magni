@@ -12,6 +12,10 @@ setup_snapshot_env :: proc(t: ^testing.T, test_name: string) -> ^pager.Pager {
 	if os.exists(filename) {
 		os.remove(filename)
 	}
+	wal_name := fmt.tprintf("%s-wal", filename)
+	if os.exists(wal_name) {
+		os.remove(wal_name)
+	}
 
 	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "Failed to open pager")
@@ -23,6 +27,10 @@ teardown_snapshot_env :: proc(p: ^pager.Pager, test_name: string) {
 	pager.close(p)
 	if os.exists(filename) {
 		os.remove(filename)
+	}
+	wal_name := fmt.tprintf("%s-wal", filename)
+	if os.exists(wal_name) {
+		os.remove(wal_name)
 	}
 }
 
@@ -41,7 +49,11 @@ test_snapshot_create_and_load :: proc(t: ^testing.T) {
 	testing.expect_value(t, h.prev_snapshot, u32(0))
 	testing.expect_value(t, h.schema_root, u32(42))
 	testing.expect_value(t, h.manifest_page, u32(0))
-	testing.expect_value(t, snapshot.Snapshot_Operation(h.operation), snapshot.Snapshot_Operation.UNKNOWN)
+	testing.expect_value(
+		t,
+		snapshot.Snapshot_Operation(h.operation),
+		snapshot.Snapshot_Operation.UNKNOWN,
+	)
 }
 
 @(test)
@@ -156,7 +168,11 @@ test_snapshot_manifest :: proc(t: ^testing.T) {
 	h, load_ok := snapshot.load(p, snap_page)
 	testing.expect(t, load_ok, "Load snapshot with manifest failed")
 	testing.expect_value(t, h.manifest_page, man_page)
-	testing.expect_value(t, snapshot.Snapshot_Operation(h.operation), snapshot.Snapshot_Operation.INSERT)
+	testing.expect_value(
+		t,
+		snapshot.Snapshot_Operation(h.operation),
+		snapshot.Snapshot_Operation.INSERT,
+	)
 
 	found_root, manifest_found := snapshot.find_in_manifest(p, h.manifest_page, "users")
 	testing.expect(t, manifest_found, "users should be findable from snapshot manifest")
@@ -181,15 +197,19 @@ test_snapshot_diff :: proc(t: ^testing.T) {
 	p := setup_snapshot_env(t, "diff")
 	defer teardown_snapshot_env(p, "diff")
 
-	tables_a := []types.Table{{name = "users", root_page = 100}, {name = "orders", root_page = 200}}
+	tables_a := []types.Table {
+		{name = "users", root_page = 100},
+		{name = "orders", root_page = 200},
+	}
+
 	man_a := snapshot.create_manifest(p, tables_a)
 	testing.expect(t, man_a > 0, "manifest A created")
-
 	tables_b := []types.Table {
 		{name = "users", root_page = 100}, // unchanged
 		{name = "orders", root_page = 300}, // modified
 		{name = "products", root_page = 400}, // created
 	}
+
 	man_b := snapshot.create_manifest(p, tables_b)
 	testing.expect(t, man_b > 0, "manifest B created")
 
@@ -202,38 +222,52 @@ test_snapshot_diff :: proc(t: ^testing.T) {
 	has_orders_mod := false
 	has_products_cre := false
 	for e in entries {
-		if e.table_name == "orders" && e.change == .MODIFIED && e.old_root == 200 && e.new_root == 300 {
+		if e.table_name == "orders" &&
+		   e.change == .MODIFIED &&
+		   e.old_root == 200 &&
+		   e.new_root == 300 {
 			has_orders_mod = true
 		}
-		if e.table_name == "products" && e.change == .CREATED && e.old_root == 0 && e.new_root == 400 {
+		if e.table_name == "products" &&
+		   e.change == .CREATED &&
+		   e.old_root == 0 &&
+		   e.new_root == 400 {
 			has_products_cre = true
 		}
 	}
+
 	testing.expect(t, has_orders_mod, "orders should be MODIFIED (200→300)")
 	testing.expect(t, has_products_cre, "products should be CREATED")
-
 	// Diff B → A (reverse) — should show orders MODIFIED, products DROPPED
 	entries_rev, ok_rev := snapshot.diff_manifests(p, man_b, man_a)
 	defer snapshot.diff_entries_free(entries_rev)
+
 	testing.expect(t, ok_rev, "diff_manifests B→A should succeed")
 	testing.expect_value(t, len(entries_rev), 2)
 
 	has_orders_mod_rev := false
 	has_products_drop := false
 	for e in entries_rev {
-		if e.table_name == "orders" && e.change == .MODIFIED && e.old_root == 300 && e.new_root == 200 {
+		if e.table_name == "orders" &&
+		   e.change == .MODIFIED &&
+		   e.old_root == 300 &&
+		   e.new_root == 200 {
 			has_orders_mod_rev = true
 		}
-		if e.table_name == "products" && e.change == .DROPPED && e.old_root == 400 && e.new_root == 0 {
+		if e.table_name == "products" &&
+		   e.change == .DROPPED &&
+		   e.old_root == 400 &&
+		   e.new_root == 0 {
 			has_products_drop = true
 		}
 	}
+
 	testing.expect(t, has_orders_mod_rev, "orders should be MODIFIED (300→200) in reverse")
 	testing.expect(t, has_products_drop, "products should be DROPPED in reverse")
-
 	// Diff same manifest — should be empty
 	same_diff, ok_same := snapshot.diff_manifests(p, man_a, man_a)
 	defer snapshot.diff_entries_free(same_diff)
+
 	testing.expect(t, ok_same, "diff same manifest should succeed")
 	testing.expect_value(t, len(same_diff), 0)
 }
@@ -251,6 +285,7 @@ test_snapshot_diff_snapshots :: proc(t: ^testing.T) {
 		{name = "users", root_page = 200}, // modified
 		{name = "orders", root_page = 300}, // created
 	}
+
 	man_b := snapshot.create_manifest(p, tables_b)
 	testing.expect(t, man_b > 0, "manifest B created")
 
@@ -261,25 +296,33 @@ test_snapshot_diff_snapshots :: proc(t: ^testing.T) {
 
 	entries, ok := snapshot.diff_snapshots(p, 1, 2, s2)
 	defer snapshot.diff_entries_free(entries)
+
 	testing.expect(t, ok, "diff_snapshots should succeed")
 	testing.expect_value(t, len(entries), 2)
 
 	has_users_mod := false
 	has_orders_cre := false
 	for e in entries {
-		if e.table_name == "users" && e.change == .MODIFIED && e.old_root == 100 && e.new_root == 200 {
+		if e.table_name == "users" &&
+		   e.change == .MODIFIED &&
+		   e.old_root == 100 &&
+		   e.new_root == 200 {
 			has_users_mod = true
 		}
-		if e.table_name == "orders" && e.change == .CREATED && e.old_root == 0 && e.new_root == 300 {
+		if e.table_name == "orders" &&
+		   e.change == .CREATED &&
+		   e.old_root == 0 &&
+		   e.new_root == 300 {
 			has_orders_cre = true
 		}
 	}
+
 	testing.expect(t, has_users_mod, "users should be MODIFIED (100→200)")
 	testing.expect(t, has_orders_cre, "orders should be CREATED")
-
 	// Auto-swap: passing older > newer should still work
 	entries_swap, ok_swap := snapshot.diff_snapshots(p, 2, 1, s2)
 	defer snapshot.diff_entries_free(entries_swap)
+
 	testing.expect(t, ok_swap, "diff_snapshots with swapped args should succeed")
 	testing.expect_value(t, len(entries_swap), 2)
 }

@@ -8,7 +8,11 @@ T :: ^testing.T
 
 @(test)
 test_lifecycle_create_destroy :: proc(t: T) {
-	values := []types.Value{types.value_int(101), types.value_text("Odin Lang"), types.value_real(1.618)}
+	values := []types.Value {
+		types.value_int(101),
+		types.value_text("Odin Lang"),
+		types.value_real(1.618),
+	}
 
 	c, err := cell.create(1, values)
 	testing.expect(t, err == nil, "Cell creation failed")
@@ -92,7 +96,11 @@ test_zero_copy_mechanics :: proc(t: T) {
 	buf_ptr := raw_data(buffer)
 	buf_end := rawptr(uintptr(buf_ptr) + uintptr(len(buffer)))
 	is_inside := uintptr(str_ptr) >= uintptr(buf_ptr) && uintptr(str_ptr) < uintptr(buf_end)
-	testing.expect(t, is_inside, "Zero-copy violation: String data does not point to source buffer")
+	testing.expect(
+		t,
+		is_inside,
+		"Zero-copy violation: String data does not point to source buffer",
+	)
 }
 
 @(test)

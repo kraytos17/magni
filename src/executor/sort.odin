@@ -76,6 +76,7 @@ sort_rows :: proc(
 		if all_int {
 			desc := order_clause[0].desc
 			nulls_first := order_clause[0].nulls_first
+			// SQL default: ASC → NULLS LAST, DESC → NULLS FIRST.
 			if !nulls_first { nulls_first = desc }
 			idx := make([]int, len(rows), context.temp_allocator)
 			for i in 0 ..< len(rows) { idx[i] = i }

@@ -1,3 +1,4 @@
+// Package main implements the MagniDB CLI: REPL, script execution, dot-commands.
 package main
 
 import "core:bufio"
@@ -8,9 +9,11 @@ import "core:strconv"
 import "core:strings"
 import "src:db"
 
+APP_VERSION :: "1.0"
+DEFAULT_DB_PATH :: "test.db"
+
 PROMPT :: "magni> "
 CONT_PROMPT :: "   ...> "
-WELCOME_MSG :: "MagniDB v1.0\nEnter .help for usage hints."
 
 CLI :: struct {
 	database: string `args:"pos=0,usage=Database file path (default: test.db)"`,
@@ -20,7 +23,7 @@ CLI :: struct {
 
 main :: proc() {
 	cli := CLI {
-		database = "test.db",
+		database = DEFAULT_DB_PATH,
 	}
 
 	err := flags.parse(&cli, os.args[1:], .Unix)
@@ -45,7 +48,7 @@ main :: proc() {
 	} else if len(cli.eval) > 0 {
 		execute_sql(database, cli.eval)
 	} else if os.is_tty(os.stdin) {
-		fmt.println(WELCOME_MSG)
+		fmt.printf("MagniDB v%s\nEnter .help for usage hints.\n", APP_VERSION)
 		repl(database)
 	} else {
 		execute_script_stream(database)
@@ -183,6 +186,15 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
 			} else {
 				fmt.println("Usage: .snapshot restore <id>")
 			}
+		} else if strings.has_prefix(trimmed, ".expire") {
+			parts := strings.split(trimmed, " ", context.temp_allocator)
+			keep := db.DEFAULT_KEEP
+			if len(parts) >= 2 {
+				if v, ok := strconv.parse_i64(parts[1]); ok { keep = int(v) }
+			}
+			db.expire_snapshots(database, keep)
+		} else if trimmed == ".rollforward" {
+			db.rollforward(database)
 		} else if strings.has_prefix(trimmed, ".dump ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
@@ -267,6 +279,10 @@ print_help :: proc() {
 	fmt.println("  .snapdiff <old> <new>  Show diff between two snapshots")
 	fmt.println("  .snapshot tag <id> <label>  Tag a snapshot with a label")
 	fmt.println("  .snapshot restore <id>  Restore database to a historical snapshot")
+	fmt.println("  .rollforward            Advance current state to the most recent snapshot")
+	fmt.println(
+		fmt.tprintf("  .expire [keep]          Expire old snapshots (keep default %d) and garbage collect", db.DEFAULT_KEEP),
+	)
 	fmt.println("  .stats              Show database file statistics")
 	fmt.println("  .integrity          Run consistency checks")
 	fmt.println("  .checkpoint         Flush WAL/Pages to disk")

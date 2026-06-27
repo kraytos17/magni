@@ -8,6 +8,8 @@ import "src:parser"
 import "src:snapshot"
 import "src:types"
 
+// Execute a SQL string: parse, handle AS OF, dispatch to executor, auto-snapshot if
+// outside a transaction. Returns true on success.
 execute :: proc(db: ^Database, sql: string) -> bool {
 	if !db_check(db) { return false }
 	sync.lock(&db.mu)
@@ -59,8 +61,13 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 	}
 
 	exec_ok, new_root := executor.execute(&st, stmt)
+	// AS OF queries read a historical schema_root — do NOT update the live schema root.
 	if !as_of_override { db.schema_root_page = new_root }
+	// Every mutation outside an explicit transaction creates a snapshot with the operation type.
 	if exec_ok && db.txn_state == .NONE && !as_of_override {
+		pager.wal_begin_txn(db.pager)
+
+		// Determine snapshot operation type from the statement kind
 		snap_op: snapshot.Snapshot_Operation
 		#partial switch s in stmt.type {
 		case parser.Insert_Stmt:
@@ -110,14 +117,9 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 		if snap_ok {
 			db.snapshot_index[snap_id] = snap_page
 			db.latest_snapshot = snap_page
-			snapshot.prune(db.pager, db.latest_snapshot, 100)
-			db.gc_pending_count += 1
-			if db.gc_pending_count >= GC_INTERVAL {
-				snapshot.gc(db.pager, db.latest_snapshot, 100)
-				db.gc_pending_count = 0
-			}
+			snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
 		}
-		pager.flush_all(db.pager)
+		pager.wal_commit_txn(db.pager)
 	}
 	free_all(context.temp_allocator)
 	return exec_ok
@@ -130,6 +132,7 @@ Query_Result :: struct {
 	ok:        bool,
 }
 
+// Execute a SELECT and return structured results (columns, types, rows). Only SELECT is supported.
 query :: proc(db: ^Database, sql: string) -> Query_Result {
 	r := Query_Result{}
 	if !db_check(db) { return r }

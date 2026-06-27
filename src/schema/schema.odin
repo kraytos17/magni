@@ -1,3 +1,4 @@
+// Package schema manages database metadata (tables, columns) stored in the schema b-tree.
 package schema
 
 import "core:fmt"
@@ -26,7 +27,7 @@ add_table :: proc(
 		types.value_text(sql_stmt),
 		types.value_blob(col_blob),
 	}
-
+	// WARNING: RowID = fnv64a(table_name) & 0x7FFF... Hash collisions silently overwrite.
 	rowid := types.Row_ID(types.hash_string(table_name))
 	err := btree.tree_insert(t, rowid, values)
 	if err != .None {

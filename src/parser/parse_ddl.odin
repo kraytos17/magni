@@ -74,6 +74,7 @@ parse_create_table :: proc(
 				} else if match(p, .CHECK) {
 					if !match(p, .LPAREN) { return nil, false }
 					b := strings.builder_make(allocator)
+					// Track parenthesis depth to handle nested parens in CHECK expressions.
 					depth := 1
 					for depth > 0 {
 						tok := peek(p); advance(p)

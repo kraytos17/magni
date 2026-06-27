@@ -18,6 +18,10 @@ setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, str
 	if os.exists(filename) {
 		os.remove(filename)
 	}
+	wal_name := fmt.tprintf("%s-wal", filename)
+	if os.exists(wal_name) {
+		os.remove(wal_name)
+	}
 
 	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "Failed to open pager")
@@ -38,6 +42,10 @@ teardown_executor_env :: proc(tree: btree.Tree, filename: string) {
 	pager.close(tree.pager)
 	if os.exists(filename) {
 		os.remove(filename)
+	}
+	wal_name := fmt.tprintf("%s-wal", filename)
+	if os.exists(wal_name) {
+		os.remove(wal_name)
 	}
 	delete(filename)
 }
@@ -212,7 +220,10 @@ test_page_splitting_stress :: proc(t: ^testing.T) {
 	fmt.println("--- Starting Stress Insert (70 rows) ---")
 	for i in 1 ..= 70 {
 		free_all(context.temp_allocator)
-		name := fmt.tprintf("Row Number %d with padding to force split.............................", i)
+		name := fmt.tprintf(
+			"Row Number %d with padding to force split.............................",
+			i,
+		)
 		stmt := make_insert_stmt("stress", i64(i), name, 10.5)
 		success, _ := executor.execute(&tree, stmt)
 		if !success {
@@ -229,7 +240,11 @@ test_page_splitting_stress :: proc(t: ^testing.T) {
 	is_interior := header.page_type == .INTERIOR_TABLE
 	testing.expect(t, is_interior, "Root page did not split! It is still a Leaf Node.")
 	if is_interior {
-		fmt.printf(" [PASS] Root Page %d is now Interior (Cells: %d)\n", table.root_page, header.cell_count)
+		fmt.printf(
+			" [PASS] Root Page %d is now Interior (Cells: %d)\n",
+			table.root_page,
+			header.cell_count,
+		)
 	}
 
 	table_tree := btree.init(tree.pager, table.root_page)
@@ -316,7 +331,6 @@ test_exec_distinct :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 1.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "a", 1.0))
 
-	// DISTINCT on name should return 2 rows (a and b)
 	sql := "SELECT DISTINCT name FROM t;"
 	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
@@ -337,32 +351,40 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
-	// NULLS FIRST
-	stmt1, ok1 := parser.parse("SELECT id FROM t ORDER BY name NULLS FIRST;", context.temp_allocator)
+	stmt1, ok1 := parser.parse(
+		"SELECT id FROM t ORDER BY name NULLS FIRST;",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok1, "parse NULLS FIRST")
 	s1, _ := stmt1.type.(parser.Select_Stmt)
 	order1, _ := s1.order_by.?
 	testing.expect(t, order1[0].nulls_first, "nulls_first should be true")
 	executor.execute(&tree, stmt1)
 
-	// NULLS LAST
-	stmt2, ok2 := parser.parse("SELECT id FROM t ORDER BY name NULLS LAST;", context.temp_allocator)
+	stmt2, ok2 := parser.parse(
+		"SELECT id FROM t ORDER BY name NULLS LAST;",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok2, "parse NULLS LAST")
 	s2, _ := stmt2.type.(parser.Select_Stmt)
 	order2, _ := s2.order_by.?
 	testing.expect(t, !order2[0].nulls_first, "nulls_first should be false for LAST")
 	executor.execute(&tree, stmt2)
 
-	// ASC NULLS FIRST
-	stmt3, ok3 := parser.parse("SELECT id FROM t ORDER BY name ASC NULLS FIRST;", context.temp_allocator)
+	stmt3, ok3 := parser.parse(
+		"SELECT id FROM t ORDER BY name ASC NULLS FIRST;",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok3, "parse ASC NULLS FIRST")
 	s3, _ := stmt3.type.(parser.Select_Stmt)
 	order3, _ := s3.order_by.?
 	testing.expect(t, order3[0].nulls_first, "nulls_first should be true for ASC NULLS FIRST")
 	executor.execute(&tree, stmt3)
 
-	// DESC NULLS LAST
-	stmt4, ok4 := parser.parse("SELECT id FROM t ORDER BY name DESC NULLS LAST;", context.temp_allocator)
+	stmt4, ok4 := parser.parse(
+		"SELECT id FROM t ORDER BY name DESC NULLS LAST;",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok4, "parse DESC NULLS LAST")
 	s4, _ := stmt4.type.(parser.Select_Stmt)
 	order4, _ := s4.order_by.?
@@ -387,9 +409,12 @@ test_exec_check_constraint :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_c")
 	defer teardown_executor_env(tree, file)
 
-	// CHECK token + keyword registered, create table parses CHECK expression
 	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
-	testing.expect(t, stmt_c.sql == "CREATE TABLE t (age INT CHECK (age > 0));", "CHECK CREATE should parse")
+	testing.expect(
+		t,
+		stmt_c.sql == "CREATE TABLE t (age INT CHECK (age > 0));",
+		"CHECK CREATE should parse",
+	)
 	cs, has_cs := stmt_c.type.(parser.Create_Stmt)
 	testing.expect(t, has_cs && len(cs.columns) == 1, "expected 1 column")
 	chk, has_chk := cs.columns[0].check_expr.?
@@ -407,7 +432,6 @@ test_exec_in_literal :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
-	// IN token + keyword registered, basic WHERE parsing verified
 	_, parse_ok := parser.parse("SELECT * FROM t WHERE id = 1;", context.temp_allocator)
 	testing.expect(t, parse_ok, "basic WHERE should parse")
 }
@@ -420,7 +444,6 @@ test_exec_in_subquery :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_create_stmt("t"))
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 
-	// FROM subquery works (existing feature), verify parse
 	_, parse_ok := parser.parse("SELECT * FROM (SELECT * FROM t) AS sub;", context.temp_allocator)
 	testing.expect(t, parse_ok, "FROM subquery should parse")
 }
@@ -430,11 +453,9 @@ test_exec_foreign_key :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "fk")
 	defer teardown_executor_env(tree, file)
 
-	// Create parent table
 	stmt_p, _ := parser.parse("CREATE TABLE parent (id INT PRIMARY KEY);", context.temp_allocator)
 	executor.execute(&tree, stmt_p)
 
-	// FK tokens registered (FOREIGN, REFERENCES), verify parse
 	_, parse_ok := parser.parse("CREATE TABLE child (id INT PRIMARY KEY);", context.temp_allocator)
 	testing.expect(t, parse_ok, "CREATE TABLE should parse")
 }
@@ -445,14 +466,12 @@ test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-	// Insert in an order that creates non-adjacent duplicates: a, b, a, c, b
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "a", 3.0))
 	executor.execute(&tree, make_insert_stmt("t", 4, "c", 4.0))
 	executor.execute(&tree, make_insert_stmt("t", 5, "b", 5.0))
 
-	// Execute via direct data query
 	sel_sql := "SELECT DISTINCT name FROM t;"
 	stmt, parse_ok := parser.parse(sel_sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
@@ -465,7 +484,6 @@ test_exec_check_enforcement :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_enforce")
 	defer teardown_executor_env(tree, file)
 
-	// Create table with CHECK — verify the check_expr is parsed correctly
 	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
 	cs, has_cs := stmt_c.type.(parser.Create_Stmt)
 	testing.expect(t, has_cs, "expected Create_Stmt")
@@ -484,7 +502,6 @@ test_exec_subquery_projection :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 1, "Alice", 100.0))
 	executor.execute(&tree, make_insert_stmt("t", 2, "Bob", 200.0))
 
-	// Subquery with projection should return only 1 column
 	sql := "SELECT name FROM (SELECT * FROM t) AS sub;"
 	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "subquery SELECT should parse")
@@ -506,7 +523,6 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t1", 2, "b", 20.0))
 	executor.execute(&tree, make_insert_stmt("t1", 3, "c", 30.0))
 
-	// Create second table with only 2 matching rows
 	cols2 := make([dynamic]types.Column, context.temp_allocator)
 	append(&cols2, types.Column{name = "ref", type = .INTEGER})
 	append(&cols2, types.Column{name = "val", type = .TEXT})
@@ -534,7 +550,6 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	}
 	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
 
-	// LEFT JOIN via exec_select (display path) — should succeed
 	sql := "SELECT t1.id, t2.val FROM t1 LEFT JOIN t2 ON t1.id = t2.ref;"
 	stmt, parse_ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "LEFT JOIN should parse")
@@ -548,7 +563,6 @@ test_exec_cow_split_stress :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-	// Insert enough rows to force multiple splits (COW path)
 	for i in 1 ..= 100 {
 		free_all(context.temp_allocator)
 		name := fmt.tprintf("row-%d", i)
@@ -566,7 +580,6 @@ test_exec_cow_split_stress :: proc(t: ^testing.T) {
 	count, _ := btree.tree_count_rows(&table_tree)
 	testing.expect_value(t, count, 100)
 
-	// Verify a row at each leaf boundary region
 	test_ids := []types.Row_ID{1, 25, 50, 75, 100}
 	for rid, _ in test_ids {
 		cell, err := btree.tree_find(&table_tree, rid, context.temp_allocator)
@@ -621,7 +634,6 @@ test_exec_in_literal_list :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
-	// IN (value-list) parsing
 	stmt, ok := parser.parse("SELECT * FROM t WHERE id IN (1, 3);", context.temp_allocator)
 	testing.expect(t, ok, "IN (list) should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
@@ -637,11 +649,9 @@ test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_persist")
 	defer teardown_executor_env(tree, file)
 
-	// Create table with CHECK and execute it (persists to schema)
 	stmt_c, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
 	executor.execute(&tree, stmt_c)
 
-	// Retrieve from schema and verify check_expr survived round-trip
 	table, found := schema.get_table(&tree, "t", context.temp_allocator)
 	testing.expect(t, found, "table should exist")
 	defer schema.table_free(table, context.temp_allocator)
@@ -695,7 +705,6 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 		},
 	)
 
-	// Two-condition ON clause → non-equi, falls back to nested-loop
 	sql := "SELECT * FROM t1 JOIN t2 ON t1.id = t2.ref AND t1.name = t2.val;"
 	stmt, ok := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "multi-condition JOIN should parse")
@@ -728,17 +737,14 @@ test_exec_order_by_int :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 
-	// ASC (exercises integer fast path)
 	stmt1, _ := parser.parse("SELECT id FROM t ORDER BY id;", context.temp_allocator)
 	ok, _ := executor.execute(&tree, stmt1)
 	testing.expect(t, ok, "ORDER BY ASC should execute")
 
-	// DESC (exercises reversed permutation)
 	stmt2, _ := parser.parse("SELECT id FROM t ORDER BY id DESC;", context.temp_allocator)
 	ok2, _ := executor.execute(&tree, stmt2)
 	testing.expect(t, ok2, "ORDER BY DESC should execute")
 
-	// NULLS FIRST (fast path with nulls handling)
 	stmt3, _ := parser.parse("SELECT id FROM t ORDER BY id NULLS FIRST;", context.temp_allocator)
 	ok3, _ := executor.execute(&tree, stmt3)
 	testing.expect(t, ok3, "ORDER BY NULLS FIRST should execute")
@@ -750,14 +756,10 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-
-	// Insert 50 rows
 	for i in 1 ..= 50 {
 		free_all(context.temp_allocator)
 		executor.execute(&tree, make_insert_stmt("t", i64(i), fmt.tprintf("n-%d", i), f64(i)))
 	}
-
-	// Delete every other row (25 deletions → freeblocks created)
 	for i in 1 ..= 50 {
 		if i % 2 == 0 { continue }
 		cond := parser.Condition {
@@ -771,14 +773,11 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 		}
 		executor.execute(&tree, parser.Statement{type = del, sql = ""})
 	}
-
-	// Re-insert into freed space
 	for i in 51 ..= 75 {
 		free_all(context.temp_allocator)
 		executor.execute(&tree, make_insert_stmt("t", i64(i), fmt.tprintf("new-%d", i), f64(i)))
 	}
 
-	// Verify all 50 rows are intact
 	table, _ := schema.get_table(&tree, "t", context.temp_allocator)
 	table_tree := btree.init(tree.pager, table.root_page)
 	count, _ := btree.tree_count_rows(&table_tree)

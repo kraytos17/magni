@@ -5,8 +5,6 @@ import "core:mem"
 import "src:cell"
 import "src:types"
 
-PAGE_HEADER_OFFSET_ROOT :: 100
-#assert(PAGE_HEADER_OFFSET_ROOT == types.DATABASE_HEADER_SIZE)
 PAGE_SIZE :: types.PAGE_SIZE
 
 Page_Type :: enum u8 {
@@ -36,8 +34,10 @@ Leaf_Header :: struct #packed #simple {
 }
 #assert(size_of(Leaf_Header) == 8)
 
+// Page 1 has a 100-byte database header prefix (types.DATABASE_HEADER_SIZE);
+// all other pages start at offset 0.
 get_page_header_offset :: proc(page_num: u32) -> int {
-	return int(page_num == 1 ? PAGE_HEADER_OFFSET_ROOT : 0)
+	return int(page_num == 1 ? types.DATABASE_HEADER_SIZE : 0)
 }
 
 page_header_size :: proc(page_type: Page_Type) -> int {

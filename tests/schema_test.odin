@@ -32,6 +32,8 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
 	_ = pager.close(tree.pager)
 	os.remove(filename)
+	wal_name := fmt.tprintf("%s-wal", filename)
+	os.remove(wal_name)
 	delete(filename, context.allocator)
 }
 

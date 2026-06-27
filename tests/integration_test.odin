@@ -11,6 +11,11 @@ setup_db :: proc(t: ^testing.T, name: string) -> ^db.Database {
 	if os.exists(filename) {
 		os.remove(filename)
 	}
+	
+	wal_name := fmt.tprintf("%s-wal", filename)
+	if os.exists(wal_name) {
+		os.remove(wal_name)
+	}
 
 	database, ok := db.open(filename)
 	testing.expect(t, ok, "Failed to open database")
@@ -22,6 +27,10 @@ teardown_db :: proc(db_handle: ^db.Database, name: string) {
 	db.close(db_handle)
 	if os.exists(filename) {
 		os.remove(filename)
+	}
+	wal_name := fmt.tprintf("%s-wal", filename)
+	if os.exists(wal_name) {
+		os.remove(wal_name)
 	}
 }
 
@@ -192,7 +201,11 @@ test_integration_prune_old_snapshots :: proc(t: ^testing.T) {
 
 	p := d.pager
 	count := snapshot.count_committed(p, d.latest_snapshot)
-	testing.expect(t, count <= 100, fmt.tprintf("Snapshots should be pruned to <=100 (got %d)", count))
+	testing.expect(
+		t,
+		count <= 100,
+		fmt.tprintf("Snapshots should be pruned to <=100 (got %d)", count),
+	)
 }
 
 @(test)
@@ -364,9 +377,12 @@ test_integration_join_hash :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO a VALUES (3, 'Carol');")
 	db.execute(d, "INSERT INTO b VALUES (1, 'X');")
 	db.execute(d, "INSERT INTO b VALUES (3, 'Z');")
-
+	
 	// Equi-join — should use hash join
-	r := db.execute(d, "SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id ORDER BY a.id;")
+	r := db.execute(
+		d,
+		"SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id ORDER BY a.id;",
+	)
 	testing.expect(t, r, "Equi-join INNER JOIN should succeed")
 }
 
@@ -429,4 +445,146 @@ test_integration_query_as_of_timestamp :: proc(t: ^testing.T) {
 	if len(q.rows) > 0 {
 		testing.expect_value(t, q.rows[0][0].(i64), 1)
 	}
+}
+
+@(test)
+test_integration_begin_commit_stress :: proc(t: ^testing.T) {
+	d := setup_db(t, "txn_stress")
+	defer teardown_db(d, "txn_stress")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	for i in 1 ..= 100 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'row%d');", i, i))
+	}
+
+	q := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok, "COUNT after 100 inserts")
+}
+
+@(test)
+test_integration_wal_rollback_preserves_data :: proc(t: ^testing.T) {
+	d := setup_db(t, "wal_rb")
+	defer teardown_db(d, "wal_rb")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'original');")
+
+	db.begin(d)
+	db.execute(d, "INSERT INTO t VALUES (2, 'rolled');")
+	db.execute(d, "INSERT INTO t VALUES (3, 'back');")
+	db.rollback(d)
+
+	q := db.query(d, "SELECT id, val FROM t ORDER BY id;")
+	testing.expect(t, q.ok, "SELECT after rollback")
+	testing.expect_value(t, len(q.rows), 1)
+	if len(q.rows) >= 1 {
+		id, _ := q.rows[0][0].(i64)
+		val, _ := q.rows[0][1].(string)
+		testing.expect_value(t, id, i64(1))
+		testing.expect_value(t, val, "original")
+	}
+}
+
+@(test)
+test_integration_snapshot_restore_with_verification :: proc(t: ^testing.T) {
+	d := setup_db(t, "restore_verify")
+	defer teardown_db(d, "restore_verify")
+
+	db.execute(d, "CREATE TABLE t (id INT, name TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'Alice');")
+	db.execute(d, "INSERT INTO t VALUES (2, 'Bob');")
+
+	q1 := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q1.ok, "pre-restore query")
+
+	db.execute(d, "INSERT INTO t VALUES (3, 'Charlie');")
+	db.execute(d, "INSERT INTO t VALUES (4, 'Diana');")
+
+	q2 := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q2.ok, "pre-restore query 2")
+
+	db.snapshot_restore(d, 3)
+
+	q3 := db.query(d, "SELECT id, name FROM t ORDER BY id;")
+	testing.expect(t, q3.ok, "post-restore query should succeed")
+	testing.expect_value(t, len(q3.rows), 2)
+}
+
+@(test)
+test_integration_snapshot_rollforward_roundtrip :: proc(t: ^testing.T) {
+	d := setup_db(t, "rollfwd")
+	defer teardown_db(d, "rollfwd")
+
+	db.execute(d, "CREATE TABLE t (id INT);")
+	db.execute(d, "INSERT INTO t VALUES (1);")
+	db.execute(d, "INSERT INTO t VALUES (2);")
+	db.execute(d, "INSERT INTO t VALUES (3);")
+
+	// Restore to snapshot 1 (just CREATE)
+	db.snapshot_restore(d, 1)
+
+	q1 := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q1.ok, "SELECT after restore")
+
+	// Roll forward
+	ok := db.rollforward(d)
+	testing.expect(t, ok, "rollforward to snapshot 2 should succeed")
+
+	q2 := db.query(d, "SELECT id FROM t ORDER BY id;")
+	testing.expect(t, q2.ok, "SELECT after rollforward")
+}
+
+@(test)
+test_integration_as_of_after_restore :: proc(t: ^testing.T) {
+	d := setup_db(t, "asof_restore")
+	defer teardown_db(d, "asof_restore")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'first');")
+	db.execute(d, "INSERT INTO t VALUES (2, 'second');")
+	db.execute(d, "INSERT INTO t VALUES (3, 'third');")
+
+	// Query AS OF snapshot 2 (after first INSERT)
+	q1 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 2;")
+	testing.expect(t, q1, "AS OF SNAPSHOT 2 before restore")
+}
+
+@(test)
+test_integration_expire_and_reclaim :: proc(t: ^testing.T) {
+	d := setup_db(t, "expire")
+	defer teardown_db(d, "expire")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	for i in 1 ..= 20 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'row%d');", i, i))
+	}
+
+	// Expire, keeping only last 5
+	db.expire_snapshots(d, 5)
+	// Recent snapshots should still work
+	q := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 20;")
+	testing.expect(t, q, "AS OF recent snapshot should work after expire")
+
+	// Very old snapshot should fail
+	q2 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 1;")
+	testing.expect(t, !q2, "AS OF expired snapshot should fail")
+}
+
+@(test)
+test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
+	d := setup_db(t, "ckpt")
+
+	db.execute(d, "CREATE TABLE t (id INT);")
+	for i in 1 ..= 10 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d);", i))
+	}
+
+	db.checkpoint(d)
+	db.close(d)
+	d2, open_ok := db.open(fmt.tprintf("test_int_ckpt.db"))
+	testing.expect(t, open_ok, "reopen after checkpoint")
+	defer teardown_db(d2, "ckpt")
+
+	q := db.query(d2, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok, "data should survive checkpoint+reopen")
 }

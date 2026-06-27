@@ -87,6 +87,11 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 7. **Inline scratch buffers** — `[dynamic; N]T` replaces heap `make([dynamic]T)` for bounded
    collections (cell deserialization, ≤10 columns), eliminating per-operation allocs.
 
+8. **WAL durability** — All writes go to a sequential `-wal` file. Commits append a commit frame +
+   `fsync` (not the full cache). Crash recovery replays committed frames on open. Checkpoint
+   writes WAL frames back to the main file. `wal_abort_txn` discards uncommitted writes without
+   touching the main file — no page leak on rollback.
+
 ---
 
 ## Layer Architecture
@@ -251,6 +256,11 @@ Pager:
   use shared locks; all mutations use exclusive locks.
 - **Zero-on-alloc**: Only the first 100 bytes (header region) are zeroed. Callers overwrite
   as needed.
+- **WAL**: All writes go to a `-wal` sidecar file. Commits append a commit frame + `fsync`.
+  `wal_recover` replays committed frames on open. `wal_abort_txn` discards uncommitted
+  frames. `wal_checkpoint` writes WAL frames back to the main file and truncates the WAL.
+- **Page bitmap**: `[]u64` tracks ever-allocated pages. Maintained by `allocate_page`/`free_page`.
+  GC sweep skips zero 64-bit words (all 64 pages free) in O(1).
 
 #### Table Metadata (`schema/schema.odin`)
 
@@ -280,9 +290,13 @@ Database :: struct {
     mu:               sync.Mutex,
     schema_root_page: u32,
     latest_snapshot:  u32,
+    refs_page:        u32,              // page storing named refs + rollforward log
     txn_state:        Transaction_State,
     txn_snapshot_id:  u64,
-    snapshot_index:   map[u64]u32,     // O(1) snapshot lookup
+    txn_start_file_len: i64,            // file_len at BEGIN, restored on ROLLBACK
+    snapshot_index:   map[u64]u32,      // O(1) snapshot lookup
+    table_roots:      map[string]u32,   // incremental root-page cache for manifests
+    table_roots_dirty: bool,
 }
 ```
 
@@ -299,11 +313,10 @@ execute(db, sql):
   ok, new_root = executor.execute(schema_tree, stmt)
   db.schema_root_page = new_root
   if ok && !readonly:
+    wal_begin_txn()
     create_snapshot()
-    if gc_pending_count >= 10:  // throttled: every 10 DMLs
-      run_prune()
-      run_gc()
-      gc_pending_count = 0
+    set_ref("main" → snap_id)
+    wal_commit_txn()            // single fsync of the WAL, not the full cache
   free_all(temp_allocator)
   unlock(mu)
 ```
@@ -349,16 +362,21 @@ Each manifest maps table names to their B-tree root pages at a snapshot point-in
 entry = [name_hash: u64, root_page: u32, name_len: u16, name_bytes: name_len]
 ```
 
-### Operations
+### Refs Page
+
+Named refs (branches/tags) are stored on a dedicated refs page (`REFS_MAGIC`).
+The `"main"` branch is the current snapshot pointer. Rollback moves the ref pointer
+without mutating the snapshot chain. A rollforward log ring buffer (64 entries) on the
+same page tracks previous ref positions for `rollforward`.
 
 | Operation | Complexity | Description |
 |---|---|---|
-| `create` | O(pages) | Allocate page, write header |
-| `find_by_id` | O(1) | Map lookup in `Database.snapshot_index` |
-| `find_by_timestamp` | O(n) chain | Walk chain for newest `timestamp ≤ target` |
-| `diff_manifests` | O(n*m) | Compare two manifests (n, m = table count) |
-| `prune` | O(chain) | Mark old snapshots as ABANDONED |
-| `gc` | O(pages_in_chain) | Mark-and-sweep: free unreachable pages (skipped if page_count < 512) |
+| `set_ref` | O(refs) | Add or update a named ref pointing to a snapshot |
+| `get_ref` | O(refs) | Look up a ref by name, return its snapshot_id |
+| `log_push` | O(1) | Record a ref move in the ring buffer |
+| `log_pop` | O(1) | Pop the most recent log entry (for rollforward) |
+| `list_refs` | O(refs) | List all ref entries |
+| `expire_snapshots` | O(chain + pages) | Policy-driven: retain last N, mark older ABANDONED, GC sweep |
 | `set_tag` / `get_tag` | O(1) | Read/write 64 bytes at page offset 40 |
 
 ### GC Algorithm
@@ -371,10 +389,20 @@ gc(pager, latest_page, keep_count):
     for each table root in manifest:
       live += root
       btree.collect_pages(root) → live += all sub-pages
-  for every page from 2..max_page:
-    if page not in live:
-      pager.free_page(page)
+  sweep:
+    if page_bitmap exists:
+      for each 64-bit word in bitmap:
+        if word == 0: continue     # all 64 pages free, skip
+        for each set bit: check against live; free if not live
+    else:
+      for every page from 2..max_page:
+        if page not in live: free
+  truncate file_len to highest live page so future GC scans skip freed tail
 ```
+
+After GC, the page bitmap is updated and `file_len` is truncated to the highest live
+page, shrinking the scan range for subsequent GC passes. The bitmap allows the sweep
+to skip entire 64-page ranges that are fully free in O(1).
 
 ---
 
@@ -388,7 +416,7 @@ Database.mu (sync.Mutex)           ← serializes all db.* operations
     └── Pager.mutex (sync.RW_Mutex)  ← per-operation page cache access
         ├── Read shared:  page_count, page_in_cache
         └── Write exclusive: get_page, allocate_page, unpin_page,
-                             flush_all, mark_dirty, free_page
+                             mark_dirty, free_page, copy_page
 ```
 
 Single-writer principle: `Database.mu` ensures at most one statement executes at a time.
@@ -464,7 +492,8 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 | `find_by_id` | O(1) | In-memory map |
 | `find_by_timestamp` | O(keep_count) | Chain walk, typically ≤100 |
 | `create` | O(tables) | Manifest serialization |
-| `diff_manifests` | O(tables²) | Nested loop comparison |
+| `set_ref` / `get_ref` | O(refs) | Refs page scan |
+| `log_push` / `log_pop` | O(1) | Ring buffer on refs page |
 
 ---
 
@@ -490,7 +519,9 @@ begin(db: ^Database)                -> bool
 commit(db: ^Database)               -> bool
 rollback(db: ^Database)             -> bool
 snapshot_restore(db, id)            -> bool
+rollforward(db)                     -> bool
 snapshot_tag(db, id, label)         -> bool
+expire_snapshots(db, keep)          -> bool
 print_snapshots(db)
 snapshot_diff(db, older, newer)     -> bool
 integrity_check(db)                 -> bool
@@ -531,6 +562,12 @@ gc(pager, latest_page, keep_count)
 set_tag(pager, page, tag)
 get_tag(pager, page)                                     -> string
 list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
+expire_snapshots(pager, latest, keep_count)              -> [dynamic]u64
+expire_and_collect(pager, latest, keep_count)
+set_ref(pager, page, name, id, kind, protected)          -> bool
+get_ref(pager, page, name)                               -> (snapshot_id, bool)
+log_push(pager, page, snapshot_id)                       -> bool
+log_pop(pager, page)                                     -> (snapshot_id, bool)
 ```
 
 ### CLI Dot-commands
@@ -549,6 +586,8 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 | `.snapdiff <a> <b>` | Diff snapshots | `db.snapshot_diff()` |
 | `.snapshot tag <id> <label>` | Tag snapshot | `db.snapshot_tag()` |
 | `.snapshot restore <id>` | Restore | `db.snapshot_restore()` |
+| `.rollforward` | Advance to most recent snapshot | `db.rollforward()` |
+| `.expire [keep]` | Expire old snapshots (default 100) | `db.expire_snapshots()` |
 | `.begin` / `.commit` / `.rollback` | Transaction | `db.begin/commit/rollback()` |
 
 ---
@@ -562,6 +601,7 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 | `build` | `-debug -o:none -warnings-as-errors` | Development |
 | `release` | `-o:aggressive -no-bounds-check -microarch:native` | Production |
 | `test` | `odin test tests/ -collection:src=src` | Unit tests |
+| `test-single` | `odin test ./tests -test-name <name>` | Run one test by name |
 | `vet-all` | `odin build + odin test` with `-vet*` flags | Full CI check |
 | `check` | Parse + type check only | Fast pre-commit |
 
@@ -573,7 +613,7 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 | `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates, DISTINCT, CHECK, EXPLAIN, subquery projection |
 | `btree` | 20 | Insert/find/delete/update, cursor, split, persistence, duplicates |
 | `cell` | 11 | Serialization roundtrip, zero-copy, edge cases |
-| `pager` | 12 | Open/close, caching, pinning, eviction |
+| `pager` | 19 | Page cache, WAL, crash recovery, bitmap, pinning, eviction |
 | `schema` | 10 | Column blob with CHECK, add/find/drop/list |
 | `snapshot` | 12 | Chain, manifest, diff, tags, timestamp lookup, GC |
 | `integration` | 23 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, query API, freeblock reuse |
@@ -582,14 +622,15 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 
 ## Trade-offs & Alternatives
 
-### COW vs WAL
+### COW + WAL
 
-| Aspect | COW (chosen) | WAL (alternative) |
+| Aspect | COW + WAL (chosen) | WAL-only (alternative) |
 |---|---|---|
-| Read concurrency | Single-threaded but historical reads | Concurrent readers + writer |
-| Write amplification | Depth × 4KB per mutation | ~1 page per mutation |
-| Snapshot isolation | Built-in (old pages persist) | Requires separate version store |
-| Crash recovery | No recovery needed (pages intact) | Requires WAL replay |
+| Read concurrency | Single-threaded but historical reads via COW snapshots | Concurrent readers + writer |
+| Write amplification | Depth × 4KB per mutation + WAL append | ~1 page per mutation |
+| Snapshot isolation | Built-in (old pages persist via COW) | Requires separate version store |
+| Crash recovery | WAL replay on open | Requires WAL replay |
+| Rollback | Instant — discard WAL frames | Instant — discard WAL frames |
 | Implementation complexity | Moderate | High |
 
 ### Slab cache vs Map
@@ -625,7 +666,6 @@ list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
 - **No `UNION` / `INTERSECT` / `EXCEPT`**: Set operations absent.
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
 - **No indexes**: Only the implicit primary-key B-tree exists.
-- **No WAL / crash recovery**: Single-file, `os.sync` only on flush.
 - **No B-tree rebalancing**: Deletes fragment pages without merging.
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
 - **Mixed AND/OR WHERE**: Not supported.

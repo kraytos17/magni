@@ -5,7 +5,8 @@ import "core:os"
 import "core:sync"
 import "src:types"
 
-// Allocates a page from the free-page linked list. Caller must hold p.mutex.
+// Allocates a page from the free-page linked list. Caller MUST hold p.mutex (write-locked).
+// Reads the first 4 bytes of the free page as the next-free pointer.
 alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	free_page_num := p.first_free_page
 	slot := find_empty_slot(p)
@@ -22,6 +23,8 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
 	slot.page.page_num = free_page_num; slot.page.pin_count = 1; slot.page.dirty = true
 	p.cache_index[free_page_num] = slot
+	bitmap_grow(p, free_page_num)
+	bitmap_set(p.page_bitmap, free_page_num)
 	return &slot.page, .None
 }
 
@@ -34,10 +37,11 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 
 		(^u32)(raw_data(slot._data_buf[:]))^ = p.first_free_page
 		slot.page.dirty = true
-		if err := flush_page_unsafe(p, &slot.page); err != .None { return }
+		wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
 
 		delete_key(&p.cache_index, page_num)
 		slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
 	}
 	p.first_free_page = page_num
+	bitmap_clear(p.page_bitmap, page_num)
 }

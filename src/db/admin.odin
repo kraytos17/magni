@@ -5,15 +5,16 @@ import "core:sync"
 import "src:btree"
 import "src:pager"
 import "src:schema"
-import "src:snapshot"
 import "src:types"
 
 checkpoint :: proc(db: ^Database) -> bool {
 	if !db_check(db) { return false }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	if db.latest_snapshot != 0 { snapshot.gc(db.pager, db.latest_snapshot, 100) }
+	if db.latest_snapshot != 0 {
+		expire_snapshots_impl(db, DEFAULT_KEEP)
+	}
 
-	pager.flush_all(db.pager)
+	pager.wal_checkpoint(db.pager)
 	update_header(db)
 	fmt.println("Checkpoint complete: all pages flushed to disk")
 	return true
@@ -23,11 +24,17 @@ integrity_check :: proc(db: ^Database) -> bool {
 	if !db_check(db) { return false }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	fmt.println("=== Integrity Check ===")
-	if !verify_header(db) { fmt.println("✗ Database header is corrupted"); return false }
+	if !verify_header(db) {
+		fmt.println("✗ Database header is corrupted")
+		return false
+	}
 
 	fmt.println("✓ Database header is valid")
 	_, err := pager.get_page(db.pager, db.schema_root_page)
-	if err != .None { fmt.println("✗ Schema page is missing"); return false }
+	if err != .None {
+		fmt.println("✗ Schema page is missing")
+		return false
+	}
 	defer pager.unpin_page(db.pager, db.schema_root_page)
 
 	fmt.println("✓ Schema page exists")
@@ -59,7 +66,8 @@ list_tables :: proc(db: ^Database) {
 
 describe_table :: proc(db: ^Database, table_name: string) -> bool {
 	if !db_check(db) { return false }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 
 	st := schema_tree(db)
 	table, found := schema.find_table(&st, table_name, context.temp_allocator)

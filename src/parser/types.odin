@@ -11,12 +11,13 @@ Token :: struct {
 Condition :: struct {
 	column:      string,
 	operator:    Token_Type,
+	// rhs: types.Value for literal comparisons, string for column-column comparisons (e.g. t1.a = t2.b)
 	rhs:         union {
 		types.Value,
 		string,
 	},
-	in_values:   []types.Value,
-	in_subquery: ^Select_Stmt,
+	in_values:   []types.Value, // IN (val1, val2, ...)
+	in_subquery: ^Select_Stmt, // IN (SELECT ...); owned pointer freed by where_clause_free
 }
 
 Where_Clause :: struct {
@@ -86,10 +87,10 @@ Join_Source_Result :: struct {
 }
 
 Select_Stmt :: struct {
-	from:            From_Source,
-	from_alias:      string,
+	from:            From_Source, // table name string or subquery ^Select_Stmt
+	from_alias:      string, // e.g. "FROM t AS a" sets from_alias = "a"
 	joins:           []Join_Clause,
-	columns:         []string,
+	columns:         []string, // projected column names; empty = *
 	aggregates:      []Aggregate_Expr,
 	is_distinct:     bool,
 	where_clause:    Maybe(Where_Clause),
@@ -98,8 +99,8 @@ Select_Stmt :: struct {
 	offset:          Maybe(u64),
 	group_by:        []string,
 	having:          Maybe(Where_Clause),
-	as_of_snapshot:  Maybe(u64),
-	as_of_timestamp: Maybe(u64),
+	as_of_snapshot:  Maybe(u64), // AS OF SNAPSHOT <id>
+	as_of_timestamp: Maybe(u64), // AS OF TIMESTAMP <micros>
 }
 
 Update_Stmt :: struct {

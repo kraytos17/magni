@@ -1,9 +1,11 @@
+// Package snapshot manages the snapshot chain: headers, refs, tags, GC, and rollforward log.
 package snapshot
 
 import "core:fmt"
 import "core:mem"
 import "core:time"
 import "src:pager"
+import "src:types"
 
 SNAPSHOT_MAGIC :: "MAGNISNP"
 
@@ -78,7 +80,7 @@ create :: proc(
 	h := (^Snapshot_Header)(raw_data(page.data))
 	copy(h.magic[:], SNAPSHOT_MAGIC)
 	h.snapshot_id = snapshot_id; h.prev_snapshot = prev_snapshot
-	h.timestamp = timestamp if timestamp != 0 else u64(time.now()._nsec / 1000)
+	h.timestamp = timestamp if timestamp != 0 else u64(time.now()._nsec / types.NANOS_PER_MICRO)
 
 	h.schema_root = schema_root; h.manifest_page = manifest_page
 	h.state = u8(Snapshot_State.COMMITTED); h.operation = u8(operation)

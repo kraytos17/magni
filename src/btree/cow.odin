@@ -4,6 +4,8 @@ import "core:mem"
 import "src:pager"
 import "src:types"
 
+// Page 1 has a 100-byte database header prefix. When COW copies it,
+// the page header moves from offset 100 to offset 0 in the new copy.
 copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 	new_page, err := pager.copy_page(t.pager, page_id)
 	if err != .None { return 0, .Page_Read_Failed }

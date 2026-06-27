@@ -1,3 +1,4 @@
+// Package btree implements a B+tree with COW (copy-on-write) for row storage.
 package btree
 
 import "core:encoding/endian"
@@ -318,6 +319,8 @@ rowid_exists :: proc(data: []u8, page_id: u32, target_rowid: types.Row_ID) -> bo
 	return ok2 && rowid == target_rowid
 }
 
+// Insert a row into the b-tree. Handles root splits transparently.
+// Returns .Duplicate_Rowid if check_duplicates is enabled and the rowid exists.
 tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Error {
 	root_node, err := load_node(t, t.root)
 	if err != .None { return err }
@@ -384,6 +387,8 @@ descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	return get_right_ptr(data, page_id)
 }
 
+// Find a row by Row_ID. Returns a Cell (with deep-copied or zero-copy values per Config).
+// Returns .Cell_Not_Found if the row doesn't exist.
 tree_find :: proc(
 	t: ^Tree,
 	key: types.Row_ID,
@@ -492,6 +497,7 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	return .None
 }
 
+// Delete a row by Row_ID. Removes the cell and adds the freed space to the freeblock list.
 tree_delete :: proc(t: ^Tree, key: types.Row_ID) -> Error {
 	k := key; leaf_node, err := descend_to_leaf(t, descend_by_key, &k)
 	if err != .None { return err }

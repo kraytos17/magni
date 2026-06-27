@@ -4,51 +4,62 @@ import "src:btree"
 import "src:pager"
 import "src:types"
 
-walk_chain_data :: struct {
-	p:         ^pager.Pager,
-	max_keep:  int,
-	committed: int,
-	target_id: u64,
-	result:    ^Snapshot_Header,
-	found:     ^bool,
-	count:     ^int,
-}
-
-count_committed :: proc(p: ^pager.Pager, start_page: u32) -> int {
-	count := 0
-	walk_chain(p, start_page, &count, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		if Snapshot_State(h.state) == .COMMITTED { (cast(^int)data)^ += 1 }; return true
+expire_snapshots :: proc(
+	p: ^pager.Pager,
+	latest_page: u32,
+	keep_count: int,
+) -> (
+	expired_ids: [dynamic]u64,
+) {
+	expired_ids = make([dynamic]u64, context.temp_allocator)
+	total := 0
+	walk_chain(p, latest_page, &total, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
+		total := cast(^int)data
+		if Snapshot_State(h.state) == .COMMITTED { total^ += 1 }
+		return true
 	})
-	return count
-}
 
-prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
-	total := count_committed(p, start_page)
-	if total <= max_keep { return }
-	d := walk_chain_data {
-		p        = p,
-		max_keep = max_keep,
+	if total <= keep_count { return expired_ids }
+
+	keep := 0
+	d := struct {
+		p:           ^pager.Pager,
+		keep:        ^int,
+		keep_count:  int,
+		expired_ids: ^[dynamic]u64,
+	} {
+		p           = p,
+		keep        = &keep,
+		keep_count  = keep_count,
+		expired_ids = &expired_ids,
 	}
 
-	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		d := cast(^walk_chain_data)data
+	walk_chain(p, latest_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
+		d := cast(^struct {
+			p:           ^pager.Pager,
+			keep:        ^int,
+			keep_count:  int,
+			expired_ids: ^[dynamic]u64,
+		})data
 		if Snapshot_State(h.state) == .COMMITTED {
-			d.committed += 1
-			if d.committed > d.max_keep {
+			d.keep^ += 1
+			if d.keep^ > d.keep_count {
 				pg, err := pager.get_page(d.p, page)
 				if err == .None {
 					(^Snapshot_Header)(raw_data(pg.data)).state = u8(Snapshot_State.ABANDONED)
 					pager.mark_dirty(d.p, page); pager.unpin_page(d.p, page)
+					append(d.expired_ids, h.snapshot_id)
 				}
 			}
 		}
 		return true
 	})
+
+	return expired_ids
 }
 
-GC_MIN_PAGES :: 512
-
-gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
+expire_and_collect :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
+	_ = expire_snapshots(p, latest_page, keep_count)
 	max_page := pager.page_count(p)
 	if max_page < GC_MIN_PAGES { return }
 
@@ -84,6 +95,7 @@ gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 		}
 		count += 1; page = h.prev_snapshot
 	}
+	// Sweep using page bitmap to skip free page ranges
 	bm := p.page_bitmap
 	if len(bm) > 0 {
 		for i := 0; i < len(bm); i += 1 {
@@ -103,11 +115,17 @@ gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 			if pn not_in live { pager.free_page(p, pn) }
 		}
 	}
+
+	// Truncate file_len to the highest live page so future GC scans skip freed pages
+	
+	// After GC, shrink the logical file length to the highest live page so
+	// future GC scans skip the freed tail region entirely.
 	highest_live: u32
 	for pn, _ in live {
 		if pn > highest_live { highest_live = pn }
 	}
-	if highest_live > 0 && highest_live < max_page {
+	current_max := pager.page_count(p)
+	if highest_live > 0 && highest_live < current_max {
 		new_len := i64(highest_live) * i64(types.PAGE_SIZE)
 		if new_len > 0 { p.file_len = new_len }
 	}

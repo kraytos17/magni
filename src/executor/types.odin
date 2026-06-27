@@ -5,14 +5,14 @@ import "src:parser"
 import "src:types"
 
 Table_Info :: struct {
-	table:   types.Table,
-	tree:    btree.Tree,
-	virtual: Maybe(Virtual_Table),
+	table:   types.Table, // physical table metadata (for FROM table sources)
+	tree:    btree.Tree, // data b-tree for this table
+	virtual: Maybe(Virtual_Table), // set when FROM source is a subquery instead of a physical table
 }
 
 Table_Col_Range :: struct {
 	table_name: string,
-	start_col:  int,
+	start_col:  int, // first column index in the combined columns array
 	col_count:  int,
 }
 
@@ -50,17 +50,19 @@ Mutated_Table_Info :: struct #all_or_none {
 	name: string,
 	root: u32,
 }
+// GLOBAL: set by COW executors (insert/update/delete/drop) and consumed by db.execute
+// for auto-snapshot table-root tracking. Not thread-safe — relies on db.mu being held.
 mutated_table_info: Mutated_Table_Info
 
 Resolved_Condition :: struct {
-	col_idx:       int,
+	col_idx:       int, // column index in the row's values array
 	operator:      parser.Token_Type,
-	rhs:           types.Value,
-	has_right_col: bool,
+	rhs:           types.Value, // compared value (ignored if has_right_col or has_in)
+	has_right_col: bool, // true → rhs is another column at right_idx
 	right_idx:     int,
-	has_in:        bool,
-	in_values:     []types.Value,
-	in_subquery:   ^parser.Select_Stmt,
+	has_in:        bool, // true → use in_values or in_subquery instead of rhs
+	in_values:     []types.Value, // literal IN list
+	in_subquery:   ^parser.Select_Stmt, // subquery IN (SELECT ...)
 }
 
 Where_Eval_Ctx :: struct {

@@ -1,3 +1,4 @@
+// Package parser tokenizes SQL and produces an AST for all supported DDL/DML/transaction commands.
 package parser
 
 import "core:strings"

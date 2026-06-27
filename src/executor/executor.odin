@@ -1,3 +1,4 @@
+// Package executor dispatches parsed SQL statements to the appropriate execution engine.
 package executor
 
 import "core:fmt"

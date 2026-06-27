@@ -48,6 +48,10 @@ teardown_tree :: proc(ctx: ^Test_Context) {
 	if os.exists(ctx.filename) {
 		os.remove(ctx.filename)
 	}
+	wal_name := fmt.tprintf("%s-wal", ctx.filename)
+	if os.exists(wal_name) {
+		os.remove(wal_name)
+	}
 }
 
 make_large_text :: proc(allocator: mem.Allocator, size: int) -> string {
@@ -194,7 +198,11 @@ test_cursor :: proc(t: ^testing.T) {
 
 		val := c.values[0].(i64)
 		if val != expected[idx] {
-			testing.expect(t, false, fmt.tprintf("Index %d: Expected %d, Got %d", idx, expected[idx], val))
+			testing.expect(
+				t,
+				false,
+				fmt.tprintf("Index %d: Expected %d, Got %d", idx, expected[idx], val),
+			)
 		}
 
 		cell.destroy(&c)

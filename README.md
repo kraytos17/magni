@@ -12,7 +12,7 @@ snapshot chain with time-travel queries, and ACID-ish transactions.
 # Build and run REPL
 make run
 
-# Run all 169 tests
+# Run all tests
 make test
 
 # Run full vet suite
@@ -142,10 +142,12 @@ ROLLBACK;
 | `.stats` | Database statistics |
 | `.integrity` | Verify all B-trees |
 | `.checkpoint` | Flush pages + garbage collect |
+| `.expire [keep]` | Expire old snapshots (default 100) and garbage collect |
 | `.snapshots` | Show snapshot chain |
 | `.snapdiff <a> <b>` | Diff two snapshots |
 | `.snapshot tag <id> <label>` | Tag a snapshot |
 | `.snapshot restore <id>` | Restore to historical state |
+| `.rollforward` | Advance current state to the most recent snapshot |
 | `.begin` / `.commit` / `.rollback` | Transaction control |
 
 ### CLI Modes
@@ -205,7 +207,10 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
   (COUNT/SUM/AVG/MIN/MAX, including COUNT(col)), CHECK constraints,
   FOREIGN KEY validation, EXPLAIN, transactions (BEGIN/COMMIT/ROLLBACK).
 - **Time-travel**: `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`.
-- **Snapshot system**: append-only chain with O(1) lookup, tagging, diff, restore, GC.
+- **Snapshot system**: append-only chain with O(1) lookup, tagging, diff, restore, refs page,
+  rollforward log, and `rollforward`/`expire` operations.
+- **WAL (Write-Ahead Log)**: sequential append + single fsync per commit; crash recovery replays
+  committed frames on open; checkpoint writes WAL frames back to the main file.
 - **Slab page cache**: 256 pages in a contiguous 1MB array. Zero per-page heap
   allocations. `map[u32]` for O(1) lookup.
 - **Freeblock chain**: SQLite-compatible freeblock list. Deleted cell space is
@@ -213,8 +218,10 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 - **Hash join**: integer-key hash join avoids allocation per row; string-key fallback.
 - **Pre-resolved WHERE**: column indices resolved once, not per row.
 - **LIMIT pushdown**: LIMIT without ORDER BY stops the table scan early.
-- **GC throttling**: garbage collection runs every 10 DMLs (skipped for under 512 pages).
+- **GC throttling**: garbage collection runs on demand via `.expire` or `.checkpoint`.
 - **Inline deserialize buffer**: `[dynamic; MAX_COLS]T` avoids heap alloc per row decode.
+- **Page bitmap**: GC sweep skips 64-free-page ranges in O(1), accelerating the scan.
+- **WAL (Write-Ahead Log)**: sequential append + single fsync per commit; crash recovery replays committed frames.
 - **`@(fast_math)` aggregate loops**: SUM/AVG/MIN/MAX compute with IEEE-relaxed ops.
 - **`#simple` / `#all_or_none`**: applied to page headers, snapshot headers, and result structs for safety.
 
@@ -228,7 +235,7 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 | `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, GROUP BY, JOINs, aggregates |
 | `btree` | 20 | Insert/find/delete/update, cursor, splits, persistence |
 | `cell` | 11 | Serialization roundtrip, zero-copy, validation |
-| `pager` | 12 | Page cache, I/O, pinning, eviction |
+| `pager` | 19 | Page cache, I/O, pinning, eviction, WAL, bitmap |
 | `schema` | 10 | Column blob, add/find/drop/list |
 | `snapshot` | 12 | Chain, manifests, diff, tags, timestamp lookup, GC |
 | `integration` | 23 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, query API, freeblock reuse |
@@ -293,8 +300,10 @@ src/
 │   ├── schema.odin        Table metadata, add/find/drop
 │   └── serialize.odin     Column blob serialization
 ├── snapshot/
+│   ├── expire.odin       Explicit snapshot expiration + GC
 │   ├── gc.odin            Prune + garbage collect
 │   ├── manifest.odin      Manifest creation, diff
+│   ├── refs.odin          Named refs (branches/tags), rollforward log
 │   └── snapshot.odin      Snapshot chain, tags, walk
 └── types/
     └── types.odin         Core types: Value, Column, Table, SerialType
@@ -314,7 +323,6 @@ tests/
 ## Limitations
 
 - No secondary indexes (only the primary-key B-tree)
-- No WAL / crash recovery
 - No `UNION`, `INTERSECT`, `EXCEPT`
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)

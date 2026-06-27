@@ -11,9 +11,10 @@ Cursor_Stack_Item :: struct {
 
 Cursor :: struct {
 	tree:              ^Tree,
-	path:              [32]Cursor_Stack_Item,
+	path:              [32]Cursor_Stack_Item, // fixed-size stack; no heap alloc
 	depth:             u8,
 	is_valid:          bool,
+	// Cached leaf page info — avoids pager lookup across adjacent cell reads
 	cached_page_id:    u32,
 	cached_page_data:  []u8,
 	cached_cell_count: u16,
@@ -54,6 +55,8 @@ cursor_destroy :: proc(c: ^Cursor) {
 	}
 }
 
+// Initialize a cursor for in-order traversal starting at the leftmost leaf.
+// Returns an invalid cursor if the tree is empty.
 cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error) {
 	c := Cursor {
 		tree     = t,
@@ -104,6 +107,7 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	return n, .None
 }
 
+// Move the cursor to the next cell in in-order. Sets is_valid=false at end of tree.
 cursor_advance :: proc(c: ^Cursor) -> Error {
 	if !c.is_valid || c.depth == 0 {
 		return .None
@@ -154,6 +158,8 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 	return .None
 }
 
+// Deserialize and return the cell at the current cursor position.
+// Values are allocated per the allocator. Zero-copy mode returns string/blob pointing into the page.
 cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cell, Error) {
 	if !c.is_valid || c.depth == 0 {
 		return {}, .Cell_Not_Found

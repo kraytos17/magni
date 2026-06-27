@@ -1,3 +1,4 @@
+// Package types defines core data types: Value, Column, Table, SerialType, and utilities.
 package types
 
 import "core:fmt"
@@ -9,7 +10,13 @@ import "core:strings"
 PAGE_SIZE :: 4096
 DATABASE_HEADER_SIZE :: 100
 MAX_COLS :: 10
-MAGIC_STRING :: "MAGNI_DB_v1.0"
+MAGIC_STRING :: "MAGNI_DB"
+SCHEMA_VERSION :: 1
+WAL_MAGIC :: "MAGNIWAL"
+WAL_HEADER_SIZE :: 32
+WAL_FRAME_HEADER_SIZE :: 24
+WAL_FRAME_SIZE :: WAL_FRAME_HEADER_SIZE + PAGE_SIZE  // 24 + 4096 = 4120
+NANOS_PER_MICRO :: 1000
 
 // Serial types used for encoding values in cells
 Serial_Type :: enum u64 {
@@ -28,7 +35,6 @@ Serial_Type :: enum u64 {
 	// >= 13 (odd): TEXT with length (N-13)/2
 }
 
-// Column data types
 Column_Type :: enum {
 	INTEGER,
 	TEXT,
@@ -68,7 +74,6 @@ value_blob :: proc(v: []u8) -> Value {
 	return v
 }
 
-// Check if value is NULL
 is_null :: proc(v: Value) -> bool {
 	_, ok := v.(Null)
 	return ok
@@ -141,8 +146,6 @@ value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string
 	}
 }
 
-// Calculate content size from serial type
-// Returns (size, valid) - size is 0 if invalid
 serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
 	if serial >= 12 {
 		// BLOB (even): length = (N-12)/2
@@ -170,10 +173,8 @@ serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
 	}
 }
 
-// Row ID type
 Row_ID :: distinct i64
 
-// Column definition
 Column :: struct {
 	name:          string,
 	type:          Column_Type,

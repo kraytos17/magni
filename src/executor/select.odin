@@ -71,6 +71,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	if is_subq { return exec_select_subquery(t, stmt) }
 	if len(stmt.joins) == 0 { return exec_select_single(t, stmt) }
 
+	// === Phase 1: Resolve all table sources and build column ranges ===
 	table_count := 1 + len(stmt.joins)
 	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
 	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
@@ -160,6 +161,8 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		}
 	}
 
+	// === Phase 2: Scan first table (or materialize subquery) ===
+
 	rows: []Row_Entry
 	if col_count_0 > 0 {
 		r, scan_err := scan_table(
@@ -176,6 +179,8 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		rows = vt.rows
 	}
 
+	// === Phase 3: Process JOINs ===
+
 	for j_idx in 0 ..< len(stmt.joins) {
 		jc := stmt.joins[j_idx]
 		info_idx := j_idx + 1
@@ -186,6 +191,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		if vt, is_vt := table_ctxs[info_idx].info.virtual.?; is_vt {
 			right_rows = vt.rows
 		} else {
+			// Materialize the right table once, then match against every left row
 			right_rows, _ = scan_table(
 				&table_ctxs[info_idx].info.tree,
 				&table_ctxs[info_idx].info.table,
@@ -195,6 +201,8 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 				context.temp_allocator,
 			)
 		}
+
+		// === Phase 4: Hash join (single equi-condition) or nested-loop fallback ===
 
 		hash_used := false
 		if on_cl, has_on := jc.on_clause.?; has_on && len(on_cl.conditions) == 1 {
@@ -666,7 +674,10 @@ exec_select_single_data :: proc(
 		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
 	}
 
-	if len(stmt.aggregates) > 0 { return nil, nil, false }
+	if len(stmt.aggregates) > 0 {
+		exec_select_aggregate_combined(stmt, rows, table.columns, single_range)
+		return nil, nil, true
+	}
 	if order_clause, has_o2 := stmt.order_by.?; has_o2 && len(order_clause) > 0 {
 		if !sort_rows(rows, order_clause, table.columns, single_range) {
 			return nil, nil, false
