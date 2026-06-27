@@ -162,7 +162,7 @@ expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> bool {
 	for id in expired_ids {
 		delete_key(&db.snapshot_index, id)
 	}
-	
+
 	snapshot.expire_and_collect(db.pager, db.latest_snapshot, keep_count)
 	pager.wal_begin_txn(db.pager)
 	update_header(db)

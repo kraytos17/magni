@@ -60,14 +60,20 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 		}
 	}
 
-	exec_ok, new_root := executor.execute(&st, stmt)
-	// AS OF queries read a historical schema_root — do NOT update the live schema root.
+	exec_ok, new_root, mt := executor.execute(&st, stmt)
+	// AS OF queries read a historical schema_root — dont update live schema root.
 	if !as_of_override { db.schema_root_page = new_root }
-	// Every mutation outside an explicit transaction creates a snapshot with the operation type.
 	if exec_ok && db.txn_state == .NONE && !as_of_override {
-		pager.wal_begin_txn(db.pager)
+		db.snapshot_batch_count += 1
+		threshold := db.snapshot_batch_threshold
+		if threshold <= 0 { threshold = 1 }
 
-		// Determine snapshot operation type from the statement kind
+		make_snapshot := db.snapshot_batch_count >= threshold
+		if make_snapshot {
+			db.snapshot_batch_count = 0
+		}
+
+		pager.wal_begin_txn(db.pager)
 		snap_op: snapshot.Snapshot_Operation
 		#partial switch s in stmt.type {
 		case parser.Insert_Stmt:
@@ -82,42 +88,48 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 			snap_op = .DROP
 		}
 
-		mt := executor.mutated_table_info
 		if mt.name != "" {
 			if mt.root != 0 {
 				db.table_roots[mt.name] = mt.root
 			} else {
 				delete_key(&db.table_roots, mt.name)
 			}
-
-			executor.mutated_table_info = {}
 		} else if snap_op == .CREATE || snap_op == .DROP {
 			db.table_roots_dirty = true
 		}
 
-		ensure_table_roots(db)
-		tables := make([dynamic]types.Table, context.temp_allocator)
-		for name, root in db.table_roots {
-			append(&tables, types.Table{name = name, root_page = root})
-		}
+		if make_snapshot {
+			ensure_table_roots(db)
+			tables := make([dynamic]types.Table, context.temp_allocator)
+			for name, root in db.table_roots {
+				append(&tables, types.Table{name = name, root_page = root})
+			}
 
-		manifest_page := snapshot.create_manifest(db.pager, tables[:])
-		defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
+			manifest_page := snapshot.create_manifest(db.pager, tables[:])
+			defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
 
-		db.txn_snapshot_id += 1
-		snap_id := db.txn_snapshot_id
-		snap_page, snap_ok := snapshot.create(
-			db.pager,
-			snap_id,
-			db.latest_snapshot,
-			db.schema_root_page,
-			manifest_page,
-			snap_op,
-		)
-		if snap_ok {
-			db.snapshot_index[snap_id] = snap_page
-			db.latest_snapshot = snap_page
-			snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
+			db.txn_snapshot_id += 1
+			snap_id := db.txn_snapshot_id
+			snap_page, snap_ok := snapshot.create(
+				db.pager,
+				snap_id,
+				db.latest_snapshot,
+				db.schema_root_page,
+				manifest_page,
+				snap_op,
+			)
+			if snap_ok {
+				db.snapshot_index[snap_id] = snap_page
+				db.latest_snapshot = snap_page
+				snapshot.set_ref(
+					db.pager,
+					db.refs_page,
+					snapshot.MAIN_REF,
+					snap_id,
+					.BRANCH,
+					false,
+				)
+			}
 		}
 		pager.wal_commit_txn(db.pager)
 	}

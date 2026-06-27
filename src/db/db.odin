@@ -18,19 +18,21 @@ Transaction_State :: enum {
 DEFAULT_KEEP :: 100
 
 Database :: struct {
-	path:                string,
-	pager:               ^pager.Pager,
-	is_new:              bool,
-	mu:                  sync.Mutex, // serializes all db.* operations
-	schema_root_page:    u32,
-	latest_snapshot:     u32, // cached page number of the most recent snapshot
-	refs_page:           u32, // page storing named refs (branches/tags) and rollforward log
-	txn_state:           Transaction_State,
-	txn_snapshot_id:     u64, // monotonically increasing snapshot ID counter
-	txn_start_file_len:  i64, // file_len snapshot at BEGIN, restored on ROLLBACK
-	snapshot_index:      map[u64]u32, // snapshot_id → page_num (built on open)
-	table_roots:         map[string]u32, // {table_name → root_page} cache for manifests
-	table_roots_dirty:   bool, // invalidated after schema mutation
+	path:                     string,
+	pager:                    ^pager.Pager,
+	is_new:                   bool,
+	mu:                       sync.Mutex, // serializes all db.* operations
+	schema_root_page:         u32,
+	latest_snapshot:          u32, // cached page number of the most recent snapshot
+	refs_page:                u32, // page storing named refs (branches/tags) and rollforward log
+	txn_state:                Transaction_State,
+	txn_snapshot_id:          u64, // monotonically increasing snapshot ID counter
+	txn_start_file_len:       i64, // file_len snapshot at BEGIN, restored on ROLLBACK
+	snapshot_index:           map[u64]u32, // snapshot_id → page_num (built on open)
+	table_roots:              map[string]u32, // {table_name → root_page} cache for manifests
+	table_roots_dirty:        bool, // invalidated after schema mutation
+	snapshot_batch_count:     int, // mutations accumulated since last snapshot
+	snapshot_batch_threshold: int, // 0 = every mutation, N = batch N mutations
 }
 
 Header :: struct #packed {
@@ -117,7 +119,44 @@ open :: proc(path: string) -> (^Database, bool) {
 // Close the database: update header, close pager, free all resources.
 close :: proc(db: ^Database) {
 	if db == nil { return }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+
+	// Flush any pending batch snapshot
+	if db.snapshot_batch_count > 0 {
+		db.snapshot_batch_threshold = 1
+		db.snapshot_batch_count = 1
+		// Create a COMMIT snapshot for the pending state
+		ensure_table_roots(db)
+		tables := make([dynamic]types.Table, context.temp_allocator)
+		for name, root in db.table_roots {
+			append(&tables, types.Table{name = name, root_page = root})
+		}
+
+		manifest_page := snapshot.create_manifest(db.pager, tables[:])
+		defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
+
+		db.txn_snapshot_id += 1
+		snap_id := db.txn_snapshot_id
+		snap_page, snap_ok := snapshot.create(
+			db.pager,
+			snap_id,
+			db.latest_snapshot,
+			db.schema_root_page,
+			manifest_page,
+			.COMMIT,
+		)
+		if snap_ok {
+			db.snapshot_index[snap_id] = snap_page
+			db.latest_snapshot = snap_page
+			snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
+		}
+
+		pager.wal_begin_txn(db.pager)
+		update_header(db)
+		pager.wal_commit_txn(db.pager)
+	}
+
 	update_header(db)
 	if db.pager != nil {
 		if err := pager.close(db.pager); err != .None {
@@ -181,9 +220,15 @@ verify_header :: proc(db: ^Database) -> bool {
 	if string(header.magic[:len(types.MAGIC_STRING)]) != types.MAGIC_STRING {
 		return false
 	}
+
 	sv := u32(header.schema_version)
 	if sv > types.SCHEMA_VERSION {
-		fmt.eprintln("Error: Database schema version", sv, "is newer than expected", types.SCHEMA_VERSION)
+		fmt.eprintln(
+			"Error: Database schema version",
+			sv,
+			"is newer than expected",
+			types.SCHEMA_VERSION,
+		)
 		return false
 	}
 	if header.page_size != u32le(types.PAGE_SIZE) {

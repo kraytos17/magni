@@ -56,7 +56,7 @@ test-verbose:
 test-single:
 	@echo "Running single test: $(filter-out $@,$(MAKECMDGOALS))"
 	$(ODIN) test $(TEST_DIR) $(COLLECTIONS) $(TEST_FLAGS) \
-	        -test-name "$(filter-out $@,$(MAKECMDGOALS))"
+	        -define:ODIN_TEST_NAMES="tests.$(filter-out $@,$(MAKECMDGOALS))"
 
 %:
 	@true

@@ -50,9 +50,6 @@ Mutated_Table_Info :: struct #all_or_none {
 	name: string,
 	root: u32,
 }
-// GLOBAL: set by COW executors (insert/update/delete/drop) and consumed by db.execute
-// for auto-snapshot table-root tracking. Not thread-safe — relies on db.mu being held.
-mutated_table_info: Mutated_Table_Info
 
 Resolved_Condition :: struct {
 	col_idx:       int, // column index in the row's values array
@@ -63,6 +60,8 @@ Resolved_Condition :: struct {
 	has_in:        bool, // true → use in_values or in_subquery instead of rhs
 	in_values:     []types.Value, // literal IN list
 	in_subquery:   ^parser.Select_Stmt, // subquery IN (SELECT ...)
+	skip_page_min: u32, // skip index: only scan pages ≥ this (0 = no skip)
+	skip_page_max: u32, // skip index: only scan pages ≤ this (0 = no skip)
 }
 
 Where_Eval_Ctx :: struct {

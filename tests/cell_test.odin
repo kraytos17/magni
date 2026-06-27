@@ -204,3 +204,108 @@ test_utilities :: proc(t: T) {
 	testing.expect(t, ok, "get_rowid failed")
 	testing.expect_value(t, rowid, 1)
 }
+
+@(test)
+test_columnar_roundtrip :: proc(t: T) {
+	columns := []types.Column {
+		{name = "id", type = .INTEGER},
+		{name = "score", type = .REAL},
+		{name = "name", type = .TEXT},
+	}
+
+	rowids := []types.Row_ID{1, 2, 3}
+	rows := [][]types.Value {
+		{types.value_int(1), types.value_real(10.5), types.value_text("Alice")},
+		{types.value_int(2), types.value_real(20.0), types.value_text("Bob")},
+		{types.value_int(3), types.value_real(30.5), types.value_text("Charlie")},
+	}
+
+	buf: [4096]u8
+	ok := cell.serialize_columnar(buf[:], rowids, rows[:], columns)
+	testing.expect(t, ok, "serialize_columnar should succeed")
+
+	// Verify column directory
+	h0, ok0 := cell.read_col_header(buf[:], 0)
+	testing.expect(t, ok0, "read col 0 header")
+	testing.expect_value(t, h0.col_index, u8(0))
+	testing.expect_value(t, h0.row_count, u16(3))
+
+	h1, ok1 := cell.read_col_header(buf[:], 1)
+	testing.expect(t, ok1, "read col 1 header")
+	testing.expect_value(t, h1.col_index, u8(1))
+	testing.expect_value(t, h1.row_count, u16(3))
+
+	// Decode column 0 (INTEGER)
+	col0 := cell.decode_column(buf[:], 3, 0)
+	testing.expect(t, col0 != nil, "decode col 0")
+	if col0 != nil {
+		v0, _ := col0[0].(i64)
+		v1, _ := col0[1].(i64)
+		v2, _ := col0[2].(i64)
+		testing.expect_value(t, v0, i64(1))
+		testing.expect_value(t, v1, i64(2))
+		testing.expect_value(t, v2, i64(3))
+	}
+
+	// Decode column 1 (REAL)
+	col1 := cell.decode_column(buf[:], 3, 1)
+	testing.expect(t, col1 != nil, "decode col 1")
+	if col1 != nil {
+		v0, _ := col1[0].(f64)
+		v1, _ := col1[1].(f64)
+		v2, _ := col1[2].(f64)
+		testing.expect(t, v0 > 10.0 && v0 < 11.0, "col 1 val 0 ~10.5")
+		testing.expect(t, v1 > 19.0 && v1 < 21.0, "col 1 val 1 ~20.0")
+		testing.expect(t, v2 > 30.0 && v2 < 31.0, "col 1 val 2 ~30.5")
+	}
+
+	@(test)
+	test_columnar_single_row :: proc(t: T) {
+		columns := []types.Column{{name = "id", type = .INTEGER}}
+		rowids := []types.Row_ID{42}
+		rows := [][]types.Value{{types.value_int(42)}}
+		buf: [4096]u8
+
+		ok := cell.serialize_columnar(buf[:], rowids, rows[:], columns)
+		testing.expect(t, ok, "serialize single row")
+
+		col0 := cell.decode_column(buf[:], 1, 0)
+		testing.expect(t, col0 != nil, "decode single row")
+		if col0 != nil {
+			v, _ := col0[0].(i64)
+			testing.expect_value(t, v, i64(42))
+		}
+	}
+
+	@(test)
+	test_columnar_all_types :: proc(t: T) {
+		columns := []types.Column{{name = "a", type = .INTEGER}, {name = "b", type = .REAL}}
+		rowids := []types.Row_ID{10, 20}
+		rows := [][]types.Value {
+			{types.value_int(10), types.value_real(1.5)},
+			{types.value_int(20), types.value_real(2.5)},
+		}
+		buf: [4096]u8
+
+		ok := cell.serialize_columnar(buf[:], rowids, rows[:], columns)
+		testing.expect(t, ok, "serialize mixed types")
+
+		col0 := cell.decode_column(buf[:], 2, 0)
+		testing.expect(t, col0 != nil, "decode int col")
+		if col0 != nil {
+			v0, _ := col0[0].(i64)
+			v1, _ := col0[1].(i64)
+			testing.expect_value(t, v0, i64(10))
+			testing.expect_value(t, v1, i64(20))
+		}
+
+		col1 := cell.decode_column(buf[:], 2, 1)
+		testing.expect(t, col1 != nil, "decode real col")
+		if col1 != nil {
+			v0, _ := col1[0].(f64)
+			v1, _ := col1[1].(f64)
+			testing.expect(t, v0 > 1.0 && v0 < 2.0, "real val 0")
+			testing.expect(t, v1 > 2.0 && v1 < 3.0, "real val 1")
+		}
+	}
+}

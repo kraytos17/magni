@@ -221,9 +221,15 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 - **GC throttling**: garbage collection runs on demand via `.expire` or `.checkpoint`.
 - **Inline deserialize buffer**: `[dynamic; MAX_COLS]T` avoids heap alloc per row decode.
 - **Page bitmap**: GC sweep skips 64-free-page ranges in O(1), accelerating the scan.
+- **Schema_Row**: Named-struct abstraction for schema b-tree entries with compact encoding:
+  kind byte (`i64(0)` for table) instead of string, conditional skip_root omitted when zero.
+- **Column blob**: `0xFE`-marked versioned format with varint-encoded lengths and a packed
+  byte encoding type, not_null, pk, has_check, and has_default in a single byte.
+- **Pager free-list**: O(1) slot allocation instead of linear scan across 256 cache slots.
 - **WAL (Write-Ahead Log)**: sequential append + single fsync per commit; crash recovery replays committed frames.
 - **`@(fast_math)` aggregate loops**: SUM/AVG/MIN/MAX compute with IEEE-relaxed ops.
 - **`#simple` / `#all_or_none`**: applied to page headers, snapshot headers, and result structs for safety.
+- **`types.Storage_Config`**: shared config struct (`allocator` + `zero_copy`) aliased by both `btree.Config` and `cell.Config`, removing duplicate definitions.
 
 ---
 
@@ -236,9 +242,10 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 | `btree` | 20 | Insert/find/delete/update, cursor, splits, persistence |
 | `cell` | 11 | Serialization roundtrip, zero-copy, validation |
 | `pager` | 19 | Page cache, I/O, pinning, eviction, WAL, bitmap |
-| `schema` | 10 | Column blob, add/find/drop/list |
+| `schema` | 11 | Column blob, add/find/drop/list, row round-trip |
 | `snapshot` | 12 | Chain, manifests, diff, tags, timestamp lookup, GC |
-| `integration` | 23 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, query API, freeblock reuse |
+| `integration` | 22 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads |
+| **Total** | **197** | |
 
 ---
 

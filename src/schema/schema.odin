@@ -11,6 +11,56 @@ init :: proc(t: ^btree.Tree) -> bool {
 	return err == .None
 }
 
+// Schema_Row is the canonical representation of a schema b-tree entry.
+Schema_Row :: struct {
+	kind:         string, // always "table"
+	name:         string,
+	root_page:    u32,
+	sql:          string,
+	columns_blob: []u8,
+	skip_root:    u32,
+}
+
+schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator) -> []types.Value {
+	n := 5 // kind + name + root + sql + blob
+	if r.skip_root > 0 { n += 1 }
+	result := make([]types.Value, n, allocator)
+	result[0] = types.value_int(0) // 0 = table
+	result[1] = types.value_text(r.name)
+	result[2] = types.value_int(i64(r.root_page))
+	result[3] = types.value_text(r.sql)
+	result[4] = types.value_blob(r.columns_blob)
+	if r.skip_root > 0 {
+		result[5] = types.value_int(i64(r.skip_root))
+	}
+	return result
+}
+
+schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
+	if len(values) < 5 { return {}, false }
+	name, ok1 := values[1].(string)
+	if !ok1 { return {}, false }
+	_, kind_ok := values[0].(i64)
+	if !kind_ok { return {}, false }
+
+	sr := Schema_Row {
+		kind = "table",
+		name = name,
+	}
+	root, ok2 := values[2].(i64)
+	sql, ok3 := values[3].(string)
+	blob, ok4 := values[4].([]u8)
+	if !ok2 || !ok3 || !ok4 { return {}, false }
+
+	sr.root_page = u32(root)
+	sr.sql = sql
+	sr.columns_blob = blob
+	if len(values) >= 6 {
+		if skip, ok5 := values[5].(i64); ok5 { sr.skip_root = u32(skip) }
+	}
+	return sr, true
+}
+
 add_table :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -19,15 +69,15 @@ add_table :: proc(
 	sql_stmt: string,
 ) -> bool {
 	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
-	values := []types.Value {
-		types.value_text("table"),
-		types.value_text(table_name),
-		types.value_text(table_name),
-		types.value_int(i64(root_page)),
-		types.value_text(sql_stmt),
-		types.value_blob(col_blob),
+	r := Schema_Row {
+		kind         = "table",
+		name         = table_name,
+		root_page    = root_page,
+		sql          = sql_stmt,
+		columns_blob = col_blob,
 	}
-	// WARNING: RowID = fnv64a(table_name) & 0x7FFF... Hash collisions silently overwrite.
+
+	values := schema_row_to_values(r)
 	rowid := types.Row_ID(types.hash_string(table_name))
 	err := btree.tree_insert(t, rowid, values)
 	if err != .None {
@@ -48,15 +98,15 @@ add_table_cow :: proc(
 	bool,
 ) {
 	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
-	values := []types.Value {
-		types.value_text("table"),
-		types.value_text(table_name),
-		types.value_text(table_name),
-		types.value_int(i64(root_page)),
-		types.value_text(sql_stmt),
-		types.value_blob(col_blob),
+	r := Schema_Row {
+		kind         = "table",
+		name         = table_name,
+		root_page    = root_page,
+		sql          = sql_stmt,
+		columns_blob = col_blob,
 	}
 
+	values := schema_row_to_values(r)
 	rowid := types.Row_ID(types.hash_string(table_name))
 	new_root, err := btree.tree_insert_cow(t, rowid, values)
 	if err != .None {
@@ -140,19 +190,14 @@ table_from_values :: proc(
 	types.Table,
 	bool,
 ) {
-	if len(values) < 6 { return {}, false }
-	
-	name_str, ok1 := values[1].(string)
-	root_page, ok2 := values[3].(i64)
-	sql_stmt, ok3 := values[4].(string)
-	blob, ok4 := values[5].([]u8)
-	if !ok1 || !ok2 || !ok3 || !ok4 { return {}, false }
+	sr, ok := schema_row_from_values(values)
+	if !ok { return {}, false }
 
 	table: types.Table
-	table.name = strings.clone(name_str, allocator)
-	table.root_page = u32(root_page)
-	table.sql = strings.clone(sql_stmt, allocator)
-	cols := deserialize_columns(blob, allocator)
+	table.name = strings.clone(sr.name, allocator)
+	table.root_page = sr.root_page
+	table.sql = strings.clone(sr.sql, allocator)
+	cols := deserialize_columns(sr.columns_blob, allocator)
 	if cols == nil {
 		delete(table.name, allocator)
 		delete(table.sql, allocator)
@@ -160,6 +205,7 @@ table_from_values :: proc(
 	}
 
 	table.columns = cols
+	table.skip_root = sr.skip_root
 	return table, true
 }
 
@@ -193,30 +239,59 @@ update_root_page_cow :: proc(
 		return t.root, false
 	}
 
-	old_sql, sql_ok := c.values[4].(string); old_blob, blob_ok := c.values[5].([]u8)
-	if !sql_ok || !blob_ok {
+	sr, sr_ok := schema_row_from_values(c.values)
+	if !sr_ok {
 		fmt.eprintf(
-			"[schema] update_root_page_cow: type assertion failed sql=%v blob=%v for '%s'\n",
-			sql_ok,
-			blob_ok,
+			"[schema] update_root_page_cow: schema_row_from_values failed for '%s'\n",
 			table_name,
 		)
 		return t.root, false
 	}
 
-	values := []types.Value {
-		types.value_text("table"),
-		types.value_text(table_name),
-		types.value_text(table_name),
-		types.value_int(i64(new_root_page)),
-		types.value_text(old_sql),
-		types.value_blob(old_blob),
-	}
-
+	sr.root_page = new_root_page
+	values := schema_row_to_values(sr)
 	new_root, upd_err := btree.tree_update_cow(t, rowid, values)
 	if upd_err != .None {
 		fmt.eprintf(
 			"[schema] update_root_page_cow: tree_update_cow failed for '%s': %v\n",
+			table_name,
+			upd_err,
+		)
+		return t.root, false
+	}
+	return new_root, true
+}
+
+update_skip_root_cow :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	new_skip_root: u32,
+) -> (
+	new_schema_root: u32,
+	ok: bool,
+) {
+	rowid := types.Row_ID(types.hash_string(table_name))
+	c, err := btree.tree_find(t, rowid, context.temp_allocator)
+	if err != .None {
+		fmt.eprintf("[schema] update_skip_root_cow: tree_find failed for '%s'\n", table_name)
+		return t.root, false
+	}
+
+	sr, sr_ok := schema_row_from_values(c.values)
+	if !sr_ok {
+		fmt.eprintf(
+			"[schema] update_skip_root_cow: schema_row_from_values failed for '%s'\n",
+			table_name,
+		)
+		return t.root, false
+	}
+
+	sr.skip_root = new_skip_root
+	values := schema_row_to_values(sr)
+	new_root, upd_err := btree.tree_update_cow(t, rowid, values)
+	if upd_err != .None {
+		fmt.eprintf(
+			"[schema] update_skip_root_cow: tree_update_cow failed for '%s': %v\n",
 			table_name,
 			upd_err,
 		)

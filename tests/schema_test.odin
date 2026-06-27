@@ -199,3 +199,50 @@ test_duplicate_table_name :: proc(t: ^testing.T) {
 	ok2 := schema.add_table(&tree, "dup", cols, 3, "")
 	testing.expect(t, !ok2, "Duplicate add should fail")
 }
+
+@(test)
+test_schema_row_roundtrip :: proc(t: ^testing.T) {
+	r := schema.Schema_Row{
+		kind = "table", name = "test_tbl",
+		root_page = 42, sql = "CREATE TABLE test_tbl (id INT)",
+		columns_blob = []u8{1, 2, 3, 4}, skip_root = 7,
+	}
+
+	// New format with skip_root: produces 6 values (kind byte + 5 fields)
+	values := schema.schema_row_to_values(r)
+	testing.expect(t, len(values) == 6, "skip_root>0 produces 6 values")
+
+	r2, ok := schema.schema_row_from_values(values)
+	testing.expect(t, ok, "new format skip>0 round-trip")
+	testing.expect_value(t, r2.kind, r.kind)
+	testing.expect_value(t, r2.name, r.name)
+	testing.expect_value(t, r2.root_page, r.root_page)
+	testing.expect_value(t, r2.sql, r.sql)
+	testing.expect_value(t, r2.skip_root, r.skip_root)
+
+	// New format without skip_root: produces 5 values
+	r0 := r
+	r0.skip_root = 0
+	values5 := schema.schema_row_to_values(r0)
+	testing.expect(t, len(values5) == 5, "skip_root=0 produces 5 values")
+
+	r5, ok5 := schema.schema_row_from_values(values5)
+	testing.expect(t, ok5, "5-value format accepted")
+	testing.expect_value(t, r5.skip_root, u32(0))
+	testing.expect_value(t, r5.name, "test_tbl")
+	testing.expect_value(t, r5.root_page, u32(42))
+
+	// values[0] is i64(0) for kind=table
+	v0, is_int := values[0].(i64)
+	testing.expect(t, is_int && v0 == 0, "values[0] is i64(0)")
+
+	// Invalid: too few values
+	_, bad := schema.schema_row_from_values([]types.Value{types.value_int(0), types.value_text("x")})
+	testing.expect(t, !bad, "<5 values rejected")
+
+	// Invalid: wrong type at values[0]
+	_, bad2 := schema.schema_row_from_values(
+		[]types.Value{types.value_text("table"), types.value_text("x"), types.value_int(1), types.value_text(""), types.value_blob({})},
+	)
+	testing.expect(t, !bad2, "string at values[0] rejected")
+}

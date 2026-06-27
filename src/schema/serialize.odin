@@ -2,16 +2,21 @@ package schema
 
 import "core:encoding/endian"
 import "core:strings"
+import "src:cell"
 import "src:types"
 
-// Format: [Count(4b)] -> [NameLen(4b) + NameBytes + Type(1b) + Flags(1b) + DefaultMarker(1b) + DefaultValue... + CheckLen(4b) + CheckBytes?]
+COL_BLOB_MARKER :: 0xFE
+COL_BLOB_VERSION :: 1
+
 serialize_columns_to_blob :: proc(
 	columns: []types.Column,
 	allocator := context.allocator,
 ) -> []u8 {
-	size := 4
-	for col in columns { size += 4 + len(col.name) + 1 + 1 + 1 }
+	// Estimate size: header (2) + count varint + per-column data
+	size := 2
+	size += cell.varint_size(u64(len(columns)))
 	for col in columns {
+		size += cell.varint_size(u64(len(col.name))) + len(col.name) + 1
 		if def, ok := col.default_value.?; ok {
 			#partial switch v in def {
 			case types.Null:
@@ -26,28 +31,33 @@ serialize_columns_to_blob :: proc(
 				size += 1 + 4 + len(v)
 			}
 		}
-		if chk, has_chk := col.check_expr.?; has_chk { size += 4 + len(chk) }
+		if chk, has_chk := col.check_expr.?; has_chk {
+			size += cell.varint_size(u64(len(chk))) + len(chk)
+		}
 	}
 
 	blob := make([]u8, size, allocator)
 	offset := 0
-	endian.put_u32(blob[offset:], .Little, u32(len(columns))); offset += 4
-	for col in columns {
-		endian.put_u32(blob[offset:], .Little, u32(len(col.name))); offset += 4
-		copy(blob[offset:], col.name); offset += len(col.name)
-		blob[offset] = u8(col.type); offset += 1
-		flags: u8
-		if col.not_null do flags |= 1
-		if col.pk do flags |= 2
-		if _, has_chk := col.check_expr.?; has_chk do flags |= 4
+	blob[offset] = COL_BLOB_MARKER; offset += 1
+	blob[offset] = COL_BLOB_VERSION; offset += 1
+	offset += cell.varint_encode(blob[offset:], u64(len(columns)))
 
-		blob[offset] = flags; offset += 1
+	for col in columns {
+		offset += cell.varint_encode(blob[offset:], u64(len(col.name)))
+		copy(blob[offset:], col.name); offset += len(col.name)
+
+		packed: u8 = u8(col.type)
+		if col.not_null { packed |= 0x08 }
+		if col.pk { packed |= 0x10 }
+		if _, has := col.check_expr.?; has { packed |= 0x20 }
+		if _, has := col.default_value.?; has { packed |= 0x40 }
+		blob[offset] = packed; offset += 1
+
 		if def, ok := col.default_value.?; ok {
-			blob[offset] = 1; offset += 1
 			serialize_value_to_blob(blob, &offset, def)
-		} else { blob[offset] = 0; offset += 1 }
-		if chk, has_chk := col.check_expr.?; has_chk {
-			endian.put_u32(blob[offset:], .Little, u32(len(chk))); offset += 4
+		}
+		if chk, has := col.check_expr.?; has {
+			offset += cell.varint_encode(blob[offset:], u64(len(chk)))
 			copy(blob[offset:], chk); offset += len(chk)
 		}
 	}
@@ -55,40 +65,40 @@ serialize_columns_to_blob :: proc(
 }
 
 deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
-	if len(blob) < 4 { return nil }
-	offset := 0
-	count, ok := endian.get_u32(blob[offset:], .Little)
-	if !ok { return nil }
-
-	offset += 4
-	cols := make([dynamic]types.Column, 0, count, allocator)
+	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER { return nil }
+	offset := 2
+	count, _, cnt_ok := cell.varint_decode(blob, offset)
+	if !cnt_ok || count == 0 { return nil }
+	
+	offset += cell.varint_size(count)
+	cols := make([dynamic]types.Column, 0, int(count), allocator)
 	for _ in 0 ..< count {
-		name_len, ok_len := endian.get_u32(blob[offset:], .Little)
-		if !ok_len { return nil }
+		name_len, _, name_ok := cell.varint_decode(blob, offset)
+		if !name_ok || name_len == 0 { return nil }
+		offset += cell.varint_size(name_len)
+		if offset + int(name_len) + 1 > len(blob) { return nil }
 
-		offset += 4
-		if offset + int(name_len) + 3 > len(blob) { return nil }
-
-		name_str := string(blob[offset:offset + int(name_len)]); offset += int(name_len)
-		type_byte := blob[offset]; offset += 1
-		flags_byte := blob[offset]; offset += 1
-		default_marker := blob[offset]; offset += 1
+		name_str := string(blob[offset:offset + int(name_len)])
+		offset += int(name_len)
+		packed := blob[offset]
+		offset += 1
 		col := types.Column {
 			name     = strings.clone(name_str, allocator),
-			type     = types.Column_Type(type_byte),
-			not_null = (flags_byte & 1) != 0,
-			pk       = (flags_byte & 2) != 0,
+			type     = types.Column_Type(packed & 0x07),
+			not_null = (packed & 0x08) != 0,
+			pk       = (packed & 0x10) != 0,
 		}
 
-		if default_marker == 1 {
+		if (packed & 0x40) != 0 {
 			def_val, def_ok := deserialize_value_from_blob(blob, &offset, allocator)
 			if !def_ok { return nil }
 			col.default_value = def_val
 		}
-		if (flags_byte & 4) != 0 {
-			if offset + 4 > len(blob) { return nil }
-			chk_len := (^u32le)(raw_data(blob[offset:]))^
-			offset += 4
+		if (packed & 0x20) != 0 {
+			chk_len, _, chk_ok := cell.varint_decode(blob, offset)
+			if !chk_ok || chk_len == 0 { return nil }
+			
+			offset += cell.varint_size(chk_len)
 			if offset + int(chk_len) > len(blob) { return nil }
 			col.check_expr = strings.clone(string(blob[offset:offset + int(chk_len)]), allocator)
 			offset += int(chk_len)

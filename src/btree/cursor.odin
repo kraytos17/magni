@@ -174,17 +174,34 @@ cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cel
 		return {}, .Invalid_Page_Header
 	}
 
+	actual_alloc := allocator
+	if actual_alloc.procedure == nil {
+		actual_alloc = context.allocator
+	}
+
+	// Columnar page: read individual row by index
+	if is_columnar(node.data, item.page_id) {
+		num_cols, found := detect_columnar_col_count(node.data, item.page_id)
+		if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
+		
+		boff := get_page_header_offset(item.page_id)
+		cc, cc_ok := cell.read_columnar_cell(
+			node.data,
+			num_cols,
+			int(item.cell_index),
+			cell.Config{allocator = actual_alloc, zero_copy = c.tree.config.zero_copy},
+			boff,
+		)
+		if !cc_ok { return {}, .Cell_Deserialize_Failed }
+		return cc, .None
+	}
+
 	pointers := get_pointers(node.data, item.page_id)
 	if int(item.cell_index) >= len(pointers) {
 		return {}, .Cell_Not_Found
 	}
 
 	cell_ptr := pointers[item.cell_index]
-	actual_alloc := allocator
-	if actual_alloc.procedure == nil {
-		actual_alloc = context.allocator
-	}
-
 	cell_cfg := cell.Config {
 		allocator = actual_alloc,
 		zero_copy = c.tree.config.zero_copy,

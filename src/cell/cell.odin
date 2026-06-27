@@ -18,10 +18,7 @@ Cell :: struct {
 	owns_data: bool,
 }
 
-Config :: struct {
-	allocator: mem.Allocator,
-	zero_copy: bool,
-}
+Config :: types.Storage_Config
 
 create :: proc(
 	rowid: types.Row_ID,

@@ -88,7 +88,7 @@ try_join_match :: proc(
 			len(outer_row.values) + len(inner_values),
 			context.temp_allocator,
 		)
-		
+
 		copy(tmp[:len(outer_row.values)], outer_row.values)
 		copy(tmp[len(outer_row.values):], inner_values)
 		if !evaluate_where(&on_cl, tmp, combined_cols, table_ranges) { return }
@@ -99,7 +99,7 @@ try_join_match :: proc(
 		len(outer_row.values) + len(inner_values),
 		context.temp_allocator,
 	)
-	
+
 	copy(combined[:len(outer_row.values)], outer_row.values)
 	copy(combined[len(outer_row.values):], inner_values)
 

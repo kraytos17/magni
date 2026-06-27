@@ -249,12 +249,14 @@ Pager:
 
 - **Zero per-page heap allocations**: All 256 page buffers are inline in the slab.
 - **Lookup**: `map[u32]^Page_Slot` — O(1) average via Odin's Robin Hood map.
-- **Eviction**: Linear scan for first unpinned slot (simple clock-hand approximation).
+- **Eviction**: Rotating-hand scan for first unpinned slot (avoids always scanning from 0).
+- **Free-list**: `free_slots: [dynamic]^Page_Slot` provides O(1) slot allocation — `pop` for
+  empty slots, `append` for evicted/freed slots. Eliminates the previous O(cache_size) scan.
 - **Freelist**: Linked list stored in-page (first 4 bytes = next free page). `first_free_page`
   persisted in database header.
 - **Concurrency**: `RW_Mutex` — read-only operations (`page_count`, `page_in_cache`)
   use shared locks; all mutations use exclusive locks.
-- **Zero-on-alloc**: Only the first 100 bytes (header region) are zeroed. Callers overwrite
+- **Zero-on-alloc**: Only the first DATABASE_HEADER_SIZE bytes (100B) are zeroed. Callers overwrite
   as needed.
 - **WAL**: All writes go to a `-wal` sidecar file. Commits append a commit frame + `fsync`.
   `wal_recover` replays committed frames on open. `wal_abort_txn` discards uncommitted
@@ -264,21 +266,32 @@ Pager:
 
 #### Table Metadata (`schema/schema.odin`)
 
-Schema is stored as a B-tree on page 1:
+Schema is stored as a B-tree on page 1.
 
-| Column | Type | Description |
-|---|---|---|
+**Schema row format:**
+
+| Index | Type | Content |
+|-------|------|---------|
 | RowID | i64 | `fnv64(table_name) & 0x7FFF...` |
-| type | TEXT | `"table"` |
-| name | TEXT | Table name |
-| tbl_name | TEXT | Table name (SQLite compat) |
-| root_page | INT | B-tree root page number |
-| sql | TEXT | Original CREATE TABLE statement |
-| columns_blob | BLOB | Serialized column definitions |
+| [0] | i64 | Kind discriminator (`0` = table) |
+| [1] | TEXT | Table name |
+| [2] | INT | B-tree root page number |
+| [3] | TEXT | Original CREATE TABLE statement |
+| [4] | BLOB | Serialized column definitions (see below) |
+| [5] | INT | Skip-index root page (present only when > 0) |
 
-All mutations (`add_table_cow`, `drop_table_cow`, `update_root_page_cow`) use COW and
-return a new schema root. `get_table` passes the caller's allocator directly through to
-`find_table`.
+**Column blob format:**
+
+```
+Format: [0xFE:marker][version:1][count:varint]
+        per column: [name_len:varint][name_bytes][packed:1][default_value?][check_len:varint?][check_bytes?]
+
+Packed byte bits: 0-2 = type, 3 = not_null, 4 = pk, 5 = has_check, 6 = has_default
+```
+
+All mutations (`add_table_cow`, `drop_table_cow`, `update_root_page_cow`, `update_skip_root_cow`) use COW and
+return a new schema root. Schema row construction/destruction goes through `Schema_Row` struct and
+`schema_row_to_values` / `schema_row_from_values` helpers.
 
 #### Database Coordinator (`db/db.odin`)
 
@@ -301,7 +314,8 @@ Database :: struct {
 ```
 
 The `table_roots` field (`map[string]u32`) is an incremental cache of table → root-page
-mappings, updated via `mutated_table_info` (set by COW DML operations). This avoids scanning
+mappings, updated from the `Mutated_Table_Info` return value of COW DML operations (passed
+explicitly through the call chain, not via a global). This avoids scanning
 the schema tree on every `list_tables` / `describe_table` call.
 
 Responsibility: coordinate the full lifecycle of a query.
@@ -457,6 +471,7 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 | `Serialization_Info.serial_types` | 0 (inline compute) | 1 (`make([]u64)`) | -100% |
 | Cell.allocator | 0 (removed) | 1 (16 bytes) | -100% |
 | Cursor path | 0 (`[32]` stack) | 1 (`make([dynamic]`) | -100% |
+| Pager slot lookup | 0 (free-list pop) | O(n) scan across 256 slots | -100% |
 | AST nodes | many (temp_allocator) | many (temp_allocator) | Same (bulk-freed) |
 
 ---
@@ -482,7 +497,8 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 | Slot size | 4120 bytes (24 Page + 4096 data) |
 | Total memory | ~1 MB |
 | Lookup (hit, avg probes) | ~1.5 (hash from `page_num % 256`) |
-| Lookup (miss, full scan) | 256 probes |
+| Slot allocation | O(1) — pop from `free_slots` dynamic array |
+| Eviction | O(n) — rotating-hand scan, 256 slots max |
 | Eviction cost | 1 `os.write_at` + 1 `os.read_at` |
 
 ### Snapshot
@@ -601,7 +617,7 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 | `build` | `-debug -o:none -warnings-as-errors` | Development |
 | `release` | `-o:aggressive -no-bounds-check -microarch:native` | Production |
 | `test` | `odin test tests/ -collection:src=src` | Unit tests |
-| `test-single` | `odin test ./tests -test-name <name>` | Run one test by name |
+| `test-single` | `make test-single <name>` | Run one test by name |
 | `vet-all` | `odin build + odin test` with `-vet*` flags | Full CI check |
 | `check` | Parse + type check only | Fast pre-commit |
 
@@ -609,14 +625,15 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 
 | Package | Tests | Coverage |
 |---|---|---|
-| `parser` | 52 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
+| `parser` | 38 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
 | `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates, DISTINCT, CHECK, EXPLAIN, subquery projection |
 | `btree` | 20 | Insert/find/delete/update, cursor, split, persistence, duplicates |
 | `cell` | 11 | Serialization roundtrip, zero-copy, edge cases |
 | `pager` | 19 | Page cache, WAL, crash recovery, bitmap, pinning, eviction |
-| `schema` | 10 | Column blob with CHECK, add/find/drop/list |
+| `schema` | 11 | Column blob with CHECK, add/find/drop/list, row round-trip |
 | `snapshot` | 12 | Chain, manifest, diff, tags, timestamp lookup, GC |
-| `integration` | 23 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, query API, freeblock reuse |
+| `integration` | 22 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, columnar integration |
+| **Total** | **197** | |
 
 ---
 
@@ -669,4 +686,4 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 - **No B-tree rebalancing**: Deletes fragment pages without merging.
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
 - **Mixed AND/OR WHERE**: Not supported.
-- **Max 10 columns per table**: Enforced by `MAX_COLS` constant.
+- **Max 10 columns per table**: Enforced by `MAX_COLS` constant (constrained by inline `[dynamic; N]T` scratch buffer in deserializer — avoids heap alloc per row).

@@ -101,6 +101,7 @@ expire_and_collect :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 		for i := 0; i < len(bm); i += 1 {
 			word := bm[i]
 			if word == 0 { continue }
+
 			base := u32(i) * 64
 			for bit := uint(0); bit < 64; bit += 1 {
 				pn := base + u32(bit)
@@ -117,13 +118,13 @@ expire_and_collect :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 	}
 
 	// Truncate file_len to the highest live page so future GC scans skip freed pages
-	
 	// After GC, shrink the logical file length to the highest live page so
 	// future GC scans skip the freed tail region entirely.
 	highest_live: u32
 	for pn, _ in live {
 		if pn > highest_live { highest_live = pn }
 	}
+
 	current_max := pager.page_count(p)
 	if highest_live > 0 && highest_live < current_max {
 		new_len := i64(highest_live) * i64(types.PAGE_SIZE)

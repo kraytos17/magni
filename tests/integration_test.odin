@@ -3,15 +3,20 @@ package tests
 import "core:fmt"
 import "core:os"
 import "core:testing"
+import "src:btree"
+import "src:cell"
 import "src:db"
+import "src:pager"
+import "src:schema"
 import "src:snapshot"
+import "src:types"
 
 setup_db :: proc(t: ^testing.T, name: string) -> ^db.Database {
 	filename := fmt.tprintf("test_int_%s.db", name)
 	if os.exists(filename) {
 		os.remove(filename)
 	}
-	
+
 	wal_name := fmt.tprintf("%s-wal", filename)
 	if os.exists(wal_name) {
 		os.remove(wal_name)
@@ -377,7 +382,7 @@ test_integration_join_hash :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO a VALUES (3, 'Carol');")
 	db.execute(d, "INSERT INTO b VALUES (1, 'X');")
 	db.execute(d, "INSERT INTO b VALUES (3, 'Z');")
-	
+
 	// Equi-join — should use hash join
 	r := db.execute(
 		d,
@@ -587,4 +592,238 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 
 	q := db.query(d2, "SELECT COUNT(*) FROM t;")
 	testing.expect(t, q.ok, "data should survive checkpoint+reopen")
+}
+
+@(test)
+test_integration_batch_snapshot :: proc(t: ^testing.T) {
+	d := setup_db(t, "batch_snap")
+	defer teardown_db(d, "batch_snap")
+
+	// With threshold=1 (default), every INSERT creates a snapshot
+	db.execute(d, "CREATE TABLE t (id INT)")
+	for i in 1 ..= 5 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d);", i))
+	}
+
+	// Verify data is queryable
+	q := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok, "data after default batch")
+}
+
+@(test)
+test_integration_rebalance :: proc(t: ^testing.T) {
+	d := setup_db(t, "rebal")
+	defer teardown_db(d, "rebal")
+
+	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
+	for i in 1 ..= 50 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'row%d');", i, i))
+	}
+	// Delete half the rows to create sparse pages
+	for i in 1 ..= 25 {
+		db.execute(d, fmt.tprintf("DELETE FROM t WHERE id = %d;", i * 2))
+	}
+
+	// Run rebalance
+	st := db.schema_tree(d)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	if len(tables) > 0 {
+		tree := btree.init(d.pager, tables[0].root_page)
+		btree.rebalance(&tree)
+	}
+
+	// Verify data is still accessible
+	q := db.query(d, "SELECT id, val FROM t ORDER BY id;")
+	testing.expect(t, q.ok, "SELECT after rebalance")
+	testing.expect(t, len(q.rows) > 0, "rows exist after rebalance")
+}
+
+@(test)
+test_integration_skip_index :: proc(t: ^testing.T) {
+	d := setup_db(t, "skipidx")
+	defer teardown_db(d, "skipidx")
+
+	db.execute(d, "CREATE TABLE t (id INT, score INT);")
+	for i in 1 ..= 20 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 10))
+	}
+
+	// Build a skip index on the table
+	st := db.schema_tree(d)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	if len(tables) > 0 {
+		tree := btree.init(d.pager, tables[0].root_page)
+		btree.build_skip_index(&tree, 1)
+	}
+
+	// Verify data is queryable
+	q := db.query(d, "SELECT id, score FROM t WHERE score > 50;")
+	testing.expect(t, q.ok, "SELECT after skip index build")
+}
+
+@(test)
+test_columnar_integration :: proc(t: ^testing.T) {
+	columns := []types.Column{{type = .INTEGER, name = "id"}, {type = .INTEGER, name = "score"}}
+	rowids := []types.Row_ID{10, 20, 30}
+	rows := [][]types.Value{{types.value_int(1), types.value_int(100)}, {types.value_int(2), types.value_int(200)}, {types.value_int(3), types.value_int(300)}}
+
+	buf: [4096]u8
+	// Use page_id=2 (non-page-1) to avoid database header offset
+	page_id: u32 = 2
+
+	ok := cell.serialize_columnar(buf[:], rowids, rows, columns)
+	testing.expect(t, ok, "serialize_columnar")
+
+	// Set up a minimal page header for page_id 2
+	off := btree.get_page_header_offset(page_id)
+	hdr_setup := (^btree.Page_Header)(raw_data(buf[off:]))
+	hdr_setup.page_type = .LEAF_TABLE_COLUMNAR
+	hdr_setup.cell_count = u16le(3)
+	hdr_setup.cell_content_offset = u16le(8 + len(columns) * 12)
+
+	// Read back individual rows via read_columnar_cell
+	for i in 0 ..< 3 {
+		cc, cc_ok := cell.read_columnar_cell(buf[:], 2, i, cell.Config{allocator = context.temp_allocator})
+		testing.expect(t, cc_ok, fmt.tprintf("read columnar cell %d", i))
+		if cc_ok {
+			testing.expect_value(t, types.Row_ID(cc.rowid), rowids[i])
+			if len(cc.values) >= 2 {
+				v0, _ := cc.values[0].(i64)
+				v1, _ := cc.values[1].(i64)
+				testing.expect_value(t, v0, rows[i][0].(i64))
+				testing.expect_value(t, v1, rows[i][1].(i64))
+			}
+		}
+	}
+
+	// Test: convert_columnar_to_row_major preserves data
+	btree.convert_columnar_to_row_major(buf[:], page_id, 2)
+	hdr := btree.get_leaf_header(buf[:], page_id)
+	testing.expect(t, hdr != nil, "got leaf header after conversion")
+	testing.expect_value(t, int(hdr.cell_count), 3)
+	testing.expect(t, hdr.page_type == .LEAF_TABLE, "page type is LEAF_TABLE after conversion")
+
+	// Verify: deserialize cells from row-major page
+	for i in 0 ..< 3 {
+		ptrs := btree.get_pointers(buf[:], page_id)
+		testing.expect(t, i < len(ptrs), fmt.tprintf("cell pointer %d exists", i))
+		if i < len(ptrs) {
+			c, _, des_ok := cell.deserialize(buf[:], int(ptrs[i]), cell.Config{allocator = context.temp_allocator})
+			testing.expect(t, des_ok, fmt.tprintf("deserialize cell %d", i))
+			if des_ok {
+				testing.expect_value(t, types.Row_ID(c.rowid), rowids[i])
+			}
+		}
+	}
+}
+
+@(test)
+test_columnar_btree_read :: proc(t: ^testing.T) {
+	// Test cursor and tree_find on columnar pages within a real b-tree
+	ctx := setup_tree(t, "colbtree")
+	defer teardown_tree(&ctx)
+
+	// Insert 5 rows into the tree
+	for i in 1 ..= 5 {
+		val := []types.Value{types.value_int(i64(i * 10))}
+		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), val)
+		testing.expect(t, err == .None, fmt.tprintf("insert row %d", i))
+	}
+
+	// Manually convert the root page (page 1) to columnar format
+	pg, pg_err := pager.get_page(ctx.pager, 1)
+	testing.expect(t, pg_err == .None, "get page 1")
+	defer pager.unpin_page(ctx.pager, 1)
+
+	// Read current data from row-major page
+	original_rows := make([dynamic]struct{rid: types.Row_ID, vals: []types.Value}, context.temp_allocator)
+	{
+		c, _ := btree.cursor_start(&ctx.tree)
+		defer btree.cursor_destroy(&c)
+		for c.is_valid {
+			cell_val, _ := btree.cursor_get_cell(&c)
+			append(&original_rows, struct{rid: types.Row_ID, vals: []types.Value}{cell_val.rowid, cell_val.values})
+			btree.cursor_advance(&c)
+		}
+	}
+	testing.expect(t, len(original_rows) == 5, "original 5 rows")
+
+	// Build columnar data. Page 1 has 100-byte DB header offset.
+	off := btree.get_page_header_offset(1)
+	rowids := make([]types.Row_ID, len(original_rows), context.temp_allocator)
+	values := make([][]types.Value, len(original_rows), context.temp_allocator)
+	for i in 0 ..< len(original_rows) {
+		rowids[i] = original_rows[i].rid
+		values[i] = original_rows[i].vals
+	}
+	cols := []types.Column{{name = "val", type = .INTEGER}}
+	ok := cell.serialize_columnar(pg.data[off:], rowids, values, cols)
+	testing.expect(t, ok, "serialize columnar on page 1")
+
+	// Set page header
+	hdr := btree.get_leaf_header(pg.data, 1)
+	hdr.page_type = .LEAF_TABLE_COLUMNAR
+	hdr.cell_count = u16le(5)
+	hdr.cell_content_offset = u16le(8 + len(cols) * 12)
+	pager.mark_dirty(ctx.pager, 1)
+
+	// Test: cursor reads from columnar page
+	{
+		c, c_err := btree.cursor_start(&ctx.tree)
+		testing.expect(t, c_err == .None, "cursor start on columnar tree")
+		defer btree.cursor_destroy(&c)
+		count := 0
+		for c.is_valid {
+			cell_val, g_err := btree.cursor_get_cell(&c)
+			testing.expect(t, g_err == .None, fmt.tprintf("get cell from columnar page %d", count))
+			if g_err == .None {
+				// Verify rowid matches expected
+				for orig in original_rows {
+					if cell_val.rowid == orig.rid { count += 1; break }
+				}
+			}
+			btree.cursor_advance(&c)
+		}
+		testing.expect(t, count == 5, "cursor read 5 rows from columnar page")
+	}
+
+	// Test: tree_find on columnar page
+	for i in 1 ..= 5 {
+		found, f_err := btree.tree_find(&ctx.tree, types.Row_ID(i), context.temp_allocator)
+		testing.expect(t, f_err == .None, fmt.tprintf("tree_find row %d", i))
+		if f_err == .None {
+			testing.expect_value(t, types.Row_ID(i), found.rowid)
+		}
+	}
+
+	// Test: tree_find for non-existent row returns Cell_Not_Found
+	_, f_err := btree.tree_find(&ctx.tree, 999, context.temp_allocator)
+	testing.expect(t, f_err == .Cell_Not_Found, "tree_find non-existent returns not found")
+
+	// Test: INSERT triggers columnar→row-major conversion
+	{
+		new_val := []types.Value{types.value_int(999)}
+		new_root, ins_err := btree.tree_insert_cow(&ctx.tree, 99, new_val)
+		testing.expect(t, ins_err == .None, "insert on columnar page")
+		_ = new_root
+
+		// Verify via cursor
+		ctx.tree.root = new_root
+		c, _ := btree.cursor_start(&ctx.tree)
+		defer btree.cursor_destroy(&c)
+		found := false
+		for c.is_valid {
+			cell_val, _ := btree.cursor_get_cell(&c)
+			if cell_val.rowid == 99 {
+				found = true
+				if len(cell_val.values) > 0 {
+					v, is_i64 := cell_val.values[0].(i64)
+					testing.expect(t, is_i64 && v == 999, "inserted value 999 found")
+				}
+				break
+			}
+			btree.cursor_advance(&c)
+		}
+		testing.expect(t, found, "inserted row 99 was found")
+	}
 }

@@ -281,7 +281,10 @@ print_help :: proc() {
 	fmt.println("  .snapshot restore <id>  Restore database to a historical snapshot")
 	fmt.println("  .rollforward            Advance current state to the most recent snapshot")
 	fmt.println(
-		fmt.tprintf("  .expire [keep]          Expire old snapshots (keep default %d) and garbage collect", db.DEFAULT_KEEP),
+		fmt.tprintf(
+			"  .expire [keep]          Expire old snapshots (keep default %d) and garbage collect",
+			db.DEFAULT_KEEP,
+		),
 	)
 	fmt.println("  .stats              Show database file statistics")
 	fmt.println("  .integrity          Run consistency checks")

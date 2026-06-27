@@ -3,7 +3,6 @@ package btree
 
 import "core:encoding/endian"
 import "core:fmt"
-import "core:mem"
 import "core:strings"
 import "src:cell"
 import "src:pager"
@@ -24,8 +23,7 @@ Tree :: struct {
 }
 
 Config :: struct #all_or_none {
-	allocator:        mem.Allocator,
-	zero_copy:        bool,
+	using _:          types.Storage_Config,
 	check_duplicates: bool,
 }
 
@@ -61,7 +59,9 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 	return Tree{pager = p, root = root_page, config = c}
 }
 
-is_leaf :: proc(n: Node) -> bool { return n.header.page_type == .LEAF_TABLE }
+is_leaf :: proc(n: Node) -> bool {
+	return n.header.page_type == .LEAF_TABLE || n.header.page_type == .LEAF_TABLE_COLUMNAR
+}
 
 node_leaf :: proc(n: Node) -> ^Leaf_Header { return get_leaf_header(n.data, n.id) }
 
@@ -106,6 +106,8 @@ node_insert_leaf_cell :: proc(
 	values: []types.Value,
 ) -> Error {
 	if !is_leaf(n^) { return .Invalid_Page_Header }
+
+	ensure_row_major(n.data, n.id)
 	pointers := get_pointers(n.data, n.id)
 	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid)
 	if t.config.check_duplicates {
@@ -402,6 +404,30 @@ tree_find :: proc(
 	if err != .None { return {}, err }
 	defer unpin_node(t, leaf)
 
+	// Columnar page: linear scan rowids
+	if is_columnar(leaf.data, leaf.id) {
+		num_cols, found := detect_columnar_col_count(leaf.data, leaf.id)
+		if !found { return {}, .Invalid_Cell_Pointer }
+
+		boff := get_page_header_offset(leaf.id)
+		row_count := int(leaf.header.cell_count)
+		for i in 0 ..< row_count {
+			rid, _ := cell.read_columnar_rowid(leaf.data, num_cols, i, boff)
+			if rid == key {
+				cc, cc_ok := cell.read_columnar_cell(
+					leaf.data,
+					num_cols,
+					i,
+					cell.Config{allocator = allocator, zero_copy = t.config.zero_copy},
+					boff,
+				)
+				if cc_ok { return cc, .None }
+				return {}, .Cell_Deserialize_Failed
+			}
+		}
+		return {}, .Cell_Not_Found
+	}
+
 	pointers := get_pointers(leaf.data, leaf.id)
 	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key)
 	if !ok { return {}, .Invalid_Cell_Pointer }
@@ -458,6 +484,9 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (int, Error) {
 }
 
 delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error {
+	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
+
+	ensure_row_major(leaf_node.data, leaf_node.id)
 	pointers := get_raw_pointers(leaf_node.data, leaf_node.id)
 	limit := int(leaf_node.header.cell_count)
 	delete_idx, cell_off, cell_sz := -1, 0, 0

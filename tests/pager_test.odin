@@ -239,7 +239,7 @@ create_test_wal_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, 
 	if os.exists(filename) { os.remove(filename) }
 	if os.exists(wal_filename) { os.remove(wal_filename) }
 
-	p, err := pager.open(filename, 256)
+	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "WAL: Failed to open pager with WAL")
 	testing.expect(t, p != nil, "WAL: Pager should not be nil")
 	return p, filename
@@ -302,7 +302,7 @@ test_wal_uncommitted_discarded_on_close :: proc(t: ^testing.T) {
 	pager.wal_abort_txn(p)
 	_ = pager.close(p)
 
-	p2, err2 := pager.open(file, 256)
+	p2, err2 := pager.open(file)
 	testing.expect(t, err2 == .None, "WAL: reopen failed")
 	defer destroy_test_wal_env(p2, file)
 
@@ -323,7 +323,7 @@ test_wal_commit_survives_reopen :: proc(t: ^testing.T) {
 	pager.wal_commit_txn(p)
 	_ = pager.close(p)
 
-	p2, err := pager.open(file, 256)
+	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "WAL: reopen after commit failed")
 	if err != .None { return }
 	defer destroy_test_wal_env(p2, file)
@@ -348,7 +348,7 @@ test_wal_recovery_from_crash :: proc(t: ^testing.T) {
 	defer os.remove(file)
 	defer os.remove(wal_file)
 
-	p1, err := pager.open(file, 256)
+	p1, err := pager.open(file)
 	testing.expect(t, err == .None, "WAL crash: open failed")
 
 	pg, _ := pager.allocate_page(p1)
@@ -365,7 +365,7 @@ test_wal_recovery_from_crash :: proc(t: ^testing.T) {
 		p1.wal_state.file = nil
 	}
 
-	p2, err2 := pager.open(file, 256)
+	p2, err2 := pager.open(file)
 	testing.expect(t, err2 == .None, "WAL crash: reopen after crash failed")
 	defer destroy_test_wal_env(p2, file)
 
@@ -455,7 +455,7 @@ test_wal_multi_txn_read_your_writes :: proc(t: ^testing.T) {
 	pager.wal_commit_txn(p)
 
 	_ = pager.close(p)
-	p2, err := pager.open(file, 256)
+	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "WAL multi-txn: reopen failed")
 	defer destroy_test_wal_env(p2, file)
 
@@ -488,7 +488,7 @@ test_wal_begin_commit_rollback_stress :: proc(t: ^testing.T) {
 	}
 
 	_ = pager.close(p)
-	p2, err := pager.open(file, 256)
+	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "WAL stress: reopen failed")
 	defer destroy_test_wal_env(p2, file)
 
@@ -524,7 +524,7 @@ test_wal_rollback_does_not_leak_pages :: proc(t: ^testing.T) {
 	pager.wal_abort_txn(p)
 	_ = pager.close(p)
 
-	p2, err := pager.open(file, 256)
+	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "WAL rollback leak: reopen failed")
 	defer destroy_test_wal_env(p2, file)
 
@@ -629,7 +629,7 @@ test_bitmap_grows_on_allocate :: proc(t: ^testing.T) {
 	wal_name := fmt.tprintf("%s-wal", filename)
 	defer os.remove(wal_name)
 
-	p, err := pager.open(filename, 256)
+	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "open failed")
 	defer pager.close(p)
 

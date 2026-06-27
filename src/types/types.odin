@@ -9,13 +9,25 @@ import "core:strings"
 
 PAGE_SIZE :: 4096
 DATABASE_HEADER_SIZE :: 100
+
+// MAX_COLS is the maximum number of columns a table can have. It's constrained by
+// the inline scratch buffers in cell.deserialize and read_columnar_cell, which use
+// [dynamic; types.MAX_COLS]T for stack-allocated storage (no heap alloc per row).
+// Increasing this value increases stack frame size in the deserialization hot path.
 MAX_COLS :: 10
+
+// Storage_Config is shared between btree and cell for consistent deserialization settings.
+Storage_Config :: struct {
+	allocator: mem.Allocator,
+	zero_copy: bool,
+}
+
 MAGIC_STRING :: "MAGNI_DB"
 SCHEMA_VERSION :: 1
 WAL_MAGIC :: "MAGNIWAL"
 WAL_HEADER_SIZE :: 32
 WAL_FRAME_HEADER_SIZE :: 24
-WAL_FRAME_SIZE :: WAL_FRAME_HEADER_SIZE + PAGE_SIZE  // 24 + 4096 = 4120
+WAL_FRAME_SIZE :: WAL_FRAME_HEADER_SIZE + PAGE_SIZE // 24 + 4096 = 4120
 NANOS_PER_MICRO :: 1000
 
 // Serial types used for encoding values in cells
@@ -102,6 +114,13 @@ value_delete :: proc(v: Value, allocator := context.allocator) {
 	case []u8:
 		delete(val, allocator)
 	}
+}
+
+values_delete :: proc(values: []Value, allocator := context.allocator) {
+	for v in values {
+		value_delete(v, allocator)
+	}
+	delete(values, allocator)
 }
 
 value_compare :: proc(a, b: Value) -> bool {
@@ -194,6 +213,7 @@ Table :: struct {
 	root_page:    u32,
 	sql:          string,
 	foreign_keys: []Foreign_Key,
+	skip_root:    u32, // root page of the skip index for this table (0 = none)
 }
 
 Foreign_Key :: struct {

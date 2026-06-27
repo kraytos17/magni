@@ -7,9 +7,8 @@ where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
 		delete(cond.column, allocator)
 		if rc, ok := cond.rhs.(string); ok { delete(rc, allocator) }
 		if val, ok := cond.rhs.(types.Value); ok { types.value_delete(val, allocator) }
-		for v in cond.in_values { types.value_delete(v, allocator) }
 
-		delete(cond.in_values, allocator)
+		types.values_delete(cond.in_values, allocator)
 		if subq := cond.in_subquery; subq != nil {
 			statement_free(Statement{type = subq^, sql = ""}, allocator)
 			free(subq, allocator)
@@ -40,8 +39,7 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		delete(s.table_name, allocator)
 		for col in s.columns { delete(col, allocator) }
 		delete(s.columns, allocator)
-		for val in s.values { types.value_delete(val, allocator) }
-		delete(s.values, allocator)
+		types.values_delete(s.values, allocator)
 	case Select_Stmt:
 		#partial switch src in s.from {
 		case string:
@@ -84,8 +82,7 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		delete(s.table_name, allocator)
 		for col in s.update_columns { delete(col, allocator) }
 		delete(s.update_columns, allocator)
-		for val in s.update_values { types.value_delete(val, allocator) }
-		delete(s.update_values, allocator)
+		types.values_delete(s.update_values, allocator)
 		if w, ok := s.where_clause.?; ok { where_clause_free(w, allocator) }
 	case Delete_Stmt:
 		delete(s.table_name, allocator)

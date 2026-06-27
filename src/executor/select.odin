@@ -824,6 +824,20 @@ scan_table :: proc(
 	if wc, has_wc := where_clause.?; has_wc {
 		where_ctx = init_where_ctx(&wc, table.columns, nil, schema_tree, allocator)
 	}
+	// Populate skip index bounds from the table's skip index
+	if ctx, ctx_ok := where_ctx.?; ctx_ok && table.skip_root > 0 {
+		for i in 0 ..< len(ctx.conditions) {
+			rc := &ctx.conditions[i]
+			if rc.has_right_col || rc.has_in { continue }
+			if val, is_int := rc.rhs.(i64); is_int {
+				skip_tree := btree.init(tree.pager, table.skip_root)
+				pmin, pmax, found := btree.query_skip_index(&skip_tree, val)
+				if found {
+					rc.skip_page_min = pmin; rc.skip_page_max = pmax
+				}
+			}
+		}
+	}
 
 	use_where := false
 	where_ctx_val: Where_Eval_Ctx
@@ -831,7 +845,24 @@ scan_table :: proc(
 		use_where = true
 		where_ctx_val = ctx
 	}
+
+	skip_min, skip_max: u32
+	if use_where {
+		for rc in where_ctx_val.conditions {
+			if rc.skip_page_min > 0 {
+				if skip_min == 0 || rc.skip_page_min < skip_min { skip_min = rc.skip_page_min }
+			}
+			if rc.skip_page_max > 0 {
+				if rc.skip_page_max > skip_max { skip_max = rc.skip_page_max }
+			}
+		}
+	}
 	for cursor.is_valid {
+		if skip_max > 0 {
+			cp := cursor.path[cursor.depth - 1].page_id
+			if cp > skip_max { break }
+		}
+
 		c, get_err := btree.cursor_get_cell(&cursor, allocator)
 		if get_err != .None {
 			btree.cursor_advance(&cursor)
@@ -847,6 +878,25 @@ scan_table :: proc(
 		append(&r, Row_Entry{c.rowid, c.values})
 		if limit, has_limit := max_rows.?; has_limit && u64(len(r)) >= limit { break }
 		btree.cursor_advance(&cursor)
+	}
+	if use_where && table.skip_root == 0 && schema_tree != nil {
+		for rc in where_ctx_val.conditions {
+			if rc.has_right_col || rc.has_in { continue }
+			col_idx := rc.col_idx
+			skip_idx, build_err := btree.build_skip_index(tree, col_idx)
+			if build_err == .None {
+				new_schema_root, ok := schema.update_skip_root_cow(
+					schema_tree,
+					table.name,
+					skip_idx.root,
+				)
+				if ok {
+					schema_tree.root = new_schema_root
+					table.skip_root = skip_idx.root
+				}
+			}
+			break // only build for the first qualifying column
+		}
 	}
 	return r[:], false
 }

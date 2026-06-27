@@ -63,6 +63,64 @@ node_move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: 
 
 split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if node_leaf(curr^).cell_count == 0 { return {}, .Page_Full }
+	// If the page is columnar, convert to row-major before splitting
+	if is_columnar(curr.data, curr.id) {
+		num_cols, found := detect_columnar_col_count(curr.data, curr.id)
+		if !found { return {}, .Page_Full }
+
+		row_count := int(curr.header.cell_count)
+		boff := get_page_header_offset(curr.id)
+		rowids := make([]types.Row_ID, row_count, context.temp_allocator)
+		for i in 0 ..< row_count {
+			rid, rid_ok := cell.read_columnar_rowid(curr.data, num_cols, i, boff)
+			if !rid_ok { return {}, .Serialization_Failed }
+			rowids[i] = rid
+		}
+
+		values := make([][]types.Value, row_count, context.temp_allocator)
+		for col_i in 0 ..< num_cols {
+			col_vals := cell.decode_column(
+				curr.data,
+				num_cols,
+				col_i,
+				boff,
+				context.temp_allocator,
+			)
+			if col_vals == nil { return {}, .Serialization_Failed }
+			for ri in 0 ..< row_count {
+				if values[ri] == nil {
+					values[ri] = make([]types.Value, num_cols, context.temp_allocator)
+				}
+				if ri < len(col_vals) {
+					values[ri][col_i] = col_vals[ri]
+				}
+			}
+		}
+
+		// Reinitialize page as row-major and insert all rows
+		init_leaf_page(curr.data, curr.id)
+		for ri in 0 ..< row_count {
+			info := cell.compute_info(rowids[ri], values[ri])
+			off := get_page_header_offset(curr.id)
+			header := (^Leaf_Header)(raw_data(curr.data[off:]))
+			dest_off := int(header.cell_content_offset) - info.total_size
+			if dest_off < off + size_of(Leaf_Header) + (int(header.cell_count) + 1) * 2 {
+				return {}, .Page_Full
+			}
+
+			cell.serialize(
+				curr.data[dest_off:dest_off + info.total_size],
+				rowids[ri],
+				values[ri],
+				info,
+			)
+
+			header.cell_content_offset = u16le(dest_off)
+			ptr_loc := off + size_of(Leaf_Header) + int(header.cell_count) * 2
+			endian.put_u16(curr.data[ptr_loc:], .Little, u16(dest_off))
+			header.cell_count = u16le(int(header.cell_count) + 1)
+		}
+	}
 
 	new_page, err := pager.allocate_page(t.pager)
 	if err != nil { return {}, .Page_Full }

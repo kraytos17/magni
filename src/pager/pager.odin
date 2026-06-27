@@ -28,14 +28,16 @@ Pager :: struct {
 	file_len:        i64,
 	page_size:       u32,
 	slots:           [PAGE_CACHE_SIZE]Page_Slot,
-	max_cache_pages: u32,
-	mutex:           sync.RW_Mutex, // shared lock for reads, exclusive for writes
+	mutex:           sync.RW_Mutex,
 	allocator:       mem.Allocator,
-	first_free_page: u32, // head of the free-page linked list
-	slot_count:      u32, // cache slots currently in use
-	cache_index:     map[u32]^Page_Slot, // page_num → cache slot
-	wal_state:       Wal_State, // WAL frame indices (txn_index + page_index)
-	page_bitmap:     []u64, // bit N = 1 → page N was ever allocated (GC uses this)
+	first_free_page: u32,
+	slot_count:      u32,
+	max_cache_pages: u32,
+	cache_index:     map[u32]^Page_Slot,
+	wal_state:       Wal_State,
+	page_bitmap:     []u64,
+	evict_hand:      u32,
+	free_slots:      [dynamic]^Page_Slot,
 }
 
 Error :: enum {
@@ -51,29 +53,21 @@ Error :: enum {
 find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return p.cache_index[page_num] }
 
 find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
-	if p.slot_count >=
-	   p.max_cache_pages { if err := evict_one_slot(p); err != .None { return nil } }
-	for i in 0 ..< PAGE_CACHE_SIZE {
-		slot := &p.slots[i]
-		if slot.page.page_num == 0 {
-			slot.page.data = slot._data_buf[:]; p.slot_count += 1
-			return slot
-		}
+	if p.slot_count >= p.max_cache_pages {
+		if evict_one_slot(p) != .None { return nil }
 	}
-	if evict_one_slot(p) != .None { return nil }
-	for i in 0 ..< PAGE_CACHE_SIZE {
-		slot := &p.slots[i]
-		if slot.page.page_num == 0 {
-			slot.page.data = slot._data_buf[:]; p.slot_count += 1
-			return slot
-		}
-	}
-	return nil
+	if len(p.free_slots) == 0 { return nil }
+	slot := pop(&p.free_slots)
+	slot.page.data = slot._data_buf[:]
+	p.slot_count += 1
+	return slot
 }
 
 evict_one_slot :: proc(p: ^Pager) -> Error {
+	start := p.evict_hand % PAGE_CACHE_SIZE
 	for i in 0 ..< PAGE_CACHE_SIZE {
-		slot := &p.slots[i]
+		idx := (start + u32(i)) % PAGE_CACHE_SIZE
+		slot := &p.slots[idx]
 		if slot.page.page_num != 0 && slot.page.pin_count == 0 {
 			if slot.page.dirty {
 				if err := wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0);
@@ -81,7 +75,10 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 			}
 
 			delete_key(&p.cache_index, slot.page.page_num)
-			slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
+			slot.page = {}
+			p.slot_count -= 1
+			append(&p.free_slots, slot)
+			p.evict_hand = (idx + 1) % PAGE_CACHE_SIZE
 			return .None
 		}
 	}
@@ -106,6 +103,11 @@ open :: proc(
 	p.cache_index = make(map[u32]^Page_Slot, PAGE_CACHE_SIZE, allocator)
 	p.wal_state.page_index = make(map[u32]i64, allocator)
 	p.wal_state.txn_index = make(map[u32]i64, allocator)
+	p.free_slots = make([dynamic]^Page_Slot, 0, PAGE_CACHE_SIZE, allocator)
+	for i in 0 ..< p.max_cache_pages {
+		append(&p.free_slots, &p.slots[i])
+	}
+	
 	flags := os.O_RDWR | os.O_CREATE
 	file, open_err := os.open(path, flags)
 	if open_err != nil {
@@ -148,7 +150,11 @@ close :: proc(p: ^Pager) -> Error {
 	wal_close(p)
 	if p.file != nil { os.close(p.file) }
 
-	delete(p.file_name); delete(p.cache_index); delete(p.page_bitmap); free(p, p.allocator)
+	delete(p.file_name)
+	delete(p.cache_index)
+	delete(p.page_bitmap)
+	delete(p.free_slots)
+	free(p, p.allocator)
 	return .None
 }
 
@@ -191,13 +197,15 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	offset := i64(page_num - 1) * i64(p.page_size)
 	bytes_read, read_err := os.read_at(p.file, slot._data_buf[:], offset)
 	if read_err != nil || bytes_read < int(p.page_size) {
-		slot.page.page_num = 0
-		slot.page.data = nil
+		slot.page = {}
 		p.slot_count -= 1
+		append(&p.free_slots, slot)
 		return nil, .IO_Error
 	}
 
-	slot.page.page_num = page_num; slot.page.pin_count = 1; slot.page.dirty = false
+	slot.page.page_num = page_num
+	slot.page.pin_count = 1
+	slot.page.dirty = false
 	p.cache_index[page_num] = slot
 	return &slot.page, .None
 }

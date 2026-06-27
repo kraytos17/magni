@@ -8,8 +8,9 @@ import "src:types"
 PAGE_SIZE :: types.PAGE_SIZE
 
 Page_Type :: enum u8 {
-	INTERIOR_TABLE = 5, // Internal node: pointers to pages
-	LEAF_TABLE     = 13, // Leaf node: pointers to data
+	INTERIOR_TABLE      = 5, // Internal node: pointers to pages
+	LEAF_TABLE          = 13, // Leaf node: pointers to data (row-major)
+	LEAF_TABLE_COLUMNAR = 14, // Leaf node: columnar-encoded data
 }
 
 Cell_Pointer :: distinct u16le
@@ -62,6 +63,11 @@ get_leaf_header :: proc(data: []u8, page_id: u32) -> ^Leaf_Header {
 	return (^Leaf_Header)(raw_data(data[off:]))
 }
 
+is_columnar :: proc(data: []u8, page_id: u32) -> bool {
+	h := get_header(data, page_id)
+	return h != nil && h.page_type == .LEAF_TABLE_COLUMNAR
+}
+
 init_interior_page :: proc(data: []u8, page_id: u32) {
 	off := get_page_header_offset(page_id)
 	mem.zero_slice(data[off:])
@@ -85,6 +91,80 @@ init_leaf_page :: proc(data: []u8, page_id: u32) {
 	header.cell_count = 0
 	header.cell_content_offset = PAGE_SIZE
 	header.fragmented_bytes = 0
+}
+
+convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
+	off := get_page_header_offset(page_id)
+	hdr := (^Page_Header)(raw_data(data[off:]))
+	row_count := int(hdr.cell_count)
+	if row_count == 0 { return }
+
+	rowids := make([]types.Row_ID, row_count, context.temp_allocator)
+	for i in 0 ..< row_count {
+		rid, ok := cell.read_columnar_rowid(data, num_cols, i, off)
+		if !ok { return }
+		rowids[i] = rid
+	}
+
+	values := make([][]types.Value, row_count, context.temp_allocator)
+	for col_i in 0 ..< num_cols {
+		col_vals := cell.decode_column(data, num_cols, col_i, off, context.temp_allocator)
+		if col_vals == nil { return }
+		for ri in 0 ..< row_count {
+			if values[ri] == nil {
+				values[ri] = make([]types.Value, num_cols, context.temp_allocator)
+			}
+			if ri < len(col_vals) {
+				values[ri][col_i] = col_vals[ri]
+			}
+		}
+	}
+
+	// Reinitialize page as row-major LEAF_TABLE
+	mem.zero_slice(data[off:])
+	header := (^Leaf_Header)(raw_data(data[off:]))
+	header.page_type = .LEAF_TABLE
+	header.first_freeblock = 0
+	header.cell_count = 0
+	header.cell_content_offset = PAGE_SIZE
+	header.fragmented_bytes = 0
+
+	for ri in 0 ..< row_count {
+		if values[ri] == nil { continue }
+		info := cell.compute_info(rowids[ri], values[ri])
+		dest_off := int(header.cell_content_offset) - info.total_size
+		if dest_off < off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * 2 {
+			return
+		}
+
+		cell.serialize(data[dest_off:dest_off + info.total_size], rowids[ri], values[ri], info)
+		header.cell_content_offset = u16le(dest_off)
+		ptr_loc := off + size_of(Leaf_Header) + int(header.cell_count) * 2
+		endian.put_u16(data[ptr_loc:], .Little, u16(dest_off))
+		header.cell_count = u16le(int(header.cell_count) + 1)
+	}
+}
+
+ensure_row_major :: proc(data: []u8, page_id: u32) {
+	if !is_columnar(data, page_id) { return }
+	num_cols, found := detect_columnar_col_count(data, page_id)
+	if !found { return }
+	convert_columnar_to_row_major(data, page_id, num_cols)
+}
+
+detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
+	if !is_columnar(data, page_id) { return 0, false }
+	hdr := get_header(data, page_id)
+	if hdr == nil { return 0, false }
+
+	col_start := 8 // COLUMNAR_DIR_OFFSET
+	col_sz := 12 // size_of(Col_Header)
+	data_start := int(hdr.cell_content_offset)
+	if data_start <= col_start { return 0, false }
+
+	n := (data_start - col_start) / col_sz
+	if n < 1 || n > 100 { return 0, false }
+	return n, true
 }
 
 get_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
