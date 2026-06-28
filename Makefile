@@ -28,7 +28,7 @@ CHECK_FLAGS   := -warnings-as-errors
         check vet vet-shadowing vet-style vet-all vet-cast vet-unused \
         check-vet help
 
-all: build
+all: clean build
 
 build:
 	@echo "Building debug version..."

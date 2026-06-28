@@ -7,7 +7,9 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:sys/posix"
 import "src:db"
+import "src:linedit"
 
 APP_VERSION :: "1.0"
 DEFAULT_DB_PATH :: "test.db"
@@ -19,8 +21,8 @@ CLI :: struct {
 	database:      string `args:"pos=0,usage=Database file path (default: test.db)"`,
 	file:          string `args:"name=file,usage=Execute SQL from file and exit"`,
 	eval:          string `args:"name=eval,usage=Execute a single SQL statement and exit"`,
-	stop_on_error: bool   `args:"name=stop-on-error,usage=Exit on first SQL error in script mode"`,
-	version:       bool   `args:"name=version,usage=Print version and exit"`,
+	stop_on_error: bool `args:"name=stop-on-error,usage=Exit on first SQL error in script mode"`,
+	version:       bool `args:"name=version,usage=Print version and exit"`,
 }
 
 main :: proc() {
@@ -37,7 +39,6 @@ main :: proc() {
 		fmt.eprintln("Error:", err)
 		return
 	}
-
 	if cli.version {
 		fmt.printf("MagniDB v%s\n", APP_VERSION)
 		return
@@ -51,7 +52,6 @@ main :: proc() {
 	defer db.close(database)
 
 	stop_on_error := cli.stop_on_error
-
 	if len(cli.file) > 0 {
 		execute_script_file(database, cli.file, stop_on_error)
 	} else if len(cli.eval) > 0 {
@@ -65,13 +65,58 @@ main :: proc() {
 }
 
 repl :: proc(database: ^db.Database) {
+	history_path := filepath_join_home(".magnidb_history")
+	ed, ok := linedit.init(posix.STDIN_FILENO, history_path)
+	if !ok {
+		repl_fallback(database)
+		return
+	}
+	defer linedit.destroy(&ed)
+
+	query_buffer := strings.builder_make()
+	defer strings.builder_destroy(&query_buffer)
+
+	for {
+		defer free_all(context.temp_allocator)
+		prompt := strings.builder_len(query_buffer) == 0 ? PROMPT : CONT_PROMPT
+		line, got := linedit.read_line(&ed, prompt)
+		if !got {
+			fmt.println()
+			break
+		}
+
+		trimmed := strings.trim_space(line)
+		if len(trimmed) == 0 {
+			if strings.builder_len(query_buffer) > 0 {
+				strings.builder_reset(&query_buffer)
+			}
+			continue
+		}
+		if strings.builder_len(query_buffer) == 0 && strings.has_prefix(trimmed, ".") {
+			linedit.history_add(&ed.history, trimmed)
+			if handle_dot_command(database, trimmed) { break }
+			continue
+		}
+
+		strings.write_string(&query_buffer, line)
+		strings.write_byte(&query_buffer, '\n')
+		if strings.has_suffix(trimmed, ";") {
+			full_sql := strings.to_string(query_buffer)
+			linedit.history_add(&ed.history, strings.trim_space(full_sql))
+			db.execute(database, full_sql)
+			strings.builder_reset(&query_buffer)
+		}
+	}
+}
+
+repl_fallback :: proc(database: ^db.Database) {
 	reader: bufio.Reader
 	bufio.reader_init(&reader, os.to_stream(os.stdin))
 	defer bufio.reader_destroy(&reader)
 
 	query_buffer := strings.builder_make()
 	defer strings.builder_destroy(&query_buffer)
-	loop: for {
+	for {
 		defer free_all(context.temp_allocator)
 		if strings.builder_len(query_buffer) == 0 {
 			fmt.print(PROMPT)
@@ -90,11 +135,9 @@ repl :: proc(database: ^db.Database) {
 		}
 
 		trimmed := strings.trim_space(line)
-		if len(trimmed) == 0 {
-			continue
-		}
+		if len(trimmed) == 0 { continue }
 		if strings.builder_len(query_buffer) == 0 && strings.has_prefix(trimmed, ".") {
-			handle_dot_command(database, trimmed)
+			if handle_dot_command(database, trimmed) { break }
 			continue
 		}
 
@@ -107,11 +150,11 @@ repl :: proc(database: ^db.Database) {
 	}
 }
 
-handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
+handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	switch trimmed {
 	case ".exit", ".quit":
 		fmt.println("Goodbye.")
-		os.exit(0)
+		return true
 	case ".help":
 		print_help()
 	case ".version":
@@ -214,6 +257,7 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) {
 			fmt.printf("Error: Unknown command '%s'. Try .help\n", trimmed)
 		}
 	}
+	return false
 }
 
 execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error: bool = false) {
@@ -238,7 +282,7 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 	statements := split_statements(sql)
 	for stmt in statements {
 		trimmed := strings.trim_space(stmt)
-		if len(trimmed) == 0 { continue }
+		if len(trimmed) <= 1 { continue } 	// skip empty or bare ";"
 		if !db.execute(database, trimmed) {
 			if stop_on_error {
 				fmt.eprintf("Error: %s\n", trimmed[:min(len(trimmed), 80)])
@@ -267,6 +311,20 @@ split_statements :: proc(sql: string) -> []string {
 		}
 	}
 	return result[:]
+}
+
+filepath_join_home :: proc(path: string) -> string {
+	buf: [1024]u8
+	home := os.get_env_buf(buf[:], "HOME")
+	if len(home) == 0 {
+		return path
+	}
+
+	sb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&sb, home)
+	strings.write_byte(&sb, '/')
+	strings.write_string(&sb, path)
+	return strings.to_string(sb)
 }
 
 print_help :: proc() {

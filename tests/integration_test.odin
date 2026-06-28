@@ -2,11 +2,13 @@ package tests
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:cell"
 import "src:db"
 import "src:pager"
+import "src:parser"
 import "src:schema"
 import "src:snapshot"
 import "src:types"
@@ -762,6 +764,8 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 				rid:  types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
+			cell_val.values = nil
+			cell.destroy(&cell_val)
 			btree.cursor_advance(&c)
 		}
 	}
@@ -778,6 +782,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 	cols := []types.Column{{name = "val", type = .INTEGER}}
 	ok := cell.serialize_columnar(pg.data[off:], rowids, values, cols)
 	testing.expect(t, ok, "serialize columnar on page 1")
+	for v in original_rows { delete(v.vals) }
 
 	// Set page header
 	hdr := btree.get_leaf_header(pg.data, 1)
@@ -802,16 +807,18 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 				}
 			}
 			btree.cursor_advance(&c)
+			cell.destroy(&cell_val)
 		}
 		testing.expect(t, count == 5, "cursor read 5 rows from columnar page")
 	}
 
 	// Test: tree_find on columnar page
 	for i in 1 ..= 5 {
-		found, f_err := btree.tree_find(&ctx.tree, types.Row_ID(i), context.temp_allocator)
+		found, f_err := btree.tree_find(&ctx.tree, types.Row_ID(i), context.allocator)
 		testing.expect(t, f_err == .None, fmt.tprintf("tree_find row %d", i))
 		if f_err == .None {
 			testing.expect_value(t, types.Row_ID(i), found.rowid)
+			cell.destroy(&found)
 		}
 	}
 
@@ -833,6 +840,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 		found := false
 		for c.is_valid {
 			cell_val, _ := btree.cursor_get_cell(&c)
+			defer cell.destroy(&cell_val)
 			if cell_val.rowid == 99 {
 				found = true
 				if len(cell_val.values) > 0 {
@@ -872,6 +880,8 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 				rid:  types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
+			cell_val.values = nil
+			cell.destroy(&cell_val)
 			btree.cursor_advance(&c)
 		}
 	}
@@ -891,13 +901,13 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 	}
 	cols := []types.Column{{name = "val", type = .INTEGER}}
 	cell.serialize_columnar(pg.data[off:], rowids, vals, cols)
+	for v in orig { delete(v.vals) }
 
 	hdr := btree.get_leaf_header(pg.data, 1)
 	hdr.page_type = .LEAF_TABLE_COLUMNAR
 	hdr.cell_count = u16le(3)
 	hdr.cell_content_offset = u16le(8 + len(cols) * 12)
 	pager.mark_dirty(ctx.pager, 1)
-
 	// Verify cursor still reads correctly
 	{
 		c, _ := btree.cursor_start(&ctx.tree)
@@ -910,6 +920,7 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 				count += 1
 			}
 			btree.cursor_advance(&c)
+			cell.destroy(&cell_val)
 		}
 		testing.expect(t, count == 3, "cursor reads 3 rows from columnar page")
 	}
@@ -930,6 +941,7 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 			total += 1
 			if cell_val.rowid == 99 { found = true }
 			btree.cursor_advance(&c)
+			cell.destroy(&cell_val)
 		}
 		testing.expect(t, found, "inserted row 99 found after columnar conversion")
 		testing.expect(t, total == 4, "4 rows total after insert")
@@ -961,6 +973,8 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 				rid:  types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
+			cell_val.values = nil
+			cell.destroy(&cell_val)
 			btree.cursor_advance(&c)
 		}
 	}
@@ -978,6 +992,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 	}
 	cols := []types.Column{{name = "val", type = .INTEGER}}
 	cell.serialize_columnar(pg.data[off:], rowids, vals, cols)
+	for v in orig_rows { delete(v.vals) }
 
 	hdr := btree.get_leaf_header(pg.data, 1)
 	hdr.page_type = .LEAF_TABLE_COLUMNAR
@@ -1006,6 +1021,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 				}
 			}
 			btree.cursor_advance(&c)
+			cell.destroy(&cell_val)
 		}
 		testing.expect(t, updated, "row 2 updated to 222 after columnar conversion")
 	}
@@ -1040,4 +1056,62 @@ test_split_statements :: proc(t: ^testing.T) {
 
 	q := db.query(d, "SELECT COUNT(*) FROM t;")
 	testing.expect(t, q.ok, "COUNT query")
+}
+
+@(test)
+test_block_comment :: proc(t: ^testing.T) {
+	d := setup_db(t, "blockcmt")
+	defer teardown_db(d, "blockcmt")
+	// Block comments /* like this */ should be ignored
+	ok := db.execute(d, "CREATE /* inline */ TABLE t (id INT);")
+	testing.expect(t, ok, "CREATE with block comment")
+	ok = db.execute(d, "INSERT INTO t VALUES (1);")
+	testing.expect(t, ok, "INSERT after block comment")
+	q := db.query(d, "SELECT id FROM t;")
+	testing.expect(t, q.ok, "SELECT after block comment")
+}
+
+@(test)
+test_double_semicolon :: proc(t: ^testing.T) {
+	d := setup_db(t, "dblsemi")
+	defer teardown_db(d, "dblsemi")
+	// Double semicolon should not produce a spurious error
+	ok := db.execute(d, "CREATE TABLE t (id INT);;")
+	testing.expect(t, ok, "CREATE with double ;;")
+	ok = db.execute(d, "INSERT INTO t VALUES (1);;")
+	testing.expect(t, ok, "INSERT with double ;;")
+}
+
+@(test)
+test_insert_too_many_columns :: proc(t: ^testing.T) {
+	d := setup_db(t, "toomany")
+	defer teardown_db(d, "toomany")
+	db.execute(d, "CREATE TABLE t (id INT, val INT);")
+	// Column list with more entries than table has columns should be rejected
+	ok := db.execute(d, "INSERT INTO t (id,val,id,val) VALUES (1,2,3,4);")
+	testing.expect(t, !ok, "INSERT with too many columns rejected")
+	// Duplicate column names in INSERT should be accepted (last wins)
+	ok = db.execute(d, "INSERT INTO t (id,id) VALUES (1,2);")
+	testing.expect(t, ok, "INSERT with duplicate column names accepted")
+	// But the value should be the last one
+	q := db.query(d, "SELECT id FROM t;")
+	if q.ok && len(q.rows) >= 1 && len(q.rows[0]) >= 1 {
+		v, _ := q.rows[0][0].(i64)
+		testing.expect_value(t, v, i64(2))
+	}
+}
+
+@(test)
+test_negative_limit :: proc(t: ^testing.T) {
+	// Verify that negative LIMIT produces an error message (not just generic failure)
+	_, ok, err_msg := parser.parse("SELECT * FROM t LIMIT -5;", context.temp_allocator)
+	testing.expect(t, !ok, "negative LIMIT rejected")
+	testing.expect(t, strings.contains(err_msg, "non-negative"), "error mentions non-negative")
+}
+
+@(test)
+test_negative_offset :: proc(t: ^testing.T) {
+	_, ok, err_msg := parser.parse("SELECT * FROM t LIMIT 5 OFFSET -3;", context.temp_allocator)
+	testing.expect(t, !ok, "negative OFFSET rejected")
+	testing.expect(t, strings.contains(err_msg, "non-negative"), "error mentions non-negative")
 }

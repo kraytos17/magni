@@ -151,6 +151,25 @@ ROLLBACK;
 | `.rollforward` | Advance current state to the most recent snapshot |
 | `.begin` / `.commit` / `.rollback` | Transaction control |
 
+**REPL keyboard shortcuts:**
+
+| Key | Action |
+|---|---|
+| ← → | Move cursor |
+| ↑ ↓ | History navigation |
+| Home / Ctrl-A | Beginning of line |
+| End / Ctrl-E | End of line |
+| Backspace / Delete | Delete backward/forward |
+| Ctrl-K | Kill to end of line |
+| Ctrl-U | Kill to start of line |
+| Ctrl-W | Delete word backward |
+| Ctrl-Z | Undo last edit |
+| Ctrl-C | Cancel current line / abort multi-line statement |
+| Ctrl-D (empty line) | Exit |
+| Ctrl-R | Incremental reverse history search |
+| Tab | Dot-command completion |
+| Paste | Bracketed paste — multi-line pastes inserted as a single block |
+
 ### CLI Flags
 
 | Flag | Description |
@@ -162,7 +181,7 @@ ROLLBACK;
 ### CLI Modes
 
 ```bash
-# Interactive REPL
+# Interactive REPL (raw-mode line editor on TTY, bufio fallback on pipe)
 ./build/magni [database]
 
 # Single statement
@@ -171,7 +190,7 @@ ROLLBACK;
 # Execute SQL file
 ./build/magni mydb.db --file script.sql
 
-# Pipe mode
+# Pipe mode (non-interactive, uses fallback reader)
 echo "SELECT * FROM t;" | ./build/magni mydb.db
 ```
 
@@ -251,6 +270,10 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 - **`#simple` / `#all_or_none`**: applied to page headers, snapshot headers, and result structs for safety.
 - **`types.Storage_Config`**: shared config struct (`allocator` + `zero_copy`) aliased by both
   `btree.Config` and `cell.Config`, removing duplicate definitions.
+- **Line editor** (`linedit/`): raw-mode terminal editor with arrow-key navigation,
+  multi-level undo (Ctrl-Z), incremental reverse history search (Ctrl-R), dot-command
+  tab completion, UTF-8/CJK support, bracketed paste, SIGWINCH-aware terminal width
+  tracking with wrap-correct redraw, and a `bufio`-based fallback for non-TTY input.
 
 ---
 
@@ -258,15 +281,16 @@ See [ARCH.md](ARCH.md) for complete architecture documentation.
 
 | Package | Tests | What's tested |
 |---|---|---|
-| `parser` | 39 | Tokenization, all SQL forms, JOINs, subqueries, errors |
-| `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, GROUP BY, JOINs, aggregates |
-| `btree` | 22 | Insert/find/delete/update, cursor, splits, persistence, rebalance merge, byte accounting |
-| `cell` | 11 | Serialization roundtrip, zero-copy, validation |
+| `linedit` | 42 | Line buffer ops, undo, history navigation/add/load/save/cap/search, all control chars, UTF-8 decode, escape sequences (arrows/Home/End/Delete/paste markers), dot-command completion, rune widths (ASCII/CJK/Hangul/emoji), terminal query |
+| `parser` | 53 | Tokenization, all SQL forms, JOINs, subqueries, errors |
+| `executor` | 30 | Full DML/DDL, WHERE, ORDER BY, GROUP BY, JOINs, aggregates |
+| `btree` | 26 | Insert/find/delete/update, cursor, splits, persistence, rebalance merge, byte accounting, empty tree, foreach, collect_pages |
+| `cell` | 17 | Serialization roundtrip, zero-copy, validation, columnar encoding (INTEGER/REAL/TEXT/BLOB, nulls, empty), single-row, all types |
 | `pager` | 20 | Page cache, I/O, pinning, eviction, WAL, bitmap, checksum |
-| `schema` | 12 | Column blob, add/find/drop/list, row round-trip, hash collision |
+| `schema` | 17 | Column blob, add/find/drop/list, row round-trip, hash collision, empty list, unknown kind, special char names, row kind validation |
 | `snapshot` | 12 | Chain, manifests, diff, tags, timestamp lookup, GC |
-| `integration` | 28 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads, columnar mutation, semicolon-in-string, multi-statement |
-| **Total** | **208** | |
+| `integration` | 44 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads, columnar mutation, semicolon-in-string, multi-statement, block comments, too-many-columns rejection, negative LIMIT/OFFSET |
+| **Total** | **269** | |
 
 ---
 
@@ -293,10 +317,13 @@ src/
 │   ├── cow.odin           COW insert/find/delete/update
 │   ├── cursor.odin        In-order row cursor (fixed path stack)
 │   ├── headers.odin       Page headers, freeblock helpers
+│   ├── rebalance.odin     Leaf merge rebalancing
+│   ├── skip_index.odin    Skip index B-tree
 │   ├── split.odin         Leaf/interior/root split operations
 │   └── tree.odin          B+tree: insert, find, delete, update, verify
 ├── cell/
-│   └── cell.odin          Row serialization, varint, validation
+│   ├── cell.odin          Row serialization, varint, validation
+│   └── columnar.odin      Columnar page format (serialize/read/decode)
 ├── db/
 │   ├── admin.odin         Stats, dump, describe, checkpoint, integrity
 │   ├── db.odin            Database handle, open/close
@@ -312,10 +339,17 @@ src/
 │   ├── types.odin         Shared type definitions
 │   ├── util.odin          Helpers: qualified columns, CHECK, compare
 │   └── where.odin         WHERE clause evaluation, LIKE
+├── linedit/               Line editor (raw-mode REPL)
+│   ├── buffer.odin        Line buffer, undo stack
+│   ├── history.odin       In-memory history, persistence, search
+│   ├── keys.odin          Raw byte/key decoder, UTF-8, escape sequences
+│   ├── linedit.odin       Public API: init/destroy/read_line, Ctrl-R, Tab
+│   ├── render.odin        Wrap-aware redraw with CJK support
+│   └── term.odin          Raw mode, termios, TIOCGWINSZ, SIGWINCH
 ├── parser/
 │   ├── free.odin          AST memory cleanup
 │   ├── parse_ddl.odin     CREATE/DROP TABLE
-│   ├── parse_dml.odin     INSERT/UPDATE/DELETE
+│   ├── parse_dml.odin      INSERT/UPDATE/DELETE
 │   ├── parse_select.odin  SELECT, JOIN, identifiers
 │   ├── parse_where.odin   WHERE clause, IN, value parsing
 │   ├── parser.odin        Token types, parse dispatcher
@@ -323,7 +357,8 @@ src/
 │   └── types.odin         AST node types
 ├── pager/
 │   ├── freelist.odin      Free-page linked list
-│   └── pager.odin         Page cache, file I/O, eviction
+│   ├── pager.odin         Page cache, file I/O, eviction
+│   └── wal.odin           Write-Ahead Log, checkpoint, recovery
 ├── schema/
 │   ├── schema.odin        Table metadata, add/find/drop
 │   └── serialize.odin     Column blob serialization
@@ -336,6 +371,7 @@ src/
 └── types/
     └── types.odin         Core types: Value, Column, Table, SerialType
 tests/
+├── linedit_test.odin
 ├── parser_test.odin
 ├── executor_test.odin
 ├── btree_test.odin
@@ -355,3 +391,4 @@ tests/
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100)
+- REPL line editor: no SQL keyword/table-name completion (dot-commands only), no multi-row display for long lines exceeding terminal width (uses wrap-correct rendering)

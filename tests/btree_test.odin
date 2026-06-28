@@ -520,3 +520,59 @@ test_rebalance_byte_accounting :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+test_find_on_empty_tree :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "empty_find")
+	defer teardown_tree(&ctx)
+
+	_, err := btree.tree_find(&ctx.tree, 999, context.temp_allocator)
+	testing.expect(t, err == .Cell_Not_Found, "find on empty tree returns Cell_Not_Found")
+}
+
+@(test)
+test_delete_on_empty_tree :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "empty_del")
+	defer teardown_tree(&ctx)
+
+	btree.tree_delete(&ctx.tree, 999)
+	_, err := btree.tree_find(&ctx.tree, 999, context.temp_allocator)
+	testing.expect(t, err == .Cell_Not_Found, "still empty after delete on empty tree")
+}
+
+@(test)
+test_tree_collect_pages :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "collect_pg")
+	defer teardown_tree(&ctx)
+
+	val := []types.Value{types.value_int(10)}
+	btree.tree_insert(&ctx.tree, 1, val)
+	btree.tree_insert(&ctx.tree, 2, val)
+	btree.tree_insert(&ctx.tree, 3, val)
+
+	pages := make(map[u32]bool, context.temp_allocator)
+	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
+	testing.expect(t, len(pages) >= 1, "at least one page collected")
+	found_root := false
+	for p in pages {
+		if p == ctx.tree.root { found_root = true }
+	}
+	testing.expect(t, found_root, "root page in collected pages")
+}
+
+@(test)
+test_foreach_callback :: proc(t: ^testing.T) {
+	ctx := setup_tree(t, "foreach")
+	defer teardown_tree(&ctx)
+
+	val := []types.Value{types.value_int(100)}
+	btree.tree_insert(&ctx.tree, 1, val)
+	btree.tree_insert(&ctx.tree, 2, val)
+
+	count := 0
+	btree.tree_foreach(&ctx.tree, proc(c: ^cell.Cell, user_data: rawptr) -> bool {
+			(^int)(user_data)^ += 1
+			return true
+		}, &count)
+	testing.expect_value(t, count, 2)
+}

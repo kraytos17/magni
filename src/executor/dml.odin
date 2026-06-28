@@ -75,6 +75,14 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 			fmt.eprintln("Error: Column list length does not match value count")
 			return false
 		}
+		if len(stmt.columns) > len(table.columns) {
+			fmt.eprintfln(
+				"Error: Too many columns in INSERT. Expected at most %d, got %d",
+				len(table.columns),
+				len(stmt.columns),
+			)
+			return false
+		}
 
 		reordered := make([]types.Value, len(table.columns), context.temp_allocator)
 		for i in 0 ..< len(reordered) {
@@ -312,6 +320,14 @@ exec_insert_cow :: proc(
 	if len(stmt.columns) > 0 {
 		if len(stmt.columns) != len(stmt.values) {
 			fmt.eprintln("Error: Column list length does not match value count")
+			return false, t.root, {}
+		}
+		if len(stmt.columns) > len(table.columns) {
+			fmt.eprintfln(
+				"Error: Too many columns in INSERT. Expected at most %d, got %d",
+				len(table.columns),
+				len(stmt.columns),
+			)
 			return false, t.root, {}
 		}
 

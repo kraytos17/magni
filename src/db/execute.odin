@@ -16,7 +16,11 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 	defer sync.unlock(&db.mu)
 	stmt, ok, err_msg := parser.parse(sql, context.temp_allocator)
 	if !ok {
-		if err_msg != "" { fmt.eprintln("Error:", err_msg) } else { fmt.eprintln("Error: Failed to parse SQL statement") }
+		if err_msg != "" {
+			fmt.eprintln("Error:", err_msg)
+		} else {
+			fmt.eprintln("Error: Failed to parse SQL statement")
+		}
 		return false
 	}
 	if txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt); is_txn {
@@ -62,7 +66,10 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 
 	exec_ok, new_root, mt := executor.execute(&st, stmt)
 	// AS OF queries read a historical schema_root — dont update live schema root.
-	if !as_of_override { db.schema_root_page = new_root }
+	if !as_of_override {
+		db.schema_root_page = new_root
+		update_header(db)
+	}
 	if exec_ok && db.txn_state == .NONE && !as_of_override {
 		db.snapshot_batch_count += 1
 		threshold := db.snapshot_batch_threshold
@@ -153,7 +160,8 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 
 	stmt, parse_ok, err_msg := parser.parse(sql, context.temp_allocator)
 	if !parse_ok {
-		if err_msg != "" { fmt.eprintln("Error:", err_msg) } else { fmt.eprintln("Error: Failed to parse SQL statement") }
+		if err_msg !=
+		   "" { fmt.eprintln("Error:", err_msg) } else { fmt.eprintln("Error: Failed to parse SQL statement") }
 		return r
 	}
 
@@ -165,6 +173,7 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 				fmt.eprintln("Error: Snapshot", snap_id, "not found")
 				return r
 			}
+
 			snap_h, snap_ok := snapshot.load(db.pager, snap_page)
 			if !snap_ok { return r }
 			st.root = snap_h.schema_root

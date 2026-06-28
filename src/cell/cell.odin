@@ -178,6 +178,12 @@ deserialize :: proc(
 	}
 
 	result_values := make([]types.Value, serial_count, alloc)
+
+	success := false
+	defer if !success && !config.zero_copy {
+		types.values_delete(result_values, alloc)
+	}
+
 	for st_idx in 0 ..< serial_count {
 		st := serial_types[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
@@ -223,6 +229,7 @@ deserialize :: proc(
 		}
 	}
 
+	success = true
 	cell = Cell {
 		rowid     = types.Row_ID(rowid_val),
 		values    = result_values,

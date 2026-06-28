@@ -1,0 +1,278 @@
+package linedit
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:sys/posix"
+import "core:unicode/utf8"
+
+SEARCH_PROMPT :: "(reverse-i-search)`%s': "
+
+Editor :: struct {
+	term:    Term,
+	history: History,
+}
+
+init :: proc(fd: posix.FD, history_path: string) -> (ed: Editor, ok: bool) {
+	ed.term.fd = fd
+	t, tok := term_init(fd)
+	if !tok {
+		return ed, false
+	}
+
+	ed.term = t
+	if !term_enable_raw(&ed.term) {
+		return ed, false
+	}
+
+	history_load(&ed.history, history_path)
+	ed.history.nav_index = -1
+	return ed, true
+}
+
+destroy :: proc(ed: ^Editor) {
+	history_destroy(&ed.history)
+	term_restore(&ed.term)
+}
+
+read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
+	lb: Line_Buffer
+	defer lb_destroy(&lb)
+
+	ed.history.nav_index = -1
+	redraw(prompt, &lb)
+	for {
+		ev, read_ok := read_key(ed.term.fd)
+		if !read_ok {
+			return "", false
+		}
+
+		switch ev.key {
+		case .Enter:
+			fmt.fprint(os.stdout, "\r\n")
+			return lb_to_string(&lb, context.allocator), true
+		case .Ctrl_D:
+			if lb_len(&lb) == 0 {
+				return "", false
+			}
+		case .Ctrl_C:
+			fmt.fprint(os.stdout, "\r\n")
+			lb_clear(&lb)
+			return "", true
+		case .Backspace:
+			lb_backspace(&lb)
+		case .Delete:
+			lb_delete_forward(&lb)
+		case .Left:
+			lb_move_left(&lb)
+		case .Right:
+			lb_move_right(&lb)
+		case .Home, .Ctrl_A:
+			lb_home(&lb)
+		case .End, .Ctrl_E:
+			lb_end(&lb)
+		case .Ctrl_K:
+			lb_kill_to_end(&lb)
+		case .Ctrl_U:
+			lb_kill_to_start(&lb)
+		case .Ctrl_W:
+			lb_delete_word_back(&lb)
+		case .Ctrl_Z:
+			lb_undo(&lb)
+		case .Up:
+			history_begin_nav(&ed.history, lb_to_string(&lb))
+			if s, hok := history_prev(&ed.history); hok {
+				lb_set(&lb, s)
+			}
+		case .Down:
+			if s, hok := history_next(&ed.history); hok {
+				lb_set(&lb, s)
+			}
+		case .Tab:
+			run_tab_complete(&lb)
+		case .Ctrl_R:
+			run_reverse_search(ed, prompt, &lb)
+		case .Paste_Start:
+			read_pasted_text(ed.term.fd, &lb)
+		case .Escape, .None, .Eof, .Paste_End:
+		case .Char:
+			lb_insert(&lb, ev.char)
+		}
+		redraw(prompt, &lb)
+	}
+}
+
+run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
+	query := strings.builder_make()
+	defer strings.builder_destroy(&query)
+
+	original := lb_to_string(lb, context.temp_allocator)
+	search_idx := len(ed.history.entries)
+	search_failed := false
+	for {
+		if search_failed {
+			search_prompt := fmt.tprintf(
+				"(failed reverse-i-search)`%s': ",
+				strings.to_string(query),
+			)
+			redraw(search_prompt, lb)
+		} else {
+			search_prompt := fmt.tprintf(SEARCH_PROMPT, strings.to_string(query))
+			redraw(search_prompt, lb)
+		}
+
+		ev, ok := read_key(ed.term.fd)
+		if !ok { break }
+
+		#partial switch ev.key {
+		case .Enter:
+			return
+		case .Escape, .Ctrl_C:
+			lb_set(lb, original)
+			return
+		case .Ctrl_R:
+			if strings.builder_len(query) > 0 {
+				idx, found := history_search_prev(
+					&ed.history,
+					strings.to_string(query),
+					search_idx,
+				)
+				if found {
+					search_failed = false
+					search_idx = idx
+					lb_set(lb, ed.history.entries[idx])
+				}
+			}
+		case .Char:
+			strings.write_rune(&query, ev.char)
+			search_idx = len(ed.history.entries)
+			idx, found := history_search_prev(&ed.history, strings.to_string(query), search_idx)
+			if found {
+				search_failed = false
+				search_idx = idx
+				lb_set(lb, ed.history.entries[idx])
+			} else {
+				search_failed = true
+				lb_set(lb, original)
+			}
+		case .Backspace:
+			q := strings.to_string(query)
+			n := utf8.rune_count_in_string(q)
+			if n > 0 {
+				runes := make([]rune, n, context.temp_allocator)
+				i := 0
+				for r in q {
+					runes[i] = r
+					i += 1
+				}
+
+				trimmed, _ := utf8.runes_to_string(runes[:n - 1])
+				strings.builder_reset(&query)
+				strings.write_string(&query, trimmed)
+				search_idx = len(ed.history.entries)
+				idx, found := history_search_prev(
+					&ed.history,
+					strings.to_string(query),
+					search_idx,
+				)
+				if found {
+					search_failed = false
+					search_idx = idx
+					lb_set(lb, ed.history.entries[idx])
+				} else {
+					search_failed = true
+					lb_set(lb, original)
+				}
+			}
+		}
+	}
+}
+
+dot_commands :: []string {
+	".begin",
+	".checkpoint",
+	".commit",
+	".debug_schema",
+	".desc ",
+	".dump ",
+	".exit",
+	".expire ",
+	".help",
+	".integrity",
+	".quit",
+	".rollback",
+	".rollforward",
+	".schema",
+	".snapdiff ",
+	".snapshot restore ",
+	".snapshot tag ",
+	".snapshots",
+	".stats",
+	".tables",
+	".version",
+}
+
+run_tab_complete :: proc(lb: ^Line_Buffer) {
+	line := lb_to_string(lb, context.temp_allocator)
+	if len(line) == 0 || line[0] != '.' {
+		return
+	}
+
+	candidates := make([dynamic]string, context.temp_allocator)
+	for cmd in dot_commands {
+		if strings.has_prefix(cmd, line) {
+			append(&candidates, cmd)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	if len(candidates) == 1 {
+		line_trimmed := strings.trim_suffix(line, " ")
+		rest := candidates[0][len(line_trimmed):]
+		for r in rest {
+			lb_insert(lb, r)
+		}
+		return
+	}
+
+	fmt.fprint(os.stdout, "\r\n")
+	for cmd in candidates {
+		fmt.fprintf(os.stdout, "%s  ", cmd)
+	}
+	fmt.fprint(os.stdout, "\r\n")
+}
+
+read_pasted_text :: proc(fd: posix.FD, lb: ^Line_Buffer) {
+	buf: [dynamic]u8
+	defer delete(buf)
+
+	end := []u8{0x1b, '[', '2', '0', '1', '~'}
+	mi := 0
+	for {
+		b, ok := read_byte(fd)
+		if !ok { break }
+
+		append(&buf, b)
+		if b == end[mi] {
+			mi += 1
+			if mi == len(end) {
+				resize(&buf, len(buf) - len(end))
+				break
+			}
+		} else {
+			mi = 0
+		}
+	}
+	for b in buf {
+		switch b {
+		case '\n':
+			lb_insert(lb, '\n')
+		case 0x0d:
+		case:
+			if b >= 0x20 || b == '\t' {
+				lb_insert(lb, rune(b))
+			}
+		}
+	}
+}

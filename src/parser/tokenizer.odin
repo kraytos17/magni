@@ -388,6 +388,12 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			for i < len(sql) && sql[i] != '\n' { i += 1 }
 			continue
 		}
+		if c == '/' && i + 1 < len(sql) && sql[i + 1] == '*' {
+			i += 2
+			for i + 1 < len(sql) && !(sql[i] == '*' && sql[i + 1] == '/') { i += 1 }
+			if i >= len(sql) { delete(tokens); return nil, false }
+			i += 2; continue
+		}
 		if c == '\'' {
 			start := i + 1; i += 1
 			for i < len(sql) {

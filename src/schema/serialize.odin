@@ -66,6 +66,7 @@ serialize_columns_to_blob :: proc(
 
 deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
 	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER { return nil }
+	if blob[1] != COL_BLOB_VERSION { return nil }
 	offset := 2
 	count, _, cnt_ok := cell.varint_decode(blob, offset)
 	if !cnt_ok || count == 0 { return nil }

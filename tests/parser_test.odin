@@ -207,7 +207,10 @@ test_parse_error_syntax :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_error_messages :: proc(t: ^testing.T) {
-	tests := []struct{ sql: string, contains: string }{
+	tests := []struct {
+		sql:      string,
+		contains: string,
+	} {
 		{"CREATE TABLE test;", "column definition"},
 		{"INSERT INTO test;", "VALUES"},
 		{"INSERT test VALUES (1);", "INTO"},
@@ -217,8 +220,11 @@ test_parse_error_messages :: proc(t: ^testing.T) {
 		_, ok, err_msg := parser.parse(test.sql, context.temp_allocator)
 		testing.expect(t, !ok, fmt.tprintf("'%s' should fail to parse", test.sql))
 		if test.contains != "" {
-			testing.expect(t, strings.contains(err_msg, test.contains),
-				fmt.tprintf("error '%s' should contain '%s'", err_msg, test.contains))
+			testing.expect(
+				t,
+				strings.contains(err_msg, test.contains),
+				fmt.tprintf("error '%s' should contain '%s'", err_msg, test.contains),
+			)
 		}
 	}
 }

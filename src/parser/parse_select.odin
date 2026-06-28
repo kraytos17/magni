@@ -278,10 +278,15 @@ parse_select :: proc(
 	limit: Maybe(u64); offset: Maybe(u64)
 	if match(p, .LIMIT) {
 		limit_token := expect(p, .NUMBER) or_return
-		limit = strconv.parse_u64(limit_token.lexeme) or_return
+		lv, lu_ok := strconv.parse_u64(limit_token.lexeme)
+		if !lu_ok { return err(p, "LIMIT must be a non-negative integer") }
+		
+		limit = lv
 		if match(p, .OFFSET) {
 			offset_token := expect(p, .NUMBER) or_return
-			offset = strconv.parse_u64(offset_token.lexeme) or_return
+			ov, ou_ok := strconv.parse_u64(offset_token.lexeme)
+			if !ou_ok { return err(p, "OFFSET must be a non-negative integer") }
+			offset = ov
 		}
 	}
 	return Select_Stmt {

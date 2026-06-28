@@ -40,8 +40,8 @@ schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 	if len(values) < 5 { return {}, false }
 	name, ok1 := values[1].(string)
 	if !ok1 { return {}, false }
-	_, kind_ok := values[0].(i64)
-	if !kind_ok { return {}, false }
+	kind_val, kind_ok := values[0].(i64)
+	if !kind_ok || kind_val != 0 { return {}, false }
 
 	sr := Schema_Row {
 		kind = "table",
@@ -414,6 +414,6 @@ debug_print_all :: proc(t: ^btree.Tree) {
 print_ddl :: proc(t: ^btree.Tree) {
 	tables := list_tables(t, context.temp_allocator)
 	for table in tables {
-		fmt.printfln("%s;", strings.trim_space(table.sql))
+		fmt.printfln("%s", strings.trim_space(table.sql))
 	}
 }

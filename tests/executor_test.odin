@@ -409,12 +409,16 @@ test_exec_check_constraint :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_c")
 	defer teardown_executor_env(tree, file)
 
-	stmt_c, _, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	stmt_c, _, _ := parser.parse(
+		"CREATE TABLE t (age INT CHECK (age > 0));",
+		context.temp_allocator,
+	)
 	testing.expect(
 		t,
 		stmt_c.sql == "CREATE TABLE t (age INT CHECK (age > 0));",
 		"CHECK CREATE should parse",
 	)
+
 	cs, has_cs := stmt_c.type.(parser.Create_Stmt)
 	testing.expect(t, has_cs && len(cs.columns) == 1, "expected 1 column")
 	chk, has_chk := cs.columns[0].check_expr.?
@@ -456,9 +460,12 @@ test_exec_foreign_key :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "fk")
 	defer teardown_executor_env(tree, file)
 
-	stmt_p, _, _ := parser.parse("CREATE TABLE parent (id INT PRIMARY KEY);", context.temp_allocator)
-	executor.execute(&tree, stmt_p)
+	stmt_p, _, _ := parser.parse(
+		"CREATE TABLE parent (id INT PRIMARY KEY);",
+		context.temp_allocator,
+	)
 
+	executor.execute(&tree, stmt_p)
 	_, parse_ok, _ := parser.parse(
 		"CREATE TABLE child (id INT PRIMARY KEY);",
 		context.temp_allocator,
@@ -490,7 +497,11 @@ test_exec_check_enforcement :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_enforce")
 	defer teardown_executor_env(tree, file)
 
-	stmt_c, _, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
+	stmt_c, _, _ := parser.parse(
+		"CREATE TABLE t (age INT CHECK (age > 0));",
+		context.temp_allocator,
+	)
+
 	cs, has_cs := stmt_c.type.(parser.Create_Stmt)
 	testing.expect(t, has_cs, "expected Create_Stmt")
 	chk, has_chk := cs.columns[0].check_expr.?
@@ -554,8 +565,8 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 		table_name = "t2",
 		values     = vals3[:],
 	}
-	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
 
+	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
 	sql := "SELECT t1.id, t2.val FROM t1 LEFT JOIN t2 ON t1.id = t2.ref;"
 	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, parse_ok, "LEFT JOIN should parse")
@@ -639,8 +650,8 @@ test_exec_in_literal_list :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
-
 	stmt, ok, _ := parser.parse("SELECT * FROM t WHERE id IN (1, 3);", context.temp_allocator)
+
 	testing.expect(t, ok, "IN (list) should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
@@ -655,9 +666,12 @@ test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "check_persist")
 	defer teardown_executor_env(tree, file)
 
-	stmt_c, _, _ := parser.parse("CREATE TABLE t (age INT CHECK (age > 0));", context.temp_allocator)
-	executor.execute(&tree, stmt_c)
+	stmt_c, _, _ := parser.parse(
+		"CREATE TABLE t (age INT CHECK (age > 0));",
+		context.temp_allocator,
+	)
 
+	executor.execute(&tree, stmt_c)
 	table, found := schema.get_table(&tree, "t", context.temp_allocator)
 	testing.expect(t, found, "table should exist")
 	defer schema.table_free(table, context.temp_allocator)
@@ -689,6 +703,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 		table_name = "t2",
 		columns    = cols2[:],
 	}
+
 	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
 	executor.execute(
 		&tree,
@@ -750,8 +765,10 @@ test_exec_order_by_int :: proc(t: ^testing.T) {
 	stmt2, _, _ := parser.parse("SELECT id FROM t ORDER BY id DESC;", context.temp_allocator)
 	ok2, _, _ := executor.execute(&tree, stmt2)
 	testing.expect(t, ok2, "ORDER BY DESC should execute")
-
-	stmt3, _, _ := parser.parse("SELECT id FROM t ORDER BY id NULLS FIRST;", context.temp_allocator)
+	stmt3, _, _ := parser.parse(
+		"SELECT id FROM t ORDER BY id NULLS FIRST;",
+		context.temp_allocator,
+	)
 	ok3, _, _ := executor.execute(&tree, stmt3)
 	testing.expect(t, ok3, "ORDER BY NULLS FIRST should execute")
 }

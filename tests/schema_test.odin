@@ -219,17 +219,16 @@ test_schema_hash_collision :: proc(t: ^testing.T) {
 	// This simulates what happens if two different table names hash to the same value.
 	target_hash := types.Row_ID(types.hash_string("mytable"))
 	collision_vals := []types.Value {
-		types.value_text("table"),
-		types.value_text("intruder"),
+		types.value_int(0),
 		types.value_text("intruder"),
 		types.value_int(999),
 		types.value_text(""),
 		types.value_blob({}),
 		types.value_int(0),
 	}
+
 	btree.tree_delete(&tree, target_hash)
 	btree.tree_insert(&tree, target_hash, collision_vals)
-
 	// The original "mytable" row was overwritten by the collision row (same hash key).
 	// get_table("mytable") should fail because the row at that hash now has name "intruder".
 	_, found_mytable := schema.get_table(&tree, "mytable")
@@ -305,4 +304,64 @@ test_schema_row_roundtrip :: proc(t: ^testing.T) {
 		},
 	)
 	testing.expect(t, !bad2, "string at values[0] rejected")
+}
+
+@(test)
+test_column_blob_version :: proc(t: ^testing.T) {
+	// A blob with a marker byte but wrong version should be rejected
+	bad_blob := []u8{0xFE, 0xFF, 0x01} // marker=0xFE, version=0xFF, count=1
+	result := schema.deserialize_columns(bad_blob, context.temp_allocator)
+	testing.expect(t, result == nil, "wrong column blob version rejected")
+}
+
+@(test)
+test_list_tables_empty :: proc(t: ^testing.T) {
+	tree, file := setup_schema_env(t, "list_empty")
+	defer teardown_schema_env(tree, file)
+
+	tables := schema.list_tables(&tree, context.temp_allocator)
+	testing.expect_value(t, len(tables), 0)
+}
+
+@(test)
+test_schema_unknown_kind :: proc(t: ^testing.T) {
+	// A row with kind=5 (unknown, not 0=table) should be rejected
+	vals := []types.Value {
+		types.value_int(5),
+		types.value_text("weird"),
+		types.value_int(1),
+		types.value_text(""),
+		types.value_blob({}),
+	}
+	_, ok := schema.schema_row_from_values(vals)
+	testing.expect(t, !ok, "unknown kind rejected")
+}
+
+@(test)
+test_schema_special_char_names :: proc(t: ^testing.T) {
+	tree, file := setup_schema_env(t, "spec_names")
+	defer teardown_schema_env(tree, file)
+
+	cols := []types.Column{{name = "col one", type = .INTEGER}}
+	ok := schema.add_table(&tree, "my table", cols, 2, "")
+	testing.expect(t, ok, "table name with space added")
+
+	tbl, found := schema.find_table(&tree, "my table", context.temp_allocator)
+	testing.expect(t, found, "table with space found")
+	testing.expect_value(t, tbl.name, "my table")
+	testing.expect_value(t, tbl.columns[0].name, "col one")
+}
+
+@(test)
+test_schema_row_kind_as_string :: proc(t: ^testing.T) {
+	// kind must be an int, not a string
+	vals := []types.Value {
+		types.value_text("table"),
+		types.value_text("x"),
+		types.value_int(1),
+		types.value_text(""),
+		types.value_blob({}),
+	}
+	_, ok := schema.schema_row_from_values(vals)
+	testing.expect(t, !ok, "string kind rejected")
 }

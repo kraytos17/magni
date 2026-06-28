@@ -30,6 +30,8 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 ┌────────────────────────────────────────────────────────────────────┐
 │                          CLI / REPL                                │
 │  main.odin — flag parsing, mode dispatch, dot-commands             │
+│  linedit/  — raw-mode terminal editor: history, Ctrl-R, Tab,       │
+│              undo, bracketed paste, wrap-aware redraw, SIGWINCH    │
 └──────────────────────────┬─────────────────────────────────────────┘
                            │ SQL string
                            ▼
@@ -137,6 +139,70 @@ Groups are printed using the original `key_values` `[]types.Value` stored in eac
 
 **HAVING** evaluates against both group-key values and computed aggregate values. Supports
 aggregate function references (e.g., `HAVING count > 1`) as well as group-by column comparisons.
+
+### 1.1 Line Editor — `linedit/`
+
+The REPL uses a hand-rolled raw-mode terminal editor (`linedit/`) built directly on `core:sys/posix` termios with no third-party dependencies. On non-TTY input (piped stdin, script mode) it falls back to the original `bufio.Reader` loop.
+
+**Architecture:**
+
+```
+linedit/
+├── linedit.odin    Public API: init/destroy/read_line
+├── term.odin       Raw mode (termios), TIOCGWINSZ, SIGWINCH
+├── keys.odin       Byte decoder, escape sequences, UTF-8
+├── buffer.odin     Line buffer, undo stack (100 levels)
+├── render.odin     Wrap-aware redraw, CJK rune widths
+└── history.odin    In-memory history, disk persistence, search
+```
+
+**`read_line` flow:**
+
+1. `term_enable_raw` disables canonical mode, echo, signal chars, IXON
+2. On each keystroke, `read_key` reads a raw byte and decodes it:
+   - Printable ASCII/UTF-8 → `.Char` with decoded rune
+   - Control chars (^A, ^C, ^D, ^E, ^K, ^R, ^U, ^W, ^Z) → `.Ctrl_*`
+   - `ESC [ ...` → escape sequence detection via `poll()` with 80ms timeout
+   - `ESC [ 200 ~` / `ESC [ 201 ~` → `.Paste_Start` / `.Paste_End`
+3. `Line_Buffer` stores the editable line as `[dynamic]rune` with cursor index.
+   Every mutating operation pushes the prior state onto an `undo_stack` (max 100).
+4. `redraw` outputs `\r` + `ESC[0K` + prompt + line, then moves cursor back
+   to the edit position. It handles terminal wrapping by inserting `\r\n` at
+   column boundaries, re-queries `TIOCGWINSZ` on `SIGWINCH`, and accounts for
+   CJK/emoji double-width characters via `rune_width`.
+5. On `.Enter`, the line is returned. Multi-line statements accumulate lines
+   in `query_buffer` in `main.odin`; Ctrl-C at any point resets the buffer.
+6. History is persisted to `~/.magnidb_history` (capped at 1000 entries,
+   consecutive duplicate suppressed). `history_search_prev` provides substring
+   backward search for Ctrl-R.
+7. Tab completion matches against a static list of 21 dot-commands. On
+   unambiguous match the remainder is inserted; on ambiguity the candidates
+   are printed below and the prompt is redrawn underneath.
+
+**Keybindings:**
+
+| Key | Action |
+|---|---|
+| ← → | Move cursor (UTF-8/CJK-aware) |
+| ↑ ↓ | History navigation with in-progress line save/restore |
+| Home, Ctrl-A | Beginning of line |
+| End, Ctrl-E | End of line |
+| Backspace, Delete | Delete backward/forward |
+| Ctrl-K | Kill to end |
+| Ctrl-U | Kill to start |
+| Ctrl-W | Delete word backward |
+| Ctrl-Z | Undo (multi-level, 100-deep stack) |
+| Ctrl-C | Return empty line (aborts multi-line statement in main.odin) |
+| Ctrl-D (empty) | EOF (exit REPL) |
+| Ctrl-R | Incremental reverse history search with `(failed ...)` indicator |
+| Tab | Dot-command completion |
+| Paste (bracketed) | Multi-line pastes inserted as single block |
+
+**Platform support:**
+
+- Linux: full raw-mode via `core:sys/posix` termios + `ioctl(TIOCGWINSZ)` for terminal dimensions
+- macOS: same `core:sys/posix` path (different `TIOCGWINSZ` constant `0x40087468`)
+- Non-POSIX (Windows): `linedit.init` returns `false`; `main.odin` falls back to `bufio.Reader`
 
 ### 2. Storage Engine — `btree/`, `cell/`, `pager/`, `schema/`, `db/`
 
@@ -604,7 +670,7 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 
 | Command | Action | Implementation |
 |---|---|---|
-| `.exit` / `.quit` | Exit | `os.exit(0)` |
+| `.exit` / `.quit` | Exit | `handle_dot_command` returns `true`, triggering REPL loop break 
 | `.help` | Show help | `print_help()` |
 | `.version` | Print version | `APP_VERSION` |
 | `.tables` | List tables | `db.list_tables()` |
@@ -642,15 +708,16 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 
 | Package | Tests | Coverage |
 |---|---|---|
-| `parser` | 39 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
-| `executor` | 64 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates, DISTINCT, CHECK, EXPLAIN, subquery projection |
-| `btree` | 22 | Insert/find/delete/update, cursor, split, persistence, duplicates, rebalance merge, byte accounting |
-| `cell` | 11 | Serialization roundtrip, zero-copy, edge cases |
-| `pager` | 20 | Page cache, WAL, crash recovery, bitmap, pinning, eviction, checksum |
-| `schema` | 12 | Column blob with CHECK, add/find/drop/list, row round-trip, hash collision |
+| `linedit` | 42 | Line buffer ops, undo (single/multi-level, cursor restore), history navigation/add/load/save/cap search, all control chars, UTF-8 decode, escape sequences (arrows/Home/End/Delete/paste markers/partial/bare), dot-command completion, rune widths (ASCII/CJK/Hangul/emoji/fullwidth/various), terminal query on pipe |
+| `parser` | 53 | Tokenization, all SQL forms, JOINs, subqueries, error handling, IN lists |
+| `executor` | 30 | Full DML/DDL, WHERE, ORDER BY, LIMIT, GROUP BY, JOINs, aggregates, DISTINCT, CHECK, EXPLAIN, subquery projection |
+| `btree` | 26 | Insert/find/delete/update, cursor, split, persistence, duplicates, rebalance merge, byte accounting, empty tree, foreach, collect_pages |
+| `cell` | 17 | Serialization roundtrip, zero-copy, edge cases, columnar encoding (INTEGER/REAL/TEXT/BLOB, nulls, empty, single-row, all types) |
+| `pager` | 28 | Page cache, WAL, crash recovery, bitmap, pinning, eviction, checksum, corruption |
+| `schema` | 17 | Column blob with CHECK, add/find/drop/list, row round-trip, hash collision, empty schema, unknown kind, special characters, kind validation |
 | `snapshot` | 12 | Chain, manifest, diff, tags, timestamp lookup, GC |
-| `integration` | 28 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, columnar integration, columnar mutation, semicolon-in-string, multi-statement |
-| **Total** | **208** | |
+| `integration` | 44 | CRUD, time-travel, JOINs, UPDATE, DELETE, restore, persistence, columnar integration, columnar mutation, semicolon-in-string, multi-statement, block comments, too-many-columns, negative LIMIT/OFFSET |
+| **Total** | **269** | |
 
 ---
 
@@ -704,3 +771,4 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
 - **Mixed AND/OR WHERE**: Not supported.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (constrained by inline `[dynamic; N]T` scratch buffer in deserializer — avoids heap alloc per row).
+- **REPL line editor**: no SQL keyword/table-name completion (dot-commands only); no `--` line comments or scientific float literals in the parser.
