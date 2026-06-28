@@ -174,6 +174,7 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 		if target_rowid, pk_ok := try_pk_lookup(table, where_clause); pk_ok {
 			c, find_err := btree.tree_find(&table_tree, target_rowid, context.temp_allocator)
 			if find_err == .None {
+				defer cell.destroy(&c, context.temp_allocator)
 				new_row := deep_copy_values(c.values)
 				for idx, val in update_map {
 					new_row[idx] = val
@@ -199,6 +200,7 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	defer btree.cursor_destroy(&cursor)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
+		defer cell.destroy(&c, context.temp_allocator)
 		if get_err != .None {
 			btree.cursor_advance(&cursor)
 			continue
@@ -266,6 +268,7 @@ exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 			btree.cursor_advance(&cursor)
 			continue
 		}
+		defer cell.destroy(&c, context.temp_allocator)
 
 		should_delete := true
 		if where_cl, has_where := stmt.where_clause.?; has_where {
@@ -430,6 +433,7 @@ exec_update_cow :: proc(
 		if target_rowid, pk_ok := try_pk_lookup(table, where_clause); pk_ok {
 			c, find_err := btree.tree_find(&table_tree, target_rowid, context.temp_allocator)
 			if find_err == .None {
+			defer cell.destroy(&c, context.temp_allocator)
 				new_row := deep_copy_values(c.values)
 				for idx, val in update_map {
 					new_row[idx] = val
@@ -475,6 +479,7 @@ exec_update_cow :: proc(
 			btree.cursor_advance(&cursor)
 			continue
 		}
+		defer cell.destroy(&c, context.temp_allocator)
 
 		should_update := true
 		if where_cl, has_where := stmt.where_clause.?; has_where {
@@ -555,6 +560,7 @@ exec_delete_cow :: proc(
 			btree.cursor_advance(&cursor)
 			continue
 		}
+		defer cell.destroy(&c, context.temp_allocator)
 
 		should_delete := true
 		if where_cl, has_where := stmt.where_clause.?; has_where {

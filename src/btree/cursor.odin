@@ -1,6 +1,7 @@
 package btree
 
 import "core:encoding/endian"
+import "core:mem"
 import "src:cell"
 import "src:pager"
 
@@ -161,7 +162,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 
 // Deserialize and return the cell at the current cursor position.
 // Values are allocated per the allocator. Zero-copy mode returns string/blob pointing into the page.
-cursor_get_cell :: proc(c: ^Cursor, allocator := context.allocator) -> (cell.Cell, Error) {
+cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Error) {
 	if !c.is_valid || c.depth == 0 {
 		return {}, .Cell_Not_Found
 	}

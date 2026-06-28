@@ -44,6 +44,9 @@ create :: proc(
 	return Cell{rowid = rowid, values = values_copy, owns_data = true}, nil
 }
 
+// destroy frees the cell's values.
+// allocator MUST match the allocator used when the cell was created.
+// A mismatch causes memory corruption (bad free on string/blob values).
 destroy :: proc(c: ^Cell, allocator := context.allocator) {
 	if c.values == nil {
 		return

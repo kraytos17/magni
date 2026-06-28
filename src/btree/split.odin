@@ -212,7 +212,6 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	set_right_ptr(curr.data, curr.id, child_from_mid_cell)
 	pager.mark_dirty(t.pager, curr.id)
 	pager.mark_dirty(t.pager, right_node.id)
-	pager.unpin_page(t.pager, new_page.page_num)
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
 }
 

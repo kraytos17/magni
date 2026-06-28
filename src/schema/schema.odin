@@ -4,6 +4,7 @@ package schema
 import "core:fmt"
 import "core:strings"
 import "src:btree"
+import "src:cell"
 import "src:types"
 
 init :: proc(t: ^btree.Tree) -> bool {
@@ -70,6 +71,7 @@ add_table :: proc(
 ) -> bool {
 	rowid := types.Row_ID(types.hash_string(table_name))
 	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
+		defer cell.destroy(&c, context.temp_allocator)
 		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
 			fmt.eprintln("[Schema] Table already exists:", table_name)
 		} else {
@@ -113,6 +115,7 @@ add_table_cow :: proc(
 ) {
 	rowid := types.Row_ID(types.hash_string(table_name))
 	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
+		defer cell.destroy(&c, context.temp_allocator)
 		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
 			fmt.eprintln("[Schema] Table already exists:", table_name)
 		} else {
@@ -155,6 +158,7 @@ find_table :: proc(
 	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None { return {}, false }
+	defer cell.destroy(&c, context.temp_allocator)
 
 	table, ok := table_from_values(c.values, allocator)
 	if !ok { return {}, false }
@@ -183,6 +187,7 @@ list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.T
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err == .None {
 			if tbl, ok := table_from_values(c.values, allocator); ok { append(&tables, tbl) }
+			cell.destroy(&c, context.temp_allocator)
 		}
 		btree.cursor_advance(&cursor)
 	}
@@ -203,12 +208,16 @@ drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
 }
 
 table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
-	_, err := btree.tree_find(
+	c, err := btree.tree_find(
 		t,
 		types.Row_ID(types.hash_string(table_name)),
 		context.temp_allocator,
 	)
-	return err == .None
+	if err == .None {
+		cell.destroy(&c, context.temp_allocator)
+		return true
+	}
+	return false
 }
 
 table_from_values :: proc(
@@ -266,6 +275,7 @@ update_root_page_cow :: proc(
 		)
 		return t.root, false
 	}
+	defer cell.destroy(&c, context.temp_allocator)
 
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {
@@ -304,6 +314,7 @@ update_skip_root_cow :: proc(
 		fmt.eprintf("[schema] update_skip_root_cow: tree_find failed for '%s'\n", table_name)
 		return t.root, false
 	}
+	defer cell.destroy(&c, context.temp_allocator)
 
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {

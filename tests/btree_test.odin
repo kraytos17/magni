@@ -75,8 +75,8 @@ test_basic_operations :: proc(t: ^testing.T) {
 	err = btree.tree_insert(&ctx.tree, 2, val2)
 	testing.expect_value(t, err, btree.Error.None)
 
-	c, find_err := btree.tree_find(&ctx.tree, 1)
-	defer cell.destroy(&c)
+	c, find_err := btree.tree_find(&ctx.tree, 1, context.temp_allocator)
+	defer cell.destroy(&c, context.temp_allocator)
 
 	testing.expect_value(t, find_err, btree.Error.None)
 	if find_err == .None {
@@ -85,7 +85,7 @@ test_basic_operations :: proc(t: ^testing.T) {
 		testing.expect_value(t, val, 100)
 	}
 
-	_, missing_err := btree.tree_find(&ctx.tree, 99)
+	_, missing_err := btree.tree_find(&ctx.tree, 99, context.temp_allocator)
 	testing.expect_value(t, missing_err, btree.Error.Cell_Not_Found)
 
 	count, count_err := btree.tree_count_rows(&ctx.tree)
@@ -110,8 +110,8 @@ test_persistence :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	tree2 := btree.init(p2, 1)
-	c, find_err := btree.tree_find(&tree2, 42)
-	defer cell.destroy(&c)
+	c, find_err := btree.tree_find(&tree2, 42, context.temp_allocator)
+	defer cell.destroy(&c, context.temp_allocator)
 
 	testing.expect_value(t, find_err, btree.Error.None)
 	if find_err == .None {
@@ -140,16 +140,16 @@ test_heavy_split_logic :: proc(t: ^testing.T) {
 		testing.fail_now(t, "Tree verification failed (Nodes disordered or keys out of bounds)")
 	}
 
-	c_start, _ := btree.tree_find(&ctx.tree, 1)
-	defer cell.destroy(&c_start)
+	c_start, _ := btree.tree_find(&ctx.tree, 1, context.temp_allocator)
+	defer cell.destroy(&c_start, context.temp_allocator)
 	testing.expect_value(t, c_start.values[0].(i64), 1)
 
-	c_end, _ := btree.tree_find(&ctx.tree, types.Row_ID(item_count))
-	defer cell.destroy(&c_end)
+	c_end, _ := btree.tree_find(&ctx.tree, types.Row_ID(item_count), context.temp_allocator)
+	defer cell.destroy(&c_end, context.temp_allocator)
 	testing.expect_value(t, c_end.values[0].(i64), i64(item_count))
 
-	c_mid, _ := btree.tree_find(&ctx.tree, types.Row_ID(item_count / 2))
-	defer cell.destroy(&c_mid)
+	c_mid, _ := btree.tree_find(&ctx.tree, types.Row_ID(item_count / 2), context.temp_allocator)
+	defer cell.destroy(&c_mid, context.temp_allocator)
 	testing.expect_value(t, c_mid.values[0].(i64), i64(item_count / 2))
 }
 
@@ -188,7 +188,7 @@ test_cursor :: proc(t: ^testing.T) {
 	expected := []i64{10, 20, 30, 40, 50}
 	idx := 0
 	for cursor.is_valid {
-		c, get_err := btree.cursor_get_cell(&cursor)
+		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if !testing.expect_value(t, get_err, btree.Error.None) {
 			break
 		}
@@ -205,7 +205,7 @@ test_cursor :: proc(t: ^testing.T) {
 			)
 		}
 
-		cell.destroy(&c)
+		cell.destroy(&c, context.temp_allocator)
 		btree.cursor_advance(&cursor)
 		idx += 1
 	}
@@ -224,14 +224,14 @@ test_deletion :: proc(t: ^testing.T) {
 	err := btree.tree_delete(&ctx.tree, 2)
 	testing.expect_value(t, err, btree.Error.None)
 
-	_, find_err := btree.tree_find(&ctx.tree, 2)
+	_, find_err := btree.tree_find(&ctx.tree, 2, context.temp_allocator)
 	testing.expect_value(t, find_err, btree.Error.Cell_Not_Found)
 
-	c1, _ := btree.tree_find(&ctx.tree, 1)
-	defer cell.destroy(&c1)
+	c1, _ := btree.tree_find(&ctx.tree, 1, context.temp_allocator)
+	defer cell.destroy(&c1, context.temp_allocator)
 
-	c3, _ := btree.tree_find(&ctx.tree, 3)
-	defer cell.destroy(&c3)
+	c3, _ := btree.tree_find(&ctx.tree, 3, context.temp_allocator)
+	defer cell.destroy(&c3, context.temp_allocator)
 
 	cnt, _ := btree.tree_count_rows(&ctx.tree)
 	testing.expect_value(t, cnt, 2)
@@ -290,14 +290,14 @@ test_delete_first_last_key :: proc(t: ^testing.T) {
 
 	err := btree.tree_delete(&ctx.tree, 1)
 	testing.expect_value(t, err, btree.Error.None)
-	_, find_err := btree.tree_find(&ctx.tree, 1)
+	_, find_err := btree.tree_find(&ctx.tree, 1, context.temp_allocator)
 	testing.expect_value(t, find_err, btree.Error.Cell_Not_Found)
 	cnt, _ := btree.tree_count_rows(&ctx.tree)
 	testing.expect_value(t, cnt, 4)
 
 	err = btree.tree_delete(&ctx.tree, 5)
 	testing.expect_value(t, err, btree.Error.None)
-	_, find_err = btree.tree_find(&ctx.tree, 5)
+	_, find_err = btree.tree_find(&ctx.tree, 5, context.temp_allocator)
 	testing.expect_value(t, find_err, btree.Error.Cell_Not_Found)
 	cnt, _ = btree.tree_count_rows(&ctx.tree)
 	testing.expect_value(t, cnt, 3)

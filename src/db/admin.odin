@@ -3,6 +3,7 @@ package db
 import "core:fmt"
 import "core:sync"
 import "src:btree"
+import "src:cell"
 import "src:pager"
 import "src:schema"
 import "src:types"
@@ -141,6 +142,7 @@ dump_table :: proc(db: ^Database, table_name: string) {
 	row_count := 0
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
+		defer cell.destroy(&c, context.temp_allocator)
 		if get_err != .None {
 			btree.cursor_advance(&cursor)
 			continue

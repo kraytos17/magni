@@ -733,7 +733,6 @@ exec_select_aggregate_combined :: proc(
 
 	groups := make([dynamic]Group, context.temp_allocator)
 	group_map := make(map[u64]int, context.temp_allocator)
-	defer delete(group_map)
 
 	for row_entry, _ in rows {
 		if len(group_by_indices) == 0 {
@@ -868,18 +867,20 @@ scan_table :: proc(
 		}
 
 		c, get_err := btree.cursor_get_cell(&cursor, allocator)
+		defer cell.destroy(&c, allocator)
 		if get_err != .None {
 			btree.cursor_advance(&cursor)
 			continue
 		}
 		if use_where {
 			if !evaluate_where_ctx(where_ctx_val, c.values) {
-				cell.destroy(&c, allocator); btree.cursor_advance(&cursor)
+				btree.cursor_advance(&cursor)
 				continue
 			}
 		}
 
 		append(&r, Row_Entry{c.rowid, c.values})
+		c.values = nil
 		if limit, has_limit := max_rows.?; has_limit && u64(len(r)) >= limit { break }
 		btree.cursor_advance(&cursor)
 	}

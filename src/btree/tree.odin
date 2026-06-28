@@ -3,6 +3,7 @@ package btree
 
 import "core:encoding/endian"
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 import "src:cell"
 import "src:pager"
@@ -394,7 +395,7 @@ descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 tree_find :: proc(
 	t: ^Tree,
 	key: types.Row_ID,
-	allocator := context.allocator,
+	allocator: mem.Allocator,
 ) -> (
 	cell.Cell,
 	Error,
@@ -570,7 +571,7 @@ foreach_recursive :: proc(
 			if !ok { return .Cell_Deserialize_Failed }
 
 			continue_iter := cb(&c, ud)
-			if !t.config.zero_copy { cell.destroy(&c) }
+			cell.destroy(&c, t.config.allocator)
 			if !continue_iter { return .None }
 		}
 		return .None

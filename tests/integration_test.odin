@@ -759,13 +759,13 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 		c, _ := btree.cursor_start(&ctx.tree)
 		defer btree.cursor_destroy(&c)
 		for c.is_valid {
-			cell_val, _ := btree.cursor_get_cell(&c)
+			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			append(&original_rows, struct {
 				rid:  types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
 			cell_val.values = nil
-			cell.destroy(&cell_val)
+			cell.destroy(&cell_val, context.temp_allocator)
 			btree.cursor_advance(&c)
 		}
 	}
@@ -782,7 +782,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 	cols := []types.Column{{name = "val", type = .INTEGER}}
 	ok := cell.serialize_columnar(pg.data[off:], rowids, values, cols)
 	testing.expect(t, ok, "serialize columnar on page 1")
-	for v in original_rows { delete(v.vals) }
+	for v in original_rows { delete(v.vals, context.temp_allocator) }
 
 	// Set page header
 	hdr := btree.get_leaf_header(pg.data, 1)
@@ -798,7 +798,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 		defer btree.cursor_destroy(&c)
 		count := 0
 		for c.is_valid {
-			cell_val, g_err := btree.cursor_get_cell(&c)
+			cell_val, g_err := btree.cursor_get_cell(&c, context.allocator)
 			testing.expect(t, g_err == .None, fmt.tprintf("get cell from columnar page %d", count))
 			if g_err == .None {
 				// Verify rowid matches expected
@@ -807,7 +807,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 				}
 			}
 			btree.cursor_advance(&c)
-			cell.destroy(&cell_val)
+			cell.destroy(&cell_val, context.allocator)
 		}
 		testing.expect(t, count == 5, "cursor read 5 rows from columnar page")
 	}
@@ -818,7 +818,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 		testing.expect(t, f_err == .None, fmt.tprintf("tree_find row %d", i))
 		if f_err == .None {
 			testing.expect_value(t, types.Row_ID(i), found.rowid)
-			cell.destroy(&found)
+			cell.destroy(&found, context.allocator)
 		}
 	}
 
@@ -839,8 +839,8 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 		defer btree.cursor_destroy(&c)
 		found := false
 		for c.is_valid {
-			cell_val, _ := btree.cursor_get_cell(&c)
-			defer cell.destroy(&cell_val)
+			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
+			defer cell.destroy(&cell_val, context.temp_allocator)
 			if cell_val.rowid == 99 {
 				found = true
 				if len(cell_val.values) > 0 {
@@ -875,13 +875,13 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 		c, _ := btree.cursor_start(&ctx.tree)
 		defer btree.cursor_destroy(&c)
 		for c.is_valid {
-			cell_val, _ := btree.cursor_get_cell(&c)
+			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			append(&orig, struct {
 				rid:  types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
 			cell_val.values = nil
-			cell.destroy(&cell_val)
+			cell.destroy(&cell_val, context.temp_allocator)
 			btree.cursor_advance(&c)
 		}
 	}
@@ -901,7 +901,7 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 	}
 	cols := []types.Column{{name = "val", type = .INTEGER}}
 	cell.serialize_columnar(pg.data[off:], rowids, vals, cols)
-	for v in orig { delete(v.vals) }
+	for v in orig { delete(v.vals, context.temp_allocator) }
 
 	hdr := btree.get_leaf_header(pg.data, 1)
 	hdr.page_type = .LEAF_TABLE_COLUMNAR
@@ -914,13 +914,13 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 		defer btree.cursor_destroy(&c)
 		count := 0
 		for c.is_valid {
-			cell_val, g_err := btree.cursor_get_cell(&c)
+			cell_val, g_err := btree.cursor_get_cell(&c, context.temp_allocator)
 			testing.expect(t, g_err == .None, "cursor get cell on columnar")
 			if g_err == .None && cell_val.rowid >= 1 && cell_val.rowid <= 3 {
 				count += 1
 			}
 			btree.cursor_advance(&c)
-			cell.destroy(&cell_val)
+			cell.destroy(&cell_val, context.temp_allocator)
 		}
 		testing.expect(t, count == 3, "cursor reads 3 rows from columnar page")
 	}
@@ -937,11 +937,11 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 		found := false
 		total := 0
 		for c.is_valid {
-			cell_val, _ := btree.cursor_get_cell(&c)
+			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			total += 1
 			if cell_val.rowid == 99 { found = true }
 			btree.cursor_advance(&c)
-			cell.destroy(&cell_val)
+			cell.destroy(&cell_val, context.temp_allocator)
 		}
 		testing.expect(t, found, "inserted row 99 found after columnar conversion")
 		testing.expect(t, total == 4, "4 rows total after insert")
@@ -968,13 +968,13 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 		c, _ := btree.cursor_start(&ctx.tree)
 		defer btree.cursor_destroy(&c)
 		for c.is_valid {
-			cell_val, _ := btree.cursor_get_cell(&c)
+			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			append(&orig_rows, struct {
 				rid:  types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
 			cell_val.values = nil
-			cell.destroy(&cell_val)
+			cell.destroy(&cell_val, context.temp_allocator)
 			btree.cursor_advance(&c)
 		}
 	}
@@ -992,7 +992,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 	}
 	cols := []types.Column{{name = "val", type = .INTEGER}}
 	cell.serialize_columnar(pg.data[off:], rowids, vals, cols)
-	for v in orig_rows { delete(v.vals) }
+	for v in orig_rows { delete(v.vals, context.temp_allocator) }
 
 	hdr := btree.get_leaf_header(pg.data, 1)
 	hdr.page_type = .LEAF_TABLE_COLUMNAR
@@ -1013,7 +1013,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 		defer btree.cursor_destroy(&c)
 		updated := false
 		for c.is_valid {
-			cell_val, _ := btree.cursor_get_cell(&c)
+			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			if cell_val.rowid == 2 {
 				if len(cell_val.values) > 0 {
 					v, _ := cell_val.values[0].(i64)
@@ -1021,7 +1021,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 				}
 			}
 			btree.cursor_advance(&c)
-			cell.destroy(&cell_val)
+			cell.destroy(&cell_val, context.temp_allocator)
 		}
 		testing.expect(t, updated, "row 2 updated to 222 after columnar conversion")
 	}

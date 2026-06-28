@@ -86,7 +86,10 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 	if a_err != .None { return {}, .Page_Full }
 
 	_, r_err := node_from_bytes(root_page.page_num, root_page.data)
-	if r_err != .None { return {}, r_err }
+	if r_err != .None {
+		pager.unpin_page(t.pager, root_page.page_num)
+		return {}, r_err
+	}
 
 	btree := Tree {
 		pager = t.pager,
@@ -128,6 +131,7 @@ query_skip_index :: proc(skip_tree: ^Tree, val: i64) -> (page_min: u32, page_max
 		int(pointers[read_idx]),
 		cell.Config{allocator = context.temp_allocator, zero_copy = skip_tree.config.zero_copy},
 	)
+	defer cell.destroy(&c, context.temp_allocator)
 	if !des_ok { return 0, 0, false }
 	if len(c.values) >= 2 {
 		pmin, pmin_ok := c.values[0].(i64)
