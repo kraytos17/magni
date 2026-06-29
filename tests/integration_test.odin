@@ -24,8 +24,8 @@ setup_db :: proc(t: ^testing.T, name: string) -> ^db.Database {
 		os.remove(wal_name)
 	}
 
-	database, ok := db.open(filename)
-	testing.expect(t, ok, "Failed to open database")
+	database, open_err := db.open(filename)
+	testing.expect(t, open_err == .None, "Failed to open database")
 	return database
 }
 
@@ -46,13 +46,13 @@ test_integration_basic_create_and_insert :: proc(t: ^testing.T) {
 	d := setup_db(t, "basic_crud")
 	defer teardown_db(d, "basic_crud")
 
-	ok := db.execute(d, "CREATE TABLE test (id INT, val TEXT);")
+	ok := db.execute(d, "CREATE TABLE test (id INT, val TEXT);") == .None
 	testing.expect(t, ok, "CREATE TABLE should succeed")
 
-	ok2 := db.execute(d, "INSERT INTO test VALUES (1, 'hello');")
+	ok2 := db.execute(d, "INSERT INTO test VALUES (1, 'hello');") == .None
 	testing.expect(t, ok2, "INSERT should succeed")
 
-	ok3 := db.execute(d, "INSERT INTO test VALUES (2, 'world');")
+	ok3 := db.execute(d, "INSERT INTO test VALUES (2, 'world');") == .None
 	testing.expect(t, ok3, "Second INSERT should succeed")
 }
 
@@ -75,10 +75,10 @@ test_integration_select_empty_table :: proc(t: ^testing.T) {
 	d := setup_db(t, "empty_sel")
 	defer teardown_db(d, "empty_sel")
 
-	ok := db.execute(d, "CREATE TABLE t (id INT);")
+	ok := db.execute(d, "CREATE TABLE t (id INT);") == .None
 	testing.expect(t, ok, "CREATE TABLE should succeed")
 
-	ok2 := db.execute(d, "SELECT * FROM t;")
+	ok2 := db.execute(d, "SELECT * FROM t;") == .None
 	testing.expect(t, ok2, "SELECT on empty table should succeed")
 }
 
@@ -91,7 +91,7 @@ test_integration_select_with_data :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (1, 'Alice');")
 	db.execute(d, "INSERT INTO t VALUES (2, 'Bob');")
 
-	ok := db.execute(d, "SELECT * FROM t;")
+	ok := db.execute(d, "SELECT * FROM t;") == .None
 	testing.expect(t, ok, "SELECT with data should succeed")
 }
 
@@ -105,23 +105,23 @@ test_integration_time_travel_as_of_snapshot :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (2, 'Bob');")
 	db.execute(d, "INSERT INTO t VALUES (3, 'Charlie');")
 
-	ok_current := db.execute(d, "SELECT * FROM t;")
+	ok_current := db.execute(d, "SELECT * FROM t;") == .None
 	testing.expect(t, ok_current, "Current SELECT should succeed")
 
-	ok_snap1 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 1;")
+	ok_snap1 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 1;") == .None
 	testing.expect(t, ok_snap1, "AS OF SNAPSHOT 1 should succeed")
 
-	ok_snap2 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 2;")
+	ok_snap2 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 2;") == .None
 	testing.expect(t, ok_snap2, "AS OF SNAPSHOT 2 should succeed")
 
-	ok_snap3 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 3;")
+	ok_snap3 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 3;") == .None
 	testing.expect(t, ok_snap3, "AS OF SNAPSHOT 3 should succeed")
 
-	ok_snap4 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 4;")
+	ok_snap4 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 4;") == .None
 	testing.expect(t, ok_snap4, "AS OF SNAPSHOT 4 should succeed")
 
-	ok_bad := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 99;")
-	testing.expect(t, !ok_bad, "Non-existent snapshot should fail")
+	ok_bad := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 99;") != .None
+	testing.expect(t, ok_bad, "Non-existent snapshot should fail")
 }
 
 @(test)
@@ -134,7 +134,7 @@ test_integration_time_travel_with_where :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (2, 'Bob');")
 	db.execute(d, "INSERT INTO t VALUES (3, 'Charlie');")
 
-	ok := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 3 WHERE id = 1;")
+	ok := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 3 WHERE id = 1;") == .None
 	testing.expect(t, ok, "AS OF SNAPSHOT with WHERE should succeed")
 }
 
@@ -148,7 +148,7 @@ test_integration_time_travel_with_limit :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (2);")
 	db.execute(d, "INSERT INTO t VALUES (3);")
 
-	ok := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 4 LIMIT 2;")
+	ok := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 4 LIMIT 2;") == .None
 	testing.expect(t, ok, "AS OF SNAPSHOT with LIMIT should succeed")
 }
 
@@ -176,14 +176,14 @@ test_integration_cross_session_snapshots :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (2);")
 	db.close(d)
 
-	d2, open_ok := db.open(fmt.tprintf("test_int_%s.db", name))
+	d2, open_err := db.open(fmt.tprintf("test_int_%s.db", name))
 	defer teardown_db(d2, name)
-	testing.expect(t, open_ok, "Re-open should succeed")
+	testing.expect(t, open_err == .None, "Re-open should succeed")
 
-	ok := db.execute(d2, "SELECT * FROM t AS OF SNAPSHOT 1;")
+	ok := db.execute(d2, "SELECT * FROM t AS OF SNAPSHOT 1;") == .None
 	testing.expect(t, ok, "Cross-session time-travel should succeed")
 
-	ok2 := db.execute(d2, "SELECT * FROM t AS OF SNAPSHOT 3;")
+	ok2 := db.execute(d2, "SELECT * FROM t AS OF SNAPSHOT 3;") == .None
 	testing.expect(t, ok2, "Cross-session last snapshot should succeed")
 }
 
@@ -192,7 +192,7 @@ test_integration_keyword_as_identifier :: proc(t: ^testing.T) {
 	d := setup_db(t, "keyword_id")
 	defer teardown_db(d, "keyword_id")
 
-	ok := db.execute(d, "CREATE TABLE snapshot (id INT, of TEXT);")
+	ok := db.execute(d, "CREATE TABLE snapshot (id INT, of TEXT);") == .None
 	testing.expect(t, ok, "Using 'snapshot' and 'of' as identifiers should work")
 }
 
@@ -267,7 +267,7 @@ test_integration_join :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO b VALUES (1, 'X');")
 	db.execute(d, "INSERT INTO b VALUES (2, 'Y');")
 
-	r := db.execute(d, "SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id;")
+	r := db.execute(d, "SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id;") == .None
 	testing.expect(t, r, "INNER JOIN should succeed")
 }
 
@@ -304,7 +304,7 @@ test_integration_snapshot_restore :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (2);")
 
 	// Restore to snapshot 1 (after CREATE, before first INSERT)
-	ok := db.snapshot_restore(d, 1)
+	ok := db.snapshot_restore(d, 1) == .None
 	testing.expect(t, ok, "snapshot_restore to snapshot 1")
 
 	// After restore, the table should still exist (schema at snapshot 1)
@@ -368,7 +368,7 @@ test_integration_join_cross :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO b VALUES ('X');")
 
 	// CROSS JOIN — no ON clause, falls back to nested-loop
-	ok := db.execute(d, "SELECT a.id, b.val FROM a CROSS JOIN b LIMIT 10;")
+	ok := db.execute(d, "SELECT a.id, b.val FROM a CROSS JOIN b LIMIT 10;") == .None
 	testing.expect(t, ok, "CROSS JOIN should succeed")
 }
 
@@ -386,10 +386,12 @@ test_integration_join_hash :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO b VALUES (3, 'Z');")
 
 	// Equi-join — should use hash join
-	r := db.execute(
-		d,
-		"SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id ORDER BY a.id;",
-	)
+	r :=
+		db.execute(
+			d,
+			"SELECT a.id, a.name, b.val FROM a INNER JOIN b ON a.id = b.id ORDER BY a.id;",
+		) ==
+		.None
 	testing.expect(t, r, "Equi-join INNER JOIN should succeed")
 }
 
@@ -408,10 +410,12 @@ test_integration_join_asymmetric :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO big VALUES (2, 'w');")
 
 	// Join reorder: small table on right — uses hash on right table
-	r := db.execute(
-		d,
-		"SELECT small.id, small.name, big.val FROM small INNER JOIN big ON small.id = big.id ORDER BY small.id, big.val;",
-	)
+	r :=
+		db.execute(
+			d,
+			"SELECT small.id, small.name, big.val FROM small INNER JOIN big ON small.id = big.id ORDER BY small.id, big.val;",
+		) ==
+		.None
 	testing.expect(t, r, "Asymmetric JOIN should succeed")
 }
 
@@ -425,7 +429,7 @@ test_integration_select_distinct :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES ('Bob', 20);")
 	db.execute(d, "INSERT INTO t VALUES ('Alice', 30);")
 
-	r := db.execute(d, "SELECT DISTINCT name FROM t ORDER BY name;")
+	r := db.execute(d, "SELECT DISTINCT name FROM t ORDER BY name;") == .None
 	testing.expect(t, r, "SELECT DISTINCT should succeed")
 }
 
@@ -534,7 +538,7 @@ test_integration_snapshot_rollforward_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, q1.ok, "SELECT after restore")
 
 	// Roll forward
-	ok := db.rollforward(d)
+	ok := db.rollforward(d) == .None
 	testing.expect(t, ok, "rollforward to snapshot 2 should succeed")
 
 	q2 := db.query(d, "SELECT id FROM t ORDER BY id;")
@@ -552,7 +556,7 @@ test_integration_as_of_after_restore :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (3, 'third');")
 
 	// Query AS OF snapshot 2 (after first INSERT)
-	q1 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 2;")
+	q1 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 2;") == .None
 	testing.expect(t, q1, "AS OF SNAPSHOT 2 before restore")
 }
 
@@ -569,12 +573,12 @@ test_integration_expire_and_reclaim :: proc(t: ^testing.T) {
 	// Expire, keeping only last 5
 	db.expire_snapshots(d, 5)
 	// Recent snapshots should still work
-	q := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 20;")
+	q := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 20;") == .None
 	testing.expect(t, q, "AS OF recent snapshot should work after expire")
 
 	// Very old snapshot should fail
-	q2 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 1;")
-	testing.expect(t, !q2, "AS OF expired snapshot should fail")
+	q2 := db.execute(d, "SELECT * FROM t AS OF SNAPSHOT 1;") != .None
+	testing.expect(t, q2, "AS OF expired snapshot should fail")
 }
 
 @(test)
@@ -588,8 +592,8 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 
 	db.checkpoint(d)
 	db.close(d)
-	d2, open_ok := db.open(fmt.tprintf("test_int_ckpt.db"))
-	testing.expect(t, open_ok, "reopen after checkpoint")
+	d2, open_err := db.open(fmt.tprintf("test_int_ckpt.db"))
+	testing.expect(t, open_err == .None, "reopen after checkpoint")
 	defer teardown_db(d2, "ckpt")
 
 	q := db.query(d2, "SELECT COUNT(*) FROM t;")
@@ -1033,7 +1037,7 @@ test_insert_semicolon_in_string :: proc(t: ^testing.T) {
 	defer teardown_db(d, "semi")
 
 	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
-	ok := db.execute(d, "INSERT INTO t VALUES (1, 'hello world');")
+	ok := db.execute(d, "INSERT INTO t VALUES (1, 'hello world');") == .None
 	testing.expect(t, ok, "INSERT without semicolon in string")
 
 	q := db.query(d, "SELECT val FROM t WHERE id = 1;")
@@ -1047,11 +1051,11 @@ test_split_statements :: proc(t: ^testing.T) {
 	defer teardown_db(d, "splitmulti")
 
 	// Simulate multi-statement execution: send individual statements via db.execute
-	ok := db.execute(d, "CREATE TABLE t (id INT);")
+	ok := db.execute(d, "CREATE TABLE t (id INT);") == .None
 	testing.expect(t, ok, "CREATE TABLE")
-	ok = db.execute(d, "INSERT INTO t VALUES (1);")
+	ok = db.execute(d, "INSERT INTO t VALUES (1);") == .None
 	testing.expect(t, ok, "INSERT 1")
-	ok = db.execute(d, "INSERT INTO t VALUES (2);")
+	ok = db.execute(d, "INSERT INTO t VALUES (2);") == .None
 	testing.expect(t, ok, "INSERT 2")
 
 	q := db.query(d, "SELECT COUNT(*) FROM t;")
@@ -1063,9 +1067,9 @@ test_block_comment :: proc(t: ^testing.T) {
 	d := setup_db(t, "blockcmt")
 	defer teardown_db(d, "blockcmt")
 	// Block comments /* like this */ should be ignored
-	ok := db.execute(d, "CREATE /* inline */ TABLE t (id INT);")
+	ok := db.execute(d, "CREATE /* inline */ TABLE t (id INT);") == .None
 	testing.expect(t, ok, "CREATE with block comment")
-	ok = db.execute(d, "INSERT INTO t VALUES (1);")
+	ok = db.execute(d, "INSERT INTO t VALUES (1);") == .None
 	testing.expect(t, ok, "INSERT after block comment")
 	q := db.query(d, "SELECT id FROM t;")
 	testing.expect(t, q.ok, "SELECT after block comment")
@@ -1076,9 +1080,9 @@ test_double_semicolon :: proc(t: ^testing.T) {
 	d := setup_db(t, "dblsemi")
 	defer teardown_db(d, "dblsemi")
 	// Double semicolon should not produce a spurious error
-	ok := db.execute(d, "CREATE TABLE t (id INT);;")
+	ok := db.execute(d, "CREATE TABLE t (id INT);;") == .None
 	testing.expect(t, ok, "CREATE with double ;;")
-	ok = db.execute(d, "INSERT INTO t VALUES (1);;")
+	ok = db.execute(d, "INSERT INTO t VALUES (1);;") == .None
 	testing.expect(t, ok, "INSERT with double ;;")
 }
 
@@ -1088,10 +1092,10 @@ test_insert_too_many_columns :: proc(t: ^testing.T) {
 	defer teardown_db(d, "toomany")
 	db.execute(d, "CREATE TABLE t (id INT, val INT);")
 	// Column list with more entries than table has columns should be rejected
-	ok := db.execute(d, "INSERT INTO t (id,val,id,val) VALUES (1,2,3,4);")
-	testing.expect(t, !ok, "INSERT with too many columns rejected")
+	ok := db.execute(d, "INSERT INTO t (id,val,id,val) VALUES (1,2,3,4);") != .None
+	testing.expect(t, ok, "INSERT with too many columns rejected")
 	// Duplicate column names in INSERT should be accepted (last wins)
-	ok = db.execute(d, "INSERT INTO t (id,id) VALUES (1,2);")
+	ok = db.execute(d, "INSERT INTO t (id,id) VALUES (1,2);") == .None
 	testing.expect(t, ok, "INSERT with duplicate column names accepted")
 	// But the value should be the last one
 	q := db.query(d, "SELECT id FROM t;")

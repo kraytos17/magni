@@ -53,7 +53,7 @@ node_move_leaf_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: i
 
 		raw_dst := get_raw_entries(dst.data, dst.id)
 		raw_src := get_raw_entries(src.data, src.id)
-		raw_dst[dst_cell_count + i] = Cell_Entry{
+		raw_dst[dst_cell_count + i] = Cell_Entry {
 			ptr = Cell_Pointer(u16(dst_off)),
 			key = raw_src[idx].key,
 		}
@@ -104,7 +104,7 @@ node_move_interior_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, coun
 
 		raw_dst := get_raw_entries(dst.data, dst.id)
 		raw_src := get_raw_entries(src.data, src.id)
-		raw_dst[dst_cell_count + i] = Cell_Entry{
+		raw_dst[dst_cell_count + i] = Cell_Entry {
 			ptr = Cell_Pointer(u16(dst_off)),
 			key = raw_src[idx].key,
 		}
@@ -181,66 +181,40 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 
 	defer pager.unpin_page(t.pager, new_page.page_num)
 	init_leaf_page(new_page.data, new_page.page_num)
-	right_node, _ := node_from_bytes(new_page.page_num, new_page.data)
+	right_node, _ := node_from_bytes(
+		new_page.page_num,
+		new_page.data,
+		get_layout(t.pager.page_format_version),
+	)
 
 	total := int(node_leaf(curr^).cell_count)
 	mid := total / 2
-	if t.pager.page_format_version >= 2 {
-		if !node_move_leaf_cells_v2(curr, &right_node, mid, total - mid) {
-			return {}, .Serialization_Failed
-		}
-	} else if !node_move_leaf_cells(curr, &right_node, mid, total - mid) {
+	if !curr.layout.move_leaf(curr, &right_node, mid, total - mid) {
 		return {}, .Serialization_Failed
 	}
 	if mid > 0 {
-		if t.pager.page_format_version >= 2 {
-			dst_off := PAGE_SIZE
-			raw_entries := get_raw_entries(curr.data, curr.id)
-			for i in 0 ..< mid {
-				src_ptr := int(get_cell_ptr(curr.data, curr.id, i, CELL_ENTRY_STRIDE))
-				cell_sz, ok := cell.get_size(curr.data, src_ptr)
-				if !ok { return {}, .Serialization_Failed }
+		dst_off := PAGE_SIZE
+		for i in 0 ..< mid {
+			cell_off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
+			cell_sz, ok := cell.get_size(curr.data, cell_off)
+			if !ok { return {}, .Serialization_Failed }
 
-				dst_off -= cell_sz
-				copy(curr.data[dst_off:dst_off + cell_sz], curr.data[src_ptr:src_ptr + cell_sz])
-				raw_entries[i] = Cell_Entry{
-					ptr = Cell_Pointer(u16(dst_off)),
-					key = get_cell_key(curr.data, curr.id, i, 2),
-				}
-			}
-			curr.header.cell_content_offset = u16le(dst_off)
-			curr.header.cell_count = u16le(mid)
-		} else {
-			curr_ptrs := get_pointers(curr.data, curr.id)
-			hdr_sz := page_header_size(curr.header.page_type)
-			base := get_page_header_offset(curr.id)
-			dst_off := PAGE_SIZE
-			for i in 0 ..< mid {
-				src_ptr := int(curr_ptrs[i])
-				cell_sz, ok := cell.get_size(curr.data, src_ptr)
-				if !ok { return {}, .Serialization_Failed }
-
-				dst_off -= cell_sz
-				copy(curr.data[dst_off:dst_off + cell_sz], curr.data[src_ptr:src_ptr + cell_sz])
-				ptr_loc := base + hdr_sz + i * 2
-				endian.put_u16(curr.data[ptr_loc:], .Little, u16(dst_off))
-			}
-			curr.header.cell_content_offset = u16le(dst_off)
-			curr.header.cell_count = u16le(mid)
+			dst_off -= cell_sz
+			copy(curr.data[dst_off:dst_off + cell_sz], curr.data[cell_off:cell_off + cell_sz])
+			curr.layout.set_entry(
+				curr.data,
+				curr.id,
+				i,
+				u16(dst_off),
+				get_cell_key(curr.data, curr.id, i, curr.layout),
+			)
 		}
+
+		curr.header.cell_content_offset = u16le(dst_off)
+		curr.header.cell_count = u16le(mid)
 	}
 
-	sep: types.Row_ID
-	if t.pager.page_format_version >= 2 {
-		entries := get_entries(right_node.data, right_node.id)
-		sep = entries[0].key
-	} else {
-		ptrs := get_pointers(right_node.data, right_node.id)
-		s_ok := true
-		sep, s_ok = cell.get_rowid(right_node.data, int(ptrs[0]))
-		if !s_ok { return {}, .Invalid_Cell_Pointer }
-	}
-
+	sep := get_cell_key(right_node.data, right_node.id, 0, right_node.layout)
 	pager.mark_dirty(t.pager, curr.id)
 	pager.mark_dirty(t.pager, right_node.id)
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
@@ -252,62 +226,48 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 
 	defer pager.unpin_page(t.pager, new_page.page_num)
 	init_interior_page(new_page.data, new_page.page_num)
-	right_node, _ := node_from_bytes(new_page.page_num, new_page.data)
+	right_node, _ := node_from_bytes(
+		new_page.page_num,
+		new_page.data,
+		get_layout(t.pager.page_format_version),
+	)
+
 	total := int(node_interior(curr^).cell_count)
 	mid := total / 2
 
-	v := t.pager.page_format_version
 	sep: types.Row_ID
 	child_from_mid_cell: u32
-	if v >= 2 {
-		if total == 0 { return {}, .Invalid_Cell_Pointer }
-		mid_ptr := get_cell_ptr(curr.data, curr.id, mid, CELL_ENTRY_STRIDE)
-		sep_u64, _, ok := cell.varint_decode(curr.data, int(mid_ptr) + 4)
-		if !ok { return {}, .Invalid_Cell_Pointer }
-		sep = types.Row_ID(sep_u64)
-		child_from_mid_cell, _ = endian.get_u32(curr.data[int(mid_ptr):], .Big)
-		count_right := total - (mid + 1)
-		if count_right > 0 { node_move_interior_cells_v2(curr, &right_node, mid + 1, count_right) }
-	} else {
-		ptrs := get_pointers(curr.data, curr.id)
-		if len(ptrs) == 0 { return {}, .Invalid_Cell_Pointer }
-		mid_ptr := ptrs[mid]
-		sep_u64, _, ok := cell.varint_decode(curr.data, int(mid_ptr) + 4)
-		if !ok { return {}, .Invalid_Cell_Pointer }
-		sep = types.Row_ID(sep_u64)
-		child_from_mid_cell, _ = endian.get_u32(curr.data[int(mid_ptr):], .Big)
-		count_right := total - (mid + 1)
-		if count_right > 0 { node_move_interior_cells(curr, &right_node, mid + 1, count_right) }
+	if total == 0 { return {}, .Invalid_Cell_Pointer }
+
+	mid_ptr := int(get_cell_ptr(curr.data, curr.id, mid, curr.layout.stride))
+	sep_u64, _, ok := cell.varint_decode(curr.data, mid_ptr + 4)
+	if !ok { return {}, .Invalid_Cell_Pointer }
+
+	sep = types.Row_ID(sep_u64)
+	child_from_mid_cell, _ = endian.get_u32(curr.data[mid_ptr:], .Big)
+	count_right := total - (mid + 1)
+	if count_right > 0 {
+		if !curr.layout.move_interior(curr, &right_node, mid + 1, count_right) {
+			return {}, .Serialization_Failed
+		}
 	}
 
 	orig_rightmost := get_right_ptr(curr.data, curr.id)
 	set_right_ptr(right_node.data, right_node.id, orig_rightmost)
 	if mid > 0 {
-		hdr_sz := size_of(Interior_Header)
-		base := get_page_header_offset(curr.id)
 		dst_off := PAGE_SIZE
-		if v >= 2 {
-			raw_entries := get_raw_entries(curr.data, curr.id)
-			for i in 0 ..< mid {
-				off := int(get_cell_ptr(curr.data, curr.id, i, CELL_ENTRY_STRIDE))
-				cell_sz := interior_cell_size_from_page(curr.data, off)
-				dst_off -= cell_sz
-				copy(curr.data[dst_off:dst_off + cell_sz], curr.data[off:off + cell_sz])
-				raw_entries[i] = Cell_Entry{
-					ptr = Cell_Pointer(u16(dst_off)),
-					key = get_cell_key(curr.data, curr.id, i, 2),
-				}
-			}
-		} else {
-			ptrs := get_pointers(curr.data, curr.id)
-			for i in 0 ..< mid {
-				off := int(ptrs[i])
-				size := interior_cell_size_from_page(curr.data, off)
-				dst_off -= size
-				copy(curr.data[dst_off:dst_off + size], curr.data[off:off + size])
-				ptr_loc := base + hdr_sz + i * 2
-				endian.put_u16(curr.data[ptr_loc:], .Little, u16(dst_off))
-			}
+		for i in 0 ..< mid {
+			off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
+			cell_sz := interior_cell_size_from_page(curr.data, off)
+			dst_off -= cell_sz
+			copy(curr.data[dst_off:dst_off + cell_sz], curr.data[off:off + cell_sz])
+			curr.layout.set_entry(
+				curr.data,
+				curr.id,
+				i,
+				u16(dst_off),
+				get_cell_key(curr.data, curr.id, i, curr.layout),
+			)
 		}
 
 		curr_int := node_interior(curr^)
@@ -340,8 +300,9 @@ split_leaf_root :: proc(t: ^Tree, root_page: u32) -> (new_root: u32, err: Error)
 	init_leaf_page(left_page.data, left_page.page_num)
 	init_leaf_page(right_page.data, right_page.page_num)
 
-	left_node, _ := node_from_bytes(left_page.page_num, left_page.data)
-	right_node, _ := node_from_bytes(right_page.page_num, right_page.data)
+	l := get_layout(t.pager.page_format_version)
+	left_node, _ := node_from_bytes(left_page.page_num, left_page.data, l)
+	right_node, _ := node_from_bytes(right_page.page_num, right_page.data, l)
 	root_node, load_err := load_node(t, root_page)
 	if load_err != .None { return 0, load_err }
 
@@ -351,33 +312,14 @@ split_leaf_root :: proc(t: ^Tree, root_page: u32) -> (new_root: u32, err: Error)
 
 	total := int(node_leaf(root_node).cell_count)
 	mid := total / 2
-	v := t.pager.page_format_version
-	if v >= 2 {
-		if !node_move_leaf_cells_v2(&root_node, &left_node, 0, mid) {
-			return 0, .Serialization_Failed
-		}
-		if !node_move_leaf_cells_v2(&root_node, &right_node, mid, total - mid) {
-			return 0, .Serialization_Failed
-		}
-	} else {
-		if !node_move_leaf_cells(&root_node, &left_node, 0, mid) {
-			return 0, .Serialization_Failed
-		}
-		if !node_move_leaf_cells(&root_node, &right_node, mid, total - mid) {
-			return 0, .Serialization_Failed
-		}
+	if !root_node.layout.move_leaf(&root_node, &left_node, 0, mid) {
+		return 0, .Serialization_Failed
+	}
+	if !root_node.layout.move_leaf(&root_node, &right_node, mid, total - mid) {
+		return 0, .Serialization_Failed
 	}
 
-	sep: types.Row_ID
-	s_ok: bool
-	if v >= 2 {
-		entries := get_entries(right_node.data, right_node.id)
-		sep = entries[0].key; s_ok = true
-	} else {
-		ptrs := get_pointers(right_node.data, right_node.id)
-		sep, s_ok = cell.get_rowid(right_node.data, int(ptrs[0]))
-	}
-	if !s_ok { return 0, .Invalid_Cell_Pointer }
+	sep := get_cell_key(right_node.data, right_node.id, 0, right_node.layout)
 
 	init_interior_page(root_node.data, root_node.id)
 	pager.mark_dirty(t.pager, root_node.id)
@@ -387,7 +329,7 @@ split_leaf_root :: proc(t: ^Tree, root_page: u32) -> (new_root: u32, err: Error)
 	if load_err != .None { return 0, load_err }
 
 	set_right_ptr(root_node.data, root_node.id, right_node.id)
-	insert_interior_cell(root_node.data, root_node.id, left_node.id, sep)
+	insert_interior_cell(root_node.data, root_node.id, left_node.id, sep, root_node.layout)
 	pager.mark_dirty(t.pager, left_node.id)
 	pager.mark_dirty(t.pager, right_node.id)
 	pager.mark_dirty(t.pager, root_node.id)
@@ -401,20 +343,18 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 
 	defer pager.unpin_page(t.pager, left_page.page_num)
 	init_interior_page(left_page.data, left_page.page_num)
-	left_node, _ := node_from_bytes(left_page.page_num, left_page.data)
+	left_node, _ := node_from_bytes(
+		left_page.page_num,
+		left_page.data,
+		get_layout(t.pager.page_format_version),
+	)
 
 	root_node, r_err := load_node(t, t.root)
 	if r_err != .None { return r_err }
 	if is_leaf(root_node) { unpin_node(t, root_node); return .Invalid_Page_Header }
 
 	total := int(node_interior(root_node).cell_count)
-	v := t.pager.page_format_version
-	if v >= 2 {
-		if !node_move_interior_cells_v2(&root_node, &left_node, 0, total) {
-			unpin_node(t, root_node)
-			return .Serialization_Failed
-		}
-	} else if !node_move_interior_cells(&root_node, &left_node, 0, total) {
+	if !root_node.layout.move_interior(&root_node, &left_node, 0, total) {
 		unpin_node(t, root_node)
 		return .Serialization_Failed
 	}
@@ -429,7 +369,14 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 	if r_err != .None { return r_err }
 
 	set_right_ptr(root_node.data, root_node.id, split.right_page)
-	insert_interior_cell(root_node.data, root_node.id, left_node.id, split.split_key)
+	insert_interior_cell(
+		root_node.data,
+		root_node.id,
+		left_node.id,
+		split.split_key,
+		root_node.layout,
+	)
+
 	pager.mark_dirty(t.pager, t.root)
 	pager.mark_dirty(t.pager, left_node.id)
 	unpin_node(t, root_node)

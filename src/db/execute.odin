@@ -1,6 +1,5 @@
 package db
 
-import "core:fmt"
 import "core:sync"
 import "src:executor"
 import "src:pager"
@@ -8,20 +7,14 @@ import "src:parser"
 import "src:snapshot"
 import "src:types"
 
-// Execute a SQL string: parse, handle AS OF, dispatch to executor, auto-snapshot if
-// outside a transaction. Returns true on success.
-execute :: proc(db: ^Database, sql: string) -> bool {
-	if !db_check(db) { return false }
+execute :: proc(db: ^Database, sql: string) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
-	stmt, ok, err_msg := parser.parse(sql, context.temp_allocator)
+
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	if !ok {
-		if err_msg != "" {
-			fmt.eprintln("Error:", err_msg)
-		} else {
-			fmt.eprintln("Error: Failed to parse SQL statement")
-		}
-		return false
+		return .Parse_Error
 	}
 	if txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt); is_txn {
 		switch txn_stmt.op {
@@ -40,14 +33,12 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 		if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
 			snap_page, has_page := db.snapshot_index[snap_id]
 			if !has_page {
-				fmt.eprintln("Error: Snapshot", snap_id, "not found")
-				return false
+				return .Snapshot_Not_Found
 			}
 
 			snap_h, snap_ok := snapshot.load(db.pager, snap_page)
 			if !snap_ok {
-				fmt.eprintln("Error: Failed to load snapshot", snap_id)
-				return false
+				return .Snapshot_Failed
 			}
 
 			st.root = snap_h.schema_root
@@ -55,8 +46,7 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 		} else if ts_val, has_ts := sel.as_of_timestamp.?; has_ts {
 			snap_h, snap_ok := snapshot.find_by_timestamp(db.pager, db.latest_snapshot, ts_val)
 			if !snap_ok {
-				fmt.eprintln("Error: No snapshot found at or before timestamp", ts_val)
-				return false
+				return .Snapshot_Not_Found
 			}
 
 			st.root = snap_h.schema_root
@@ -65,7 +55,6 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 	}
 
 	exec_ok, new_root, mt := executor.execute(&st, stmt)
-	// AS OF queries read a historical schema_root — dont update live schema root.
 	if !as_of_override {
 		db.schema_root_page = new_root
 		update_header(db)
@@ -140,8 +129,9 @@ execute :: proc(db: ^Database, sql: string) -> bool {
 		}
 		pager.wal_commit_txn(db.pager)
 	}
-	free_all(context.temp_allocator)
-	return exec_ok
+
+	if exec_ok { return .None }
+	return .IO_Error
 }
 
 Query_Result :: struct {
@@ -149,19 +139,18 @@ Query_Result :: struct {
 	col_types: []types.Column_Type,
 	rows:      [][]types.Value,
 	ok:        bool,
+	err:       DB_Error,
 }
 
-// Execute a SELECT and return structured results (columns, types, rows). Only SELECT is supported.
 query :: proc(db: ^Database, sql: string) -> Query_Result {
 	r := Query_Result{}
-	if !db_check(db) { return r }
+	if err := db_check(db); err != .None { r.err = err; return r }
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	stmt, parse_ok, err_msg := parser.parse(sql, context.temp_allocator)
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
 	if !parse_ok {
-		if err_msg !=
-		   "" { fmt.eprintln("Error:", err_msg) } else { fmt.eprintln("Error: Failed to parse SQL statement") }
+		r.err = .Parse_Error
 		return r
 	}
 
@@ -170,24 +159,30 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 		if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
 			snap_page, has_page := db.snapshot_index[snap_id]
 			if !has_page {
-				fmt.eprintln("Error: Snapshot", snap_id, "not found")
+				r.err = .Snapshot_Not_Found
 				return r
 			}
 
 			snap_h, snap_ok := snapshot.load(db.pager, snap_page)
-			if !snap_ok { return r }
+			if !snap_ok {
+				r.err = .Snapshot_Failed
+				return r
+			}
 			st.root = snap_h.schema_root
 		} else if ts_val, has_ts := sel.as_of_timestamp.?; has_ts {
 			snap_h, snap_ok := snapshot.find_by_timestamp(db.pager, db.latest_snapshot, ts_val)
 			if !snap_ok {
-				fmt.eprintln("Error: No snapshot found at or before timestamp", ts_val)
+				r.err = .Snapshot_Not_Found
 				return r
 			}
 			st.root = snap_h.schema_root
 		}
 
 		rows, cols, q_ok := executor.exec_query(&st, sel)
-		if !q_ok { return r }
+		if !q_ok {
+			r.err = .IO_Error
+			return r
+		}
 
 		col_names := make([]string, len(cols), context.temp_allocator)
 		col_types := make([]types.Column_Type, len(cols), context.temp_allocator)
@@ -198,13 +193,13 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 
 		flat_rows := make([][]types.Value, len(rows), context.temp_allocator)
 		for entry, i in rows { flat_rows[i] = entry.values }
-		return Query_Result {
-			columns = col_names,
-			col_types = col_types,
-			rows = flat_rows,
-			ok = true,
-		}
+
+		r.ok = true
+		r.columns = col_names
+		r.col_types = col_types
+		r.rows = flat_rows
+		return r
 	}
-	fmt.eprintln("Error: query() only supports SELECT statements")
+	r.err = .Not_Supported
 	return r
 }

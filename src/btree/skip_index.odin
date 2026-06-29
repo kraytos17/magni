@@ -37,8 +37,7 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 			cursor_advance(&cursor); continue
 		}
 
-		v := t.pager.page_format_version
-		stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+		stride := node.layout.stride
 		cell_count := get_cell_count(node.data, page_id)
 		if cell_count == 0 {
 			unpin_node(t, node)
@@ -98,7 +97,11 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 	root_page, a_err := pager.allocate_page(t.pager)
 	if a_err != .None { return {}, .Page_Full }
 
-	_, r_err := node_from_bytes(root_page.page_num, root_page.data)
+	_, r_err := node_from_bytes(
+		root_page.page_num,
+		root_page.data,
+		get_layout(t.pager.page_format_version),
+	)
 	if r_err != .None {
 		pager.unpin_page(t.pager, root_page.page_num)
 		return {}, r_err
@@ -121,17 +124,17 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 query_skip_index :: proc(skip_tree: ^Tree, val: i64) -> (page_min: u32, page_max: u32, ok: bool) {
 	key := types.Row_ID(val)
 	dk := Descend_Key_Ctx {
-		key     = key,
-		version = skip_tree.pager.page_format_version,
+		key    = key,
+		layout = get_layout(skip_tree.pager.page_format_version),
 	}
+
 	leaf, err := descend_to_leaf(skip_tree, descend_by_key, &dk)
 	if err != .None { return 0, 0, false }
 	defer unpin_node(skip_tree, leaf)
 
-	v := skip_tree.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	stride := leaf.layout.stride
 	cell_count := get_cell_count(leaf.data, leaf.id)
-	idx, lb_ok := leaf_lower_bound(leaf.data, leaf.id, key, v)
+	idx, lb_ok := leaf_lower_bound(leaf.data, leaf.id, key, leaf.layout)
 	if !lb_ok || cell_count == 0 { return 0, 0, false }
 
 	// Prefer exact match (idx < cell_count and rid == val).

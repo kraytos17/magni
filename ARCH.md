@@ -61,8 +61,7 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
    - Each mutation (INSERT/UPDATE/DELETE) uses COW B-tree operations
    - Schema tree root is updated via `tree_update_cow` (single traversal)
 4. After execution, a snapshot is created capturing the new schema root
-5. `free_all(context.temp_allocator)` reclaims all temporary memory
-6. Lock is released
+5. Lock is released
 
 ---
 
@@ -221,13 +220,14 @@ Page N (N > 1):
 
 Interior pages append `rightmost_ptr: u32be` after the standard header (12 bytes total).
 
-**In-memory `Node` struct (24 bytes):**
+**In-memory `Node` struct:**
 
 ```odin
 Node :: struct {
     id:     u32,
     data:   []u8,
     header: ^Page_Header,     // computed once on load
+    layout: ^Cell_Layout,     // resolved once per page from format registry
 }
 ```
 
@@ -371,7 +371,6 @@ execute(db, sql):
     create_snapshot()
     set_ref("main" → snap_id)
     wal_commit_txn()          // single fsync of WAL, not full cache
-  free_all(temp_allocator)
   unlock(mu)
 ```
 
@@ -493,8 +492,7 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 | Allocator | Used by | Lifecycle |
 |---|---|---|
 | `context.allocator` | Persistent: database handle, pager slab, snapshot index | Until `db.close()` |
-| `context.temp_allocator` | Per-statement: AST, tokens, intermediate rows, cursor results | `free_all()` at end of `db.execute()` |
-| `context.temp_allocator` (REPL) | Per-iteration: REPL output formatting | `free_all()` at top of REPL loop |
+| `context.temp_allocator` | Per-statement: AST, tokens, intermediate rows, cursor results | End of caller's arena (REPL's `free_all` per iteration, `execute_sql` exit, or program exit) |
 
 ### Heap Allocation Profile
 
@@ -605,9 +603,9 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 ### Public `db` API
 
 ```odin
-open(path: string)                  -> ^Database, bool
+open(path: string)                  -> ^Database, DB_Error
 close(db: ^Database)
-execute(db: ^Database, sql: string)  -> bool
+execute(db: ^Database, sql: string)  -> DB_Error
 query(db: ^Database, sql: string)    -> Query_Result
 
 Query_Result :: struct {
@@ -615,19 +613,21 @@ Query_Result :: struct {
     col_types: []types.Column_Type,
     rows:      [][]types.Value,
     ok:        bool,
+    err:       DB_Error,
 }
 
-checkpoint(db: ^Database)           -> bool
-begin(db: ^Database)                -> bool
-commit(db: ^Database)               -> bool
-rollback(db: ^Database)             -> bool
-snapshot_restore(db, id)            -> bool
-rollforward(db)                     -> bool
-snapshot_tag(db, id, label)         -> bool
-expire_snapshots(db, keep)          -> bool
+checkpoint(db: ^Database)           -> DB_Error
+begin(db: ^Database)                -> DB_Error
+commit(db: ^Database)               -> DB_Error
+rollback(db: ^Database)             -> DB_Error
+snapshot_restore(db, id)            -> DB_Error
+rollforward(db)                     -> DB_Error
+snapshot_tag(db, id, label)         -> DB_Error
+expire_snapshots(db, keep)          -> DB_Error
 print_snapshots(db)
-snapshot_diff(db, older, newer)     -> bool
-integrity_check(db)                 -> bool
+snapshot_diff(db, older, newer)     -> DB_Error
+integrity_check(db)                 -> DB_Error
+describe_table(db, name)            -> DB_Error
 ```
 
 ### Public `btree` API

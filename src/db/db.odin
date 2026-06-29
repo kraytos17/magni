@@ -1,4 +1,3 @@
-// Package db is the top-level database handle: open/close, header, schema access, coordination.
 package db
 
 import "core:fmt"
@@ -10,29 +9,90 @@ import "src:schema"
 import "src:snapshot"
 import "src:types"
 
-Transaction_State :: enum {
-	NONE,
-	ACTIVE,
+DEFAULT_KEEP :: 20
+
+Open_Config :: struct {
+	wal_size_threshold:       int, // If non-zero, WAL pages are checkpointed when WAL reaches this many pages
+	snapshot_batch_threshold: int, // 0 = every mutation, N = batch N mutations
 }
 
-DEFAULT_KEEP :: 100
+DB_Error :: enum u8 {
+	None,
+	Invalid_Handle,
+	Alloc_Failed,
+	IO_Error,
+	Corrupted,
+	Schema_Newer,
+	Page_Size_Mismatch,
+	Parse_Error,
+	Table_Not_Found,
+	Snapshot_Not_Found,
+	Snapshot_Failed,
+	Snapshot_Expired,
+	Transaction_Error,
+	No_Ref,
+	Nothing_To_Roll,
+	Not_Supported,
+}
+
+db_error_string :: proc(err: DB_Error) -> string {
+	switch err {
+	case .None:
+		return ""
+	case .Invalid_Handle:
+		return "Invalid database handle"
+	case .Alloc_Failed:
+		return "Memory allocation failed"
+	case .IO_Error:
+		return "I/O error"
+	case .Corrupted:
+		return "Database file is corrupted"
+	case .Schema_Newer:
+		return "Database schema version is too new"
+	case .Page_Size_Mismatch:
+		return "Page size mismatch"
+	case .Parse_Error:
+		return "Failed to parse SQL statement"
+	case .Table_Not_Found:
+		return "Table not found"
+	case .Snapshot_Not_Found:
+		return "Snapshot not found"
+	case .Snapshot_Failed:
+		return "Failed to load or create snapshot"
+	case .Snapshot_Expired:
+		return "Snapshot has been expired"
+	case .Transaction_Error:
+		return "Transaction error"
+	case .No_Ref:
+		return "No ref found"
+	case .Nothing_To_Roll:
+		return "Nothing to roll forward to"
+	case .Not_Supported:
+		return "Operation not supported"
+	case:
+		return "Unknown error"
+	}
+}
 
 Database :: struct {
-	path:                     string,
 	pager:                    ^pager.Pager,
+	path:                     string,
 	is_new:                   bool,
-	mu:                       sync.Mutex, // serializes all db.* operations
 	schema_root_page:         u32,
-	latest_snapshot:          u32, // cached page number of the most recent snapshot
-	refs_page:                u32, // page storing named refs (branches/tags) and rollforward log
-	txn_state:                Transaction_State,
-	txn_snapshot_id:          u64, // monotonically increasing snapshot ID counter
-	txn_start_file_len:       i64, // file_len snapshot at BEGIN, restored on ROLLBACK
-	snapshot_index:           map[u64]u32, // snapshot_id → page_num (built on open)
-	table_roots:              map[string]u32, // {table_name → root_page} cache for manifests
-	table_roots_dirty:        bool, // invalidated after schema mutation
-	snapshot_batch_count:     int, // mutations accumulated since last snapshot
-	snapshot_batch_threshold: int, // 0 = every mutation, N = batch N mutations
+	latest_snapshot:          u32,
+	txn_snapshot_id:          u64,
+	txn_state:                enum {
+		NONE,
+		ACTIVE,
+	},
+	txn_start_file_len:       u64,
+	snapshot_index:           map[u64]u32,
+	table_roots:              map[string]u32,
+	table_roots_dirty:        bool,
+	refs_page:                u32,
+	snapshot_batch_count:     int,
+	snapshot_batch_threshold: int,
+	mu:                       sync.Mutex,
 }
 
 Header :: struct #packed {
@@ -40,12 +100,13 @@ Header :: struct #packed {
 	page_size:            u32le,
 	page_count:           u32le,
 	schema_version:       u32le,
+	page_format_version:  u32le,
 	schema_root_page:     u32le,
 	latest_snapshot_page: u32le,
 	snapshot_id_counter:  u64le,
 	first_free_page:      u32le,
 	refs_page:            u32le,
-	reserved:             [51]u8,
+	reserved:             [47]u8,
 }
 
 #assert(size_of(Header) == types.DATABASE_HEADER_SIZE)
@@ -54,22 +115,18 @@ schema_tree :: proc(db: ^Database) -> btree.Tree {
 	return btree.init(db.pager, db.schema_root_page)
 }
 
-// Open the database at path. Initializes the pager, loads the header, builds the
-// snapshot index, and creates the refs page. Returns nil on error.
-open :: proc(path: string) -> (^Database, bool) {
+open :: proc(path: string) -> (^Database, DB_Error) {
 	db := new(Database)
 	if db == nil {
-		fmt.eprintln("Error: Failed to allocate database handle")
-		return nil, false
+		return nil, .Alloc_Failed
 	}
 
 	db.path = strings.clone(path); db.latest_snapshot = 0
 	p, err := pager.open(path)
 	if err != nil {
-		fmt.eprintln("Error: Failed to open database file:", err)
 		delete(db.path)
 		free(db)
-		return nil, false
+		return nil, .IO_Error
 	}
 
 	db.pager = p
@@ -79,23 +136,21 @@ open :: proc(path: string) -> (^Database, bool) {
 	db.snapshot_index = make(map[u64]u32, 128); db.table_roots = make(map[string]u32)
 	if db.is_new {
 		fmt.println("Initializing new database...")
-		if !initialize(db) {
+		if init_err := initialize(db); init_err != .None {
 			close(db)
-			return nil, false
+			return nil, init_err
 		}
-		db.pager.page_format_version = types.SCHEMA_VERSION
+		db.pager.page_format_version = types.PAGE_FORMAT_VERSION
 	} else {
-		if !verify_header(db) {
-			fmt.eprintln("Error: Invalid or corrupted database file")
+		if v_err := verify_header(db); v_err != .None {
 			close(db)
-			return nil, false
+			return nil, v_err
 		}
 
 		page1, h_err := pager.get_page(db.pager, 1)
 		if h_err != .None {
-			fmt.eprintln("Error: Failed to read database header")
 			close(db)
-			return nil, false
+			return nil, .IO_Error
 		}
 
 		header := (^Header)(raw_data(page1.data))
@@ -104,9 +159,11 @@ open :: proc(path: string) -> (^Database, bool) {
 		db.txn_snapshot_id = u64(header.snapshot_id_counter)
 		db.pager.first_free_page = u32(header.first_free_page)
 		db.refs_page = u32(header.refs_page)
-		db.pager.page_format_version = u32(header.schema_version)
-		pager.unpin_page(db.pager, 1)
+		pfv := u32(header.page_format_version)
+		if pfv == 0 { pfv = u32(header.schema_version) }
 
+		db.pager.page_format_version = pfv
+		pager.unpin_page(db.pager, 1)
 		page := db.latest_snapshot
 		for page != 0 {
 			h, ok := snapshot.load(db.pager, page)
@@ -115,20 +172,17 @@ open :: proc(path: string) -> (^Database, bool) {
 			page = h.prev_snapshot
 		}
 	}
-	return db, true
+	return db, .None
 }
 
-// Close the database: update header, close pager, free all resources.
 close :: proc(db: ^Database) {
 	if db == nil { return }
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	// Flush any pending batch snapshot
 	if db.snapshot_batch_count > 0 {
 		db.snapshot_batch_threshold = 1
 		db.snapshot_batch_count = 1
-		// Create a COMMIT snapshot for the pending state
 		ensure_table_roots(db)
 		tables := make([dynamic]types.Table, context.temp_allocator)
 		for name, root in db.table_roots {
@@ -168,11 +222,10 @@ close :: proc(db: ^Database) {
 	delete(db.snapshot_index); delete(db.table_roots); delete(db.path); free(db)
 }
 
-initialize :: proc(db: ^Database) -> bool {
+initialize :: proc(db: ^Database) -> DB_Error {
 	page1, err := pager.allocate_page(db.pager)
 	if err != .None {
-		fmt.eprintln("Error: Failed to allocate header page:", err)
-		return false
+		return .Alloc_Failed
 	}
 	defer pager.unpin_page(db.pager, page1.page_num)
 
@@ -181,10 +234,10 @@ initialize :: proc(db: ^Database) -> bool {
 	header.page_size = u32le(types.PAGE_SIZE)
 	header.page_count = 1
 	header.schema_version = u32le(types.SCHEMA_VERSION)
+	header.page_format_version = u32le(types.PAGE_FORMAT_VERSION)
 	schema_page, s_err := pager.allocate_page(db.pager)
 	if s_err != .None {
-		fmt.eprintln("Error: Failed to allocate schema root page:", s_err)
-		return false
+		return .Alloc_Failed
 	}
 	defer pager.unpin_page(db.pager, schema_page.page_num)
 
@@ -195,14 +248,12 @@ initialize :: proc(db: ^Database) -> bool {
 	header.page_count = u32le(schema_page.page_num)
 	st := schema_tree(db)
 	if !schema.init(&st) {
-		fmt.eprintln("Error: Failed to initialize schema tree")
-		return false
+		return .Alloc_Failed
 	}
 
 	refs_page := snapshot.create_refs_page(db.pager)
 	if refs_page == 0 {
-		fmt.eprintln("Error: Failed to create refs page")
-		return false
+		return .Alloc_Failed
 	}
 
 	pager.wal_begin_txn(db.pager)
@@ -210,34 +261,27 @@ initialize :: proc(db: ^Database) -> bool {
 	header.refs_page = u32le(refs_page)
 	db.refs_page = refs_page
 	pager.wal_commit_txn(db.pager)
-	return true
+	return .None
 }
 
-verify_header :: proc(db: ^Database) -> bool {
+verify_header :: proc(db: ^Database) -> DB_Error {
 	page, err := pager.get_page(db.pager, 1)
-	if err != .None { return false }
+	if err != .None { return .IO_Error }
 	defer pager.unpin_page(db.pager, 1)
 
 	header := (^Header)(raw_data(page.data))
 	if string(header.magic[:len(types.MAGIC_STRING)]) != types.MAGIC_STRING {
-		return false
+		return .Corrupted
 	}
 
 	sv := u32(header.schema_version)
 	if sv > types.SCHEMA_VERSION {
-		fmt.eprintln(
-			"Error: Database schema version",
-			sv,
-			"is newer than expected",
-			types.SCHEMA_VERSION,
-		)
-		return false
+		return .Schema_Newer
 	}
 	if header.page_size != u32le(types.PAGE_SIZE) {
-		fmt.eprintln("Error: Page size mismatch")
-		return false
+		return .Page_Size_Mismatch
 	}
-	return true
+	return .None
 }
 
 update_header :: proc(db: ^Database) {
@@ -255,12 +299,11 @@ update_header :: proc(db: ^Database) {
 	pager.mark_dirty(db.pager, 1)
 }
 
-db_check :: proc(db: ^Database) -> bool {
+db_check :: proc(db: ^Database) -> DB_Error {
 	if db == nil || db.pager == nil {
-		fmt.eprintln("Error: Invalid database handle")
-		return false
+		return .Invalid_Handle
 	}
-	return true
+	return .None
 }
 
 ensure_table_roots :: proc(db: ^Database) {

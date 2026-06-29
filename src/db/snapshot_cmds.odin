@@ -6,7 +6,7 @@ import "src:pager"
 import "src:snapshot"
 
 print_snapshots :: proc(db: ^Database) {
-	if !db_check(db) { return }
+	if db_check(db) != .None { return }
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 	if db.latest_snapshot == 0 {
@@ -16,19 +16,17 @@ print_snapshots :: proc(db: ^Database) {
 	snapshot.print_chain(db.pager, db.latest_snapshot)
 }
 
-snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> bool {
-	if !db_check(db) { return false }
+snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 	if db.latest_snapshot == 0 {
-		fmt.println("No snapshots.")
-		return false
+		return .Snapshot_Not_Found
 	}
 
 	entries, ok := snapshot.diff_snapshots(db.pager, older_id, newer_id, db.latest_snapshot)
 	if !ok {
-		fmt.eprintf("Error: failed to diff snapshots %d → %d\n", older_id, newer_id)
-		return false
+		return .Snapshot_Failed
 	}
 	defer {
 		for e in entries { delete(e.table_name) }
@@ -36,7 +34,7 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> bool {
 	}
 	if len(entries) == 0 {
 		fmt.printf("No changes between snapshots %d and %d.\n", older_id, newer_id)
-		return true
+		return .None
 	}
 
 	fmt.printf("Snapshot diff: %d → %d\n", older_id, newer_id)
@@ -51,92 +49,80 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> bool {
 		}
 	}
 	fmt.printf("(%d table(s) changed)\n", len(entries))
-	return true
+	return .None
 }
 
-snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> bool {
-	if !db_check(db) { return false }
+snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	page, has_page := db.snapshot_index[snapshot_id]
 	if !has_page {
-		fmt.eprintln("Error: Snapshot", snapshot_id, "not found")
-		return false
+		return .Snapshot_Not_Found
 	}
 	snapshot.set_tag(db.pager, page, tag)
-	return true
+	return .None
 }
 
-snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> bool {
-	if !db_check(db) { return false }
+snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	if db.latest_snapshot == 0 {
-		fmt.eprintln("Error: No snapshots")
-		return false
+		return .Snapshot_Not_Found
 	}
 
 	snap_page, has_page := db.snapshot_index[snapshot_id]
 	if !has_page {
-		fmt.eprintln("Error: Snapshot", snapshot_id, "not found")
-		return false
+		return .Snapshot_Not_Found
 	}
 
 	snap_h, snap_ok := snapshot.load(db.pager, snap_page)
 	if !snap_ok {
-		fmt.eprintln("Error: Failed to load snapshot", snapshot_id)
-		return false
+		return .Snapshot_Failed
 	}
 
-	// Log current tip before moving ref (for rollforward)
 	current_id, _ := snapshot.get_ref(db.pager, db.refs_page, snapshot.MAIN_REF)
 	if current_id != 0 && current_id != snapshot_id {
 		snapshot.log_push(db.pager, db.refs_page, current_id)
 	}
-	// Ref-pointer-move: update "main" ref to point at target snapshot
-	snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snapshot_id, .BRANCH, false)
 
+	snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snapshot_id, .BRANCH, false)
 	db.latest_snapshot = snap_page
 	db.schema_root_page = snap_h.schema_root
 	pager.wal_begin_txn(db.pager)
 	update_header(db)
 	pager.wal_commit_txn(db.pager)
 	fmt.printf("Restored to snapshot %d (schema root %d)\n", snapshot_id, snap_h.schema_root)
-	return true
+	return .None
 }
 
-rollforward :: proc(db: ^Database) -> bool {
-	if !db_check(db) { return false }
+rollforward :: proc(db: ^Database) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	if db.latest_snapshot == 0 {
-		fmt.eprintln("Error: No snapshots")
-		return false
+		return .Snapshot_Not_Found
 	}
 
 	current_id, found := snapshot.get_ref(db.pager, db.refs_page, snapshot.MAIN_REF)
 	if !found {
-		fmt.eprintln("Error: No main ref")
-		return false
+		return .No_Ref
 	}
 
 	prev_id, popped := snapshot.log_pop(db.pager, db.refs_page)
 	if !popped {
-		fmt.eprintln("Nothing to roll forward to")
-		return false
+		return .Nothing_To_Roll
 	}
 	if prev_id == current_id {
-		fmt.eprintln("Nothing to roll forward to (already at tip)")
-		return false
+		return .Nothing_To_Roll
 	}
 
 	target_page, has_page := db.snapshot_index[prev_id]
 	if !has_page {
-		fmt.eprintln("Error: Cannot roll forward — snapshot", prev_id, "has been expired")
-		return false
+		return .Snapshot_Expired
 	}
 
 	target_h, load_ok := snapshot.load(db.pager, target_page)
 	if !load_ok {
-		fmt.eprintln("Error: Failed to load snapshot", prev_id)
-		return false
+		return .Snapshot_Failed
 	}
 
 	snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, prev_id, .BRANCH, false)
@@ -146,17 +132,17 @@ rollforward :: proc(db: ^Database) -> bool {
 	update_header(db)
 	pager.wal_commit_txn(db.pager)
 	fmt.printf("Rolled forward to snapshot %d (schema root %d)\n", prev_id, target_h.schema_root)
-	return true
+	return .None
 }
 
-expire_snapshots :: proc(db: ^Database, keep_count: int) -> bool {
-	if !db_check(db) { return false }
+expire_snapshots :: proc(db: ^Database, keep_count: int) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	return expire_snapshots_impl(db, keep_count)
 }
 
-expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> bool {
-	if db.latest_snapshot == 0 { return true }
+expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
+	if db.latest_snapshot == 0 { return .None }
 
 	expired_ids := snapshot.expire_snapshots(db.pager, db.latest_snapshot, keep_count)
 	for id in expired_ids {
@@ -168,5 +154,5 @@ expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> bool {
 	update_header(db)
 	pager.wal_commit_txn(db.pager)
 	fmt.printf("Expired snapshots older than last %d, garbage collected\n", keep_count)
-	return true
+	return .None
 }

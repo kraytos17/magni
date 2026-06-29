@@ -217,7 +217,7 @@ src/
 ├── snapshot/              Snapshot chain, manifests, GC, refs, expire
 └── types/                 Core types: Value, Column, Table, SerialType
 tests/
-└── * _test.odin           276 tests across all packages
+└── * _test.odin           281 tests across all packages
 ```
 
 ---

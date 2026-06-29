@@ -1,7 +1,6 @@
 package btree
 
 import "core:encoding/endian"
-import "core:fmt"
 import "src:cell"
 import "src:pager"
 import "src:types"
@@ -31,7 +30,7 @@ collect_leaf_info :: proc(t: ^Tree, page_id: u32, infos: ^[dynamic]Leaf_Info) ->
 		off := get_page_header_offset(node.id)
 		hdr_sz := page_header_size(node.header.page_type)
 		cell_data := types.PAGE_SIZE - int(node.header.cell_content_offset)
-		overhead := off + hdr_sz + int(node.header.cell_count) * int(size_of(Cell_Pointer))
+		overhead := off + hdr_sz + int(node.header.cell_count) * node.layout.stride
 		used_bytes := cell_data + overhead
 
 		fk, _ := cell.get_rowid(node.data, int(pointers[0]))
@@ -88,16 +87,11 @@ merge_leaf_pages :: proc(t: ^Tree, left_id: u32, right_id: u32) -> bool {
 	if r_err != .None { return false }
 	defer unpin_node(t, right_node)
 
-	if t.pager.page_format_version >= 2 {
-		if !node_move_leaf_cells_v2(&right_node, &left_node, 0, int(right_node.header.cell_count)) {
-			return false
-		}
-	} else if !node_move_leaf_cells(&right_node, &left_node, 0, int(right_node.header.cell_count)) {
+	if !left_node.layout.move_leaf(&right_node, &left_node, 0, int(right_node.header.cell_count)) {
 		return false
 	}
 
 	pager.mark_dirty(t.pager, left_id)
 	pager.free_page(t.pager, right_id)
-	fmt.eprintln("Rebalance: merged leaf", right_id, "into", left_id)
 	return true
 }

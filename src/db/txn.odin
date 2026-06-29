@@ -6,23 +6,23 @@ import "src:pager"
 import "src:snapshot"
 import "src:types"
 
-begin_impl :: proc(db: ^Database) -> bool {
+begin_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state == .ACTIVE {
 		fmt.eprintln("Warning: Transaction already in progress")
-		return false
+		return .Transaction_Error
 	}
 
 	db.txn_state = .ACTIVE
-	db.txn_start_file_len = db.pager.file_len
+	db.txn_start_file_len = u64(db.pager.file_len)
 	pager.wal_begin_txn(db.pager)
 	fmt.println("BEGIN transaction")
-	return true
+	return .None
 }
 
-commit_impl :: proc(db: ^Database) -> bool {
+commit_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state != .ACTIVE {
 		fmt.eprintln("Warning: No active transaction to commit")
-		return false
+		return .Transaction_Error
 	}
 
 	db.txn_snapshot_id += 1
@@ -44,33 +44,30 @@ commit_impl :: proc(db: ^Database) -> bool {
 		.COMMIT,
 	)
 	if !snap_ok {
-		fmt.eprintln("Error: Failed to create snapshot")
-		return false
+		return .Snapshot_Failed
 	}
 
 	db.latest_snapshot = snap_page
 	db.snapshot_index[snap_id] = snap_page
 	snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
 	if err := pager.wal_commit_txn(db.pager); err != .None {
-		fmt.eprintln("Error: WAL commit failed:", err)
-		return false
+		return .IO_Error
 	}
 
 	db.txn_state = .NONE
 	fmt.println("COMMIT transaction (snapshot", db.txn_snapshot_id, ")")
-	return true
+	return .None
 }
 
-rollback_impl :: proc(db: ^Database) -> bool {
+rollback_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state != .ACTIVE {
 		fmt.eprintln("Warning: No active transaction to roll back")
-		return false
+		return .Transaction_Error
 	}
 
 	pager.wal_abort_txn(db.pager)
-	// Reclaim pages allocated during the aborted transaction
-	if db.txn_start_file_len < db.pager.file_len {
-		db.pager.file_len = db.txn_start_file_len
+	if db.txn_start_file_len < u64(db.pager.file_len) {
+		db.pager.file_len = i64(db.txn_start_file_len)
 	}
 	if db.latest_snapshot != 0 {
 		snap_h, snap_ok := snapshot.load(db.pager, db.latest_snapshot)
@@ -79,27 +76,23 @@ rollback_impl :: proc(db: ^Database) -> bool {
 
 	db.txn_state = .NONE
 	fmt.println("ROLLBACK transaction")
-	return true
+	return .None
 }
 
-// Begin an explicit transaction (acquires db.mu). Fails if a transaction is already active.
-begin :: proc(db: ^Database) -> bool {
-	if !db_check(db) { return false }
+begin :: proc(db: ^Database) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	return begin_impl(db)
 }
 
-// Commit the active transaction: create a snapshot, update refs, flush WAL.
-commit :: proc(db: ^Database) -> bool {
-	if !db_check(db) { return false }
+commit :: proc(db: ^Database) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	return commit_impl(db)
 }
 
-// Roll back the active transaction: abort WAL, reclaim pages, restore schema root from
-// the last snapshot.
-rollback :: proc(db: ^Database) -> bool {
-	if !db_check(db) { return false }
+rollback :: proc(db: ^Database) -> DB_Error {
+	if err := db_check(db); err != .None { return err }
 	sync.lock(&db.mu); defer sync.unlock(&db.mu)
 	return rollback_impl(db)
 }

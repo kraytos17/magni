@@ -1,4 +1,3 @@
-// Package main implements the MagniDB CLI: REPL, script execution, dot-commands.
 package main
 
 import "core:bufio"
@@ -44,9 +43,13 @@ main :: proc() {
 		return
 	}
 
-	database, ok := db.open(cli.database)
-	if !ok {
-		fmt.eprintf("Fatal: Could not open database '%s'.\n", cli.database)
+	database, open_err := db.open(cli.database)
+	if open_err != .None {
+		fmt.eprintf(
+			"Fatal: Could not open database '%s': %s\n",
+			cli.database,
+			db.db_error_string(open_err),
+		)
 		os.exit(1)
 	}
 	defer db.close(database)
@@ -103,7 +106,9 @@ repl :: proc(database: ^db.Database) {
 		if strings.has_suffix(trimmed, ";") {
 			full_sql := strings.to_string(query_buffer)
 			linedit.history_add(&ed.history, strings.trim_space(full_sql))
-			db.execute(database, full_sql)
+			if exec_err := db.execute(database, full_sql); exec_err != .None {
+				fmt.eprintln("Error:", db.db_error_string(exec_err))
+			}
 			strings.builder_reset(&query_buffer)
 		}
 	}
@@ -144,7 +149,9 @@ repl_fallback :: proc(database: ^db.Database) {
 		strings.write_string(&query_buffer, line)
 		if strings.has_suffix(trimmed, ";") {
 			full_sql := strings.to_string(query_buffer)
-			db.execute(database, full_sql)
+			if exec_err := db.execute(database, full_sql); exec_err != .None {
+				fmt.eprintln("Error:", db.db_error_string(exec_err))
+			}
 			strings.builder_reset(&query_buffer)
 		}
 	}
@@ -168,15 +175,15 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	case ".stats":
 		db.stats(database)
 	case ".begin":
-		if db.begin(database) {
+		if db.begin(database) == .None {
 			fmt.println("Transaction started.")
 		}
 	case ".commit":
-		if db.commit(database) {
+		if db.commit(database) == .None {
 			fmt.println("Transaction committed.")
 		}
 	case ".rollback":
-		if db.rollback(database) {
+		if db.rollback(database) == .None {
 			fmt.println("Transaction rolled back.")
 		}
 	case ".snapshots":
@@ -187,7 +194,9 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			older, older_ok := strconv.parse_u64(parts[1])
 			newer, newer_ok := strconv.parse_u64(parts[2])
 			if older_ok && newer_ok {
-				db.snapshot_diff(database, older, newer)
+				if err := db.snapshot_diff(database, older, newer); err != .None {
+					fmt.eprintln("Error:", db.db_error_string(err))
+				}
 			} else {
 				fmt.println("Usage: .snapdiff <older_id> <newer_id>")
 			}
@@ -195,11 +204,15 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			fmt.println("Usage: .snapdiff <older_id> <newer_id>")
 		}
 	case ".checkpoint":
-		if db.checkpoint(database) {
+		if err := db.checkpoint(database); err != .None {
+			fmt.eprintln("Error:", db.db_error_string(err))
+		} else {
 			fmt.println("Database flushed to disk.")
 		}
 	case ".integrity":
-		if db.integrity_check(database) {
+		if err := db.integrity_check(database); err != .None {
+			fmt.eprintln("Error:", db.db_error_string(err))
+		} else {
 			fmt.println("OK")
 		}
 	case:
@@ -209,7 +222,9 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 				id, id_ok := strconv.parse_u64(parts[2])
 				if id_ok && len(parts) >= 4 {
 					tag := strings.join(parts[3:], " ", context.temp_allocator)
-					if db.snapshot_tag(database, id, tag) {
+					if err := db.snapshot_tag(database, id, tag); err != .None {
+						fmt.eprintln("Error:", db.db_error_string(err))
+					} else {
 						fmt.printf("Tagged snapshot %d as '%s'\n", id, tag)
 					}
 				} else {
@@ -223,7 +238,9 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			if len(parts) == 3 {
 				id, id_ok := strconv.parse_u64(parts[2])
 				if id_ok {
-					db.snapshot_restore(database, id)
+					if err := db.snapshot_restore(database, id); err != .None {
+						fmt.eprintln("Error:", db.db_error_string(err))
+					}
 				} else {
 					fmt.println("Usage: .snapshot restore <id>")
 				}
@@ -238,7 +255,9 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			}
 			db.expire_snapshots(database, keep)
 		} else if trimmed == ".rollforward" {
-			db.rollforward(database)
+			if err := db.rollforward(database); err != .None {
+				fmt.eprintln("Error:", db.db_error_string(err))
+			}
 		} else if strings.has_prefix(trimmed, ".dump ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
@@ -249,7 +268,9 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 		} else if strings.has_prefix(trimmed, ".desc ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
-				db.describe_table(database, parts[1])
+				if err := db.describe_table(database, parts[1]); err != .None {
+					fmt.eprintln("Error:", db.db_error_string(err))
+				}
 			} else {
 				fmt.println("Usage: .desc <table_name>")
 			}
@@ -280,20 +301,20 @@ execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = fals
 
 execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = false) {
 	statements := split_statements(sql)
+	defer delete(statements)
 	for stmt in statements {
 		trimmed := strings.trim_space(stmt)
-		if len(trimmed) <= 1 { continue } 	// skip empty or bare ";"
-		if !db.execute(database, trimmed) {
-			if stop_on_error {
-				fmt.eprintf("Error: %s\n", trimmed[:min(len(trimmed), 80)])
-				os.exit(1)
-			}
+		if len(trimmed) <= 1 { continue }
+		exec_err := db.execute(database, trimmed)
+		if exec_err != .None && stop_on_error {
+			fmt.eprintf("Error: %s\n", trimmed[:min(len(trimmed), 80)])
+			os.exit(1)
 		}
 	}
 }
 
 split_statements :: proc(sql: string) -> []string {
-	result := make([dynamic]string, context.temp_allocator)
+	result := make([dynamic]string, context.allocator)
 	start := 0
 	in_string := false
 	for i in 0 ..< len(sql) {

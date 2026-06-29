@@ -41,10 +41,22 @@ Error :: enum {
 	Serialization_Failed,
 }
 
+pager_err_to_btree_err :: proc(e: pager.Error) -> Error {
+	#partial switch e {
+	case .None:
+		return .None
+	case .Cache_Full, .Out_Of_Memory:
+		return .Page_Full
+	case:
+		return .Page_Read_Failed
+	}
+}
+
 Node :: struct {
 	id:     u32,
 	data:   []u8,
 	header: ^Page_Header,
+	layout: ^Cell_Layout,
 }
 
 Insert_COW_Result :: struct #all_or_none {
@@ -75,27 +87,36 @@ unpin_node :: proc(t: ^Tree, n: Node) { pager.unpin_page(t.pager, n.id) }
 load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	page, err := pager.get_page(t.pager, page_id)
 	if err != nil { return {}, .Page_Read_Failed }
-	return node_from_bytes(page_id, page.data)
+	return node_from_bytes(page_id, page.data, get_layout(t.pager.page_format_version))
 }
 
-node_from_bytes :: proc(id: u32, data: []u8) -> (Node, Error) {
+node_from_bytes :: proc(id: u32, data: []u8, layout: ^Cell_Layout) -> (Node, Error) {
 	common_hdr := get_header(data, id)
 	if common_hdr == nil { return {}, .Invalid_Page_Header }
-	return Node{id = id, data = data, header = common_hdr}, .None
+	return Node{id = id, data = data, header = common_hdr, layout = layout}, .None
 }
 
-leaf_lower_bound :: proc(data: []u8, page_id: u32, target: types.Row_ID, version: u32 = 1) -> (int, bool) {
+leaf_lower_bound :: proc(
+	data: []u8,
+	page_id: u32,
+	target: types.Row_ID,
+	layout: ^Cell_Layout,
+) -> (
+	int,
+	bool,
+) {
 	cell_count := get_cell_count(data, page_id)
 	left, right := 0, cell_count
 	for left < right {
 		mid := left + (right - left) / 2
-		if get_cell_key(data, page_id, mid, version) < target { left = mid + 1 } else { right = mid }
+		if get_cell_key(data, page_id, mid, layout) <
+		   target { left = mid + 1 } else { right = mid }
 	}
 	return left, true
 }
 
-node_find_child :: proc(n: ^Node, key: types.Row_ID, version: u32 = 1) -> u32 {
-	return node_find_child_data(n.data, n.id, key, version)
+node_find_child :: proc(n: ^Node, key: types.Row_ID, layout: ^Cell_Layout) -> u32 {
+	return node_find_child_data(n.data, n.id, key, layout)
 }
 
 node_insert_leaf_cell :: proc(
@@ -107,24 +128,12 @@ node_insert_leaf_cell :: proc(
 	if !is_leaf(n^) { return .Invalid_Page_Header }
 
 	ensure_row_major(n.data, n.id)
-	v := t.pager.page_format_version
-	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid, v)
-
-	if v >= 2 {
-		entries := get_entries(n.data, n.id)
-		if t.config.check_duplicates {
-			if lb_ok && idx < len(entries) {
-				rid, _ := cell.get_rowid(n.data, int(entries[idx].ptr))
-				if rid == rowid { return .Duplicate_Rowid }
-			}
-		}
-	} else {
-		pointers := get_pointers(n.data, n.id)
-		if t.config.check_duplicates {
-			if lb_ok && idx < len(pointers) {
-				rid, _ := cell.get_rowid(n.data, int(pointers[idx]))
-				if rid == rowid { return .Duplicate_Rowid }
-			}
+	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid, n.layout)
+	if t.config.check_duplicates {
+		if lb_ok && idx < int(n.header.cell_count) {
+			ptr := get_cell_ptr(n.data, n.id, idx, n.layout.stride)
+			rid, _ := cell.get_rowid(n.data, int(ptr))
+			if rid == rowid { return .Duplicate_Rowid }
 		}
 	}
 
@@ -139,19 +148,7 @@ node_insert_leaf_cell :: proc(
 		bytes_written, ok := cell.serialize(n.data[int(free_off):], rowid, values, cinfo)
 		if !ok || bytes_written != cinfo.total_size { return .Serialization_Failed }
 
-		if v >= 2 {
-			raw_entries := get_raw_entries(n.data, n.id)
-			if idx < int(n.header.cell_count) {
-				copy(raw_entries[idx + 1:], raw_entries[idx:n.header.cell_count])
-			}
-			raw_entries[idx] = Cell_Entry{ptr = Cell_Pointer(free_off), key = rowid}
-		} else {
-			raw_ptrs := get_raw_pointers(n.data, n.id)
-			if idx < int(n.header.cell_count) {
-				copy(raw_ptrs[idx + 1:], raw_ptrs[idx:n.header.cell_count])
-			}
-			raw_ptrs[idx] = Cell_Pointer(free_off)
-		}
+		insert_cell_at(n.data, n.id, idx, u16(free_off), rowid, n.layout.stride)
 		n.header.cell_count += 1
 		pager.mark_dirty(t.pager, n.id)
 		pager.invalidate_page_int_range(t.pager, n.id)
@@ -160,9 +157,8 @@ node_insert_leaf_cell :: proc(
 
 	base_offset := get_page_header_offset(n.id)
 	header_size := page_header_size(n.header.page_type)
-	entry_sz := size_of(Cell_Entry) if v >= 2 else size_of(Cell_Pointer)
-	ptr_area_end :=
-		base_offset + header_size + int(n.header.cell_count + 1) * entry_sz
+	entry_sz := n.layout.stride
+	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * entry_sz
 
 	if ptr_area_end >= int(n.header.cell_content_offset) { return .Page_Full }
 	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end { return .Page_Full }
@@ -171,19 +167,7 @@ node_insert_leaf_cell :: proc(
 	bytes_written, ok := cell.serialize(n.data[new_offset:], rowid, values, cinfo)
 	if !ok || bytes_written != cinfo.total_size { return .Serialization_Failed }
 
-	if v >= 2 {
-		raw_entries := get_raw_entries(n.data, n.id)
-		if idx < int(n.header.cell_count) {
-			copy(raw_entries[idx + 1:], raw_entries[idx:n.header.cell_count])
-		}
-		raw_entries[idx] = Cell_Entry{ptr = Cell_Pointer(new_offset), key = rowid}
-	} else {
-		raw_ptrs := get_raw_pointers(n.data, n.id)
-		if idx < int(n.header.cell_count) {
-			copy(raw_ptrs[idx + 1:], raw_ptrs[idx:n.header.cell_count])
-		}
-		raw_ptrs[idx] = Cell_Pointer(new_offset)
-	}
+	insert_cell_at(n.data, n.id, idx, u16(new_offset), rowid, n.layout.stride)
 	n.header.cell_count += 1
 	n.header.cell_content_offset = u16le(new_offset)
 	pager.mark_dirty(t.pager, n.id)
@@ -191,12 +175,16 @@ node_insert_leaf_cell :: proc(
 	return .None
 }
 
-node_update_child_ptr :: proc(n: ^Node, key: types.Row_ID, new_sibling: u32, version: u32 = 1) -> bool {
+node_update_child_ptr :: proc(
+	n: ^Node,
+	key: types.Row_ID,
+	new_sibling: u32,
+	layout: ^Cell_Layout,
+) -> bool {
 	cell_count := get_cell_count(n.data, n.id)
-	stride := CELL_ENTRY_STRIDE if version >= 2 else CELL_POINTER_STRIDE
-	idx, ok := interior_lower_bound(n.data, n.id, key, version)
+	idx, ok := interior_lower_bound(n.data, n.id, key, layout)
 	if ok && idx < cell_count {
-		cell_offset := int(get_cell_ptr(n.data, n.id, idx, stride))
+		cell_offset := int(get_cell_ptr(n.data, n.id, idx, layout.stride))
 		endian.put_u32(n.data[cell_offset:], .Big, new_sibling)
 		return true
 	}
@@ -207,8 +195,8 @@ node_update_child_ptr :: proc(n: ^Node, key: types.Row_ID, new_sibling: u32, ver
 	return false
 }
 
-node_find_insert_index :: proc(n: ^Node, target_rowid: types.Row_ID, version: u32 = 1) -> int {
-	idx, _ := leaf_lower_bound(n.data, n.id, target_rowid, version)
+node_find_insert_index :: proc(n: ^Node, target_rowid: types.Row_ID, layout: ^Cell_Layout) -> int {
+	idx, _ := leaf_lower_bound(n.data, n.id, target_rowid, layout)
 	return idx
 }
 
@@ -273,11 +261,11 @@ insert_recursive :: proc(
 			e
 	}
 
-	child_id := node_find_child(&curr, rowid)
+	child_id := node_find_child(&curr, rowid, curr.layout)
 	child_result, c_err := insert_recursive(t, child_id, rowid, values, cow)
 	if c_err != .None { return {}, c_err }
 	if cow && child_result.new_page != child_id {
-		node_update_child_ptr(&curr, rowid, child_result.new_page, t.pager.page_format_version)
+		node_update_child_ptr(&curr, rowid, child_result.new_page, curr.layout)
 	}
 	if !child_result.did_split {
 		update_row_count(t, curr.id, 1)
@@ -295,11 +283,10 @@ insert_recursive :: proc(
 	ptr_for_insert := child_result.right_page
 	insert_key := child_result.split_key
 	if !is_rightmost {
-		idx := find_interior_cell_for_child(curr.data, curr.id, child_id, t.pager.page_format_version)
+		idx := find_interior_cell_for_child(curr.data, curr.id, child_id, curr.layout)
 		if idx == -1 { return {}, .Invalid_Page_Header }
 
-		v := t.pager.page_format_version
-		stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+		stride := curr.layout.stride
 		cell_offset := int(get_cell_ptr(curr.data, curr.id, idx, stride))
 		old_sep_u64, _, ok := cell.varint_decode(curr.data, cell_offset + 4)
 		if !ok { return {}, .Invalid_Cell_Pointer }
@@ -311,7 +298,7 @@ insert_recursive :: proc(
 		ptr_for_insert = child_id
 	}
 
-	ok := insert_interior_cell(curr.data, curr.id, ptr_for_insert, insert_key, t.pager.page_format_version)
+	ok := insert_interior_cell(curr.data, curr.id, ptr_for_insert, insert_key, curr.layout)
 	if ok {
 		if is_rightmost { set_right_ptr(curr.data, curr.id, child_result.right_page) }
 
@@ -340,7 +327,14 @@ insert_recursive :: proc(
 	defer unpin_node(t, target_node)
 	if is_rightmost { set_right_ptr(target_node.data, target_id, child_result.right_page) }
 
-	insert_interior_cell(target_node.data, target_id, ptr_for_insert, insert_key, t.pager.page_format_version)
+	insert_interior_cell(
+		target_node.data,
+		target_id,
+		ptr_for_insert,
+		insert_key,
+		target_node.layout,
+	)
+
 	pager.mark_dirty(t.pager, target_id)
 	count_recursive(t, target_id)
 	return Insert_COW_Result {
@@ -352,11 +346,15 @@ insert_recursive :: proc(
 		.None
 }
 
-rowid_exists :: proc(data: []u8, page_id: u32, target_rowid: types.Row_ID) -> bool {
+rowid_exists :: proc(
+	data: []u8,
+	page_id: u32,
+	target_rowid: types.Row_ID,
+	layout: ^Cell_Layout,
+) -> bool {
 	pointers := get_pointers(data, page_id)
-	idx, ok := leaf_lower_bound(data, page_id, target_rowid)
+	idx, ok := leaf_lower_bound(data, page_id, target_rowid, layout)
 	if !ok || idx >= len(pointers) { return false }
-
 	rowid, ok2 := cell.get_rowid(data, int(pointers[idx]))
 	return ok2 && rowid == target_rowid
 }
@@ -423,13 +421,17 @@ descend_to_leaf :: proc(
 	}
 }
 
-node_find_child_data :: proc(data: []u8, page_id: u32, key: types.Row_ID, version: u32 = 1) -> u32 {
+node_find_child_data :: proc(
+	data: []u8,
+	page_id: u32,
+	key: types.Row_ID,
+	layout: ^Cell_Layout,
+) -> u32 {
 	cell_count := get_cell_count(data, page_id)
 	if cell_count == 0 { return get_right_ptr(data, page_id) }
-	idx, ok := interior_lower_bound(data, page_id, key, version)
+	idx, ok := interior_lower_bound(data, page_id, key, layout)
 	if !ok || idx >= cell_count { return get_right_ptr(data, page_id) }
-	stride := CELL_ENTRY_STRIDE if version >= 2 else CELL_POINTER_STRIDE
-	ptr := get_cell_ptr(data, page_id, idx, stride)
+	ptr := get_cell_ptr(data, page_id, idx, layout.stride)
 	child, _ := endian.get_u32(data[int(ptr):], .Big); return child
 }
 
@@ -438,19 +440,23 @@ descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 }
 
 Descend_Key_Ctx :: struct {
-	key:     types.Row_ID,
-	version: u32,
+	key:    types.Row_ID,
+	layout: ^Cell_Layout,
 }
 
 descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	dk := (^Descend_Key_Ctx)(ctx)
-	return node_find_child_data(data, page_id, dk.key, dk.version)
+	return node_find_child_data(data, page_id, dk.key, dk.layout)
 }
 
 // Find a row by Row_ID. Returns a Cell (with deep-copied or zero-copy values per Config).
 // Returns .Cell_Not_Found if the row doesn't exist.
 tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cell.Cell, Error) {
-	dk := Descend_Key_Ctx{key = key, version = t.pager.page_format_version}
+	dk := Descend_Key_Ctx {
+		key    = key,
+		layout = get_layout(t.pager.page_format_version),
+	}
+
 	leaf, err := descend_to_leaf(t, descend_by_key, &dk)
 	if err != .None { return {}, err }
 	defer unpin_node(t, leaf)
@@ -479,10 +485,10 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 		return {}, .Cell_Not_Found
 	}
 
-	v := t.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
-	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key, v)
+	stride := leaf.layout.stride
+	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key, leaf.layout)
 	if !ok { return {}, .Invalid_Cell_Pointer }
+
 	cell_count := get_cell_count(leaf.data, leaf.id)
 	if idx < cell_count {
 		ptr := get_cell_ptr(leaf.data, leaf.id, idx, stride)
@@ -506,8 +512,7 @@ tree_next_rowid :: proc(t: ^Tree) -> (types.Row_ID, Error) {
 	defer unpin_node(t, leaf)
 	if leaf.header.cell_count == 0 { return 1, .None }
 
-	v := t.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	stride := leaf.layout.stride
 	last_ptr := get_cell_ptr(leaf.data, leaf.id, int(leaf.header.cell_count) - 1, stride)
 	last_id, ok := cell.get_rowid(leaf.data, int(last_ptr))
 	if !ok { return 0, .Invalid_Cell_Pointer }
@@ -536,8 +541,7 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (int, Error) {
 	}
 
 	total := 0
-	v := t.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	stride := node.layout.stride
 	cell_count := get_cell_count(node.data, page_id)
 	for i in 0 ..< cell_count {
 		ptr := get_cell_ptr(node.data, page_id, i, stride)
@@ -574,7 +578,7 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 		return true, .None
 	}
 
-	child_id := node_find_child(&node, key, t.pager.page_format_version)
+	child_id := node_find_child(&node, key, node.layout)
 	deleted, d_err := delete_recursive(t, child_id, key)
 	if d_err != .None { return false, d_err }
 	if deleted {
@@ -587,45 +591,24 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
 
 	ensure_row_major(leaf_node.data, leaf_node.id)
-	v := t.pager.page_format_version
 	limit := int(leaf_node.header.cell_count)
 	delete_idx, cell_off, cell_sz := -1, 0, 0
-	idx, ok := leaf_lower_bound(leaf_node.data, leaf_node.id, key, v)
-
-	if v >= 2 {
-		raw_entries := get_raw_entries(leaf_node.data, leaf_node.id)
-		if ok && idx < limit {
-			rid, ok2 := cell.get_rowid(leaf_node.data, int(raw_entries[idx].ptr))
-			if ok2 && rid == key {
-				delete_idx = idx
-				cell_off = int(raw_entries[idx].ptr)
-				sz, ok3 := cell.get_size(leaf_node.data, cell_off)
-				if ok3 { cell_sz = sz }
-			}
+	idx, ok := leaf_lower_bound(leaf_node.data, leaf_node.id, key, leaf_node.layout)
+	if ok && idx < limit {
+		ptr := get_cell_ptr(leaf_node.data, leaf_node.id, idx, leaf_node.layout.stride)
+		rid, ok2 := cell.get_rowid(leaf_node.data, int(ptr))
+		if ok2 && rid == key {
+			delete_idx = idx
+			cell_off = int(ptr)
+			sz, ok3 := cell.get_size(leaf_node.data, cell_off)
+			if ok3 { cell_sz = sz }
 		}
-		if delete_idx == -1 {
-			return .Cell_Not_Found
-		}
-		if delete_idx < limit - 1 {
-			copy(raw_entries[delete_idx:], raw_entries[delete_idx + 1:limit])
-		}
-	} else {
-		pointers := get_raw_pointers(leaf_node.data, leaf_node.id)
-		if ok && idx < limit {
-			rid, ok2 := cell.get_rowid(leaf_node.data, int(pointers[idx]))
-			if ok2 && rid == key {
-				delete_idx = idx
-				cell_off = int(pointers[idx])
-				sz, ok3 := cell.get_size(leaf_node.data, cell_off)
-				if ok3 { cell_sz = sz }
-			}
-		}
-		if delete_idx == -1 {
-			return .Cell_Not_Found
-		}
-		if delete_idx < limit - 1 {
-			copy(pointers[delete_idx:], pointers[delete_idx + 1:limit])
-		}
+	}
+	if delete_idx == -1 {
+		return .Cell_Not_Found
+	}
+	if delete_idx < limit - 1 {
+		delete_cell_at(leaf_node.data, leaf_node.id, delete_idx, leaf_node.layout.stride)
 	}
 
 	leaf_node.header.cell_count -= 1
@@ -643,6 +626,7 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 			min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), 255),
 		)
 	}
+
 	pager.mark_dirty(t.pager, leaf_node.id)
 	pager.invalidate_page_int_range(t.pager, leaf_node.id)
 	return .None
@@ -655,7 +639,11 @@ tree_delete :: proc(t: ^Tree, key: types.Row_ID) -> Error {
 }
 
 tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Error {
-	dk := Descend_Key_Ctx{key = rowid, version = t.pager.page_format_version}
+	dk := Descend_Key_Ctx {
+		key    = rowid,
+		layout = get_layout(t.pager.page_format_version),
+	}
+
 	leaf_node, err := descend_to_leaf(t, descend_by_key, &dk)
 	if err != .None { return err }
 	defer unpin_node(t, leaf_node)
@@ -681,11 +669,11 @@ foreach_recursive :: proc(
 	cb: proc(c: ^cell.Cell, user_data: rawptr) -> bool,
 	ud: rawptr,
 ) -> Error {
-	v := t.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
 	node, err := load_node(t, page_id)
 	if err != .None { return err }
 	defer unpin_node(t, node)
+
+	stride := node.layout.stride
 	if is_leaf(node) {
 		cell_count := get_cell_count(node.data, page_id)
 		for i in 0 ..< cell_count {
@@ -726,8 +714,7 @@ tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 		node.header.fragmented_bytes,
 	)
 
-	v := t.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	stride := node.layout.stride
 	cell_count := get_cell_count(node.data, page_id)
 	for i in 0 ..< cell_count {
 		ptr := get_cell_ptr(node.data, page_id, i, stride)
@@ -784,13 +771,13 @@ verify_recursive :: proc(
 		node.header.page_type,
 		node.header.cell_count,
 	)
-	v := t.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+
+	stride := node.layout.stride
 	cell_count := get_cell_count(node.data, page_id)
 	if is_leaf(node) {
 		prev := min_k
 		for i in 0 ..< cell_count {
-			rowid := get_cell_key(node.data, page_id, i, v)
+			rowid := get_cell_key(node.data, page_id, i, node.layout)
 			if rowid < prev {
 				fmt.printf("Leaf key disorder: %d came after %d\n", rowid, prev)
 				return false
@@ -813,7 +800,7 @@ verify_recursive :: proc(
 			return false
 		}
 
-		key := get_cell_key(node.data, page_id, i, v)
+		key := get_cell_key(node.data, page_id, i, node.layout)
 		if key < prev_k || key > max_k {
 			fmt.printf("Interior key %d out of bounds [%d, %d]\n", key, prev_k, max_k)
 			return false
@@ -839,8 +826,7 @@ collect_pages :: proc(t: ^Tree, root: u32, pages: ^map[u32]bool) {
 	defer unpin_node(t, node)
 	if is_leaf(node) { return }
 
-	v := t.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	stride := node.layout.stride
 	cell_count := get_cell_count(node.data, node.id)
 	for i in 0 ..< cell_count {
 		ptr := get_cell_ptr(node.data, node.id, i, stride)

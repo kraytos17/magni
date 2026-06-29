@@ -632,10 +632,9 @@ test_page_accessor_v1 :: proc(t: ^testing.T) {
 
 	// Verify get_cell_key — v1 version = 1
 	for i in 0 ..< 3 {
-		k := btree.get_cell_key(pg.data, pg.page_num, i, 1)
+		k := btree.get_cell_key(pg.data, pg.page_num, i, btree.get_layout(1))
 		testing.expectf(t, k == rids[i], "v1 get_cell_key(%d) = %d, expected %d", i, k, rids[i])
 	}
-
 	pager.unpin_page(p, pg.page_num)
 }
 
@@ -699,7 +698,7 @@ test_page_accessor_v2 :: proc(t: ^testing.T) {
 	}
 	// Verify get_cell_key — v2 version = 2
 	for i in 0 ..< 3 {
-		k := btree.get_cell_key(pg.data, pg.page_num, i, 2)
+		k := btree.get_cell_key(pg.data, pg.page_num, i, btree.get_layout(2))
 		testing.expectf(t, k == rids[i], "v2 get_cell_key(%d) = %d, expected %d", i, k, rids[i])
 	}
 
@@ -715,7 +714,7 @@ test_page_accessor_v2 :: proc(t: ^testing.T) {
 	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 4)
 	expected_keys := []types.Row_ID{100, 400, 200, 300}
 	for i in 0 ..< len(expected_keys) {
-		k := btree.get_cell_key(pg.data, pg.page_num, i, 2)
+		k := btree.get_cell_key(pg.data, pg.page_num, i, btree.get_layout(2))
 		testing.expectf(
 			t,
 			k == expected_keys[i],
@@ -733,7 +732,7 @@ test_page_accessor_v2 :: proc(t: ^testing.T) {
 	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 3)
 	expected_keys2 := []types.Row_ID{100, 400, 300}
 	for i in 0 ..< len(expected_keys2) {
-		k := btree.get_cell_key(pg.data, pg.page_num, i, 2)
+		k := btree.get_cell_key(pg.data, pg.page_num, i, btree.get_layout(2))
 		testing.expectf(
 			t,
 			k == expected_keys2[i],
@@ -804,6 +803,124 @@ test_page_accessor_move :: proc(t: ^testing.T) {
 	dst_hdr.cell_count = 1
 	// Verify dst has entry with key=20
 	testing.expect_value(t, btree.get_cell_count(dst_pg.data, dst_pg.page_num), 1)
-	k := btree.get_cell_key(dst_pg.data, dst_pg.page_num, 0, 2)
+	k := btree.get_cell_key(dst_pg.data, dst_pg.page_num, 0, btree.get_layout(2))
 	testing.expect_value(t, k, types.Row_ID(20))
+}
+
+test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label: string) {
+	p, err := pager.open(fmt.tprintf("test_layout_%s.db", label), 8)
+	defer pager.close(p)
+	defer os.remove(fmt.tprintf("test_layout_%s.db", label))
+	defer os.remove(fmt.tprintf("test_layout_%s.db-wal", label))
+	if err != nil { testing.fail_now(t, "open failed") }
+
+	pg, a_err := pager.allocate_page(p)
+	if a_err != nil { testing.fail_now(t, "alloc failed") }
+
+	btree.init_leaf_page(pg.data, pg.page_num)
+	// Manually build 3 cells and write entries using layout
+	vals := [][]types.Value{{types.value_int(10)}, {types.value_int(20)}, {types.value_int(30)}}
+	rids := []types.Row_ID{100, 200, 300}
+	off := int(types.PAGE_SIZE)
+	for i in 0 ..< 3 {
+		info := cell.compute_info(rids[i], vals[i])
+		off -= info.total_size
+		cell.serialize(pg.data[off:], rids[i], vals[i], info)
+		layout.set_entry(pg.data, pg.page_num, i, u16(off), rids[i])
+	}
+
+	hdr := btree.get_leaf_header(pg.data, pg.page_num)
+	hdr.cell_count = 3
+	hdr.cell_content_offset = u16le(off)
+
+	// Test get_cell_count
+	testing.expectf(
+		t,
+		btree.get_cell_count(pg.data, pg.page_num) == 3,
+		"%s: cell_count == 3",
+		label,
+	)
+
+	// Test get_cell_ptr + get_cell_key round-trip
+	for i in 0 ..< 3 {
+		ptr := btree.get_cell_ptr(pg.data, pg.page_num, i, layout.stride)
+		k := layout.get_key(pg.data, pg.page_num, i)
+		testing.expectf(
+			t,
+			k == rids[i],
+			"%s: get_key(%d) == %d, expected %d",
+			label,
+			i,
+			k,
+			rids[i],
+		)
+		rid, ok := cell.get_rowid(pg.data, int(ptr))
+		testing.expectf(t, ok && rid == rids[i], "%s: cell %d has rowid %d", label, i, rid)
+	}
+
+	// Test insert_cell_at: insert at index 1
+	info4 := cell.compute_info(types.Row_ID(400), {types.value_int(40)})
+	off4 := int(hdr.cell_content_offset) - info4.total_size
+	cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
+	hdr.cell_content_offset = u16le(off4)
+	btree.insert_cell_at(pg.data, pg.page_num, 1, u16(off4), 400, layout.stride)
+	hdr.cell_count = 4
+
+	testing.expectf(
+		t,
+		btree.get_cell_count(pg.data, pg.page_num) == 4,
+		"%s: after insert count == 4",
+		label,
+	)
+	expected := []types.Row_ID{100, 400, 200, 300}
+	for i in 0 ..< len(expected) {
+		k := layout.get_key(pg.data, pg.page_num, i)
+		testing.expectf(
+			t,
+			k == expected[i],
+			"%s: after insert get_key(%d) == %d, expected %d",
+			label,
+			i,
+			k,
+			expected[i],
+		)
+	}
+
+	// Test delete_cell_at: delete index 2
+	btree.delete_cell_at(pg.data, pg.page_num, 2, layout.stride)
+	hdr.cell_count = 3
+	testing.expectf(
+		t,
+		btree.get_cell_count(pg.data, pg.page_num) == 3,
+		"%s: after delete count == 3",
+		label,
+	)
+	expected2 := []types.Row_ID{100, 400, 300}
+	for i in 0 ..< len(expected2) {
+		k := layout.get_key(pg.data, pg.page_num, i)
+		testing.expectf(
+			t,
+			k == expected2[i],
+			"%s: after delete get_key(%d) == %d, expected %d",
+			label,
+			i,
+			k,
+			expected2[i],
+		)
+	}
+
+	// Test entry_area_end
+	eae := btree.entry_area_end(pg.data, pg.page_num, layout.stride)
+	testing.expectf(t, eae > 0, "%s: entry_area_end > 0", label)
+	pager.unpin_page(p, pg.page_num)
+}
+
+@(test)
+test_cell_layout_v1_conformance :: proc(t: ^testing.T) {
+	test_layout_conformance(t, btree.get_layout(1), "v1")
+}
+
+@(test)
+test_cell_layout_v2_conformance :: proc(t: ^testing.T) {
+	test_layout_conformance(t, btree.get_layout(2), "v2")
 }

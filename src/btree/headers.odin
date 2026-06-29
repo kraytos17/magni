@@ -252,23 +252,8 @@ get_cell_ptr :: proc(data: []u8, page_id: u32, i: int, stride: int) -> u16 {
 	return u16((^u16le)(raw_data(data[start + i * stride:]))^)
 }
 
-get_cell_key :: proc(data: []u8, page_id: u32, i: int, version: u32) -> types.Row_ID {
-	off := get_page_header_offset(page_id)
-	hdr := get_header(data, page_id)
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off + hdr_sz
-	if version >= 2 {
-		entry := (^Cell_Entry)(raw_data(data[start + i * CELL_ENTRY_STRIDE:]))
-		return entry.key
-	}
-
-	ptr := u16((^u16le)(raw_data(data[start + i * CELL_POINTER_STRIDE:]))^)
-	if hdr.page_type == .LEAF_TABLE || hdr.page_type == .LEAF_TABLE_COLUMNAR {
-		rid, _ := cell.get_rowid(data, int(ptr))
-		return rid
-	}
-	sep, _, _ := cell.varint_decode(data, int(ptr) + 4)
-	return types.Row_ID(sep)
+get_cell_key :: proc(data: []u8, page_id: u32, i: int, layout: ^Cell_Layout) -> types.Row_ID {
+	return layout.get_key(data, page_id, i)
 }
 
 insert_cell_at :: proc(
@@ -373,12 +358,11 @@ find_interior_cell_for_child :: proc(
 	data: []u8,
 	page_id: u32,
 	child_page: u32,
-	version: u32 = 1,
+	layout: ^Cell_Layout,
 ) -> int {
 	cell_count := get_cell_count(data, page_id)
-	stride := CELL_ENTRY_STRIDE if version >= 2 else CELL_POINTER_STRIDE
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(data, page_id, i, stride)
+		ptr := get_cell_ptr(data, page_id, i, layout.stride)
 		stored_child, _ := endian.get_u32(data[int(ptr):], .Big)
 		if stored_child == child_page {
 			return i
@@ -391,7 +375,7 @@ interior_lower_bound :: proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
-	version: u32 = 1,
+	layout: ^Cell_Layout,
 ) -> (
 	int,
 	bool,
@@ -401,7 +385,7 @@ interior_lower_bound :: proc(
 	right := cell_count
 	for left < right {
 		mid := left + (right - left) / 2
-		if key >= get_cell_key(data, page_id, mid, version) {
+		if key >= get_cell_key(data, page_id, mid, layout) {
 			left = mid + 1
 		} else {
 			right = mid
@@ -414,9 +398,9 @@ find_interior_insert_index :: proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
-	version: u32 = 1,
+	layout: ^Cell_Layout,
 ) -> int {
-	idx, _ := interior_lower_bound(data, page_id, key, version)
+	idx, _ := interior_lower_bound(data, page_id, key, layout)
 	return idx
 }
 
@@ -435,7 +419,7 @@ insert_interior_cell :: proc(
 	page_id: u32,
 	child_page: u32,
 	key: types.Row_ID,
-	version: u32 = 1,
+	layout: ^Cell_Layout,
 ) -> bool {
 	header := get_interior_header(data, page_id)
 	if header == nil { return false }
@@ -443,7 +427,7 @@ insert_interior_cell :: proc(
 	size := interior_cell_size(key)
 	hdr_sz := size_of(Interior_Header)
 	base_off := get_page_header_offset(page_id)
-	entry_sz := size_of(Cell_Entry) if version >= 2 else size_of(Cell_Pointer)
+	entry_sz := layout.stride
 	ptrs_end := base_off + hdr_sz + int(header.cell_count + 1) * entry_sz
 	content_start := int(header.cell_content_offset)
 	if ptrs_end + size > content_start {
@@ -454,27 +438,20 @@ insert_interior_cell :: proc(
 	header.cell_content_offset = u16le(new_offset)
 	endian.put_u32(data[new_offset:], .Big, child_page)
 	cell.varint_encode(data[new_offset + 4:], u64(key))
-	insert_idx := find_interior_insert_index(data, page_id, key, version)
-	if version >= 2 {
-		raw_entries := get_raw_entries(data, page_id)
-		if insert_idx < int(header.cell_count) {
-			copy(raw_entries[insert_idx + 1:], raw_entries[insert_idx:header.cell_count])
-		}
+	insert_idx := find_interior_insert_index(data, page_id, key, layout)
 
-		raw_entries[insert_idx] = Cell_Entry {
-			ptr = Cell_Pointer(new_offset),
-			key = key,
-		}
-	} else {
-		ptr_start_idx := base_off + hdr_sz
-		raw_ptr_data := raw_data(data[ptr_start_idx:])
-		ptr_slice := ([^]Cell_Pointer)(raw_ptr_data)[:header.cell_count + 1]
-		if insert_idx < int(header.cell_count) {
-			copy(ptr_slice[insert_idx + 1:], ptr_slice[insert_idx:header.cell_count])
-		}
-		ptr_slice[insert_idx] = Cell_Pointer(new_offset)
+	// Shift entries right at insert_idx
+	if insert_idx < int(header.cell_count) {
+		src := data[base_off +
+		hdr_sz +
+		insert_idx * entry_sz:base_off +
+		hdr_sz +
+		int(header.cell_count) * entry_sz]
+		dst := data[base_off + hdr_sz + (insert_idx + 1) * entry_sz:]
+		copy(dst, src)
 	}
 
+	layout.set_entry(data, page_id, insert_idx, u16(new_offset), key)
 	header.cell_count += 1
 	return true
 }

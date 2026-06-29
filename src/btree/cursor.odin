@@ -40,8 +40,7 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 
 		if is_leaf(node) { break }
 		if node.header.cell_count > 0 {
-			v := c.tree.pager.page_format_version
-			stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+			stride := node.layout.stride
 			ptr := get_cell_ptr(node.data, curr, 0, stride)
 			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
 			if !ok { return .Invalid_Cell_Pointer }
@@ -92,7 +91,11 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error
 // The page stays pinned until the cursor moves to a different page or is destroyed.
 load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	if page_id == c.cached_page_id {
-		return node_from_bytes(page_id, c.cached_page_data)
+		return node_from_bytes(
+			page_id,
+			c.cached_page_data,
+			get_layout(c.tree.pager.page_format_version),
+		)
 	}
 	if c.cached_page_id != 0 {
 		pager.unpin_page(c.tree.pager, c.cached_page_id)
@@ -103,7 +106,7 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 
 	c.cached_page_id = page_id
 	c.cached_page_data = page.data
-	n, n_err := node_from_bytes(page_id, page.data)
+	n, n_err := node_from_bytes(page_id, page.data, get_layout(c.tree.pager.page_format_version))
 	if n_err != .None { return {}, n_err }
 
 	c.cached_cell_count = u16(n.header.cell_count)
@@ -149,8 +152,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 				if int(item.cell_index) == limit {
 					child_page = get_right_ptr(node.data, item.page_id)
 				} else {
-					v := c.tree.pager.page_format_version
-					stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+					stride := node.layout.stride
 					ptr := get_cell_ptr(node.data, item.page_id, int(item.cell_index), stride)
 					child_page, _ = endian.get_u32(node.data[int(ptr):], .Big)
 				}
@@ -201,8 +203,7 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 		return cc, .None
 	}
 
-	v := c.tree.pager.page_format_version
-	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	stride := node.layout.stride
 	cell_count := get_cell_count(node.data, item.page_id)
 	if int(item.cell_index) >= cell_count {
 		return {}, .Cell_Not_Found
