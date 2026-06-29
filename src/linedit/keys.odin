@@ -23,7 +23,9 @@ Key :: enum {
 	Ctrl_D,
 	Ctrl_E,
 	Ctrl_K,
+	Ctrl_L,
 	Ctrl_R,
+	Ctrl_T,
 	Ctrl_U,
 	Ctrl_W,
 	Ctrl_Z,
@@ -67,8 +69,12 @@ read_key :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 		return Key_Event{key = .Tab}, true
 	case 0x0b:
 		return Key_Event{key = .Ctrl_K}, true
+	case 0x0c:
+		return Key_Event{key = .Ctrl_L}, true
 	case 0x12:
 		return Key_Event{key = .Ctrl_R}, true
+	case 0x14:
+		return Key_Event{key = .Ctrl_T}, true
 	case 0x15:
 		return Key_Event{key = .Ctrl_U}, true
 	case 0x17:

@@ -438,6 +438,12 @@ test_read_key_control_chars :: proc(t: ^testing.T) {
 	ev = key_from_pipe(t, []u8{0x12})
 	testing.expect_value(t, ev.key, linedit.Key.Ctrl_R)
 
+	ev = key_from_pipe(t, []u8{0x0c})
+	testing.expect_value(t, ev.key, linedit.Key.Ctrl_L)
+
+	ev = key_from_pipe(t, []u8{0x14})
+	testing.expect_value(t, ev.key, linedit.Key.Ctrl_T)
+
 	ev = key_from_pipe(t, []u8{0x1a})
 	testing.expect_value(t, ev.key, linedit.Key.Ctrl_Z)
 
@@ -778,6 +784,108 @@ test_terminal_query_size_pipe :: proc(t: ^testing.T) {
 
 	linedit.terminal_width = old_w
 	linedit.terminal_height = old_h
+}
+
+@(test)
+test_lb_transpose_middle :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_set(&lb, "abcd")
+	linedit.lb_home(&lb)
+	linedit.lb_move_right(&lb)
+	linedit.lb_move_right(&lb)
+	linedit.lb_transpose(&lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "acbd")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 3)
+}
+
+@(test)
+test_lb_transpose_end :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_set(&lb, "abcd")
+	linedit.lb_end(&lb)
+	linedit.lb_transpose(&lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "abdc")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 4)
+}
+
+@(test)
+test_lb_transpose_first_two :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_set(&lb, "abcd")
+	linedit.lb_home(&lb)
+	linedit.lb_move_right(&lb)
+	linedit.lb_transpose(&lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "bacd")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 2)
+}
+
+@(test)
+test_lb_transpose_noop :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_transpose(&lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 0)
+
+	linedit.lb_set(&lb, "a")
+	linedit.lb_transpose(&lb)
+	s = linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "a")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 1)
+}
+
+@(test)
+test_lb_transpose_at_start_noop :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_set(&lb, "abc")
+	linedit.lb_home(&lb)
+	linedit.lb_transpose(&lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "abc")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 0)
+}
+
+@(test)
+test_lb_transpose_undo :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_set(&lb, "abcd")
+	linedit.lb_end(&lb)
+	linedit.lb_transpose(&lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "abdc")
+
+	linedit.lb_undo(&lb)
+	s = linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "abcd")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 4)
+}
+
+@(test)
+test_lb_transpose_utf8 :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_set(&lb, "aéç")
+	linedit.lb_end(&lb)
+	linedit.lb_transpose(&lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "açé")
+	testing.expect_value(t, linedit.lb_cursor_pos(&lb), 3)
 }
 
 @(test)

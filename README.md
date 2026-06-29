@@ -15,9 +15,6 @@ make run
 # Run all tests
 make test
 
-# Run full vet suite
-make vet-all
-
 # CLI example
 ./build/magni mydb.db --eval "CREATE TABLE t (x INT); INSERT INTO t VALUES (42); SELECT * FROM t;"
 ```
@@ -72,39 +69,27 @@ SELECT DISTINCT name FROM users;
 
 -- Filtering
 SELECT * FROM users WHERE score > 50 AND name != 'Bob';
-SELECT * FROM users WHERE score > 50 AND name <> 'Bob';  -- != or <>
 SELECT * FROM users WHERE name LIKE 'A%';
 SELECT * FROM users WHERE id IN (1, 3, 5);
-SELECT * FROM users WHERE name IN (SELECT name FROM active_users);
 
 -- Sorting & pagination
 SELECT * FROM users ORDER BY score DESC;
 SELECT * FROM users ORDER BY name ASC LIMIT 5 OFFSET 10;
 
 -- Aggregates & grouping
-SELECT COUNT(*), AVG(score), MIN(score), MAX(score), SUM(score) FROM users;
-SELECT COUNT(score) FROM users;  -- COUNT(non-NULL values)
+SELECT COUNT(*), AVG(score), SUM(score) FROM users;
 SELECT name, COUNT(*) FROM users GROUP BY name HAVING count > 1;
 
 -- JOINs
 SELECT * FROM t1 INNER JOIN t2 ON t1.x = t2.y;
 SELECT * FROM t1 LEFT JOIN t2 ON t1.x = t2.y;
 SELECT * FROM t1 CROSS JOIN t2;
-SELECT * FROM t1, t2 WHERE t1.x = t2.y;
-SELECT t1.x, t2.y FROM t1, t2 WHERE t1.x = t2.y;
 
 -- Subqueries
 SELECT * FROM (SELECT * FROM t WHERE x > 1) AS sub;
 
 -- EXPLAIN
 EXPLAIN SELECT * FROM users WHERE id = 1;
-EXPLAIN SELECT * FROM t1 INNER JOIN t2 ON t1.x = t2.y;
-
--- Aliases
-SELECT a.x FROM t AS a;
-
--- Multi-column ORDER BY
-SELECT * FROM users ORDER BY score DESC, name ASC;
 ```
 
 ### Time-Travel Queries
@@ -123,12 +108,30 @@ SELECT * FROM users AS OF TIMESTAMP 1719000000000000;
 BEGIN;
 INSERT INTO users VALUES (3, 'Charlie', 75.0);
 COMMIT;
-
 -- or
 ROLLBACK;
 ```
 
-### Dot-Commands (REPL)
+---
+
+## Key Features
+
+| Area | Capabilities |
+|---|---|
+| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (AND/OR/LIKE/IN), JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions |
+| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. |
+| **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
+| **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
+| **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command completion, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
+| **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Page bitmap for O(1) 64-page GC range skips. |
+
+See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, and all optimization internals.
+
+---
+
+## CLI Reference
+
+### Dot-Commands
 
 | Command | Description |
 |---|---|
@@ -151,7 +154,7 @@ ROLLBACK;
 | `.rollforward` | Advance current state to the most recent snapshot |
 | `.begin` / `.commit` / `.rollback` | Transaction control |
 
-**REPL keyboard shortcuts:**
+### REPL Keyboard Shortcuts
 
 | Key | Action |
 |---|---|
@@ -164,9 +167,11 @@ ROLLBACK;
 | Ctrl-U | Kill to start of line |
 | Ctrl-W | Delete word backward |
 | Ctrl-Z | Undo last edit |
+| Ctrl-L | Clear screen (redraws prompt) |
+| Ctrl-T | Transpose characters |
 | Ctrl-C | Cancel current line / abort multi-line statement |
 | Ctrl-D (empty line) | Exit |
-| Ctrl-R | Incremental reverse history search |
+| Ctrl-R | Incremental reverse history search (results shown below prompt; wraps around with visual indicator) |
 | Tab | Dot-command completion |
 | Paste | Bracketed paste — multi-line pastes inserted as a single block |
 
@@ -196,101 +201,24 @@ echo "SELECT * FROM t;" | ./build/magni mydb.db
 
 ---
 
-## Architecture
+## Project Layout
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                      CLI / REPL                     │
-├─────────────────────────────────────────────────────┤
-│                  SQL Layer                          │
-│  parser/   — lexer + recursive-descent parser       │
-│  executor/ — statement execution, WHERE, JOINs      │
-├─────────────────────────────────────────────────────┤
-│                 Storage Engine                      │
-│  btree/    — COW B+tree (insert/find/delete/update) │
-│  cell/     — SQLite-compatible row serialization    │
-│  pager/    — inline slab page cache, freelist       │
-│  schema/   — table metadata (schema B-tree)         │
-│  snapshot/ — append-only snapshot chain, manifests  │
-│  db/       — coordinator, snapshot index            │
-└─────────────────────────────────────────────────────┘
+src/
+├── main.odin              CLI entry, REPL, dot-commands
+├── btree/                 COW B+tree storage engine
+├── cell/                  Row serialization (SQLite-compatible varint)
+├── db/                    Database handle, execute, admin, snapshots, transactions
+├── executor/              Statement dispatch, SELECT/JOIN/aggregates, WHERE, DML, sort
+├── linedit/               Raw-mode line editor (REPL input)
+├── parser/                Lexer, recursive-descent parser, AST
+├── pager/                 Slab page cache, WAL, freelist
+├── schema/                Table metadata (schema B-tree)
+├── snapshot/              Snapshot chain, manifests, GC, refs, expire
+└── types/                 Core types: Value, Column, Table, SerialType
+tests/
+└── * _test.odin           276 tests across all packages
 ```
-
-See [ARCH.md](ARCH.md) for complete architecture documentation.
-
----
-
-## Features
-
-### Highlights
-- **Copy-on-write (COW) B+tree**: every mutation creates new pages along the path.
-  Old pages remain readable for time-travel queries. No WAL or MVCC needed.
-- **Single-traversal mutations**: `tree_update_cow` does delete + re-insert in one
-  root-to-leaf traversal. Halves page writes vs delete-then-insert.
-- **Stream COW mutations**: UPDATE/DELETE apply mutations immediately in the scan
-  loop instead of batch-collecting ops first — O(1) peak memory per operation.
-- **SQL feature set**: CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE with AND/OR/LIKE/IN,
-  JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY with NULLS FIRST/LAST, NULLS LAST,
-  multi-column ORDER BY, LIMIT/OFFSET, DISTINCT, subqueries, aggregate functions
-  (COUNT/SUM/AVG/MIN/MAX, including COUNT(col)), CHECK constraints,
-  FOREIGN KEY validation, EXPLAIN, transactions (BEGIN/COMMIT/ROLLBACK).
-- **Time-travel**: `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`.
-- **Snapshot system**: append-only chain with O(1) lookup, tagging, diff, restore, refs page,
-  rollforward log, and `rollforward`/`expire` operations.
-- **WAL (Write-Ahead Log)**: sequential append + single fsync per commit; crash recovery replays
-  committed frames on open; checkpoint writes WAL frames back to the main file. Frames carry
-  64-bit FNV checksums (split across `checksum1`/`checksum2`) that are verified on recovery — corrupt
-  frames are detected and skipped rather than replayed.
-- **Slab page cache**: 256 pages in a contiguous 1MB array. Zero per-page heap
-  allocations. `map[u32]` for O(1) lookup.
-- **Freeblock chain**: SQLite-compatible freeblock list. Deleted cell space is
-  tracked and reused. Coalesces adjacent free blocks.
-- **Hash join**: integer-key hash join avoids allocation per row; string-key fallback.
-- **Pre-resolved WHERE**: column indices resolved once, not per row.
-- **LIMIT pushdown**: LIMIT without ORDER BY stops the table scan early.
-- **GC throttling**: garbage collection runs on demand via `.expire` or `.checkpoint`.
-- **Inline deserialize buffer**: `[dynamic; MAX_COLS]T` avoids heap alloc per row decode.
-- **Page bitmap**: GC sweep skips 64-free-page ranges in O(1), accelerating the scan.
-- **Schema_Row**: Named-struct abstraction for schema b-tree entries with compact encoding:
-  kind byte (`i64(0)` for table) instead of string, conditional skip_root omitted when zero.
-- **Column blob**: `0xFE`-marked versioned format with varint-encoded lengths and a packed
-  byte encoding type, not_null, pk, has_check, and has_default in a single byte.
-- **Pager free-list**: O(1) slot allocation instead of linear scan across 256 cache slots.
-- **GROUP BY hash**: Direct FNV-1a hashing of `Value` union instead of stringification —
-  eliminates allocs per row and fixes a float-precision bug where `%f` formatting collapsed
-  distinct `f64` values differing beyond 6 decimal places into the same group.
-- **Cell deserialize hot path**: Pre‑allocates result slice once and writes directly — removes
-  the redundant scratch-buffer `append` + final `copy` from every row decode.
-- **Leaf-merge byte accounting**: Merge decisions use real per-page byte counts instead of a
-  magic `cell_count / 64` heuristic — correct for variable-width rows.
-- **Schema hash-collision guard**: `add_table` / `add_table_cow` call `tree_find` before writing
-  and reject if a different-named row already occupies the same hash key.
-- **WAL checksums**: 64-bit FNV checksum written per frame, verified on recovery.
-- **`@(fast_math)` aggregate loops**: SUM/AVG/MIN/MAX compute with IEEE-relaxed ops.
-- **`#simple` / `#all_or_none`**: applied to page headers, snapshot headers, and result structs for safety.
-- **`types.Storage_Config`**: shared config struct (`allocator` + `zero_copy`) aliased by both
-  `btree.Config` and `cell.Config`, removing duplicate definitions.
-- **Line editor** (`linedit/`): raw-mode terminal editor with arrow-key navigation,
-  multi-level undo (Ctrl-Z), incremental reverse history search (Ctrl-R), dot-command
-  tab completion, UTF-8/CJK support, bracketed paste, SIGWINCH-aware terminal width
-  tracking with wrap-correct redraw, and a `bufio`-based fallback for non-TTY input.
-
----
-
-## Test Coverage
-
-| Package | Tests | What's tested |
-|---|---|---|
-| `linedit` | 42 | Line buffer ops, undo, history navigation/add/load/save/cap/search, all control chars, UTF-8 decode, escape sequences (arrows/Home/End/Delete/paste markers), dot-command completion, rune widths (ASCII/CJK/Hangul/emoji), terminal query |
-| `parser` | 53 | Tokenization, all SQL forms, JOINs, subqueries, errors |
-| `executor` | 30 | Full DML/DDL, WHERE, ORDER BY, GROUP BY, JOINs, aggregates |
-| `btree` | 26 | Insert/find/delete/update, cursor, splits, persistence, rebalance merge, byte accounting, empty tree, foreach, collect_pages |
-| `cell` | 17 | Serialization roundtrip, zero-copy, validation, columnar encoding (INTEGER/REAL/TEXT/BLOB, nulls, empty), single-row, all types |
-| `pager` | 20 | Page cache, I/O, pinning, eviction, WAL, bitmap, checksum |
-| `schema` | 17 | Column blob, add/find/drop/list, row round-trip, hash collision, empty list, unknown kind, special char names, row kind validation |
-| `snapshot` | 12 | Chain, manifests, diff, tags, timestamp lookup, GC |
-| `integration` | 44 | CRUD, time-travel, JOINs, UPDATE/DELETE, restore, persistence, columnar reads, columnar mutation, semicolon-in-string, multi-statement, block comments, too-many-columns rejection, negative LIMIT/OFFSET |
-| **Total** | **269** | |
 
 ---
 
@@ -308,82 +236,6 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 
 ---
 
-## Project Layout
-
-```
-src/
-├── main.odin              CLI entry, REPL, dot-commands
-├── btree/
-│   ├── cow.odin           COW insert/find/delete/update
-│   ├── cursor.odin        In-order row cursor (fixed path stack)
-│   ├── headers.odin       Page headers, freeblock helpers
-│   ├── rebalance.odin     Leaf merge rebalancing
-│   ├── skip_index.odin    Skip index B-tree
-│   ├── split.odin         Leaf/interior/root split operations
-│   └── tree.odin          B+tree: insert, find, delete, update, verify
-├── cell/
-│   ├── cell.odin          Row serialization, varint, validation
-│   └── columnar.odin      Columnar page format (serialize/read/decode)
-├── db/
-│   ├── admin.odin         Stats, dump, describe, checkpoint, integrity
-│   ├── db.odin            Database handle, open/close
-│   ├── execute.odin       Statement execution, query API
-│   ├── snapshot_cmds.odin Snapshot restore, diff, tag, list
-│   └── txn.odin           Begin/commit/rollback
-├── executor/
-│   ├── display.odin       Result formatting, aggregates
-│   ├── dml.odin           INSERT/UPDATE/DELETE (legacy + COW)
-│   ├── executor.odin      Statement dispatch
-│   ├── select.odin        SELECT, JOIN, subqueries, scan_table
-│   ├── sort.odin          Sorting, DISTINCT
-│   ├── types.odin         Shared type definitions
-│   ├── util.odin          Helpers: qualified columns, CHECK, compare
-│   └── where.odin         WHERE clause evaluation, LIKE
-├── linedit/               Line editor (raw-mode REPL)
-│   ├── buffer.odin        Line buffer, undo stack
-│   ├── history.odin       In-memory history, persistence, search
-│   ├── keys.odin          Raw byte/key decoder, UTF-8, escape sequences
-│   ├── linedit.odin       Public API: init/destroy/read_line, Ctrl-R, Tab
-│   ├── render.odin        Wrap-aware redraw with CJK support
-│   └── term.odin          Raw mode, termios, TIOCGWINSZ, SIGWINCH
-├── parser/
-│   ├── free.odin          AST memory cleanup
-│   ├── parse_ddl.odin     CREATE/DROP TABLE
-│   ├── parse_dml.odin      INSERT/UPDATE/DELETE
-│   ├── parse_select.odin  SELECT, JOIN, identifiers
-│   ├── parse_where.odin   WHERE clause, IN, value parsing
-│   ├── parser.odin        Token types, parse dispatcher
-│   ├── tokenizer.odin     Lexer, keyword matching
-│   └── types.odin         AST node types
-├── pager/
-│   ├── freelist.odin      Free-page linked list
-│   ├── pager.odin         Page cache, file I/O, eviction
-│   └── wal.odin           Write-Ahead Log, checkpoint, recovery
-├── schema/
-│   ├── schema.odin        Table metadata, add/find/drop
-│   └── serialize.odin     Column blob serialization
-├── snapshot/
-│   ├── expire.odin       Explicit snapshot expiration + GC
-│   ├── gc.odin            Prune + garbage collect
-│   ├── manifest.odin      Manifest creation, diff
-│   ├── refs.odin          Named refs (branches/tags), rollforward log
-│   └── snapshot.odin      Snapshot chain, tags, walk
-└── types/
-    └── types.odin         Core types: Value, Column, Table, SerialType
-tests/
-├── linedit_test.odin
-├── parser_test.odin
-├── executor_test.odin
-├── btree_test.odin
-├── cell_test.odin
-├── pager_test.odin
-├── schema_test.odin
-├── snapshot_test.odin
-└── integration_test.odin
-```
-
----
-
 ## Limitations
 
 - No secondary indexes (only the primary-key B-tree)
@@ -391,4 +243,4 @@ tests/
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100)
-- REPL line editor: no SQL keyword/table-name completion (dot-commands only), no multi-row display for long lines exceeding terminal width (uses wrap-correct rendering)
+- REPL line editor: no SQL keyword/table-name completion (dot-commands only)

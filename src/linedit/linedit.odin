@@ -4,7 +4,6 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
-import "core:unicode/utf8"
 
 SEARCH_PROMPT :: "(reverse-i-search)`%s': "
 
@@ -73,10 +72,15 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 			lb_end(&lb)
 		case .Ctrl_K:
 			lb_kill_to_end(&lb)
+		case .Ctrl_L:
+			fmt.fprint(os.stdout, "\x1b[2J\x1b[H")
+			prev_render_rows = 1
 		case .Ctrl_U:
 			lb_kill_to_start(&lb)
 		case .Ctrl_W:
 			lb_delete_word_back(&lb)
+		case .Ctrl_T:
+			lb_transpose(&lb)
 		case .Ctrl_Z:
 			lb_undo(&lb)
 		case .Up:
@@ -109,26 +113,36 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	original := lb_to_string(lb, context.temp_allocator)
 	search_idx := len(ed.history.entries)
 	search_failed := false
-	for {
-		if search_failed {
-			search_prompt := fmt.tprintf(
-				"(failed reverse-i-search)`%s': ",
-				strings.to_string(query),
-			)
-			redraw(search_prompt, lb)
-		} else {
-			search_prompt := fmt.tprintf(SEARCH_PROMPT, strings.to_string(query))
-			redraw(search_prompt, lb)
+	search_wrapped := false
+	matched_entry := original
+
+	defer {
+		if prev_search_rows > 0 {
+			fmt.fprintf(os.stdout, "\x1b[%dA", 1)
 		}
+		prev_search_rows = 0
+	}
+
+	for {
+		prompt_prefix := "(reverse-i-search)"
+		if search_failed {
+			prompt_prefix = "(failed reverse-i-search)"
+		} else if search_wrapped {
+			prompt_prefix = "(wrapped reverse-i-search)"
+		}
+		search_prompt := fmt.tprintf("%s`%s': ", prompt_prefix, strings.to_string(query))
+		render_search_overlay(search_prompt, matched_entry)
 
 		ev, ok := read_key(ed.term.fd)
 		if !ok { break }
 
 		#partial switch ev.key {
 		case .Enter:
+			if !search_failed && strings.builder_len(query) > 0 {
+				lb_set(lb, matched_entry)
+			}
 			return
 		case .Escape, .Ctrl_C:
-			lb_set(lb, original)
 			return
 		case .Ctrl_R:
 			if strings.builder_len(query) > 0 {
@@ -139,36 +153,49 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 				)
 				if found {
 					search_failed = false
+					search_wrapped = false
 					search_idx = idx
-					lb_set(lb, ed.history.entries[idx])
+					matched_entry = ed.history.entries[idx]
+				} else {
+					idx2, found2 := history_search_prev(
+						&ed.history,
+						strings.to_string(query),
+						len(ed.history.entries),
+					)
+					if found2 {
+						search_failed = false
+						search_wrapped = true
+						search_idx = idx2
+						matched_entry = ed.history.entries[idx2]
+					}
 				}
 			}
 		case .Char:
 			strings.write_rune(&query, ev.char)
+			search_wrapped = false
 			search_idx = len(ed.history.entries)
 			idx, found := history_search_prev(&ed.history, strings.to_string(query), search_idx)
 			if found {
 				search_failed = false
 				search_idx = idx
-				lb_set(lb, ed.history.entries[idx])
+				matched_entry = ed.history.entries[idx]
 			} else {
 				search_failed = true
-				lb_set(lb, original)
 			}
 		case .Backspace:
-			q := strings.to_string(query)
-			n := utf8.rune_count_in_string(q)
-			if n > 0 {
-				runes := make([]rune, n, context.temp_allocator)
-				i := 0
-				for r in q {
-					runes[i] = r
-					i += 1
+			if strings.builder_len(query) > 0 {
+				q := strings.to_string(query)
+				last := len(q)
+				for last > 0 {
+					last -= 1
+					if (q[last] & 0xC0) != 0x80 {
+						break
+					}
 				}
 
-				trimmed, _ := utf8.runes_to_string(runes[:n - 1])
 				strings.builder_reset(&query)
-				strings.write_string(&query, trimmed)
+				strings.write_string(&query, q[:last])
+				search_wrapped = false
 				search_idx = len(ed.history.entries)
 				idx, found := history_search_prev(
 					&ed.history,
@@ -178,10 +205,9 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 				if found {
 					search_failed = false
 					search_idx = idx
-					lb_set(lb, ed.history.entries[idx])
+					matched_entry = ed.history.entries[idx]
 				} else {
 					search_failed = true
-					lb_set(lb, original)
 				}
 			}
 		}

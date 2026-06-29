@@ -113,6 +113,24 @@ lb_delete_word_back :: proc(lb: ^Line_Buffer) {
 	lb.cursor = start
 }
 
+lb_transpose :: proc(lb: ^Line_Buffer) {
+	if len(lb.runes) < 2 || lb.cursor == 0 {
+		return
+	}
+
+	lb_save_undo(lb)
+	left := lb.cursor - 1
+	right := lb.cursor
+
+	if lb.cursor == len(lb.runes) {
+		left = lb.cursor - 2
+		right = lb.cursor - 1
+	}
+
+	lb.runes[left], lb.runes[right] = lb.runes[right], lb.runes[left]
+	lb.cursor = right + 1
+}
+
 lb_undo :: proc(lb: ^Line_Buffer) {
 	if len(lb.undo_stack) == 0 {
 		return

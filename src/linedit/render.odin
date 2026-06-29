@@ -5,6 +5,7 @@ import "core:os"
 import "core:sys/posix"
 
 prev_render_rows: int = 1
+prev_search_rows: int = 0
 
 rune_width :: proc(r: rune) -> int {
 	if r < 0x1100 {
@@ -77,6 +78,7 @@ redraw :: proc(prompt: string, lb: ^Line_Buffer) {
 		col += w
 	}
 
+	fmt.fprint(os.stdout, "\r")
 	cursor_vis := 0
 	for r in prompt {
 		cursor_vis += rune_width(r)
@@ -105,4 +107,39 @@ redraw :: proc(prompt: string, lb: ^Line_Buffer) {
 		fmt.fprintf(os.stdout, "\x1b[%dC", cursor_col)
 	}
 	prev_render_rows = total_rows
+}
+
+render_search_overlay :: proc(search_prompt: string, matched: string) {
+	if window_resized {
+		terminal_query_size(posix.STDIN_FILENO)
+		window_resized = false
+	}
+
+	cols := terminal_width
+	if cols <= 0 { cols = 80 }
+
+	rows := prev_search_rows if prev_search_rows > 0 else prev_render_rows
+	if rows > 1 {
+		fmt.fprintf(os.stdout, "\x1b[%dA", rows - 1)
+	}
+
+	fmt.fprint(os.stdout, "\r\x1b[J")
+	fmt.fprint(os.stdout, search_prompt)
+	fmt.fprint(os.stdout, "\r\n")
+	if len(matched) > 0 {
+		display := matched
+		if len(display) > cols - 2 {
+			display = fmt.tprintf("%s...", display[:cols - 5])
+		}
+
+		fmt.fprint(os.stdout, "> ")
+		fmt.fprint(os.stdout, display)
+	}
+
+	fmt.fprint(os.stdout, "\r\x1b[A")
+	prompt_col := len(search_prompt)
+	if prompt_col > 0 {
+		fmt.fprintf(os.stdout, "\x1b[%dC", prompt_col)
+	}
+	prev_search_rows = 2
 }
