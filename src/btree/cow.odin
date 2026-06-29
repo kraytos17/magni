@@ -26,7 +26,8 @@ copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 		} else {
 			hdr_sz := page_header_size(hdr.page_type)
 			cell_count := int(hdr.cell_count)
-			ptr_sz := cell_count * size_of(Cell_Pointer)
+			stride := size_of(Cell_Entry) if t.pager.page_format_version >= 2 else size_of(Cell_Pointer)
+			ptr_sz := cell_count * stride
 			if ptr_sz > 0 {
 				ptr_copy := make([]u8, ptr_sz, context.temp_allocator)
 				copy(ptr_copy, new_page.data[SRC_HDR_OFF + hdr_sz:])
@@ -82,6 +83,7 @@ tree_insert_cow :: proc(
 			new_root_page.page_num,
 			result.new_page,
 			result.split_key,
+			t.pager.page_format_version,
 		)
 
 		pager.mark_dirty(t.pager, new_root_page.page_num)
@@ -120,11 +122,11 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 			return Update_COW_Result{new_page = node.id}, delete_from_leaf(t, &node, key)
 		}
 
-		child_id := node_find_child(&node, key)
+		child_id := node_find_child(&node, key, t.pager.page_format_version)
 		child_result, c_err := delete_cow_recursive(t, child_id, key, true)
 		if c_err != .None { return {}, c_err }
 		if child_result.new_page != child_id {
-			node_update_child_ptr(&node, child_id, child_result.new_page)
+			node_update_child_ptr(&node, key, child_result.new_page, t.pager.page_format_version)
 		}
 
 		pager.mark_dirty(t.pager, node.id)
@@ -178,11 +180,11 @@ tree_update_cow :: proc(
 			return Update_Result{new_page = node.id}, .None
 		}
 
-		child_id := node_find_child(&node, rowid)
+		child_id := node_find_child(&node, rowid, t.pager.page_format_version)
 		child_result, c_err := update_recursive(t, child_id, rowid, values, true)
 		if c_err != .None { return {}, c_err }
 		if child_result.new_page != child_id {
-			node_update_child_ptr(&node, child_id, child_result.new_page)
+			node_update_child_ptr(&node, rowid, child_result.new_page, t.pager.page_format_version)
 		}
 
 		pager.mark_dirty(t.pager, node.id)

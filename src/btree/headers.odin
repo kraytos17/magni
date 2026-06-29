@@ -15,6 +15,12 @@ Page_Type :: enum u8 {
 
 Cell_Pointer :: distinct u16le
 
+Cell_Entry :: struct #packed {
+	ptr: Cell_Pointer,
+	key: types.Row_ID,
+}
+#assert(size_of(Cell_Entry) == 10)
+
 Page_Header :: struct #packed #simple {
 	page_type:           Page_Type, // Byte 0
 	first_freeblock:     u16le, // Bytes 1-2
@@ -196,6 +202,160 @@ get_raw_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 	return ([^]Cell_Pointer)(ptr_start)[:max_ptrs]
 }
 
+get_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
+	header := get_header(data, page_id)
+	if header == nil { return nil }
+
+	off := get_page_header_offset(page_id)
+	hdr_sz := page_header_size(header.page_type)
+	start := off + hdr_sz
+	if start >= len(data) { return nil }
+
+	max_entries := (len(data) - start) / size_of(Cell_Entry)
+	n := min(int(header.cell_count), max_entries)
+	entry_start := raw_data(data[start:])
+	return ([^]Cell_Entry)(entry_start)[:n]
+}
+
+get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
+	header := get_header(data, page_id)
+	if header == nil { return nil }
+
+	off := get_page_header_offset(page_id)
+	hdr_sz := page_header_size(header.page_type)
+	start := off + hdr_sz
+	if start >= len(data) { return nil }
+
+	max_entries := (len(data) - start) / size_of(Cell_Entry)
+	entry_start := raw_data(data[start:])
+	return ([^]Cell_Entry)(entry_start)[:max_entries]
+}
+
+// --- Page Accessor API ---
+// These 7 functions encapsulate the v1 (Cell_Pointer, stride=2) vs v2 (Cell_Entry, stride=10)
+// entry-array layout. Callers pass stride = size_of(Cell_Entry) for v2, size_of(Cell_Pointer) for v1.
+// All asserts on bounds; indices are page-internal (never user-supplied).
+
+CELL_POINTER_STRIDE :: size_of(Cell_Pointer) // 2
+CELL_ENTRY_STRIDE :: size_of(Cell_Entry) // 10
+
+get_cell_count :: proc(data: []u8, page_id: u32) -> int {
+	hdr := get_header(data, page_id)
+	return hdr != nil ? int(hdr.cell_count) : 0
+}
+
+get_cell_ptr :: proc(data: []u8, page_id: u32, i: int, stride: int) -> u16 {
+	off := get_page_header_offset(page_id)
+	hdr := get_header(data, page_id)
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off + hdr_sz
+	return u16((^u16le)(raw_data(data[start + i * stride:]))^)
+}
+
+get_cell_key :: proc(data: []u8, page_id: u32, i: int, version: u32) -> types.Row_ID {
+	off := get_page_header_offset(page_id)
+	hdr := get_header(data, page_id)
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off + hdr_sz
+	if version >= 2 {
+		entry := (^Cell_Entry)(raw_data(data[start + i * CELL_ENTRY_STRIDE:]))
+		return entry.key
+	}
+
+	ptr := u16((^u16le)(raw_data(data[start + i * CELL_POINTER_STRIDE:]))^)
+	if hdr.page_type == .LEAF_TABLE || hdr.page_type == .LEAF_TABLE_COLUMNAR {
+		rid, _ := cell.get_rowid(data, int(ptr))
+		return rid
+	}
+	sep, _, _ := cell.varint_decode(data, int(ptr) + 4)
+	return types.Row_ID(sep)
+}
+
+insert_cell_at :: proc(
+	data: []u8,
+	page_id: u32,
+	i: int,
+	ptr: u16,
+	key: types.Row_ID,
+	stride: int,
+) {
+	off := get_page_header_offset(page_id)
+	hdr := get_header(data, page_id)
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off + hdr_sz
+	cell_count := int(hdr.cell_count)
+
+	// Shift entries [i..cell_count) right by 1
+	if i < cell_count {
+		src := data[start + i * stride:start + cell_count * stride]
+		dst := data[start + (i + 1) * stride:]
+		copy(dst, src)
+	}
+
+	// Write new entry
+	if stride == CELL_ENTRY_STRIDE {
+		entry := (^Cell_Entry)(raw_data(data[start + i * stride:]))
+		entry^ = Cell_Entry {
+			ptr = Cell_Pointer(ptr),
+			key = key,
+		}
+	} else {
+		cell_ptr := (^Cell_Pointer)(raw_data(data[start + i * stride:]))
+		cell_ptr^ = Cell_Pointer(ptr)
+	}
+}
+
+delete_cell_at :: proc(data: []u8, page_id: u32, i: int, stride: int) {
+	off := get_page_header_offset(page_id)
+	hdr := get_header(data, page_id)
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off + hdr_sz
+	cell_count := int(hdr.cell_count)
+
+	if i < cell_count - 1 {
+		src := data[start + (i + 1) * stride:start + cell_count * stride]
+		dst := data[start + i * stride:]
+		copy(dst, src)
+	}
+}
+
+entry_area_end :: proc(data: []u8, page_id: u32, stride: int) -> int {
+	off := get_page_header_offset(page_id)
+	hdr := get_header(data, page_id)
+	hdr_sz := page_header_size(hdr.page_type)
+	cell_count := int(hdr.cell_count)
+	return off + hdr_sz + cell_count * stride
+}
+
+move_cells_to :: proc(
+	dst: []u8,
+	dst_id: u32,
+	src: []u8,
+	src_id: u32,
+	src_start: int,
+	count: int,
+	stride: int,
+) {
+	src_off := get_page_header_offset(src_id)
+	src_hdr := get_header(src, src_id)
+	src_hdr_sz := page_header_size(src_hdr.page_type)
+	src_base := src_off + src_hdr_sz
+
+	dst_off := get_page_header_offset(dst_id)
+	dst_hdr := get_header(dst, dst_id)
+	dst_hdr_sz := page_header_size(dst_hdr.page_type)
+	dst_cell_count := int(dst_hdr.cell_count)
+	dst_base := dst_off + dst_hdr_sz
+
+	src_start_off := src_base + src_start * stride
+	dst_start_off := dst_base + dst_cell_count * stride
+	byte_count := count * stride
+	copy(
+		dst[dst_start_off:dst_start_off + byte_count],
+		src[src_start_off:src_start_off + byte_count],
+	)
+}
+
 get_right_ptr :: proc(data: []u8, page_id: u32) -> u32 {
 	h := get_interior_header(data, page_id)
 	if h == nil { return 0 }
@@ -209,11 +369,17 @@ set_right_ptr :: proc(data: []u8, page_id: u32, ptr: u32) {
 	}
 }
 
-find_interior_cell_for_child :: proc(data: []u8, page_id: u32, child_page: u32) -> int {
-	pointers := get_pointers(data, page_id)
-	for ptr, i in pointers {
-		off := int(ptr)
-		stored_child, _ := endian.get_u32(data[off:], .Big)
+find_interior_cell_for_child :: proc(
+	data: []u8,
+	page_id: u32,
+	child_page: u32,
+	version: u32 = 1,
+) -> int {
+	cell_count := get_cell_count(data, page_id)
+	stride := CELL_ENTRY_STRIDE if version >= 2 else CELL_POINTER_STRIDE
+	for i in 0 ..< cell_count {
+		ptr := get_cell_ptr(data, page_id, i, stride)
+		stored_child, _ := endian.get_u32(data[int(ptr):], .Big)
 		if stored_child == child_page {
 			return i
 		}
@@ -221,15 +387,21 @@ find_interior_cell_for_child :: proc(data: []u8, page_id: u32, child_page: u32) 
 	return -1
 }
 
-interior_lower_bound :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> (int, bool) {
-	pointers := get_pointers(data, page_id)
+interior_lower_bound :: proc(
+	data: []u8,
+	page_id: u32,
+	key: types.Row_ID,
+	version: u32 = 1,
+) -> (
+	int,
+	bool,
+) {
+	cell_count := get_cell_count(data, page_id)
 	left := 0
-	right := len(pointers)
+	right := cell_count
 	for left < right {
 		mid := left + (right - left) / 2
-		sep_val, _, ok := cell.varint_decode(data, int(pointers[mid]) + 4)
-		if !ok { return left, false }
-		if key >= types.Row_ID(sep_val) {
+		if key >= get_cell_key(data, page_id, mid, version) {
 			left = mid + 1
 		} else {
 			right = mid
@@ -238,8 +410,13 @@ interior_lower_bound :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> (in
 	return left, true
 }
 
-find_interior_insert_index :: proc(data: []u8, page_id: u32, key: types.Row_ID) -> int {
-	idx, _ := interior_lower_bound(data, page_id, key)
+find_interior_insert_index :: proc(
+	data: []u8,
+	page_id: u32,
+	key: types.Row_ID,
+	version: u32 = 1,
+) -> int {
+	idx, _ := interior_lower_bound(data, page_id, key, version)
 	return idx
 }
 
@@ -258,6 +435,7 @@ insert_interior_cell :: proc(
 	page_id: u32,
 	child_page: u32,
 	key: types.Row_ID,
+	version: u32 = 1,
 ) -> bool {
 	header := get_interior_header(data, page_id)
 	if header == nil { return false }
@@ -265,7 +443,8 @@ insert_interior_cell :: proc(
 	size := interior_cell_size(key)
 	hdr_sz := size_of(Interior_Header)
 	base_off := get_page_header_offset(page_id)
-	ptrs_end := base_off + hdr_sz + int(header.cell_count + 1) * size_of(Cell_Pointer)
+	entry_sz := size_of(Cell_Entry) if version >= 2 else size_of(Cell_Pointer)
+	ptrs_end := base_off + hdr_sz + int(header.cell_count + 1) * entry_sz
 	content_start := int(header.cell_content_offset)
 	if ptrs_end + size > content_start {
 		return false
@@ -275,16 +454,27 @@ insert_interior_cell :: proc(
 	header.cell_content_offset = u16le(new_offset)
 	endian.put_u32(data[new_offset:], .Big, child_page)
 	cell.varint_encode(data[new_offset + 4:], u64(key))
-	insert_idx := find_interior_insert_index(data, page_id, key)
+	insert_idx := find_interior_insert_index(data, page_id, key, version)
+	if version >= 2 {
+		raw_entries := get_raw_entries(data, page_id)
+		if insert_idx < int(header.cell_count) {
+			copy(raw_entries[insert_idx + 1:], raw_entries[insert_idx:header.cell_count])
+		}
 
-	ptr_start_idx := base_off + hdr_sz
-	raw_ptr_data := raw_data(data[ptr_start_idx:])
-	ptr_slice := ([^]Cell_Pointer)(raw_ptr_data)[:header.cell_count + 1]
-	if insert_idx < int(header.cell_count) {
-		copy(ptr_slice[insert_idx + 1:], ptr_slice[insert_idx:header.cell_count])
+		raw_entries[insert_idx] = Cell_Entry {
+			ptr = Cell_Pointer(new_offset),
+			key = key,
+		}
+	} else {
+		ptr_start_idx := base_off + hdr_sz
+		raw_ptr_data := raw_data(data[ptr_start_idx:])
+		ptr_slice := ([^]Cell_Pointer)(raw_ptr_data)[:header.cell_count + 1]
+		if insert_idx < int(header.cell_count) {
+			copy(ptr_slice[insert_idx + 1:], ptr_slice[insert_idx:header.cell_count])
+		}
+		ptr_slice[insert_idx] = Cell_Pointer(new_offset)
 	}
 
-	ptr_slice[insert_idx] = Cell_Pointer(new_offset)
 	header.cell_count += 1
 	return true
 }

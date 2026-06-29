@@ -27,7 +27,6 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 
 	current_entry: Skip_Entry
 	entry_active := false
-
 	for cursor.is_valid {
 		item := cursor.path[cursor.depth - 1]
 		page_id := item.page_id
@@ -38,8 +37,10 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 			cursor_advance(&cursor); continue
 		}
 
-		ptrs := get_pointers(node.data, page_id)
-		if len(ptrs) == 0 {
+		v := t.pager.page_format_version
+		stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+		cell_count := get_cell_count(node.data, page_id)
+		if cell_count == 0 {
 			unpin_node(t, node)
 			cursor_advance(&cursor)
 			continue
@@ -47,18 +48,30 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 
 		min_val := max(i64)
 		max_val := min(i64)
-		for ptr in ptrs {
-			if col_index == -1 { break }
-
-			c, _, ok := cell.deserialize(node.data, int(ptr), cell.Config{zero_copy = true})
-			if !ok { continue }
-			if col_index < len(c.values) {
-				if v, is_int := c.values[col_index].(i64); is_int {
-					if v < min_val { min_val = v }
-					if v > max_val { max_val = v }
+		if r, cached := t.pager.page_int_ranges[page_id]; cached && int(r.col_index) == col_index {
+			min_val = r.min_int
+			max_val = r.max_int
+		} else {
+			for i in 0 ..< cell_count {
+				if col_index == -1 { break }
+				ptr := get_cell_ptr(node.data, page_id, i, stride)
+				c, _, ok := cell.deserialize(node.data, int(ptr), cell.Config{zero_copy = true})
+				if !ok { continue }
+				if col_index < len(c.values) {
+					if v, is_int := c.values[col_index].(i64); is_int {
+						if v < min_val { min_val = v }
+						if v > max_val { max_val = v }
+					}
+				}
+				cell.destroy(&c)
+			}
+			if min_val <= max_val {
+				t.pager.page_int_ranges[page_id] = pager.Page_Int_Range {
+					col_index = u8(col_index),
+					min_int   = min_val,
+					max_int   = max_val,
 				}
 			}
-			cell.destroy(&c)
 		}
 
 		unpin_node(t, node)
@@ -107,28 +120,36 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 
 query_skip_index :: proc(skip_tree: ^Tree, val: i64) -> (page_min: u32, page_max: u32, ok: bool) {
 	key := types.Row_ID(val)
-	leaf, err := descend_to_leaf(skip_tree, descend_by_key, &key)
+	dk := Descend_Key_Ctx {
+		key     = key,
+		version = skip_tree.pager.page_format_version,
+	}
+	leaf, err := descend_to_leaf(skip_tree, descend_by_key, &dk)
 	if err != .None { return 0, 0, false }
 	defer unpin_node(skip_tree, leaf)
 
-	pointers := get_pointers(leaf.data, leaf.id)
-	idx, lb_ok := leaf_lower_bound(leaf.data, leaf.id, key)
-	if !lb_ok || len(pointers) == 0 { return 0, 0, false }
+	v := skip_tree.pager.page_format_version
+	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	cell_count := get_cell_count(leaf.data, leaf.id)
+	idx, lb_ok := leaf_lower_bound(leaf.data, leaf.id, key, v)
+	if !lb_ok || cell_count == 0 { return 0, 0, false }
 
-	// Prefer exact match (idx < len and rid == val).
+	// Prefer exact match (idx < cell_count and rid == val).
 	// Otherwise use predecessor at idx-1 (largest entry < val).
 	rid: types.Row_ID
 	rid_ok := false
-	if idx < len(pointers) {
-		rid, rid_ok = cell.get_rowid(leaf.data, int(pointers[idx]))
+	if idx < cell_count {
+		ptr := get_cell_ptr(leaf.data, leaf.id, idx, stride)
+		rid, rid_ok = cell.get_rowid(leaf.data, int(ptr))
 	}
 
 	read_idx := idx if rid_ok && rid == key else idx - 1
-	if read_idx < 0 || read_idx >= len(pointers) { return 0, 0, false }
+	if read_idx < 0 || read_idx >= cell_count { return 0, 0, false }
 
+	ptr := get_cell_ptr(leaf.data, leaf.id, read_idx, stride)
 	c, _, des_ok := cell.deserialize(
 		leaf.data,
-		int(pointers[read_idx]),
+		int(ptr),
 		cell.Config{allocator = context.temp_allocator, zero_copy = skip_tree.config.zero_copy},
 	)
 	defer cell.destroy(&c, context.temp_allocator)

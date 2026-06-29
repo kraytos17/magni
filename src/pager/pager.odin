@@ -18,26 +18,36 @@ Page :: struct {
 }
 
 Page_Slot :: struct {
-	page:      Page,
-	_data_buf: [types.PAGE_SIZE]u8,
+	page:       Page,
+	_data_buf:  [types.PAGE_SIZE]u8,
+	referenced: bool,
+}
+
+Page_Int_Range :: struct {
+	col_index: u8,
+	min_int:   i64,
+	max_int:   i64,
 }
 
 Pager :: struct {
-	file:            ^os.File,
-	file_name:       string,
-	file_len:        i64,
-	page_size:       u32,
-	slots:           [PAGE_CACHE_SIZE]Page_Slot,
-	mutex:           sync.RW_Mutex,
-	allocator:       mem.Allocator,
-	first_free_page: u32,
-	slot_count:      u32,
-	max_cache_pages: u32,
-	cache_index:     map[u32]^Page_Slot,
-	wal_state:       Wal_State,
-	page_bitmap:     []u64,
-	evict_hand:      u32,
-	free_slots:      [dynamic]^Page_Slot,
+	file:                ^os.File,
+	file_name:           string,
+	file_len:            i64,
+	page_size:           u32,
+	slots:               [PAGE_CACHE_SIZE]Page_Slot,
+	mutex:               sync.RW_Mutex,
+	allocator:           mem.Allocator,
+	first_free_page:     u32,
+	slot_count:          u32,
+	max_cache_pages:     u32,
+	cache_index:         map[u32]^Page_Slot,
+	wal_state:           Wal_State,
+	page_bitmap:         []u64,
+	evict_hand:          u32,
+	free_slots:          [dynamic]^Page_Slot,
+	row_counts:          map[u32]int,
+	page_int_ranges:     map[u32]Page_Int_Range,
+	page_format_version: u32,
 }
 
 Error :: enum {
@@ -54,33 +64,44 @@ find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return p.cache_index
 
 find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 	if p.slot_count >= p.max_cache_pages {
-		if evict_one_slot(p) != .None { return nil }
+		if evict_one_slot(p) != .None {
+			return nil
+		}
 	}
-	if len(p.free_slots) == 0 { return nil }
+	if len(p.free_slots) == 0 {
+		return nil
+	}
+
 	slot := pop(&p.free_slots)
 	slot.page.data = slot._data_buf[:]
+	slot.referenced = false
 	p.slot_count += 1
 	return slot
 }
 
 evict_one_slot :: proc(p: ^Pager) -> Error {
-	start := p.evict_hand % PAGE_CACHE_SIZE
-	for i in 0 ..< PAGE_CACHE_SIZE {
-		idx := (start + u32(i)) % PAGE_CACHE_SIZE
+	for _ in 0 ..< PAGE_CACHE_SIZE {
+		idx := p.evict_hand % PAGE_CACHE_SIZE
 		slot := &p.slots[idx]
-		if slot.page.page_num != 0 && slot.page.pin_count == 0 {
-			if slot.page.dirty {
-				if err := wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0);
-				   err != .None { return err }
-			}
-
-			delete_key(&p.cache_index, slot.page.page_num)
-			slot.page = {}
-			p.slot_count -= 1
-			append(&p.free_slots, slot)
-			p.evict_hand = (idx + 1) % PAGE_CACHE_SIZE
-			return .None
+		p.evict_hand = (p.evict_hand + 1) % PAGE_CACHE_SIZE
+		if slot.page.page_num == 0 || slot.page.pin_count > 0 {
+			continue
 		}
+		if slot.referenced {
+			slot.referenced = false
+			continue
+		}
+		if slot.page.dirty {
+			if err := wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0);
+			   err != .None { return err }
+		}
+
+		delete_key(&p.cache_index, slot.page.page_num)
+		slot.page = {}
+		slot.referenced = false
+		p.slot_count -= 1
+		append(&p.free_slots, slot)
+		return .None
 	}
 	return .Cache_Full
 }
@@ -104,10 +125,13 @@ open :: proc(
 	p.wal_state.page_index = make(map[u32]i64, allocator)
 	p.wal_state.txn_index = make(map[u32]i64, allocator)
 	p.free_slots = make([dynamic]^Page_Slot, 0, PAGE_CACHE_SIZE, allocator)
+	p.row_counts = make(map[u32]int, 64, allocator)
+	p.page_int_ranges = make(map[u32]Page_Int_Range, 64, allocator)
+	p.page_format_version = 1
 	for i in 0 ..< p.max_cache_pages {
 		append(&p.free_slots, &p.slots[i])
 	}
-	
+
 	flags := os.O_RDWR | os.O_CREATE
 	file, open_err := os.open(path, flags)
 	if open_err != nil {
@@ -154,6 +178,8 @@ close :: proc(p: ^Pager) -> Error {
 	delete(p.cache_index)
 	delete(p.page_bitmap)
 	delete(p.free_slots)
+	delete(p.row_counts)
+	delete(p.page_int_ranges)
 	free(p, p.allocator)
 	return .None
 }
@@ -165,6 +191,7 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	if slot := find_slot(p, page_num); slot != nil {
 		slot.page.pin_count += 1
+		slot.referenced = true
 		return &slot.page, .None
 	}
 
@@ -316,4 +343,8 @@ bitmap_clear :: proc(bm: []u64, pn: u32) {
 bitmap_test :: proc(bm: []u64, pn: u32) -> bool {
 	idx := int(pn) / 64
 	return idx < len(bm) && (bm[idx] & (u64(1) << uint(pn % 64))) != 0
+}
+
+invalidate_page_int_range :: proc(p: ^Pager, page_id: u32) {
+	delete_key(&p.page_int_ranges, page_id)
 }

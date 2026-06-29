@@ -71,7 +71,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	if is_subq { return exec_select_subquery(t, stmt) }
 	if len(stmt.joins) == 0 { return exec_select_single(t, stmt) }
 
-	// === Phase 1: Resolve all table sources and build column ranges ===
+	// Phase 1: Resolve all table sources and build column ranges
 	table_count := 1 + len(stmt.joins)
 	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
 	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
@@ -161,8 +161,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		}
 	}
 
-	// === Phase 2: Scan first table (or materialize subquery) ===
-
+	// Phase 2: Scan first table (or materialize subquery)
 	rows: []Row_Entry
 	if col_count_0 > 0 {
 		r, scan_err := scan_table(
@@ -179,8 +178,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		rows = vt.rows
 	}
 
-	// === Phase 3: Process JOINs ===
-
+	// Phase 3: Process JOINs
 	for j_idx in 0 ..< len(stmt.joins) {
 		jc := stmt.joins[j_idx]
 		info_idx := j_idx + 1
@@ -202,8 +200,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 			)
 		}
 
-		// === Phase 4: Hash join (single equi-condition) or nested-loop fallback ===
-
+		// Phase 4: Hash join (single equi-condition) or nested-loop fallback
 		hash_used := false
 		if on_cl, has_on := jc.on_clause.?; has_on && len(on_cl.conditions) == 1 {
 			cond := on_cl.conditions[0]
@@ -598,6 +595,32 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	table_tree := btree.init(t.pager, table.root_page)
 	has_order := false
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 { has_order = true }
+	// Fast path: SELECT COUNT(*) FROM table (no WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT)
+	if len(stmt.aggregates) == 1 &&
+	   stmt.aggregates[0].func == .COUNT &&
+	   stmt.aggregates[0].column == "" &&
+	   stmt.where_clause == nil &&
+	   len(stmt.group_by) == 0 &&
+	   !stmt.is_distinct &&
+	   !has_order &&
+	   stmt.limit == nil &&
+	   stmt.offset == nil {
+		count, count_err := btree.tree_count_rows(&table_tree)
+		if count_err != .None {
+			fmt.eprintln("Error: Failed to count rows")
+			return false
+		}
+
+		print_agg_header(stmt.columns)
+		for _, i in stmt.columns {
+			if i > 0 do fmt.print(" | ")
+			fmt.print(i64(count))
+		}
+
+		fmt.println()
+		fmt.printf("(%d rows)\n", 1)
+		return true
+	}
 
 	_, has_lim := stmt.limit.?
 	max_rows := stmt.limit if has_lim && !has_order else nil
@@ -733,7 +756,6 @@ exec_select_aggregate_combined :: proc(
 
 	groups := make([dynamic]Group, context.temp_allocator)
 	group_map := make(map[u64]int, context.temp_allocator)
-
 	for row_entry, _ in rows {
 		if len(group_by_indices) == 0 {
 			if len(groups) == 0 {

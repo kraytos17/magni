@@ -1,5 +1,6 @@
 package tests
 
+import "core:encoding/endian"
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -575,4 +576,234 @@ test_foreach_callback :: proc(t: ^testing.T) {
 			return true
 		}, &count)
 	testing.expect_value(t, count, 2)
+}
+
+@(test)
+test_page_accessor_v1 :: proc(t: ^testing.T) {
+	p, err := pager.open("test_accessor_v1.db", 8)
+	defer pager.close(p); os.remove("test_accessor_v1.db"); os.remove("test_accessor_v1.db-wal")
+	if err != nil { testing.fail_now(t, "open failed") }
+
+	pg, a_err := pager.allocate_page(p)
+	if a_err != nil { testing.fail_now(t, "alloc failed") }
+
+	btree.init_leaf_page(pg.data, pg.page_num)
+	// Serialize 3 cells into the content area from bottom of page
+	vals := [][]types.Value{{types.value_int(10)}, {types.value_int(20)}, {types.value_int(30)}}
+
+	rids := []types.Row_ID{100, 200, 300}
+	sizes: [3]int
+	off := int(types.PAGE_SIZE)
+	for i in 0 ..< 3 {
+		info := cell.compute_info(rids[i], vals[i])
+		sizes[i] = info.total_size
+		off -= info.total_size
+		cell.serialize(pg.data[off:], rids[i], vals[i], info)
+	}
+
+	// Set up as v1: 3 Cell_Pointers (2 bytes each) at top
+	hdr := btree.get_leaf_header(pg.data, pg.page_num)
+	base := btree.get_page_header_offset(pg.page_num)
+	hdr_sz := size_of(btree.Leaf_Header)
+	hdr.cell_count = 3
+	hdr.cell_content_offset = u16le(off)
+	ptr_loc := base + hdr_sz
+	ptr_offsets := []u16{u16(off + sizes[1] + sizes[2]), u16(off + sizes[2]), u16(off)}
+
+	endian.put_u16(pg.data[ptr_loc:], .Little, ptr_offsets[0])
+	endian.put_u16(pg.data[ptr_loc + 2:], .Little, ptr_offsets[1])
+	endian.put_u16(pg.data[ptr_loc + 4:], .Little, ptr_offsets[2])
+
+	// Verify get_cell_count
+	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 3)
+
+	// Verify get_cell_ptr — v1 stride = 2
+	for i in 0 ..< 3 {
+		p := btree.get_cell_ptr(pg.data, pg.page_num, i, btree.CELL_POINTER_STRIDE)
+		testing.expectf(
+			t,
+			p == ptr_offsets[i],
+			"v1 get_cell_ptr(%d) = %d, expected %d",
+			i,
+			p,
+			ptr_offsets[i],
+		)
+	}
+
+	// Verify get_cell_key — v1 version = 1
+	for i in 0 ..< 3 {
+		k := btree.get_cell_key(pg.data, pg.page_num, i, 1)
+		testing.expectf(t, k == rids[i], "v1 get_cell_key(%d) = %d, expected %d", i, k, rids[i])
+	}
+
+	pager.unpin_page(p, pg.page_num)
+}
+
+@(test)
+test_page_accessor_v2 :: proc(t: ^testing.T) {
+	p, err := pager.open("test_accessor_v2.db", 8)
+	defer pager.close(p); os.remove("test_accessor_v2.db"); os.remove("test_accessor_v2.db-wal")
+	if err != nil { testing.fail_now(t, "open failed") }
+
+	pg, a_err := pager.allocate_page(p)
+	if a_err != nil { testing.fail_now(t, "alloc failed") }
+
+	btree.init_leaf_page(pg.data, pg.page_num)
+
+	// Serialize 3 cells into content area from bottom
+	vals := [][]types.Value{{types.value_int(10)}, {types.value_int(20)}, {types.value_int(30)}}
+	rids := []types.Row_ID{100, 200, 300}
+	off := int(types.PAGE_SIZE)
+	for i in 0 ..< 3 {
+		info := cell.compute_info(rids[i], vals[i])
+		off -= info.total_size
+		cell.serialize(pg.data[off:], rids[i], vals[i], info)
+	}
+
+	// Set up as v2: 3 Cell_Entries (10 bytes each) at top
+	hdr := btree.get_leaf_header(pg.data, pg.page_num)
+	base := btree.get_page_header_offset(pg.page_num)
+	hdr_sz := size_of(btree.Leaf_Header)
+	hdr.cell_count = 3
+	hdr.cell_content_offset = u16le(off)
+	ptr_offsets := []u16 {
+		u16(off),
+		u16(off + cell.compute_info(rids[0], vals[0]).total_size),
+		u16(
+			off +
+			cell.compute_info(rids[0], vals[0]).total_size +
+			cell.compute_info(rids[1], vals[1]).total_size,
+		),
+	}
+	for i in 0 ..< 3 {
+		entry_loc := base + hdr_sz + i * btree.CELL_ENTRY_STRIDE
+		(^btree.Cell_Entry)(raw_data(pg.data[entry_loc:]))^ = btree.Cell_Entry {
+			ptr = btree.Cell_Pointer(ptr_offsets[i]),
+			key = rids[i],
+		}
+	}
+
+	// Verify get_cell_count
+	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 3)
+	// Verify get_cell_ptr — v2 stride = 10
+	for i in 0 ..< 3 {
+		p := btree.get_cell_ptr(pg.data, pg.page_num, i, btree.CELL_ENTRY_STRIDE)
+		testing.expectf(
+			t,
+			p == ptr_offsets[i],
+			"v2 get_cell_ptr(%d) = %d, expected %d",
+			i,
+			p,
+			ptr_offsets[i],
+		)
+	}
+	// Verify get_cell_key — v2 version = 2
+	for i in 0 ..< 3 {
+		k := btree.get_cell_key(pg.data, pg.page_num, i, 2)
+		testing.expectf(t, k == rids[i], "v2 get_cell_key(%d) = %d, expected %d", i, k, rids[i])
+	}
+
+	// Test insert_cell_at: insert new entry at idx=1
+	info4 := cell.compute_info(400, {types.value_int(40)})
+	off4 := int(hdr.cell_content_offset) - info4.total_size
+	cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
+	hdr.cell_content_offset = u16le(off4)
+	btree.insert_cell_at(pg.data, pg.page_num, 1, u16(off4), 400, btree.CELL_ENTRY_STRIDE)
+	hdr.cell_count = 4
+
+	// Verify after insert
+	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 4)
+	expected_keys := []types.Row_ID{100, 400, 200, 300}
+	for i in 0 ..< len(expected_keys) {
+		k := btree.get_cell_key(pg.data, pg.page_num, i, 2)
+		testing.expectf(
+			t,
+			k == expected_keys[i],
+			"v2 after insert get_cell_key(%d) = %d, expected %d",
+			i,
+			k,
+			expected_keys[i],
+		)
+	}
+
+	// Test delete_cell_at: delete entry at idx=2 (which has expected_key=200)
+	btree.delete_cell_at(pg.data, pg.page_num, 2, btree.CELL_ENTRY_STRIDE)
+	hdr.cell_count = 3
+	// Verify after delete
+	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 3)
+	expected_keys2 := []types.Row_ID{100, 400, 300}
+	for i in 0 ..< len(expected_keys2) {
+		k := btree.get_cell_key(pg.data, pg.page_num, i, 2)
+		testing.expectf(
+			t,
+			k == expected_keys2[i],
+			"v2 after delete get_cell_key(%d) = %d, expected %d",
+			i,
+			k,
+			expected_keys2[i],
+		)
+	}
+	pager.unpin_page(p, pg.page_num)
+}
+
+@(test)
+test_page_accessor_move :: proc(t: ^testing.T) {
+	p, err := pager.open("test_accessor_move.db", 8)
+	defer pager.close(p)
+	os.remove("test_accessor_move.db"); os.remove("test_accessor_move.db-wal")
+	if err != nil { testing.fail_now(t, "open failed") }
+
+	src_pg, a_err := pager.allocate_page(p)
+	if a_err != nil { testing.fail_now(t, "alloc failed") }
+	defer pager.unpin_page(p, src_pg.page_num)
+
+	dst_pg, a2_err := pager.allocate_page(p)
+	if a2_err != nil { testing.fail_now(t, "alloc dst failed") }
+	defer pager.unpin_page(p, dst_pg.page_num)
+
+	btree.init_leaf_page(src_pg.data, src_pg.page_num)
+	btree.init_leaf_page(dst_pg.data, dst_pg.page_num)
+
+	// Create 2 entries in src
+	vals := [][]types.Value{{types.value_int(1)}, {types.value_int(2)}}
+	rids := []types.Row_ID{10, 20}
+	off := int(types.PAGE_SIZE)
+	for i in 0 ..< 2 {
+		info := cell.compute_info(rids[i], vals[i])
+		off -= info.total_size
+		cell.serialize(src_pg.data[off:], rids[i], vals[i], info)
+	}
+
+	src_hdr := btree.get_leaf_header(src_pg.data, src_pg.page_num)
+	src_base := btree.get_page_header_offset(src_pg.page_num)
+	src_hdr_sz := size_of(btree.Leaf_Header)
+	src_hdr.cell_count = 2
+	src_hdr.cell_content_offset = u16le(off)
+
+	src_ptr_offsets := []u16{u16(off), u16(off + cell.compute_info(rids[0], vals[0]).total_size)}
+	for i in 0 ..< 2 {
+		loc := src_base + src_hdr_sz + i * btree.CELL_ENTRY_STRIDE
+		(^btree.Cell_Entry)(raw_data(src_pg.data[loc:]))^ = btree.Cell_Entry {
+			ptr = btree.Cell_Pointer(src_ptr_offsets[i]),
+			key = rids[i],
+		}
+	}
+
+	// Move 1 entry from src[1] to dst
+	btree.move_cells_to(
+		dst_pg.data,
+		dst_pg.page_num,
+		src_pg.data,
+		src_pg.page_num,
+		1,
+		1,
+		btree.CELL_ENTRY_STRIDE,
+	)
+
+	dst_hdr := btree.get_leaf_header(dst_pg.data, dst_pg.page_num)
+	dst_hdr.cell_count = 1
+	// Verify dst has entry with key=20
+	testing.expect_value(t, btree.get_cell_count(dst_pg.data, dst_pg.page_num), 1)
+	k := btree.get_cell_key(dst_pg.data, dst_pg.page_num, 0, 2)
+	testing.expect_value(t, k, types.Row_ID(20))
 }

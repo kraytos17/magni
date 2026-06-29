@@ -83,6 +83,7 @@ open :: proc(path: string) -> (^Database, bool) {
 			close(db)
 			return nil, false
 		}
+		db.pager.page_format_version = types.SCHEMA_VERSION
 	} else {
 		if !verify_header(db) {
 			fmt.eprintln("Error: Invalid or corrupted database file")
@@ -103,6 +104,7 @@ open :: proc(path: string) -> (^Database, bool) {
 		db.txn_snapshot_id = u64(header.snapshot_id_counter)
 		db.pager.first_free_page = u32(header.first_free_page)
 		db.refs_page = u32(header.refs_page)
+		db.pager.page_format_version = u32(header.schema_version)
 		pager.unpin_page(db.pager, 1)
 
 		page := db.latest_snapshot

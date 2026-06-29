@@ -40,8 +40,10 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 
 		if is_leaf(node) { break }
 		if node.header.cell_count > 0 {
-			ptrs := get_pointers(node.data, curr)
-			child, ok := endian.get_u32(node.data[int(ptrs[0]):], .Big)
+			v := c.tree.pager.page_format_version
+			stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+			ptr := get_cell_ptr(node.data, curr, 0, stride)
+			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
 			if !ok { return .Invalid_Cell_Pointer }
 			curr = child
 		} else {
@@ -147,9 +149,10 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 				if int(item.cell_index) == limit {
 					child_page = get_right_ptr(node.data, item.page_id)
 				} else {
-					ptrs := get_pointers(node.data, item.page_id)
-					cell_ptr := ptrs[item.cell_index]
-					child_page, _ = endian.get_u32(node.data[int(cell_ptr):], .Big)
+					v := c.tree.pager.page_format_version
+					stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+					ptr := get_cell_ptr(node.data, item.page_id, int(item.cell_index), stride)
+					child_page, _ = endian.get_u32(node.data[int(ptr):], .Big)
 				}
 				return drill_down_leftmost(c, child_page)
 			}
@@ -198,12 +201,14 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 		return cc, .None
 	}
 
-	pointers := get_pointers(node.data, item.page_id)
-	if int(item.cell_index) >= len(pointers) {
+	v := c.tree.pager.page_format_version
+	stride := CELL_ENTRY_STRIDE if v >= 2 else CELL_POINTER_STRIDE
+	cell_count := get_cell_count(node.data, item.page_id)
+	if int(item.cell_index) >= cell_count {
 		return {}, .Cell_Not_Found
 	}
 
-	cell_ptr := pointers[item.cell_index]
+	cell_ptr := get_cell_ptr(node.data, item.page_id, int(item.cell_index), stride)
 	cell_cfg := cell.Config {
 		allocator = actual_alloc,
 		zero_copy = c.tree.config.zero_copy,

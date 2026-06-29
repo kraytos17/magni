@@ -37,6 +37,33 @@ node_move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int)
 	return true
 }
 
+node_move_leaf_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
+	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
+
+	dst_off := int(dst.header.cell_content_offset)
+	dst_cell_count := int(dst.header.cell_count)
+	for i in 0 ..< count {
+		idx := start_idx + i
+		src_ptr := get_cell_ptr(src.data, src.id, idx, CELL_ENTRY_STRIDE)
+		cell_sz, ok := cell.get_size(src.data, int(src_ptr))
+		if !ok { return false }
+
+		dst_off -= cell_sz
+		copy(dst.data[dst_off:dst_off + cell_sz], src.data[int(src_ptr):int(src_ptr) + cell_sz])
+
+		raw_dst := get_raw_entries(dst.data, dst.id)
+		raw_src := get_raw_entries(src.data, src.id)
+		raw_dst[dst_cell_count + i] = Cell_Entry{
+			ptr = Cell_Pointer(u16(dst_off)),
+			key = raw_src[idx].key,
+		}
+	}
+
+	dst.header.cell_content_offset = u16le(dst_off)
+	dst.header.cell_count = u16le(dst_cell_count + count)
+	return true
+}
+
 node_move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
 	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
 
@@ -58,6 +85,33 @@ node_move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: 
 
 	dst_int.cell_content_offset = u16le(dst_off)
 	dst_int.cell_count = u16le(int(dst_int.cell_count) + count)
+	return true
+}
+
+node_move_interior_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
+	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
+
+	dst_int := node_interior(dst^)
+	dst_off := int(dst_int.cell_content_offset)
+	dst_cell_count := int(dst_int.cell_count)
+	for i in 0 ..< count {
+		idx := start_idx + i
+		ptr := get_cell_ptr(src.data, src.id, idx, CELL_ENTRY_STRIDE)
+		cell_sz := interior_cell_size_from_page(src.data, int(ptr))
+		dst_off -= cell_sz
+
+		copy(dst.data[dst_off:dst_off + cell_sz], src.data[int(ptr):int(ptr) + cell_sz])
+
+		raw_dst := get_raw_entries(dst.data, dst.id)
+		raw_src := get_raw_entries(src.data, src.id)
+		raw_dst[dst_cell_count + i] = Cell_Entry{
+			ptr = Cell_Pointer(u16(dst_off)),
+			key = raw_src[idx].key,
+		}
+	}
+
+	dst_int.cell_content_offset = u16le(dst_off)
+	dst_int.cell_count = u16le(dst_cell_count + count)
 	return true
 }
 
@@ -131,32 +185,61 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 
 	total := int(node_leaf(curr^).cell_count)
 	mid := total / 2
-	if !node_move_leaf_cells(curr, &right_node, mid, total - mid) {
+	if t.pager.page_format_version >= 2 {
+		if !node_move_leaf_cells_v2(curr, &right_node, mid, total - mid) {
+			return {}, .Serialization_Failed
+		}
+	} else if !node_move_leaf_cells(curr, &right_node, mid, total - mid) {
 		return {}, .Serialization_Failed
 	}
 	if mid > 0 {
-		curr_ptrs := get_pointers(curr.data, curr.id)
-		hdr_sz := page_header_size(curr.header.page_type)
-		base := get_page_header_offset(curr.id)
-		dst_off := PAGE_SIZE
-		for i in 0 ..< mid {
-			src_ptr := int(curr_ptrs[i])
-			cell_sz, ok := cell.get_size(curr.data, src_ptr)
-			if !ok { return {}, .Serialization_Failed }
+		if t.pager.page_format_version >= 2 {
+			dst_off := PAGE_SIZE
+			raw_entries := get_raw_entries(curr.data, curr.id)
+			for i in 0 ..< mid {
+				src_ptr := int(get_cell_ptr(curr.data, curr.id, i, CELL_ENTRY_STRIDE))
+				cell_sz, ok := cell.get_size(curr.data, src_ptr)
+				if !ok { return {}, .Serialization_Failed }
 
-			dst_off -= cell_sz
-			copy(curr.data[dst_off:dst_off + cell_sz], curr.data[src_ptr:src_ptr + cell_sz])
-			ptr_loc := base + hdr_sz + i * 2
-			endian.put_u16(curr.data[ptr_loc:], .Little, u16(dst_off))
+				dst_off -= cell_sz
+				copy(curr.data[dst_off:dst_off + cell_sz], curr.data[src_ptr:src_ptr + cell_sz])
+				raw_entries[i] = Cell_Entry{
+					ptr = Cell_Pointer(u16(dst_off)),
+					key = get_cell_key(curr.data, curr.id, i, 2),
+				}
+			}
+			curr.header.cell_content_offset = u16le(dst_off)
+			curr.header.cell_count = u16le(mid)
+		} else {
+			curr_ptrs := get_pointers(curr.data, curr.id)
+			hdr_sz := page_header_size(curr.header.page_type)
+			base := get_page_header_offset(curr.id)
+			dst_off := PAGE_SIZE
+			for i in 0 ..< mid {
+				src_ptr := int(curr_ptrs[i])
+				cell_sz, ok := cell.get_size(curr.data, src_ptr)
+				if !ok { return {}, .Serialization_Failed }
+
+				dst_off -= cell_sz
+				copy(curr.data[dst_off:dst_off + cell_sz], curr.data[src_ptr:src_ptr + cell_sz])
+				ptr_loc := base + hdr_sz + i * 2
+				endian.put_u16(curr.data[ptr_loc:], .Little, u16(dst_off))
+			}
+			curr.header.cell_content_offset = u16le(dst_off)
+			curr.header.cell_count = u16le(mid)
 		}
-
-		curr.header.cell_content_offset = u16le(dst_off)
-		curr.header.cell_count = u16le(mid)
 	}
 
-	ptrs := get_pointers(right_node.data, right_node.id)
-	sep, ok := cell.get_rowid(right_node.data, int(ptrs[0]))
-	if !ok { return {}, .Invalid_Cell_Pointer }
+	sep: types.Row_ID
+	if t.pager.page_format_version >= 2 {
+		entries := get_entries(right_node.data, right_node.id)
+		sep = entries[0].key
+	} else {
+		ptrs := get_pointers(right_node.data, right_node.id)
+		s_ok := true
+		sep, s_ok = cell.get_rowid(right_node.data, int(ptrs[0]))
+		if !s_ok { return {}, .Invalid_Cell_Pointer }
+	}
 
 	pager.mark_dirty(t.pager, curr.id)
 	pager.mark_dirty(t.pager, right_node.id)
@@ -173,17 +256,29 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	total := int(node_interior(curr^).cell_count)
 	mid := total / 2
 
-	ptrs := get_pointers(curr.data, curr.id)
-	if len(ptrs) == 0 { return {}, .Invalid_Cell_Pointer }
-
-	mid_ptr := ptrs[mid]
-	sep_u64, _, ok := cell.varint_decode(curr.data, int(mid_ptr) + 4)
-	if !ok { return {}, .Invalid_Cell_Pointer }
-
-	sep := types.Row_ID(sep_u64)
-	child_from_mid_cell, _ := endian.get_u32(curr.data[int(mid_ptr):], .Big)
-	count_right := total - (mid + 1)
-	if count_right > 0 { node_move_interior_cells(curr, &right_node, mid + 1, count_right) }
+	v := t.pager.page_format_version
+	sep: types.Row_ID
+	child_from_mid_cell: u32
+	if v >= 2 {
+		if total == 0 { return {}, .Invalid_Cell_Pointer }
+		mid_ptr := get_cell_ptr(curr.data, curr.id, mid, CELL_ENTRY_STRIDE)
+		sep_u64, _, ok := cell.varint_decode(curr.data, int(mid_ptr) + 4)
+		if !ok { return {}, .Invalid_Cell_Pointer }
+		sep = types.Row_ID(sep_u64)
+		child_from_mid_cell, _ = endian.get_u32(curr.data[int(mid_ptr):], .Big)
+		count_right := total - (mid + 1)
+		if count_right > 0 { node_move_interior_cells_v2(curr, &right_node, mid + 1, count_right) }
+	} else {
+		ptrs := get_pointers(curr.data, curr.id)
+		if len(ptrs) == 0 { return {}, .Invalid_Cell_Pointer }
+		mid_ptr := ptrs[mid]
+		sep_u64, _, ok := cell.varint_decode(curr.data, int(mid_ptr) + 4)
+		if !ok { return {}, .Invalid_Cell_Pointer }
+		sep = types.Row_ID(sep_u64)
+		child_from_mid_cell, _ = endian.get_u32(curr.data[int(mid_ptr):], .Big)
+		count_right := total - (mid + 1)
+		if count_right > 0 { node_move_interior_cells(curr, &right_node, mid + 1, count_right) }
+	}
 
 	orig_rightmost := get_right_ptr(curr.data, curr.id)
 	set_right_ptr(right_node.data, right_node.id, orig_rightmost)
@@ -191,14 +286,28 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 		hdr_sz := size_of(Interior_Header)
 		base := get_page_header_offset(curr.id)
 		dst_off := PAGE_SIZE
-		for i in 0 ..< mid {
-			off := int(ptrs[i])
-			size := interior_cell_size_from_page(curr.data, off)
-			dst_off -= size
-
-			copy(curr.data[dst_off:dst_off + size], curr.data[off:off + size])
-			ptr_loc := base + hdr_sz + i * 2
-			endian.put_u16(curr.data[ptr_loc:], .Little, u16(dst_off))
+		if v >= 2 {
+			raw_entries := get_raw_entries(curr.data, curr.id)
+			for i in 0 ..< mid {
+				off := int(get_cell_ptr(curr.data, curr.id, i, CELL_ENTRY_STRIDE))
+				cell_sz := interior_cell_size_from_page(curr.data, off)
+				dst_off -= cell_sz
+				copy(curr.data[dst_off:dst_off + cell_sz], curr.data[off:off + cell_sz])
+				raw_entries[i] = Cell_Entry{
+					ptr = Cell_Pointer(u16(dst_off)),
+					key = get_cell_key(curr.data, curr.id, i, 2),
+				}
+			}
+		} else {
+			ptrs := get_pointers(curr.data, curr.id)
+			for i in 0 ..< mid {
+				off := int(ptrs[i])
+				size := interior_cell_size_from_page(curr.data, off)
+				dst_off -= size
+				copy(curr.data[dst_off:dst_off + size], curr.data[off:off + size])
+				ptr_loc := base + hdr_sz + i * 2
+				endian.put_u16(curr.data[ptr_loc:], .Little, u16(dst_off))
+			}
 		}
 
 		curr_int := node_interior(curr^)
@@ -242,15 +351,32 @@ split_leaf_root :: proc(t: ^Tree, root_page: u32) -> (new_root: u32, err: Error)
 
 	total := int(node_leaf(root_node).cell_count)
 	mid := total / 2
-	if !node_move_leaf_cells(&root_node, &left_node, 0, mid) {
-		return 0, .Serialization_Failed
-	}
-	if !node_move_leaf_cells(&root_node, &right_node, mid, total - mid) {
-		return 0, .Serialization_Failed
+	v := t.pager.page_format_version
+	if v >= 2 {
+		if !node_move_leaf_cells_v2(&root_node, &left_node, 0, mid) {
+			return 0, .Serialization_Failed
+		}
+		if !node_move_leaf_cells_v2(&root_node, &right_node, mid, total - mid) {
+			return 0, .Serialization_Failed
+		}
+	} else {
+		if !node_move_leaf_cells(&root_node, &left_node, 0, mid) {
+			return 0, .Serialization_Failed
+		}
+		if !node_move_leaf_cells(&root_node, &right_node, mid, total - mid) {
+			return 0, .Serialization_Failed
+		}
 	}
 
-	ptrs := get_pointers(right_node.data, right_node.id)
-	sep, s_ok := cell.get_rowid(right_node.data, int(ptrs[0]))
+	sep: types.Row_ID
+	s_ok: bool
+	if v >= 2 {
+		entries := get_entries(right_node.data, right_node.id)
+		sep = entries[0].key; s_ok = true
+	} else {
+		ptrs := get_pointers(right_node.data, right_node.id)
+		sep, s_ok = cell.get_rowid(right_node.data, int(ptrs[0]))
+	}
 	if !s_ok { return 0, .Invalid_Cell_Pointer }
 
 	init_interior_page(root_node.data, root_node.id)
@@ -282,7 +408,13 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 	if is_leaf(root_node) { unpin_node(t, root_node); return .Invalid_Page_Header }
 
 	total := int(node_interior(root_node).cell_count)
-	if !node_move_interior_cells(&root_node, &left_node, 0, total) {
+	v := t.pager.page_format_version
+	if v >= 2 {
+		if !node_move_interior_cells_v2(&root_node, &left_node, 0, total) {
+			unpin_node(t, root_node)
+			return .Serialization_Failed
+		}
+	} else if !node_move_interior_cells(&root_node, &left_node, 0, total) {
 		unpin_node(t, root_node)
 		return .Serialization_Failed
 	}

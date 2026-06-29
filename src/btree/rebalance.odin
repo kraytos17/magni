@@ -88,7 +88,11 @@ merge_leaf_pages :: proc(t: ^Tree, left_id: u32, right_id: u32) -> bool {
 	if r_err != .None { return false }
 	defer unpin_node(t, right_node)
 
-	if !node_move_leaf_cells(&right_node, &left_node, 0, int(right_node.header.cell_count)) {
+	if t.pager.page_format_version >= 2 {
+		if !node_move_leaf_cells_v2(&right_node, &left_node, 0, int(right_node.header.cell_count)) {
+			return false
+		}
+	} else if !node_move_leaf_cells(&right_node, &left_node, 0, int(right_node.header.cell_count)) {
 		return false
 	}
 
