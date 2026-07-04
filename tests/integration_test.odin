@@ -631,7 +631,7 @@ test_integration_rebalance :: proc(t: ^testing.T) {
 	}
 
 	// Run rebalance
-	st := db.schema_tree(d)
+	st := db.Schema_Tree(d)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	if len(tables) > 0 {
 		tree := btree.init(d.pager, tables[0].root_page)
@@ -655,7 +655,7 @@ test_integration_skip_index :: proc(t: ^testing.T) {
 	}
 
 	// Build a skip index on the table
-	st := db.schema_tree(d)
+	st := db.Schema_Tree(d)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	if len(tables) > 0 {
 		tree := btree.init(d.pager, tables[0].root_page)
@@ -1118,4 +1118,100 @@ test_negative_offset :: proc(t: ^testing.T) {
 	_, ok, err_msg := parser.parse("SELECT * FROM t LIMIT 5 OFFSET -3;", context.temp_allocator)
 	testing.expect(t, !ok, "negative OFFSET rejected")
 	testing.expect(t, strings.contains(err_msg, "non-negative"), "error mentions non-negative")
+}
+
+@(test)
+test_select_readonly_no_snapshot :: proc(t: ^testing.T) {
+	// SELECT under shared lock should not create a snapshot
+	d := setup_db(t, "sel_nosnap")
+	defer teardown_db(d, "sel_nosnap")
+
+	ok := db.execute(d, "CREATE TABLE t (id INT);")
+	testing.expect(t, ok == .None, "CREATE TABLE")
+
+	ok = db.execute(d, "INSERT INTO t VALUES (1);")
+	testing.expect(t, ok == .None, "INSERT")
+
+	// SELECT must not create a snapshot
+	q := db.query(d, "SELECT * FROM t;")
+	testing.expect(t, q.ok, "SELECT under shared lock")
+	testing.expect(t, len(q.rows) == 1, "1 row from SELECT")
+}
+
+@(test)
+test_multiple_selects :: proc(t: ^testing.T) {
+	// Multiple sequential SELECTs should all work under shared lock
+	d := setup_db(t, "multisel")
+	defer teardown_db(d, "multisel")
+
+	db.execute(d, "CREATE TABLE t (x INT);")
+	db.execute(d, "INSERT INTO t VALUES (10);")
+	db.execute(d, "INSERT INTO t VALUES (20);")
+	db.execute(d, "INSERT INTO t VALUES (30);")
+
+	for i in 0 ..< 5 {
+		q := db.query(d, "SELECT * FROM t ORDER BY x;")
+		testing.expect(t, q.ok, fmt.tprintf("SELECT %d", i))
+		testing.expect(t, len(q.rows) == 3, fmt.tprintf("3 rows in SELECT %d", i))
+	}
+}
+
+@(test)
+test_readonly_admin_commands :: proc(t: ^testing.T) {
+	d := setup_db(t, "ro_admin")
+	defer teardown_db(d, "ro_admin")
+
+	db.execute(d, "CREATE TABLE t1 (id INT);")
+	db.execute(d, "CREATE TABLE t2 (val TEXT);")
+
+	db.list_tables(d)
+	db.describe_table(d, "t1")
+	db.describe_table(d, "t2")
+	db.stats(d)
+
+	q := db.query(d, "SELECT name FROM t1;")
+	testing.expect(t, q.ok, "query after admin commands")
+}
+
+@(test)
+test_insert_creates_snapshot :: proc(t: ^testing.T) {
+	d := setup_db(t, "ins_snap")
+	defer teardown_db(d, "ins_snap")
+
+	db.execute(d, "CREATE TABLE t (id INT);")
+
+	q := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok, "initial query")
+
+	ok := db.execute(d, "INSERT INTO t VALUES (42);")
+	testing.expect(t, ok == .None, "INSERT under exclusive lock")
+
+	q = db.query(d, "SELECT id FROM t;")
+	testing.expect(t, q.ok, "query after INSERT")
+	if q.ok && len(q.rows) > 0 {
+		v, _ := q.rows[0][0].(i64)
+		testing.expect_value(t, v, i64(42))
+	}
+}
+
+@(test)
+test_write_after_read :: proc(t: ^testing.T) {
+	d := setup_db(t, "w_after_r")
+	defer teardown_db(d, "w_after_r")
+
+	db.execute(d, "CREATE TABLE t (id INT);")
+	db.execute(d, "INSERT INTO t VALUES (1);")
+
+	q := db.query(d, "SELECT * FROM t;")
+	testing.expect(t, q.ok, "read first")
+
+	ok := db.execute(d, "INSERT INTO t VALUES (2);")
+	testing.expect(t, ok == .None, "write after read")
+
+	q = db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok, "verify after write")
+	if q.ok && len(q.rows) > 0 {
+		v, _ := q.rows[0][0].(i64)
+		testing.expect_value(t, v, i64(2))
+	}
 }

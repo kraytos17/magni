@@ -92,7 +92,7 @@ Database :: struct {
 	refs_page:                u32,
 	snapshot_batch_count:     int,
 	snapshot_batch_threshold: int,
-	mu:                       sync.Mutex,
+	mu:                       sync.RW_Mutex,
 }
 
 Header :: struct #packed {
@@ -111,7 +111,7 @@ Header :: struct #packed {
 
 #assert(size_of(Header) == types.DATABASE_HEADER_SIZE)
 
-schema_tree :: proc(db: ^Database) -> btree.Tree {
+Schema_Tree :: proc(db: ^Database) -> btree.Tree {
 	return btree.init(db.pager, db.schema_root_page)
 }
 
@@ -177,8 +177,8 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 
 close :: proc(db: ^Database) {
 	if db == nil { return }
-	sync.lock(&db.mu)
-	defer sync.unlock(&db.mu)
+	sync.rw_mutex_lock(&db.mu)
+	defer sync.rw_mutex_unlock(&db.mu)
 
 	if db.snapshot_batch_count > 0 {
 		db.snapshot_batch_threshold = 1
@@ -246,7 +246,7 @@ initialize :: proc(db: ^Database) -> DB_Error {
 	db.schema_root_page = schema_page.page_num
 	header.schema_root_page = u32le(schema_page.page_num); header.latest_snapshot_page = 0
 	header.page_count = u32le(schema_page.page_num)
-	st := schema_tree(db)
+	st := Schema_Tree(db)
 	if !schema.init(&st) {
 		return .Alloc_Failed
 	}
@@ -308,7 +308,7 @@ db_check :: proc(db: ^Database) -> DB_Error {
 
 ensure_table_roots :: proc(db: ^Database) {
 	if !db.table_roots_dirty && len(db.table_roots) > 0 { return }
-	st := schema_tree(db)
+	st := Schema_Tree(db)
 	tables := schema.list_tables(&st, context.temp_allocator)
 
 	clear(&db.table_roots)

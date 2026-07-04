@@ -122,7 +122,8 @@ ROLLBACK;
 | **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
-| **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command completion, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
+| **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
+| **Concurrency** | `db.mu` uses `RW_Mutex` — SELECT and read-only admin commands take shared lock (multiple can run); INSERT/UPDATE/DELETE/DDL take exclusive lock. Pager internally uses `RW_Mutex` with shared locks for read-only page operations. COW snapshots enable time-travel reads without blocking. |
 | **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Page bitmap for O(1) 64-page GC range skips. |
 
 See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, and all optimization internals.
@@ -172,7 +173,7 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | Ctrl-C | Cancel current line / abort multi-line statement |
 | Ctrl-D (empty line) | Exit |
 | Ctrl-R | Incremental reverse history search (results shown below prompt; wraps around with visual indicator) |
-| Tab | Dot-command completion |
+| Tab | Dot-command, SQL keyword, and table/column name completion |
 | Paste | Bracketed paste — multi-line pastes inserted as a single block |
 
 ### CLI Flags
@@ -217,7 +218,7 @@ src/
 ├── snapshot/              Snapshot chain, manifests, GC, refs, expire
 └── types/                 Core types: Value, Column, Table, SerialType
 tests/
-└── * _test.odin           281 tests across all packages
+└── * _test.odin           287 tests across all packages
 ```
 
 ---
@@ -243,4 +244,4 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100)
-- REPL line editor: no SQL keyword/table-name completion (dot-commands only)
+- REPL line editor: SQL keyword and table/column name completion only (no in-expression or JOIN completion)

@@ -373,6 +373,10 @@ match_keyword :: proc(ident: string) -> Token_Type {
 	return .IDENTIFIER
 }
 
+is_hex_digit :: proc(c: rune) -> bool {
+	return unicode.is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
 tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
 	tokens := make([dynamic]Token, allocator)
 	i := 0
@@ -420,6 +424,13 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 		   (c == '-' && i + 1 < len(sql) && unicode.is_digit(rune(sql[i + 1]))) {
 			start := i
 			if c == '-' do i += 1
+			// Hex literal: 0xFF, 0xDEAD
+			if i + 1 < len(sql) && sql[i] == '0' && (sql[i + 1] | 0x20) == 'x' {
+				i += 2
+				for i < len(sql) && is_hex_digit(rune(sql[i])) { i += 1 }
+				append(&tokens, Token{.NUMBER, sql[start:i], line}); continue
+			}
+
 			has_dot := false
 			for i < len(sql) {
 				ch := sql[i]
@@ -428,6 +439,11 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 				} else if ch == '.' && !has_dot {
 					has_dot = true
 					i += 1
+				} else if (ch == 'e' || ch == 'E') && i + 1 < len(sql) {
+					i += 1
+					if sql[i] == '+' || sql[i] == '-' { i += 1 }
+					for i < len(sql) && unicode.is_digit(rune(sql[i])) { i += 1 }
+					break
 				} else {
 					break
 				}

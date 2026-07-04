@@ -48,13 +48,7 @@ prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 
 GC_MIN_PAGES :: 512
 
-gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
-	max_page := pager.page_count(p)
-	if max_page < GC_MIN_PAGES { return }
-
-	live := make(map[u32]bool, context.temp_allocator)
-	defer delete(live)
-
+_build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live: ^map[u32]bool) {
 	live[1] = true
 	count := 0
 	page := latest_page
@@ -67,7 +61,7 @@ gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 		if h.schema_root != 0 {
 			live[h.schema_root] = true
 			t := btree.init(p, h.schema_root)
-			btree.collect_pages(&t, h.schema_root, &live)
+			btree.collect_pages(&t, h.schema_root, live)
 			if h.manifest_page != 0 {
 				_, roots, load_ok := load_manifest_tables(
 					p,
@@ -77,38 +71,54 @@ gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 				if load_ok {
 					for i in 0 ..< len(roots) {
 						if roots[i] !=
-						   0 { live[roots[i]] = true; btree.collect_pages(&t, roots[i], &live) }
+						   0 { live[roots[i]] = true; btree.collect_pages(&t, roots[i], live) }
 					}
 				}
 			}
 		}
 		count += 1; page = h.prev_snapshot
 	}
+}
+
+_sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
+	max_page := pager.page_count(p)
 	bm := p.page_bitmap
 	if len(bm) > 0 {
 		for i := 0; i < len(bm); i += 1 {
 			word := bm[i]
 			if word == 0 { continue }
+
 			base := u32(i) * 64
 			for bit := uint(0); bit < 64; bit += 1 {
 				pn := base + u32(bit)
 				if pn > max_page { break }
-				if pn >= 2 && (word & (u64(1) << bit)) != 0 && pn not_in live {
+				if pn >= 2 && (word & (u64(1) << bit)) != 0 && pn not_in live^ {
 					pager.free_page(p, pn)
 				}
 			}
 		}
 	} else {
 		for pn := u32(2); pn <= max_page; pn += 1 {
-			if pn not_in live { pager.free_page(p, pn) }
+			if pn not_in live^ { pager.free_page(p, pn) }
 		}
 	}
+
 	highest_live: u32
-	for pn, _ in live {
+	for pn, _ in live^ {
 		if pn > highest_live { highest_live = pn }
 	}
 	if highest_live > 0 && highest_live < max_page {
 		new_len := i64(highest_live) * i64(types.PAGE_SIZE)
 		if new_len > 0 { p.file_len = new_len }
 	}
+}
+
+gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
+	if pager.page_count(p) < GC_MIN_PAGES { return }
+
+	live := make(map[u32]bool, context.temp_allocator)
+	defer delete(live)
+
+	_build_live_set(p, latest_page, keep_count, &live)
+	_sweep_dead_pages(p, &live)
 }

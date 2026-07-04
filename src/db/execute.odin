@@ -9,13 +9,26 @@ import "src:types"
 
 execute :: proc(db: ^Database, sql: string) -> DB_Error {
 	if err := db_check(db); err != .None { return err }
-	sync.lock(&db.mu)
-	defer sync.unlock(&db.mu)
 
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	if !ok {
 		return .Parse_Error
 	}
+
+	is_read := false
+	#partial switch s in stmt.type {
+	case parser.Select_Stmt:
+		is_read = true
+	}
+
+	if is_read {
+		sync.rw_mutex_shared_lock(&db.mu)
+		defer sync.rw_mutex_shared_unlock(&db.mu)
+	} else {
+		sync.rw_mutex_lock(&db.mu)
+		defer sync.rw_mutex_unlock(&db.mu)
+	}
+
 	if txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt); is_txn {
 		switch txn_stmt.op {
 		case .BEGIN:
@@ -27,7 +40,7 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		}
 	}
 
-	st := schema_tree(db)
+	st := Schema_Tree(db)
 	as_of_override := false
 	if sel, is_sel := stmt.type.(parser.Select_Stmt); is_sel {
 		if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
@@ -145,8 +158,8 @@ Query_Result :: struct {
 query :: proc(db: ^Database, sql: string) -> Query_Result {
 	r := Query_Result{}
 	if err := db_check(db); err != .None { r.err = err; return r }
-	sync.lock(&db.mu)
-	defer sync.unlock(&db.mu)
+	sync.rw_mutex_shared_lock(&db.mu)
+	defer sync.rw_mutex_shared_unlock(&db.mu)
 
 	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
 	if !parse_ok {
@@ -154,7 +167,7 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 		return r
 	}
 
-	st := schema_tree(db)
+	st := Schema_Tree(db)
 	if sel, is_sel := stmt.type.(parser.Select_Stmt); is_sel {
 		if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
 			snap_page, has_page := db.snapshot_index[snap_id]

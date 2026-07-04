@@ -81,18 +81,21 @@ rollback_impl :: proc(db: ^Database) -> DB_Error {
 
 begin :: proc(db: ^Database) -> DB_Error {
 	if err := db_check(db); err != .None { return err }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.rw_mutex_lock(&db.mu)
+	defer sync.rw_mutex_unlock(&db.mu)
 	return begin_impl(db)
 }
 
 commit :: proc(db: ^Database) -> DB_Error {
 	if err := db_check(db); err != .None { return err }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.rw_mutex_lock(&db.mu)
+	defer sync.rw_mutex_unlock(&db.mu)
 	return commit_impl(db)
 }
 
 rollback :: proc(db: ^Database) -> DB_Error {
 	if err := db_check(db); err != .None { return err }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.rw_mutex_lock(&db.mu)
+	defer sync.rw_mutex_unlock(&db.mu)
 	return rollback_impl(db)
 }

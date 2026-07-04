@@ -55,13 +55,23 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 
 **Data flow for a write query:**
 
-1. `db.execute()` acquires `Database.mu` (exclusive lock)
-2. `parser.parse()` tokenizes and builds AST on `temp_allocator`
+1. `parser.parse()` tokenizes and builds AST (no lock needed)
+2. `sync.rw_mutex_lock(&db.mu)` — exclusive lock for writes
 3. `executor.execute()` dispatches to DML-specific handler:
    - Each mutation (INSERT/UPDATE/DELETE) uses COW B-tree operations
    - Schema tree root is updated via `tree_update_cow` (single traversal)
 4. After execution, a snapshot is created capturing the new schema root
-5. Lock is released
+5. `free_all(context.temp_allocator)` reclaims all temporary memory
+6. Lock is released
+
+**Data flow for a read query:**
+
+1. `parser.parse()` tokenizes and builds AST (no lock needed)
+2. `sync.rw_mutex_shared_lock(&db.mu)` — shared lock for reads
+3. `executor.execute()` dispatches to SELECT handler
+4. Read-only B-tree traversal via cursor or `tree_find` — no pages modified
+5. Results are displayed or returned via `Query_Result`
+6. Lock is released
 
 ---
 
@@ -165,7 +175,8 @@ linedit/
    backward search for Ctrl-R. During search, matches are displayed on a dedicated line
    below the search prompt; when no more matches are found above, the search wraps around
    from the newest entry and shows a `(wrapped ...)` prompt prefix.
-7. Tab completion matches against a static list of 21 dot-commands. On
+7. Tab completion matches against a static list of 21 dot-commands, SQL keywords,
+   and (via a callback to the database) table names and column names. On
    unambiguous match the remainder is inserted; on ambiguity the candidates
    are printed below and the prompt is redrawn underneath.
 
@@ -187,7 +198,7 @@ linedit/
 | Ctrl-C | Return empty line (aborts multi-line statement in main.odin) |
 | Ctrl-D (empty) | EOF (exit REPL) |
 | Ctrl-R | Incremental reverse history search — results below prompt, wraps with `(wrapped ...)` |
-| Tab | Dot-command completion |
+| Tab | Dot-command, SQL keyword, and table/column name completion |
 | Paste (bracketed) | Multi-line pastes inserted as single block |
 
 **Platform support:**
@@ -343,7 +354,7 @@ Database :: struct {
     path:               string,
     pager:              ^pager.Pager,
     is_new:             bool,
-    mu:                 sync.Mutex,
+    mu:                 sync.RW_Mutex,
     schema_root_page:   u32,
     latest_snapshot:    u32,
     refs_page:          u32,
@@ -362,11 +373,12 @@ from COW DML return values. This avoids scanning the schema tree on every
 
 ```
 execute(db, sql):
-  lock(mu)
-  stmt = parse(sql, temp_allocator)
+  stmt = parse(sql, temp_allocator)    // no lock yet
+  if is_select: lock_shared(mu)        // SELECT: shared lock
+  else:         lock_exclusive(mu)      // writes: exclusive lock
   ok, new_root = executor.execute(schema_tree, stmt)
   db.schema_root_page = new_root
-  if ok && !readonly:
+  if ok && !readonly && !as_of:
     wal_begin_txn()
     create_snapshot()
     set_ref("main" → snap_id)
@@ -459,7 +471,13 @@ page, shrinking the scan range for subsequent GC passes.
 ### Lock Hierarchy
 
 ```
-Database.mu (sync.Mutex)           ← serializes all db.* operations
+Database.mu (sync.RW_Mutex)         ← SELECT = shared; writes = exclusive
+    ├── Read shared:  SELECT, query(), list_tables, describe_table,
+    │                  stats, dump_table, print_schema, integrity_check,
+    │                  print_snapshots, snapshot_diff
+    └── Write exclusive: INSERT, UPDATE, DELETE, CREATE, DROP,
+                          BEGIN/COMMIT/ROLLBACK, checkpoint, expire,
+                          snapshot_restore, rollforward, close
     │
     └── Pager.mutex (sync.RW_Mutex)  ← per-operation page cache access
         ├── Read shared:  page_count, page_in_cache
@@ -467,8 +485,7 @@ Database.mu (sync.Mutex)           ← serializes all db.* operations
                              mark_dirty, free_page, copy_page
 ```
 
-Single-writer principle: `Database.mu` ensures at most one statement executes at a time.
-The pager's `RW_Mutex` allows concurrent read-only cache probes but serializes modifications.
+`Database.mu` is parsed **before** locking: `execute` parses the SQL first, determines if the statement is a read (`SELECT`) or write, then takes the appropriate lock. This allows multiple concurrent read operations while maintaining exclusive access for writes. The pager's `RW_Mutex` allows concurrent read-only cache probes but serializes modifications.
 
 ### Snapshot Isolation
 
@@ -594,7 +611,7 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
 - **Mixed AND/OR WHERE**: Not supported.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (inline `[dynamic; N]T` scratch buffer).
-- **REPL line editor**: no SQL keyword/table-name completion (dot-commands only).
+- **REPL line editor**: SQL keyword and table/column name completion only (no in-expression or JOIN completion).
 
 ---
 

@@ -3,12 +3,14 @@ package main
 import "core:bufio"
 import "core:flags"
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
 import "src:db"
 import "src:linedit"
+import "src:schema"
 
 APP_VERSION :: "1.0"
 DEFAULT_DB_PATH :: "test.db"
@@ -74,6 +76,38 @@ repl :: proc(database: ^db.Database) {
 		repl_fallback(database)
 		return
 	}
+	
+	ed.complete_fn = proc(word: string, user_data: rawptr, allocator: mem.Allocator) -> []string {
+		database_ptr := (^db.Database)(user_data)
+		st := db.Schema_Tree(database_ptr)
+		tables := schema.list_tables(&st, allocator)
+		if dot_pos := strings.last_index(word, "."); dot_pos >= 0 {
+			tbl_name := word[:dot_pos]
+			col_prefix := word[dot_pos + 1:]
+			for tbl in tables {
+				if tbl.name == tbl_name {
+					cands := make([dynamic]string, allocator)
+					for col in tbl.columns {
+						if strings.has_prefix(col.name, col_prefix) {
+							append(&cands, fmt.tprintf("%s.%s", tbl_name, col.name))
+						}
+					}
+					return cands[:]
+				}
+			}
+			return nil
+		}
+
+		cands := make([dynamic]string, allocator)
+		for tbl in tables {
+			if strings.has_prefix(tbl.name, word) {
+				append(&cands, tbl.name)
+			}
+		}
+		return cands[:]
+	}
+	
+	ed.complete_ud = database
 	defer linedit.destroy(&ed)
 
 	query_buffer := strings.builder_make()

@@ -855,8 +855,7 @@ scan_table :: proc(
 			rc := &ctx.conditions[i]
 			if rc.has_right_col || rc.has_in { continue }
 			if val, is_int := rc.rhs.(i64); is_int {
-				skip_tree := btree.init(tree.pager, table.skip_root)
-				pmin, pmax, found := btree.query_skip_index(&skip_tree, val)
+				pmin, pmax, found := btree.query_skip_index(tree.pager, table.skip_root, val)
 				if found {
 					rc.skip_page_min = pmin; rc.skip_page_max = pmax
 				}

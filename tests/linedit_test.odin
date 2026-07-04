@@ -7,6 +7,8 @@ import "core:sys/posix"
 import "core:testing"
 import "src:linedit"
 
+dummy_ed: linedit.Editor
+
 @(test)
 test_lb_insert :: proc(t: ^testing.T) {
 	lb: linedit.Line_Buffer
@@ -688,13 +690,13 @@ test_tab_complete_dot_commands :: proc(t: ^testing.T) {
 
 	linedit.lb_set(&lb, ".h")
 	linedit.lb_end(&lb)
-	linedit.run_tab_complete(&lb)
+	linedit.run_tab_complete(&dummy_ed, &lb)
 	s := linedit.lb_to_string(&lb, context.temp_allocator)
 	testing.expect_value(t, s, ".help")
 
 	linedit.lb_set(&lb, ".tab")
 	linedit.lb_end(&lb)
-	linedit.run_tab_complete(&lb)
+	linedit.run_tab_complete(&dummy_ed, &lb)
 	s = linedit.lb_to_string(&lb, context.temp_allocator)
 	testing.expect_value(t, s, ".tables")
 }
@@ -706,9 +708,21 @@ test_tab_complete_no_dot :: proc(t: ^testing.T) {
 
 	linedit.lb_set(&lb, "SEL")
 	linedit.lb_end(&lb)
-	linedit.run_tab_complete(&lb)
+	linedit.run_tab_complete(&dummy_ed, &lb)
 	s := linedit.lb_to_string(&lb, context.temp_allocator)
-	testing.expect_value(t, s, "SEL")
+	testing.expect_value(t, s, "SELECT")
+}
+
+@(test)
+test_tab_complete_sql_partial :: proc(t: ^testing.T) {
+	lb: linedit.Line_Buffer
+	defer linedit.lb_destroy(&lb)
+
+	linedit.lb_set(&lb, "CRE")
+	linedit.lb_end(&lb)
+	linedit.run_tab_complete(&dummy_ed, &lb)
+	s := linedit.lb_to_string(&lb, context.temp_allocator)
+	testing.expect_value(t, s, "CREATE")
 }
 
 @(test)
@@ -718,7 +732,7 @@ test_tab_complete_ambiguous :: proc(t: ^testing.T) {
 
 	linedit.lb_set(&lb, ".s")
 	linedit.lb_end(&lb)
-	linedit.run_tab_complete(&lb)
+	linedit.run_tab_complete(&dummy_ed, &lb)
 	s := linedit.lb_to_string(&lb, context.temp_allocator)
 	testing.expect_value(t, s, ".s")
 }

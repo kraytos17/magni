@@ -1,3 +1,4 @@
+#+build linux, darwin
 package linedit
 
 import "core:sys/posix"

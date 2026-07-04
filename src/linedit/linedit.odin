@@ -1,15 +1,25 @@
+#+build linux, darwin
 package linedit
 
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
 
 SEARCH_PROMPT :: "(reverse-i-search)`%s': "
 
+Tab_Complete_Callback :: #type proc(
+	word: string,
+	user_data: rawptr,
+	allocator: mem.Allocator,
+) -> []string
+
 Editor :: struct {
-	term:    Term,
-	history: History,
+	term:        Term,
+	history:     History,
+	complete_fn: Tab_Complete_Callback,
+	complete_ud: rawptr,
 }
 
 init :: proc(fd: posix.FD, history_path: string) -> (ed: Editor, ok: bool) {
@@ -93,7 +103,7 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 				lb_set(&lb, s)
 			}
 		case .Tab:
-			run_tab_complete(&lb)
+			run_tab_complete(ed, &lb)
 		case .Ctrl_R:
 			run_reverse_search(ed, prompt, &lb)
 		case .Paste_Start:
@@ -238,16 +248,88 @@ dot_commands :: []string {
 	".version",
 }
 
-run_tab_complete :: proc(lb: ^Line_Buffer) {
+sql_keywords :: []string {
+	"SELECT",
+	"FROM",
+	"WHERE",
+	"AND",
+	"OR",
+	"NOT",
+	"IN",
+	"LIKE",
+	"INSERT",
+	"INTO",
+	"VALUES",
+	"UPDATE",
+	"SET",
+	"DELETE",
+	"CREATE",
+	"TABLE",
+	"DROP",
+	"INTEGER",
+	"TEXT",
+	"REAL",
+	"BLOB",
+	"PRIMARY",
+	"KEY",
+	"NULL",
+	"DEFAULT",
+	"CHECK",
+	"ORDER",
+	"BY",
+	"ASC",
+	"DESC",
+	"LIMIT",
+	"OFFSET",
+	"GROUP",
+	"HAVING",
+	"DISTINCT",
+	"AS",
+	"ON",
+	"JOIN",
+	"INNER",
+	"LEFT",
+	"RIGHT",
+	"CROSS",
+	"OUTER",
+	"BEGIN",
+	"COMMIT",
+	"ROLLBACK",
+	"EXPLAIN",
+	"SNAPSHOT",
+	"TIMESTAMP",
+	"OF",
+}
+
+run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 	line := lb_to_string(lb, context.temp_allocator)
-	if len(line) == 0 || line[0] != '.' {
-		return
-	}
+	if len(line) == 0 { return }
 
 	candidates := make([dynamic]string, context.temp_allocator)
-	for cmd in dot_commands {
-		if strings.has_prefix(cmd, line) {
-			append(&candidates, cmd)
+	if line[0] == '.' {
+		for cmd in dot_commands {
+			if strings.has_prefix(cmd, line) {
+				append(&candidates, cmd)
+			}
+		}
+	} else {
+		word_start := len(line) - 1
+		for word_start >= 0 && line[word_start] != ' ' { word_start -= 1 }
+
+		word_start += 1
+		word := line[word_start:]
+		if ed.complete_fn != nil && len(word) > 0 {
+			for cand in ed.complete_fn(word, ed.complete_ud, context.temp_allocator) {
+				append(&candidates, cand)
+			}
+		}
+		if len(candidates) == 0 {
+			word_upper := strings.to_upper(word, context.temp_allocator)
+			for kw in sql_keywords {
+				if strings.has_prefix(kw, word_upper) {
+					append(&candidates, kw)
+				}
+			}
 		}
 	}
 	if len(candidates) == 0 {

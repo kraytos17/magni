@@ -226,6 +226,44 @@ test_parse_error_messages :: proc(t: ^testing.T) {
 				fmt.tprintf("error '%s' should contain '%s'", err_msg, test.contains),
 			)
 		}
+
+		@(test)
+		test_line_comment :: proc(t: ^testing.T) {
+			sql := "SELECT * FROM t -- inline comment"
+			stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+			testing.expect(t, ok, "-- comment should parse")
+			sel, is_sel := stmt.type.(parser.Select_Stmt)
+			testing.expect(t, is_sel, "expected Select_Stmt")
+			testing.expect(t, len(sel.columns) == 1 && sel.columns[0] == "*", "expected star")
+		}
+
+		@(test)
+		test_line_comment_before_semicolon :: proc(t: ^testing.T) {
+			sql := "SELECT * FROM t -- comment before semicolon\n;"
+			_, ok, _ := parser.parse(sql, context.temp_allocator)
+			testing.expect(t, ok, "-- comment before semicolon")
+		}
+
+		@(test)
+		test_hex_integer_literal :: proc(t: ^testing.T) {
+			sql := "SELECT * FROM t WHERE id = 0xFF"
+			_, ok, _ := parser.parse(sql, context.temp_allocator)
+			testing.expect(t, ok, "hex literal")
+		}
+
+		@(test)
+		test_scientific_float_literal :: proc(t: ^testing.T) {
+			sql := "SELECT * FROM t WHERE score = 1.5e3"
+			_, ok, _ := parser.parse(sql, context.temp_allocator)
+			testing.expect(t, ok, "scientific float")
+		}
+
+		@(test)
+		test_unicode_string_literal :: proc(t: ^testing.T) {
+			sql := "SELECT 'héllo 世界' FROM t"
+			_, ok, _ := parser.parse(sql, context.temp_allocator)
+			testing.expect(t, ok, "unicode string")
+		}
 	}
 }
 

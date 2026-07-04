@@ -10,7 +10,8 @@ import "src:types"
 
 checkpoint :: proc(db: ^Database) -> DB_Error {
 	if err := db_check(db); err != .None { return err }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 	if db.latest_snapshot != 0 {
 		expire_snapshots_impl(db, DEFAULT_KEEP)
 	}
@@ -23,7 +24,8 @@ checkpoint :: proc(db: ^Database) -> DB_Error {
 
 integrity_check :: proc(db: ^Database) -> DB_Error {
 	if err := db_check(db); err != .None { return err }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 	if err := verify_header(db); err != .None {
 		return .Corrupted
 	}
@@ -34,7 +36,7 @@ integrity_check :: proc(db: ^Database) -> DB_Error {
 	}
 	defer pager.unpin_page(db.pager, db.schema_root_page)
 
-	st := schema_tree(db)
+	st := Schema_Tree(db)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	for table in tables {
 		_, page_err := pager.get_page(db.pager, table.root_page)
@@ -50,8 +52,9 @@ integrity_check :: proc(db: ^Database) -> DB_Error {
 
 list_tables :: proc(db: ^Database) {
 	if db_check(db) != .None { return }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	st := schema_tree(db)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	st := Schema_Tree(db)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	if len(tables) == 0 {
 		fmt.println("No tables found.")
@@ -69,7 +72,7 @@ describe_table :: proc(db: ^Database, table_name: string) -> DB_Error {
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
-	st := schema_tree(db)
+	st := Schema_Tree(db)
 	table, found := schema.find_table(&st, table_name, context.temp_allocator)
 	if !found {
 		return .Table_Not_Found
@@ -92,7 +95,8 @@ describe_table :: proc(db: ^Database, table_name: string) -> DB_Error {
 
 stats :: proc(db: ^Database) {
 	if db_check(db) != .None { return }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
 	page_count := pager.page_count(db.pager)
 	fmt.printf("Path: %s\n", db.path)
 	fmt.printf("Page size: %d bytes\n", types.PAGE_SIZE)
@@ -103,15 +107,16 @@ stats :: proc(db: ^Database) {
 		f64(page_count * u32(types.PAGE_SIZE)) / 1024.0,
 	)
 
-	st := schema_tree(db)
+	st := Schema_Tree(db)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	fmt.printf("Total tables: %d\n", len(tables))
 }
 
 dump_table :: proc(db: ^Database, table_name: string) {
 	if db_check(db) != .None { return }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	st := schema_tree(db)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	st := Schema_Tree(db)
 	table, found := schema.find_table(&st, table_name, context.temp_allocator)
 	if !found {
 		fmt.printf("Error: Table '%s' not found.\n", table_name)
@@ -161,14 +166,16 @@ dump_table :: proc(db: ^Database, table_name: string) {
 
 print_schema :: proc(db: ^Database) {
 	if db_check(db) != .None { return }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	st := schema_tree(db)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	st := Schema_Tree(db)
 	schema.print_ddl(&st)
 }
 
 print_schema_debug :: proc(db: ^Database) {
 	if db_check(db) != .None { return }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	st := schema_tree(db)
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	st := Schema_Tree(db)
 	schema.debug_print_all(&st)
 }
