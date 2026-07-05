@@ -76,7 +76,7 @@ repl :: proc(database: ^db.Database) {
 		repl_fallback(database)
 		return
 	}
-	
+
 	ed.complete_fn = proc(word: string, user_data: rawptr, allocator: mem.Allocator) -> []string {
 		database_ptr := (^db.Database)(user_data)
 		st := db.Schema_Tree(database_ptr)
@@ -106,7 +106,7 @@ repl :: proc(database: ^db.Database) {
 		}
 		return cands[:]
 	}
-	
+
 	ed.complete_ud = database
 	defer linedit.destroy(&ed)
 
@@ -206,6 +206,16 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 		db.print_schema(database)
 	case ".debug_schema":
 		db.print_schema_debug(database)
+	case ".tree_page":
+		parts := strings.split(trimmed, " ", context.temp_allocator)
+		if len(parts) == 2 {
+			page_num, num_ok := strconv.parse_u64(parts[1])
+			if num_ok { db.print_tree_page(database, u32(page_num)) }
+		} else {
+			fmt.println("Usage: .tree_page <page_num>")
+		}
+	case ".snapshot_debug":
+		db.print_snapshot_debug(database)
 	case ".stats":
 		db.stats(database)
 	case ".begin":
@@ -392,6 +402,8 @@ print_help :: proc() {
 	fmt.println("  .stats                    Database statistics")
 	fmt.println("  .integrity                Verify all B-trees")
 	fmt.println("  .checkpoint               Flush pages + garbage collect")
+	fmt.println("  .tree_page <n>            Print B-tree page structure")
+	fmt.println("  .snapshot_debug           Show verbose snapshot chain dump")
 	fmt.println()
 	fmt.println("Transactions:")
 	fmt.println("  .begin                    Begin a transaction")
@@ -407,6 +419,7 @@ print_help :: proc() {
 	fmt.println("  .rollforward              Advance to latest snapshot")
 	fmt.println()
 	fmt.println("General:")
+	fmt.println("  .version                  Print version")
 	fmt.println("  .exit / .quit             Exit")
 	fmt.println("  .help                     This message")
 	fmt.println()

@@ -37,16 +37,17 @@ Wal_State :: struct {
 	salt1:          u32,
 	salt2:          u32,
 	frame_count:    u32,
+	write_offset:   i64,
 	page_index:     map[u32]i64,
 	txn_index:      map[u32]i64,
 	txn_active:     bool,
 }
 
 wal_frame_hash :: proc(h: ^WAL_Frame_Header, page_data: []u8) -> u64 {
-	// Hash header with checksum fields forced to zero (checksums can't include themselves)
-	h.checksum1 = 0
-	h.checksum2 = 0
-	hdr_bytes := transmute([types.WAL_FRAME_HEADER_SIZE]u8)h^
+	local := h^
+	local.checksum1 = 0
+	local.checksum2 = 0
+	hdr_bytes := transmute([types.WAL_FRAME_HEADER_SIZE]u8)local
 	hv := hash.fnv64(hdr_bytes[:])
 	hv = hash.fnv64(page_data, hv)
 	return hv
@@ -74,7 +75,10 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 			ws.salt1 = u32(h.salt1)
 			ws.salt2 = u32(h.salt2)
 			ws.header_written = true
-			return wal_recover(p)
+			recover_err := wal_recover(p)
+			file_size2, _ := os.file_size(ws.file)
+			ws.write_offset = file_size2
+			return recover_err
 		}
 	}
 
@@ -97,7 +101,9 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	header.salt2 = u32le(ws.salt2)
 	_, write_err := os.write_at(wal_file, buf[:], 0)
 	if write_err != nil { return .IO_Error }
+
 	ws.header_written = true
+	ws.write_offset = i64(types.WAL_HEADER_SIZE)
 	return .None
 }
 
@@ -122,15 +128,13 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 	for i in 0 ..< PAGE_CACHE_SIZE {
 		slot := &p.slots[i]
 		if slot.page.dirty && slot.page.page_num != 0 {
-			err := wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0)
-			if err != .None { return err }
+			wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
 			slot.page.dirty = false
 		}
 	}
 
 	commit_buf: [types.PAGE_SIZE]u8
-	err := wal_append_frame(p, 0, commit_buf[:], true, 0)
-	if err != .None { return err }
+	wal_append_frame(p, 0, commit_buf[:], true, 0) or_return
 	if sync_err := os.sync(ws.file); sync_err != nil {
 		fmt.eprintln("WAL: fsync failed:", sync_err)
 		return .IO_Error
@@ -168,9 +172,6 @@ wal_append_frame :: proc(
 	ws := &p.wal_state
 	if ws.file == nil { return .IO_Error }
 
-	file_size, size_err := os.file_size(ws.file)
-	if size_err != nil { return .IO_Error }
-
 	db_after: u32 = 0
 	if is_commit {
 		db_after = db_size_after if db_size_after != 0 else u32(p.file_len / i64(types.PAGE_SIZE))
@@ -195,15 +196,16 @@ wal_append_frame :: proc(
 	fh.checksum1 = u32le(u32(fhv))
 	fh.checksum2 = u32le(u32(fhv >> 32))
 
-	full_frame := make([]u8, types.WAL_FRAME_SIZE, context.temp_allocator)
-	mem.copy_non_overlapping(raw_data(full_frame[:]), &fh, types.WAL_FRAME_HEADER_SIZE)
-	copy(full_frame[types.WAL_FRAME_HEADER_SIZE:], page_data)
+	file_size := ws.write_offset
+	hdr_bytes := transmute([types.WAL_FRAME_HEADER_SIZE]u8)fh
+	_, hdr_err := os.write_at(ws.file, hdr_bytes[:], file_size)
+	if hdr_err != nil { return .IO_Error }
 
-	_, write_err := os.write_at(ws.file, full_frame, file_size)
-	if write_err != nil { return .IO_Error }
+	_, data_err := os.write_at(ws.file, page_data, file_size + types.WAL_FRAME_HEADER_SIZE)
+	if data_err != nil { return .IO_Error }
 
 	ws.frame_count += 1
-	// Route to txn_index (uncommitted, discardable on abort) or page_index (committed).
+	ws.write_offset += types.WAL_FRAME_SIZE
 	if ws.txn_active {
 		ws.txn_index[page_num] = file_size
 	} else {
@@ -291,6 +293,7 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 
 	os.truncate(ws.file, types.WAL_HEADER_SIZE)
 	os.sync(ws.file)
+	ws.write_offset = i64(types.WAL_HEADER_SIZE)
 	fmt.println("WAL: checkpoint complete,", frame_count, "frames written to main file")
 	return .None
 }

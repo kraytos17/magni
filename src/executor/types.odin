@@ -52,16 +52,17 @@ Mutated_Table_Info :: struct #all_or_none {
 }
 
 Resolved_Condition :: struct {
-	col_idx:       int, // column index in the row's values array
-	operator:      parser.Token_Type,
-	rhs:           types.Value, // compared value (ignored if has_right_col or has_in)
-	has_right_col: bool, // true → rhs is another column at right_idx
-	right_idx:     int,
-	has_in:        bool, // true → use in_values or in_subquery instead of rhs
-	in_values:     []types.Value, // literal IN list
-	in_subquery:   ^parser.Select_Stmt, // subquery IN (SELECT ...)
-	skip_page_min: u32, // skip index: only scan pages ≥ this (0 = no skip)
-	skip_page_max: u32, // skip index: only scan pages ≤ this (0 = no skip)
+	col_idx:             int, // column index in the row's values array
+	operator:            parser.Token_Type,
+	rhs:                 types.Value, // compared value (ignored if has_right_col or has_in)
+	has_right_col:       bool, // true → rhs is another column at right_idx
+	right_idx:           int,
+	has_in:              bool, // true → use in_values or in_subquery instead of rhs
+	in_values:           []types.Value, // literal IN list
+	in_subquery:         ^parser.Select_Stmt, // subquery IN (SELECT ...)
+	in_subquery_results: []types.Value, // materialized subquery (filled once, not per row)
+	skip_page_min:       u32, // skip index: only scan pages ≥ this (0 = no skip)
+	skip_page_max:       u32, // skip index: only scan pages ≤ this (0 = no skip)
 }
 
 Where_Eval_Ctx :: struct {

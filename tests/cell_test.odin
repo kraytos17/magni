@@ -193,7 +193,7 @@ test_get_rowid_on_invalid_buffer :: proc(t: T) {
 test_utilities :: proc(t: T) {
 	values := []types.Value{types.value_int(42), types.value_text("SizeTest")}
 	cinfo := cell.compute_info(1, values)
-	calc_size := cell.calculate_size(1, values)
+	calc_size := cell.compute_info(1, values).total_size
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 

@@ -9,7 +9,7 @@ import "src:schema"
 import "src:types"
 
 checkpoint :: proc(db: ^Database) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 	if db.latest_snapshot != 0 {
@@ -23,7 +23,7 @@ checkpoint :: proc(db: ^Database) -> DB_Error {
 }
 
 integrity_check :: proc(db: ^Database) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 	if err := verify_header(db); err != .None {
@@ -44,6 +44,12 @@ integrity_check :: proc(db: ^Database) -> DB_Error {
 			return .IO_Error
 		}
 		defer pager.unpin_page(db.pager, table.root_page)
+
+		table_tree := btree.init(db.pager, table.root_page)
+		if !btree.tree_verify(&table_tree) {
+			fmt.printf("Integrity error: Table '%s' B-tree corrupted\n", table.name)
+			return .Corrupted
+		}
 	}
 
 	fmt.println("Integrity check passed.")
@@ -68,7 +74,7 @@ list_tables :: proc(db: ^Database) {
 }
 
 describe_table :: proc(db: ^Database, table_name: string) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.lock(&db.mu)
 	defer sync.unlock(&db.mu)
 
@@ -178,4 +184,12 @@ print_schema_debug :: proc(db: ^Database) {
 	defer sync.unlock(&db.mu)
 	st := Schema_Tree(db)
 	schema.debug_print_all(&st)
+}
+
+print_tree_page :: proc(db: ^Database, page_num: u32) {
+	if db_check(db) != .None { return }
+	sync.lock(&db.mu)
+	defer sync.unlock(&db.mu)
+	st := Schema_Tree(db)
+	btree.tree_debug_print_node(&st, page_num)
 }

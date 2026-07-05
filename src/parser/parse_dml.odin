@@ -20,11 +20,15 @@ parse_insert :: proc(
 			advance(p)
 			for {
 				col := parse_identifier(p, allocator) or_return; append(&columns, col)
-				if match(p, .RPAREN) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column") { return nil, false }
+				if match(
+					p,
+					.RPAREN,
+				) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column") { return nil, false }
 			}
 		}
 	}
-	if !expect_match(p, .VALUES, "Expected VALUES after INSERT") || !expect_match(p, .LPAREN, "Expected ( after VALUES") {
+	if !expect_match(p, .VALUES, "Expected VALUES after INSERT") ||
+	   !expect_match(p, .LPAREN, "Expected ( after VALUES") {
 		delete(table_name, allocator)
 		return nil, false
 	}
@@ -36,9 +40,15 @@ parse_insert :: proc(
 		delete(values)
 	}
 	for {
-		val, val_ok := parse_value(p, allocator); if !val_ok { return err(p, "Invalid value in INSERT") }
+		val, val_ok := parse_value(
+			p,
+			allocator,
+		); if !val_ok { return err(p, "Invalid value in INSERT") }
 		append(&values, val)
-		if match(p, .RPAREN) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") { return nil, false }
+		if match(
+			p,
+			.RPAREN,
+		) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") { return nil, false }
 	}
 	return Insert_Stmt{table_name = table_name, columns = columns[:], values = values[:]}, true
 }

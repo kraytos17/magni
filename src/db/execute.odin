@@ -4,11 +4,12 @@ import "core:sync"
 import "src:executor"
 import "src:pager"
 import "src:parser"
+import "src:schema"
 import "src:snapshot"
 import "src:types"
 
 execute :: proc(db: ^Database, sql: string) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	if !ok {
@@ -49,7 +50,7 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 				return .Snapshot_Not_Found
 			}
 
-			snap_h, snap_ok := snapshot.load(db.pager, snap_page)
+			snap_h, snap_ok := snapshot.load(db.pager, snap_page, snap_id)
 			if !snap_ok {
 				return .Snapshot_Failed
 			}
@@ -67,7 +68,7 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		}
 	}
 
-	exec_ok, new_root, mt := executor.execute(&st, stmt)
+	exec_ok, new_root, _ := executor.execute(&st, stmt)
 	if !as_of_override {
 		db.schema_root_page = new_root
 		update_header(db)
@@ -97,21 +98,12 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 			snap_op = .DROP
 		}
 
-		if mt.name != "" {
-			if mt.root != 0 {
-				db.table_roots[mt.name] = mt.root
-			} else {
-				delete_key(&db.table_roots, mt.name)
-			}
-		} else if snap_op == .CREATE || snap_op == .DROP {
-			db.table_roots_dirty = true
-		}
-
 		if make_snapshot {
-			ensure_table_roots(db)
+			snap_st := Schema_Tree(db)
+			schema_tables := schema.list_tables(&snap_st, context.temp_allocator)
 			tables := make([dynamic]types.Table, context.temp_allocator)
-			for name, root in db.table_roots {
-				append(&tables, types.Table{name = name, root_page = root})
+			for tbl in schema_tables {
+				append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
 			}
 
 			manifest_page := snapshot.create_manifest(db.pager, tables[:])
@@ -176,7 +168,7 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 				return r
 			}
 
-			snap_h, snap_ok := snapshot.load(db.pager, snap_page)
+			snap_h, snap_ok := snapshot.load(db.pager, snap_page, snap_id)
 			if !snap_ok {
 				r.err = .Snapshot_Failed
 				return r

@@ -10,7 +10,7 @@ filter_rows :: proc(
 	cols: []types.Column,
 	table_ranges: []Table_Col_Range,
 ) -> []Row_Entry {
-	filtered := make([dynamic]Row_Entry, context.temp_allocator)
+	filtered := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
 	ctx, ctx_ok := init_where_ctx(where_clause, cols, table_ranges, nil, context.temp_allocator).?
 	if !ctx_ok { return filtered[:] }
 	if len(ctx.conditions) == 0 { return rows }
@@ -62,6 +62,16 @@ init_where_ctx :: proc(
 		}
 		if cond.in_subquery != nil {
 			rc.in_subquery = cond.in_subquery
+			if schema_tree != nil {
+				subq_rows: []Row_Entry
+				subq_rows, _ = exec_subquery(schema_tree, cond.in_subquery^)
+				rc.in_subquery_results = make([]types.Value, len(subq_rows), allocator)
+				for ri in 0 ..< len(subq_rows) {
+					if len(subq_rows[ri].values) > 0 {
+						rc.in_subquery_results[ri] = subq_rows[ri].values[0]
+					}
+				}
+			}
 		}
 		resolved[i] = rc
 	}
@@ -82,6 +92,13 @@ evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 		if rc.has_in && rc.in_values != nil {
 			cond_result = false
 			for v in rc.in_values {
+				if compare_values(left_val, v) == 0 {
+					cond_result = true; break
+				}
+			}
+		} else if rc.has_in && rc.in_subquery_results != nil {
+			cond_result = false
+			for v in rc.in_subquery_results {
 				if compare_values(left_val, v) == 0 {
 					cond_result = true; break
 				}
@@ -144,6 +161,18 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 }
 
 like_match :: proc(pattern: string, text: string) -> bool {
+	// Fast path: pattern ending with %, no underscore = plain prefix match
+	if len(pattern) > 1 && pattern[len(pattern) - 1] == '%' {
+		has_underscore := false
+		for i in 0 ..< len(pattern) - 1 {
+			if pattern[i] == '_' { has_underscore = true; break }
+		}
+		if !has_underscore {
+			prefix := pattern[:len(pattern) - 1]
+			return len(text) >= len(prefix) && text[:len(prefix)] == prefix
+		}
+	}
+
 	pi := 0
 	ti := 0
 	star_pi := -1

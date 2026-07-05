@@ -113,13 +113,13 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 	}
 
 	values := make([][]types.Value, row_count, context.temp_allocator)
+	for ri in 0 ..< row_count {
+		values[ri] = make([]types.Value, num_cols, context.temp_allocator)
+	}
 	for col_i in 0 ..< num_cols {
 		col_vals := cell.decode_column(data, num_cols, col_i, off, context.temp_allocator)
 		if col_vals == nil { return }
 		for ri in 0 ..< row_count {
-			if values[ri] == nil {
-				values[ri] = make([]types.Value, num_cols, context.temp_allocator)
-			}
 			if ri < len(col_vals) {
 				values[ri][col_i] = col_vals[ri]
 			}

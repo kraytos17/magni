@@ -3,6 +3,7 @@ package db
 import "core:fmt"
 import "core:sync"
 import "src:pager"
+import "src:schema"
 import "src:snapshot"
 import "src:types"
 
@@ -27,14 +28,16 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 
 	db.txn_snapshot_id += 1
 	snap_id := db.txn_snapshot_id
-	ensure_table_roots(db)
+	st := Schema_Tree(db)
+	schema_tables := schema.list_tables(&st, context.temp_allocator)
 	tables := make([dynamic]types.Table, context.temp_allocator)
-	for name, root in db.table_roots {
-		append(&tables, types.Table{name = name, root_page = root})
+	for tbl in schema_tables {
+		append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
 	}
 
 	manifest_page := snapshot.create_manifest(db.pager, tables[:])
 	defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
+
 	snap_page, snap_ok := snapshot.create(
 		db.pager,
 		snap_id,
@@ -80,21 +83,21 @@ rollback_impl :: proc(db: ^Database) -> DB_Error {
 }
 
 begin :: proc(db: ^Database) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu)
 	defer sync.rw_mutex_unlock(&db.mu)
 	return begin_impl(db)
 }
 
 commit :: proc(db: ^Database) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu)
 	defer sync.rw_mutex_unlock(&db.mu)
 	return commit_impl(db)
 }
 
 rollback :: proc(db: ^Database) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu)
 	defer sync.rw_mutex_unlock(&db.mu)
 	return rollback_impl(db)

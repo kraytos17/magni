@@ -12,14 +12,16 @@ Cursor_Stack_Item :: struct {
 
 Cursor :: struct {
 	tree:              ^Tree,
-	path:              [MAX_TREE_DEPTH]Cursor_Stack_Item, // fixed-size stack; no heap alloc
+	path:              [MAX_TREE_DEPTH]Cursor_Stack_Item,
 	depth:             u8,
 	is_valid:          bool,
-	// Cached leaf page info — avoids pager lookup across adjacent cell reads
 	cached_page_id:    u32,
 	cached_page_data:  []u8,
 	cached_cell_count: u16,
 	cached_is_leaf:    bool,
+	col_num_cols:      u8, // >0 when on a columnar page; caches the column count
+	col_rowid:         u64, // accumulated rowid at the current cell_index on a columnar page
+	col_rowid_pos:     int, // byte position in the rowid region for the current row
 }
 
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
@@ -32,10 +34,7 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 		}
 
 		c.depth += 1
-		node, err := load_node(c.tree, curr)
-		if err != .None {
-			return err
-		}
+		node := load_node(c.tree, curr) or_return
 		defer pager.unpin_page(c.tree.pager, node.id)
 
 		if is_leaf(node) { break }
@@ -60,16 +59,13 @@ cursor_destroy :: proc(c: ^Cursor) {
 
 // Initialize a cursor for in-order traversal starting at the leftmost leaf.
 // Returns an invalid cursor if the tree is empty.
-cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error) {
-	c := Cursor {
+cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, err: Error) {
+	c = Cursor {
 		tree     = t,
 		is_valid = true,
 	}
 
-	err := drill_down_leftmost(&c, t.root)
-	if err != .None {
-		return Cursor{}, err
-	}
+	drill_down_leftmost(&c, t.root) or_return
 	if c.depth > 0 {
 		top := c.path[c.depth - 1]
 		node, e := load_node(t, top.page_id)
@@ -84,7 +80,7 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (Cursor, Error
 	} else {
 		c.is_valid = false
 	}
-	return c, .None
+	return
 }
 
 // Loads a node, caching the page in the cursor to avoid repeated loads.
@@ -106,9 +102,11 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 
 	c.cached_page_id = page_id
 	c.cached_page_data = page.data
+	c.col_num_cols = 0
+	c.col_rowid_pos = 0
 	n, n_err := node_from_bytes(page_id, page.data, get_layout(c.tree.pager.page_format_version))
-	if n_err != .None { return {}, n_err }
 
+	if n_err != .None { return {}, n_err }
 	c.cached_cell_count = u16(n.header.cell_count)
 	c.cached_is_leaf = is_leaf(n)
 	return n, .None
@@ -126,18 +124,28 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 	if c.cached_is_leaf {
 		item.cell_index += 1
 		if int(item.cell_index) < int(c.cached_cell_count) {
+			if c.col_num_cols > 0 && c.col_rowid_pos > 0 {
+				// Advance rowid for columnar page
+				delta, n, ok := cell.varint_decode(c.cached_page_data, c.col_rowid_pos)
+				if ok {
+					c.col_rowid += delta
+					c.col_rowid_pos += n
+				}
+			}
 			return .None
 		}
 
+		c.col_num_cols = 0
 		c.depth -= 1
-		if c.depth == 0 { c.is_valid = false; return .None }
-		// Fall through to walk up the stack
+		if c.depth == 0 {
+			c.is_valid = false
+			return .None
+		}
 	}
 	for c.depth > 0 {
 		top_idx = c.depth - 1
 		item = &c.path[top_idx]
-		node, err := load_cached_page(c, item.page_id)
-		if err != .None { return err }
+		node := load_cached_page(c, item.page_id) or_return
 
 		item.cell_index += 1
 		limit := int(node.header.cell_count)
@@ -185,11 +193,24 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 	if actual_alloc.procedure == nil {
 		actual_alloc = context.allocator
 	}
-
 	// Columnar page: read individual row by index
 	if is_columnar(node.data, item.page_id) {
 		num_cols, found := detect_columnar_col_count(node.data, item.page_id)
 		if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
+
+		c.col_num_cols = u8(num_cols)
+		if c.col_rowid_pos == 0 {
+			boff := get_page_header_offset(item.page_id)
+			c.col_rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
+			c.col_rowid = 0
+			for _ in 0 ..< int(item.cell_index) {
+				delta, n, ok := cell.varint_decode(node.data, c.col_rowid_pos)
+				if !ok { break }
+
+				c.col_rowid += delta
+				c.col_rowid_pos += n
+			}
+		}
 
 		boff := get_page_header_offset(item.page_id)
 		cc, cc_ok := cell.read_columnar_cell(

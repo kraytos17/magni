@@ -8,6 +8,14 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// hash_join_key returns a string suitable for use as a hash map key.
+// For string values, returns the original string directly (no allocation).
+// For other types, converts via value_to_string.
+hash_join_key :: proc(v: types.Value) -> string {
+	if s, ok := v.(string); ok { return s }
+	return types.value_to_string(v)
+}
+
 exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []types.Column) {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return nil, nil }
@@ -44,7 +52,7 @@ exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry,
 			col_indices[i] = idx
 		}
 
-		projected := make([dynamic]Row_Entry, context.temp_allocator)
+		projected := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
 		for entry in rows {
 			new_vals := make([]types.Value, len(col_indices), context.temp_allocator)
 			for ci, idx in col_indices {
@@ -344,9 +352,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 							if len(rows) <= len(right_rows) {
 								ht := make(map[string][]int, len(rows), context.temp_allocator)
 								for row, ri in rows {
-									key := types.value_to_string(
-										row.values[left_idx - left_adjust],
-									)
+									key := hash_join_key(row.values[left_idx - left_adjust])
 									if existing, ok := ht[key]; ok {
 										n := make([]int, len(existing) + 1, context.temp_allocator)
 										copy(n, existing)
@@ -363,9 +369,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									context.temp_allocator,
 								)
 								for r_row in right_rows {
-									key := types.value_to_string(
-										r_row.values[right_idx - right_adjust],
-									)
+									key := hash_join_key(r_row.values[right_idx - right_adjust])
 									if matches, has := ht[key]; has {
 										for ri in matches {
 											matched_left[ri] = true
@@ -407,9 +411,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									context.temp_allocator,
 								)
 								for r_row, ri in right_rows {
-									key := types.value_to_string(
-										r_row.values[right_idx - right_adjust],
-									)
+									key := hash_join_key(r_row.values[right_idx - right_adjust])
 									if existing, ok := ht[key]; ok {
 										n := make([]int, len(existing) + 1, context.temp_allocator)
 										copy(n, existing)
@@ -426,9 +428,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									context.temp_allocator,
 								)
 								for l_row, li in rows {
-									key := types.value_to_string(
-										l_row.values[left_idx - left_adjust],
-									)
+									key := hash_join_key(l_row.values[left_idx - left_adjust])
 									if matches, has := ht[key]; has {
 										for ri in matches {
 											matched_left[li] = true

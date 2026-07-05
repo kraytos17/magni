@@ -17,7 +17,7 @@ print_snapshots :: proc(db: ^Database) {
 }
 
 snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_shared_lock(&db.mu)
 	defer sync.rw_mutex_unlock(&db.mu)
 	if db.latest_snapshot == 0 {
@@ -53,7 +53,7 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 }
 
 snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
 	page, has_page := db.snapshot_index[snapshot_id]
 	if !has_page {
@@ -64,7 +64,7 @@ snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> DB_Error {
 }
 
 snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
 	if db.latest_snapshot == 0 {
 		return .Snapshot_Not_Found
@@ -75,7 +75,7 @@ snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> DB_Error {
 		return .Snapshot_Not_Found
 	}
 
-	snap_h, snap_ok := snapshot.load(db.pager, snap_page)
+	snap_h, snap_ok := snapshot.load(db.pager, snap_page, snapshot_id)
 	if !snap_ok {
 		return .Snapshot_Failed
 	}
@@ -96,7 +96,7 @@ snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> DB_Error {
 }
 
 rollforward :: proc(db: ^Database) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
 	if db.latest_snapshot == 0 {
 		return .Snapshot_Not_Found
@@ -120,7 +120,7 @@ rollforward :: proc(db: ^Database) -> DB_Error {
 		return .Snapshot_Expired
 	}
 
-	target_h, load_ok := snapshot.load(db.pager, target_page)
+	target_h, load_ok := snapshot.load(db.pager, target_page, prev_id)
 	if !load_ok {
 		return .Snapshot_Failed
 	}
@@ -136,7 +136,7 @@ rollforward :: proc(db: ^Database) -> DB_Error {
 }
 
 expire_snapshots :: proc(db: ^Database, keep_count: int) -> DB_Error {
-	if err := db_check(db); err != .None { return err }
+	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
 	return expire_snapshots_impl(db, keep_count)
 }
@@ -155,4 +155,14 @@ expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
 	pager.wal_commit_txn(db.pager)
 	fmt.printf("Expired snapshots older than last %d, garbage collected\n", keep_count)
 	return .None
+}
+
+print_snapshot_debug :: proc(db: ^Database) {
+	if db_check(db) != .None { return }
+	sync.lock(&db.mu); defer sync.unlock(&db.mu)
+	if db.latest_snapshot == 0 {
+		fmt.println("No snapshots.")
+		return
+	}
+	snapshot.debug_print_chain(db.pager, db.latest_snapshot)
 }

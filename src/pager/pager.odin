@@ -30,24 +30,24 @@ Page_Int_Range :: struct {
 }
 
 Pager :: struct {
-	file:                ^os.File,
-	file_name:           string,
-	file_len:            i64,
-	page_size:           u32,
-	slots:               [PAGE_CACHE_SIZE]Page_Slot,
 	mutex:               sync.RW_Mutex,
-	allocator:           mem.Allocator,
-	first_free_page:     u32,
-	slot_count:          u32,
-	max_cache_pages:     u32,
 	cache_index:         map[u32]^Page_Slot,
-	wal_state:           Wal_State,
-	page_bitmap:         []u64,
-	evict_hand:          u32,
 	free_slots:          [dynamic]^Page_Slot,
+	slot_count:          u32,
+	evict_hand:          u32,
+	file:                ^os.File,
+	file_len:            i64,
+	page_bitmap:         []u64,
+	wal_state:           Wal_State,
+	slots:               [PAGE_CACHE_SIZE]Page_Slot,
+	file_name:           string,
+	page_size:           u32,
+	max_cache_pages:     u32,
+	first_free_page:     u32,
+	page_format_version: u32,
+	allocator:           mem.Allocator,
 	row_counts:          map[u32]int,
 	page_int_ranges:     map[u32]Page_Int_Range,
-	page_format_version: u32,
 }
 
 Error :: enum {
@@ -92,11 +92,13 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 			continue
 		}
 		if slot.page.dirty {
-			if err := wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0);
-			   err != .None { return err }
+			wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
 		}
 
 		delete_key(&p.cache_index, slot.page.page_num)
+		delete_key(&p.page_int_ranges, slot.page.page_num)
+		delete_key(&p.row_counts, slot.page.page_num)
+
 		slot.page = {}
 		slot.referenced = false
 		p.slot_count -= 1
@@ -299,16 +301,16 @@ page_in_cache :: proc(p: ^Pager, page_num: u32) -> bool {
 
 // Copy the content of src_page_num to a newly allocated page. Source is unpinned,
 // destination is pinned + dirty. Used by COW operations.
-copy_page :: proc(p: ^Pager, src_page_num: u32) -> (^Page, Error) {
-	src, err := get_page(p, src_page_num)
-	if err != .None { return nil, err }
+copy_page :: proc(p: ^Pager, src_page_num: u32) -> (dst: ^Page, err: Error) {
+	src: ^Page
+	src, err = get_page(p, src_page_num)
+	if err != .None { return }
 	defer unpin_page(p, src_page_num)
 
-	dst, dst_err := allocate_page(p)
-	if dst_err != .None { return nil, dst_err }
+	dst = allocate_page(p) or_return
 
 	copy(dst.data, src.data); dst.dirty = true
-	return dst, .None
+	return
 }
 
 mark_dirty :: proc(p: ^Pager, page_num: u32) {

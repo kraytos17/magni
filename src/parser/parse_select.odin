@@ -280,7 +280,7 @@ parse_select :: proc(
 		limit_token := expect(p, .NUMBER) or_return
 		lv, lu_ok := strconv.parse_u64(limit_token.lexeme)
 		if !lu_ok { return err(p, "LIMIT must be a non-negative integer") }
-		
+
 		limit = lv
 		if match(p, .OFFSET) {
 			offset_token := expect(p, .NUMBER) or_return

@@ -28,17 +28,15 @@ copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 			cell_count := int(hdr.cell_count)
 			stride := get_layout(t.pager.page_format_version).stride
 			ptr_sz := cell_count * stride
-			if ptr_sz > 0 {
-				ptr_copy := make([]u8, ptr_sz, context.temp_allocator)
-				copy(ptr_copy, new_page.data[SRC_HDR_OFF + hdr_sz:])
-				mem.zero_slice(new_page.data[SRC_HDR_OFF + hdr_sz:SRC_HDR_OFF + hdr_sz + ptr_sz])
-				copy(new_page.data[DST_HDR_OFF + hdr_sz:], ptr_copy)
-			}
+			total_sz := hdr_sz + ptr_sz
+			tmp := make([]u8, total_sz, context.temp_allocator)
+			copy(tmp, new_page.data[SRC_HDR_OFF:])
 
-			hdr_copy := make([]u8, hdr_sz, context.temp_allocator)
-			copy(hdr_copy, new_page.data[SRC_HDR_OFF:])
-			mem.zero_slice(new_page.data[SRC_HDR_OFF:SRC_HDR_OFF + hdr_sz])
-			copy(new_page.data[DST_HDR_OFF:], hdr_copy)
+			mem.zero_slice(new_page.data[SRC_HDR_OFF:SRC_HDR_OFF + total_sz])
+			copy(new_page.data[DST_HDR_OFF:], tmp[:hdr_sz])
+			if ptr_sz > 0 {
+				copy(new_page.data[DST_HDR_OFF + hdr_sz:], tmp[hdr_sz:])
+			}
 		}
 	}
 	return new_page.page_num, .None

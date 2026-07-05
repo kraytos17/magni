@@ -349,8 +349,7 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 		get_layout(t.pager.page_format_version),
 	)
 
-	root_node, r_err := load_node(t, t.root)
-	if r_err != .None { return r_err }
+	root_node := load_node(t, t.root) or_return
 	if is_leaf(root_node) { unpin_node(t, root_node); return .Invalid_Page_Header }
 
 	total := int(node_interior(root_node).cell_count)
@@ -365,8 +364,7 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 
 	pager.mark_dirty(t.pager, t.root)
 	unpin_node(t, root_node)
-	root_node, r_err = load_node(t, t.root)
-	if r_err != .None { return r_err }
+	root_node = load_node(t, t.root) or_return
 
 	set_right_ptr(root_node.data, root_node.id, split.right_page)
 	insert_interior_cell(

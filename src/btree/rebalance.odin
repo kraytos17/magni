@@ -16,8 +16,7 @@ Leaf_Info :: struct {
 }
 
 collect_leaf_info :: proc(t: ^Tree, page_id: u32, infos: ^[dynamic]Leaf_Info) -> Error {
-	node, err := load_node(t, page_id)
-	if err != .None { return err }
+	node := load_node(t, page_id) or_return
 	defer unpin_node(t, node)
 
 	if is_leaf(node) {
@@ -59,7 +58,8 @@ collect_leaf_info :: proc(t: ^Tree, page_id: u32, infos: ^[dynamic]Leaf_Info) ->
 rebalance :: proc(t: ^Tree) -> Error {
 	infos := make([dynamic]Leaf_Info, context.temp_allocator)
 	defer delete(infos)
-	if err := collect_leaf_info(t, t.root, &infos); err != .None { return err }
+
+	collect_leaf_info(t, t.root, &infos) or_return
 	for i := 0; i < len(infos); i += 1 {
 		if infos[i].cell_count == 0 { continue }
 		if i + 1 >= len(infos) { break }

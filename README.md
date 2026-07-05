@@ -142,6 +142,7 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `.tables` | List all tables |
 | `.schema` | Show CREATE TABLE statements |
 | `.debug_schema` | Show low-level schema details (root pages, flags) |
+| `.tree_page <n>` | Print B-tree page structure |
 | `.desc <table>` | Describe table columns |
 | `.dump <table>` | Dump all rows |
 | `.stats` | Database statistics |
@@ -154,6 +155,7 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `.snapshot restore <id>` | Restore to historical state |
 | `.rollforward` | Advance current state to the most recent snapshot |
 | `.begin` / `.commit` / `.rollback` | Transaction control |
+| `.snapshot_debug` | Verbose snapshot chain dump |
 
 ### REPL Keyboard Shortcuts
 
@@ -218,7 +220,7 @@ src/
 ├── snapshot/              Snapshot chain, manifests, GC, refs, expire
 └── types/                 Core types: Value, Column, Table, SerialType
 tests/
-└── * _test.odin           287 tests across all packages
+└── * _test.odin           292 tests across all packages
 ```
 
 ---

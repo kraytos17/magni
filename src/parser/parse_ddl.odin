@@ -32,14 +32,26 @@ parse_create_table :: proc(
 			if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") { return nil, false }
 
 			fk_col := parse_identifier(p, allocator) or_return
-			if !expect_match(p, .RPAREN, "Expected ) after foreign key column") { return nil, false }
-			if !expect_match(p, .REFERENCES, "Expected REFERENCES after FOREIGN KEY") { return nil, false }
+			if !expect_match(
+				p,
+				.RPAREN,
+				"Expected ) after foreign key column",
+			) { return nil, false }
+			if !expect_match(
+				p,
+				.REFERENCES,
+				"Expected REFERENCES after FOREIGN KEY",
+			) { return nil, false }
 
 			fk_table := parse_identifier(p, allocator) or_return
 			if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") { return nil, false }
 
 			fk_ref_col := parse_identifier(p, allocator) or_return
-			if !expect_match(p, .RPAREN, "Expected ) after referenced column") { return nil, false }
+			if !expect_match(
+				p,
+				.RPAREN,
+				"Expected ) after referenced column",
+			) { return nil, false }
 			append(&fks, Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col})
 		} else {
 			col := types.Column {
@@ -87,7 +99,10 @@ parse_create_table :: proc(
 			}
 			append(&columns, col)
 		}
-		if match(p, .RPAREN) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column definition") { return nil, false }
+		if match(
+			p,
+			.RPAREN,
+		) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column definition") { return nil, false }
 	}
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }

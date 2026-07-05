@@ -10,49 +10,37 @@ expire_snapshots :: proc(
 	expired_ids: [dynamic]u64,
 ) {
 	expired_ids = make([dynamic]u64, context.temp_allocator)
-	total := 0
-	walk_chain(p, latest_page, &total, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		total := cast(^int)data
-		if Snapshot_State(h.state) == .COMMITTED { total^ += 1 }
-		return true
-	})
-
-	if total <= keep_count { return expired_ids }
-
-	keep := 0
-	d := struct {
-		p:           ^pager.Pager,
-		keep:        ^int,
-		keep_count:  int,
-		expired_ids: ^[dynamic]u64,
-	} {
-		p           = p,
-		keep        = &keep,
-		keep_count  = keep_count,
-		expired_ids = &expired_ids,
+	CommittedPage :: struct {
+		page: u32,
+		id:   u64,
 	}
 
-	walk_chain(p, latest_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		d := cast(^struct {
-			p:           ^pager.Pager,
-			keep:        ^int,
-			keep_count:  int,
-			expired_ids: ^[dynamic]u64,
-		})data
-		if Snapshot_State(h.state) == .COMMITTED {
-			d.keep^ += 1
-			if d.keep^ > d.keep_count {
-				pg, err := pager.get_page(d.p, page)
-				if err == .None {
-					(^Snapshot_Header)(raw_data(pg.data)).state = u8(Snapshot_State.ABANDONED)
-					pager.mark_dirty(d.p, page); pager.unpin_page(d.p, page)
-					append(d.expired_ids, h.snapshot_id)
-				}
-			}
-		}
-		return true
-	})
+	committed := make([dynamic]CommittedPage, context.temp_allocator)
+	defer delete(committed)
 
+	walk_chain(
+		p,
+		latest_page,
+		&committed,
+		proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
+			committed := cast(^[dynamic]CommittedPage)data
+			if Snapshot_State(h.state) == .COMMITTED {
+				append(committed, CommittedPage{page, h.snapshot_id})
+			}
+			return true
+		},
+	)
+
+	total := len(committed)
+	if total <= keep_count { return expired_ids }
+	for i := keep_count; i < total; i += 1 {
+		pg, err := pager.get_page(p, committed[i].page)
+		if err == .None {
+			(^Snapshot_Header)(raw_data(pg.data)).state = u8(Snapshot_State.ABANDONED)
+			pager.mark_dirty(p, committed[i].page); pager.unpin_page(p, committed[i].page)
+			append(&expired_ids, committed[i].id)
+		}
+	}
 	return expired_ids
 }
 
@@ -86,11 +74,7 @@ _expire_snapshots_impl :: proc(p: ^pager.Pager, latest_page: u32, keep_count: in
 		if Snapshot_State(h.state) == .COMMITTED {
 			d.keep^ += 1
 			if d.keep^ > d.keep_count {
-				pg, err := pager.get_page(d.p, page)
-				if err == .None {
-					(^Snapshot_Header)(raw_data(pg.data)).state = u8(Snapshot_State.ABANDONED)
-					pager.mark_dirty(d.p, page); pager.unpin_page(d.p, page)
-				}
+				set_header_state(d.p, page, h.snapshot_id, .ABANDONED)
 			}
 		}
 		return true

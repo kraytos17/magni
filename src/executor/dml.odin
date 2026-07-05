@@ -433,7 +433,7 @@ exec_update_cow :: proc(
 		if target_rowid, pk_ok := try_pk_lookup(table, where_clause); pk_ok {
 			c, find_err := btree.tree_find(&table_tree, target_rowid, context.temp_allocator)
 			if find_err == .None {
-			defer cell.destroy(&c, context.temp_allocator)
+				defer cell.destroy(&c, context.temp_allocator)
 				new_row := deep_copy_values(c.values)
 				for idx, val in update_map {
 					new_row[idx] = val

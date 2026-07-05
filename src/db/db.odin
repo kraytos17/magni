@@ -1,5 +1,6 @@
 package db
 
+import "core:encoding/endian"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
@@ -87,8 +88,6 @@ Database :: struct {
 	},
 	txn_start_file_len:       u64,
 	snapshot_index:           map[u64]u32,
-	table_roots:              map[string]u32,
-	table_roots_dirty:        bool,
 	refs_page:                u32,
 	snapshot_batch_count:     int,
 	snapshot_batch_threshold: int,
@@ -133,7 +132,7 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 	db.is_new = (db.pager.file_len == 0)
 	db.txn_state = .NONE
 	db.txn_snapshot_id = 0
-	db.snapshot_index = make(map[u64]u32, 128); db.table_roots = make(map[string]u32)
+	db.snapshot_index = make(map[u64]u32, 128)
 	if db.is_new {
 		fmt.println("Initializing new database...")
 		if init_err := initialize(db); init_err != .None {
@@ -166,10 +165,30 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 		pager.unpin_page(db.pager, 1)
 		page := db.latest_snapshot
 		for page != 0 {
-			h, ok := snapshot.load(db.pager, page)
-			if !ok { break }
-			db.snapshot_index[h.snapshot_id] = page
-			page = h.prev_snapshot
+			pg, pg_err := pager.get_page(db.pager, page)
+			if pg_err != .None { break }
+
+			next_page: u32
+			count := int(endian.unchecked_get_u32le(pg.data[:4]))
+			if count > 0 && count <= snapshot.MAX_HEADERS_PER_PAGE {
+				headers := transmute([]snapshot.Snapshot_Header)pg.data[snapshot.HEADER_PREFIX_SIZE:snapshot.HEADER_PREFIX_SIZE +
+				count * size_of(snapshot.Snapshot_Header)]
+				for i := 0; i < count; i += 1 {
+					db.snapshot_index[headers[i].snapshot_id] = page
+				}
+				next_page = headers[0].prev_snapshot
+			} else {
+				h := (^snapshot.Snapshot_Header)(raw_data(pg.data))
+				if string(h.magic[:]) != snapshot.SNAPSHOT_MAGIC {
+					pager.unpin_page(db.pager, page)
+					break
+				}
+
+				db.snapshot_index[h.snapshot_id] = page
+				next_page = h.prev_snapshot
+			}
+			pager.unpin_page(db.pager, page)
+			page = next_page
 		}
 	}
 	return db, .None
@@ -183,10 +202,11 @@ close :: proc(db: ^Database) {
 	if db.snapshot_batch_count > 0 {
 		db.snapshot_batch_threshold = 1
 		db.snapshot_batch_count = 1
-		ensure_table_roots(db)
+		st := Schema_Tree(db)
+		schema_tables := schema.list_tables(&st, context.temp_allocator)
 		tables := make([dynamic]types.Table, context.temp_allocator)
-		for name, root in db.table_roots {
-			append(&tables, types.Table{name = name, root_page = root})
+		for tbl in schema_tables {
+			append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
 		}
 
 		manifest_page := snapshot.create_manifest(db.pager, tables[:])
@@ -219,7 +239,7 @@ close :: proc(db: ^Database) {
 			fmt.eprintln("Warning: error closing database:", err)
 		}
 	}
-	delete(db.snapshot_index); delete(db.table_roots); delete(db.path); free(db)
+	delete(db.snapshot_index); delete(db.path); free(db)
 }
 
 initialize :: proc(db: ^Database) -> DB_Error {
@@ -304,14 +324,4 @@ db_check :: proc(db: ^Database) -> DB_Error {
 		return .Invalid_Handle
 	}
 	return .None
-}
-
-ensure_table_roots :: proc(db: ^Database) {
-	if !db.table_roots_dirty && len(db.table_roots) > 0 { return }
-	st := Schema_Tree(db)
-	tables := schema.list_tables(&st, context.temp_allocator)
-
-	clear(&db.table_roots)
-	for t in tables { db.table_roots[t.name] = t.root_page }
-	db.table_roots_dirty = false
 }

@@ -266,8 +266,8 @@ Page_Header.first_freeblock → [next: u16le] [size: u16le] [...] → 0
 | `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
 
-**Cursor** — fixed-size path stack `[MAX_TREE_DEPTH]Cursor_Stack_Item` (64 entries, ~512 bytes).
-`MAX_TREE_DEPTH :: 64` is the single source of truth for both the cursor stack size and
+**Cursor** — fixed-size path stack `[MAX_TREE_DEPTH]Cursor_Stack_Item` (12 entries, ~96 bytes).
+`MAX_TREE_DEPTH :: 12` is the single source of truth for both the cursor stack size and
 the recursive operation depth guard.
 
 #### 3b. Record Serialization (`cell/`)
@@ -351,25 +351,25 @@ different name, a hash collision is reported and the insert is rejected.
 
 ```odin
 Database :: struct {
-    path:               string,
-    pager:              ^pager.Pager,
-    is_new:             bool,
-    mu:                 sync.RW_Mutex,
-    schema_root_page:   u32,
-    latest_snapshot:    u32,
-    refs_page:          u32,
-    txn_state:          Transaction_State,
-    txn_snapshot_id:    u64,
-    txn_start_file_len: i64,
-    snapshot_index:     map[u64]u32,
-    table_roots:        map[string]u32,
-    table_roots_dirty:  bool,
+    pager:                    ^pager.Pager,
+    path:                     string,
+    is_new:                   bool,
+    schema_root_page:         u32,
+    latest_snapshot:          u32,
+    txn_snapshot_id:          u64,
+    txn_state:                enum { NONE, ACTIVE },
+    txn_start_file_len:       u64,
+    snapshot_index:           map[u64]u32,
+    refs_page:                u32,
+    snapshot_batch_count:     int,
+    snapshot_batch_threshold: int,
+    mu:                       sync.RW_Mutex,
 }
 ```
 
-The `table_roots` field is an incremental cache of table → root-page mappings, updated
-from COW DML return values. This avoids scanning the schema tree on every
-`list_tables` / `describe_table` call.
+`snapshot_batch_count` and `snapshot_batch_threshold` control batch snapshot creation —
+snapshots are only created when `count >= threshold`, reducing write amplification
+for bulk operations.
 
 ```
 execute(db, sql):
@@ -384,7 +384,30 @@ execute(db, sql):
     set_ref("main" → snap_id)
     wal_commit_txn()          // single fsync of WAL, not full cache
   unlock(mu)
+ ```
+ 
+### Error Handling: `or_return` Pattern
+
+The codebase uses Odin's `or_return` operator pervasively for error propagation.
+Two patterns are used:
+
+1. **Single-return (`-> Error`)**: Internal calls use `foo() or_return` — no named
+   returns needed. The error propagates directly.
+
+2. **Multi-return (`-> (T, Error)`)**: The first return is captured with a named
+   error return so `or_return` can compose:
+
+```odin
+tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
+    leaf := descend_to_leaf(t, descend_by_rightmost, nil) or_return
+    if leaf.header.cell_count == 0 { result = 1; return }
+    ...
+    result = last_id + 1; return
+}
 ```
+
+Manual `if err != .None` is used where error type mismatches, cleanup actions,
+or remapping prevents `or_return` composition (e.g., `pager.Error` → `DB_Error`).
 
 ---
 
@@ -511,6 +534,12 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 | `context.allocator` | Persistent: database handle, pager slab, snapshot index | Until `db.close()` |
 | `context.temp_allocator` | Per-statement: AST, tokens, intermediate rows, cursor results | End of caller's arena (REPL's `free_all` per iteration, `execute_sql` exit, or program exit) |
 
+**Mandatory allocator on hot paths**: `tree_find` and `cursor_get_cell` require an explicit
+allocator parameter (no default `context.allocator`). Callers pass `context.temp_allocator`
+for per-query results. The allocator is used for deserialized string/blob values; cell data
+on zero-copy paths points directly into page buffers. `cell.destroy` must use the same
+allocator that was passed at creation time — mismatch causes bad-free on string/blob values.
+
 ### Heap Allocation Profile
 
 | Allocation | Count per INSERT | Previous count | Change |
@@ -615,81 +644,6 @@ SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 
 ---
 
-## Appendix: API Surfaces
-
-### Public `db` API
-
-```odin
-open(path: string)                  -> ^Database, DB_Error
-close(db: ^Database)
-execute(db: ^Database, sql: string)  -> DB_Error
-query(db: ^Database, sql: string)    -> Query_Result
-
-Query_Result :: struct {
-    columns:   []string,
-    col_types: []types.Column_Type,
-    rows:      [][]types.Value,
-    ok:        bool,
-    err:       DB_Error,
-}
-
-checkpoint(db: ^Database)           -> DB_Error
-begin(db: ^Database)                -> DB_Error
-commit(db: ^Database)               -> DB_Error
-rollback(db: ^Database)             -> DB_Error
-snapshot_restore(db, id)            -> DB_Error
-rollforward(db)                     -> DB_Error
-snapshot_tag(db, id, label)         -> DB_Error
-expire_snapshots(db, keep)          -> DB_Error
-print_snapshots(db)
-snapshot_diff(db, older, newer)     -> DB_Error
-integrity_check(db)                 -> DB_Error
-describe_table(db, name)            -> DB_Error
-```
-
-### Public `btree` API
-
-```odin
-init(pager, root, config) -> Tree
-tree_insert(t, rowid, values)                             -> Error
-tree_insert_cow(t, rowid, values)                         -> (u32, Error)
-tree_find(t, rowid, allocator)                            -> (Cell, Error)
-tree_delete(t, rowid)                                     -> Error
-tree_delete_cow(t, rowid)                                 -> (u32, Error)
-tree_update(t, rowid, values)                             -> Error
-tree_update_cow(t, rowid, values)                         -> (u32, Error)
-tree_foreach(t, callback, user_data)                      -> Error
-tree_next_rowid(t)                                        -> (Row_ID, Error)
-cursor_start(t, allocator)                                -> (Cursor, Error)
-cursor_advance(c)                                         -> Error
-cursor_get_cell(c, allocator)                             -> (Cell, Error)
-collect_pages(t, root, &page_set)
-```
-
-### Public `snapshot` API
-
-```odin
-create(pager, id, prev, schema_root, manifest, op)     -> (u32, bool)
-load(pager, page)                                        -> (Snapshot_Header, bool)
-find_by_id(pager, start_page, id)                        -> (Snapshot_Header, bool)
-find_by_timestamp(pager, start_page, ts)                 -> (Snapshot_Header, bool)
-create_manifest(pager, tables)                           -> u32
-find_in_manifest(pager, manifest_page, table_name)       -> (u32, bool)
-diff_manifests(pager, a, b, allocator)                   -> ([]Diff_Entry, bool)
-diff_snapshots(pager, older, newer, latest, allocator)   -> ([]Diff_Entry, bool)
-prune(pager, start_page, max_keep)
-gc(pager, latest_page, keep_count)
-set_tag(pager, page, tag)
-get_tag(pager, page)                                     -> string
-list_snapshots(pager, latest, allocator)                 -> []Snapshot_Header
-expire_snapshots(pager, latest, keep_count)              -> [dynamic]u64
-expire_and_collect(pager, latest, keep_count)
-set_ref(pager, page, name, id, kind, protected)          -> bool
-get_ref(pager, page, name)                               -> (snapshot_id, bool)
-log_push(pager, page, snapshot_id)                       -> bool
-log_pop(pager, page)                                     -> (snapshot_id, bool)
-```
-
 ### CLI Dot-commands
 
 | Command | Action | Implementation |
@@ -700,6 +654,7 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 | `.tables` | List tables | `db.list_tables()` |
 | `.schema` | Show DDL | `db.print_schema()` |
 | `.debug_schema` | Show verbose schema dump | `db.print_schema_debug()` |
+| `.tree_page <n>` | Print B-tree page structure | `db.print_tree_page()` |
 | `.dump <table>` | Dump rows | `db.dump_table()` |
 | `.desc <table>` | Describe columns | `db.describe_table()` |
 | `.stats` | DB statistics | `db.stats()` |
@@ -707,8 +662,9 @@ log_pop(pager, page)                                     -> (snapshot_id, bool)
 | `.checkpoint` | Flush + GC | `db.checkpoint()` |
 | `.snapshots` | Show chain | `db.print_snapshots()` |
 | `.snapdiff <a> <b>` | Diff snapshots | `db.snapshot_diff()` |
-| `.snapshot tag <id> <label>` | Tag snapshot | `db.snapshot_tag()` |
+| `.snapshot tag <id> <lbl>` | Tag snapshot | `db.snapshot_tag()` |
 | `.snapshot restore <id>` | Restore | `db.snapshot_restore()` |
-| `.rollforward` | Advance to most recent snapshot | `db.rollforward()` |
+| `.rollforward` | Advance to latest snapshot | `db.rollforward()` |
 | `.expire [keep]` | Expire old snapshots (default 100) | `db.expire_snapshots()` |
-| `.begin` / `.commit` / `.rollback` | Transaction | `db.begin/commit/rollback()` |
+| `.begin` / `.commit` / `.rollback` | Transaction control | `db.begin/commit/rollback()` |
+| `.snapshot_debug` | Verbose snapshot chain dump | `db.print_snapshot_debug()` |

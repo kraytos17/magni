@@ -35,11 +35,7 @@ prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 		if Snapshot_State(h.state) == .COMMITTED {
 			d.committed += 1
 			if d.committed > d.max_keep {
-				pg, err := pager.get_page(d.p, page)
-				if err == .None {
-					(^Snapshot_Header)(raw_data(pg.data)).state = u8(Snapshot_State.ABANDONED)
-					pager.mark_dirty(d.p, page); pager.unpin_page(d.p, page)
-				}
+				set_header_state(d.p, page, h.snapshot_id, .ABANDONED)
 			}
 		}
 		return true

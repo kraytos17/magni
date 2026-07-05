@@ -1,9 +1,9 @@
 package executor
 
+import "core:encoding/endian"
 import "core:fmt"
 import "core:hash"
 import "core:slice"
-import "core:strings"
 import "src:parser"
 import "src:types"
 
@@ -12,13 +12,30 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	seen := make(map[u64]bool, len(rows), context.temp_allocator)
 	result := make([dynamic]Row_Entry, context.temp_allocator)
 	for r in rows {
-		key_b := strings.builder_make(context.temp_allocator)
+		h := u64(0)
 		for v, i in r.values {
-			if i > 0 { strings.write_byte(&key_b, '\x00') }
-			strings.write_string(&key_b, types.value_to_string(v))
+			if i > 0 {
+				h = hash.fnv64a([]byte{0}, h)
+			}
+			switch val in v {
+			case types.Null:
+				h = hash.fnv64a(transmute([]byte)string("NULL"), h)
+			case i64:
+				buf: [8]u8
+				endian.put_u64(buf[:], .Little, u64(val))
+				h = hash.fnv64a(buf[:], h)
+			case f64:
+				buf: [8]u8
+				endian.put_u64(buf[:], .Little, transmute(u64)val)
+				h = hash.fnv64a(buf[:], h)
+			case string:
+				h = hash.fnv64a(transmute([]byte)val, h)
+			case []u8:
+				h = hash.fnv64a(val, h)
+			}
 		}
 
-		fp := hash.fnv64a(transmute([]u8)strings.to_string(key_b))
+		fp := h
 		if fp not_in seen {
 			seen[fp] = true
 			append(&result, r)

@@ -162,27 +162,28 @@ diff_manifests :: proc(
 	new_names, new_roots, ok_b := load_manifest_tables(p, manifest_b, context.temp_allocator)
 	if !ok_a || !ok_b { return nil, false }
 
+	old_map := make(map[string]u32, context.temp_allocator)
+	defer delete(old_map)
+	for i in 0 ..< len(old_names) {
+		old_map[old_names[i]] = old_roots[i]
+	}
+
 	entries := make([dynamic]Snapshot_Diff_Entry, allocator)
 	for i in 0 ..< len(new_names) {
-		found := false
-		for j in 0 ..< len(old_names) {
-			if new_names[i] == old_names[j] {
-				found = true
-				if new_roots[i] != old_roots[j] {
-					append(
-						&entries,
-						Snapshot_Diff_Entry {
-							table_name = strings.clone(new_names[i], allocator),
-							change = .MODIFIED,
-							old_root = old_roots[j],
-							new_root = new_roots[i],
-						},
-					)
-				}
-				break
+		if old_root, existed := old_map[new_names[i]]; existed {
+			delete_key(&old_map, new_names[i])
+			if new_roots[i] != old_root {
+				append(
+					&entries,
+					Snapshot_Diff_Entry {
+						table_name = strings.clone(new_names[i], allocator),
+						change = .MODIFIED,
+						old_root = old_root,
+						new_root = new_roots[i],
+					},
+				)
 			}
-		}
-		if !found {
+		} else {
 			append(
 				&entries,
 				Snapshot_Diff_Entry {
@@ -193,24 +194,15 @@ diff_manifests :: proc(
 			)
 		}
 	}
-	for j in 0 ..< len(old_names) {
-		found := false
-		for i in 0 ..< len(new_names) {
-			if old_names[j] == new_names[i] {
-				found = true
-				break
-			}
-		}
-		if !found {
-			append(
-				&entries,
-				Snapshot_Diff_Entry {
-					table_name = strings.clone(old_names[j], allocator),
-					change = .DROPPED,
-					old_root = old_roots[j],
-				},
-			)
-		}
+	for name, root in old_map {
+		append(
+			&entries,
+			Snapshot_Diff_Entry {
+				table_name = strings.clone(name, allocator),
+				change = .DROPPED,
+				old_root = root,
+			},
+		)
 	}
 	return entries[:], true
 }

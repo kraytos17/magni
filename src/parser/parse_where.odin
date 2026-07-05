@@ -95,6 +95,7 @@ parse_where_clause :: proc(
 				delete(cond.column, allocator); return nil, false
 			}
 			if peek(p).type == .SELECT {
+				advance(p)
 				subq_variant, subq_ok := parse_select(p, allocator)
 				if !subq_ok {
 					delete(cond.column, allocator); return nil, false

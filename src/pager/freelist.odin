@@ -40,6 +40,7 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 		wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
 
 		delete_key(&p.cache_index, page_num)
+		delete_key(&p.row_counts, page_num)
 		slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
 	}
 	p.first_free_page = page_num

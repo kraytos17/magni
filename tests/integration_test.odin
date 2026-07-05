@@ -1215,3 +1215,32 @@ test_write_after_read :: proc(t: ^testing.T) {
 		testing.expect_value(t, v, i64(2))
 	}
 }
+
+@(test)
+test_in_subquery :: proc(t: ^testing.T) {
+	d := setup_db(t, "insubq")
+	defer teardown_db(d, "insubq")
+
+	db.execute(d, "CREATE TABLE t (id INT, name TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'Alice');")
+	db.execute(d, "INSERT INTO t VALUES (2, 'Bob');")
+	db.execute(d, "INSERT INTO t VALUES (3, 'Charlie');")
+
+	db.execute(d, "CREATE TABLE active (id INT);")
+	db.execute(d, "INSERT INTO active VALUES (1);")
+	db.execute(d, "INSERT INTO active VALUES (3);")
+
+	q := db.query(d, "SELECT name FROM t WHERE id IN (SELECT id FROM active) ORDER BY name;")
+	testing.expect(t, q.ok, "IN subquery execute")
+	testing.expect(t, len(q.rows) == 2, "2 rows from IN subquery")
+	if len(q.rows) >= 2 {
+		name0, _ := q.rows[0][1].(string)
+		name1, _ := q.rows[1][1].(string)
+		testing.expect_value(t, name0, "Alice")
+		testing.expect_value(t, name1, "Charlie")
+	}
+
+	q2 := db.query(d, "SELECT name FROM t WHERE id IN (1, 3) ORDER BY name;")
+	testing.expect(t, q2.ok, "IN literal execute")
+	testing.expect(t, len(q2.rows) == 2, "2 rows from IN literal")
+}

@@ -62,6 +62,6 @@ rune_width :: proc(r: rune) -> int {
 	return 1
 }
 
-run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {}
+run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {  }
 
-terminal_query_size :: proc(fd: posix.FD) {}
+terminal_query_size :: proc(fd: posix.FD) {  }

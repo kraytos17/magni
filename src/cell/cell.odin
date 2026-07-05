@@ -82,10 +82,6 @@ compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serializatio
 	return info
 }
 
-calculate_size :: proc(rowid: types.Row_ID, values: []types.Value) -> int {
-	return compute_info(rowid, values).total_size
-}
-
 // Serialize a row into the binary cell format at dest. Info must come from compute_info.
 // Returns bytes written and ok=false if dest is too small.
 serialize :: proc(
@@ -107,12 +103,18 @@ serialize :: proc(
 	offset += varint_encode(dest[offset:], u64(total_payload))
 	offset += varint_encode(dest[offset:], u64(rowid))
 	offset += varint_encode(dest[offset:], u64(info.serial_types_size))
+	serial_types: [types.MAX_COLS]u64
+	i := 0
 	for val in values {
 		serial := serial_type_for_value(val)
+		serial_types[i] = serial; i += 1
 		offset += varint_encode(dest[offset:], serial)
 	}
+
+	i = 0
 	for val in values {
-		serial := serial_type_for_value(val)
+		serial := serial_types[i]
+		i += 1
 		switch v in val {
 		case types.Null:
 		case i64:

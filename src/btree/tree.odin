@@ -9,7 +9,7 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
-MAX_TREE_DEPTH :: 64
+MAX_TREE_DEPTH :: 12
 
 DEFAULT_CONFIG := Config {
 	allocator        = {},
@@ -207,8 +207,8 @@ insert_recursive :: proc(
 	values: []types.Value,
 	cow: bool,
 ) -> (
-	Insert_COW_Result,
-	Error,
+	result: Insert_COW_Result,
+	err: Error,
 ) {
 	new_page_num := page_id
 	if cow {
@@ -217,8 +217,7 @@ insert_recursive :: proc(
 		new_page_num = var
 	}
 
-	curr, err := load_node(t, new_page_num)
-	if err != .None { return {}, err }
+	curr := load_node(t, new_page_num) or_return
 	defer unpin_node(t, curr)
 	if is_leaf(curr) {
 		e := node_insert_leaf_cell(t, &curr, rowid, values)
@@ -362,8 +361,7 @@ rowid_exists :: proc(
 // Insert a row into the b-tree. Handles root splits transparently.
 // Returns .Duplicate_Rowid if check_duplicates is enabled and the rowid exists.
 tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Error {
-	root_node, err := load_node(t, t.root)
-	if err != .None { return err }
+	root_node := load_node(t, t.root) or_return
 	defer unpin_node(t, root_node)
 	if is_leaf(root_node) {
 		e := node_insert_leaf_cell(t, &root_node, rowid, values)
@@ -409,15 +407,14 @@ descend_to_leaf :: proc(
 	ctx: rawptr,
 	root_override: u32 = 0,
 ) -> (
-	Node,
-	Error,
+	leaf: Node,
+	err: Error,
 ) {
 	curr := t.root if root_override == 0 else root_override
 	for {
-		n, err := load_node(t, curr)
-		if err != .None { return {}, err }
-		if is_leaf(n) { return n, .None }
-		curr = get_child(n.data, n.id, ctx); unpin_node(t, n)
+		leaf = load_node(t, curr) or_return
+		if is_leaf(leaf) { return }
+		curr = get_child(leaf.data, leaf.id, ctx); unpin_node(t, leaf)
 	}
 }
 
@@ -468,9 +465,15 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 
 		boff := get_page_header_offset(leaf.id)
 		row_count := int(leaf.header.cell_count)
+		rowid_pos := boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
+		current_rid: u64 = 0
 		for i in 0 ..< row_count {
-			rid, _ := cell.read_columnar_rowid(leaf.data, num_cols, i, boff)
-			if rid == key {
+			delta, n, ok := cell.varint_decode(leaf.data, rowid_pos)
+			if !ok { break }
+
+			current_rid += delta
+			rowid_pos += n
+			if types.Row_ID(current_rid) == key {
 				cc, cc_ok := cell.read_columnar_cell(
 					leaf.data,
 					num_cols,
@@ -506,38 +509,32 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 	return {}, .Cell_Not_Found
 }
 
-tree_next_rowid :: proc(t: ^Tree) -> (types.Row_ID, Error) {
-	leaf, err := descend_to_leaf(t, descend_by_rightmost, nil)
-	if err != .None { return 0, err }
+tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
+	leaf := descend_to_leaf(t, descend_by_rightmost, nil) or_return
 	defer unpin_node(t, leaf)
-	if leaf.header.cell_count == 0 { return 1, .None }
+	if leaf.header.cell_count == 0 { result = 1; return }
 
 	stride := leaf.layout.stride
 	last_ptr := get_cell_ptr(leaf.data, leaf.id, int(leaf.header.cell_count) - 1, stride)
 	last_id, ok := cell.get_rowid(leaf.data, int(last_ptr))
-	if !ok { return 0, .Invalid_Cell_Pointer }
-	return last_id + 1, .None
+	if !ok { err = .Invalid_Cell_Pointer; return }
+	result = last_id + 1; return
 }
 
-tree_count_rows :: proc(t: ^Tree) -> (int, Error) {
-	if count, ok := t.pager.row_counts[t.root]; ok {
-		return count, .None
-	}
-	return count_recursive(t, t.root)
+tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
+	if c, ok := t.pager.row_counts[t.root]; ok { count = c; return }
+	count = count_recursive(t, t.root) or_return; return
 }
 
-count_recursive :: proc(t: ^Tree, page_id: u32) -> (int, Error) {
-	if count, ok := t.pager.row_counts[page_id]; ok {
-		return count, .None
-	}
+count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
+	if count, ok := t.pager.row_counts[page_id]; ok { result = count; return }
 
-	node, err := load_node(t, page_id)
-	if err != .None { return 0, err }
+	node := load_node(t, page_id) or_return
 	defer unpin_node(t, node)
 	if is_leaf(node) {
-		c := int(node.header.cell_count)
-		t.pager.row_counts[page_id] = c
-		return c, .None
+		result = int(node.header.cell_count)
+		t.pager.row_counts[page_id] = result
+		return
 	}
 
 	total := 0
@@ -546,18 +543,13 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (int, Error) {
 	for i in 0 ..< cell_count {
 		ptr := get_cell_ptr(node.data, page_id, i, stride)
 		child_id, ok := endian.get_u32(node.data[int(ptr):], .Big)
-		if !ok { return 0, .Invalid_Cell_Pointer }
-		count, c_err := count_recursive(t, child_id)
-		if c_err != .None { return 0, c_err }
-		total += count
+		if !ok { err = .Invalid_Cell_Pointer; return }
+		total += count_recursive(t, child_id) or_return
 	}
 
-	right_count, r_err := count_recursive(t, get_right_ptr(node.data, page_id))
-	if r_err != .None { return 0, r_err }
-
-	total += right_count
+	total += count_recursive(t, get_right_ptr(node.data, page_id)) or_return
 	t.pager.row_counts[page_id] = total
-	return total, .None
+	result = total; return
 }
 
 update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
@@ -644,8 +636,7 @@ tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 		layout = get_layout(t.pager.page_format_version),
 	}
 
-	leaf_node, err := descend_to_leaf(t, descend_by_key, &dk)
-	if err != .None { return err }
+	leaf_node := descend_to_leaf(t, descend_by_key, &dk) or_return
 	defer unpin_node(t, leaf_node)
 	if d_err := delete_from_leaf(t, &leaf_node, rowid); d_err != .None { return d_err }
 	if i_err := node_insert_leaf_cell(t, &leaf_node, rowid, values); i_err != .None {
@@ -669,8 +660,7 @@ foreach_recursive :: proc(
 	cb: proc(c: ^cell.Cell, user_data: rawptr) -> bool,
 	ud: rawptr,
 ) -> Error {
-	node, err := load_node(t, page_id)
-	if err != .None { return err }
+	node := load_node(t, page_id) or_return
 	defer unpin_node(t, node)
 
 	stride := node.layout.stride

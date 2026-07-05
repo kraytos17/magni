@@ -102,8 +102,9 @@ test_snapshot_find_from_middle :: proc(t: ^testing.T) {
 	testing.expect(t, found, "find_by_id from middle should find earlier")
 	testing.expect_value(t, h.snapshot_id, u64(1))
 
-	_, not_found := snapshot.find_by_id(p, p2, 3)
-	testing.expect(t, !not_found, "find_by_id from middle should NOT find later")
+	_, found2 := snapshot.find_by_id(p, p2, 3)
+	// With packed format, p2 = p1 (same page), so snap 3 is on the same page and found.
+	testing.expect(t, found2, "find_by_id from same page finds snap 3")
 }
 
 @(test)
@@ -119,7 +120,10 @@ test_snapshot_count_committed :: proc(t: ^testing.T) {
 	testing.expect_value(t, c, 3)
 
 	c2 := snapshot.count_committed(p, p2)
-	testing.expect_value(t, c2, 2)
+	// With packed format, p1=p2=p3 (same page), so count is all 3.
+	c3 := snapshot.count_committed(p, p1)
+	testing.expect_value(t, c2, 3)
+	testing.expect_value(t, c3, 3)
 }
 
 @(test)
@@ -381,4 +385,106 @@ test_snapshot_gc :: proc(t: ^testing.T) {
 	// Verify page count didn't crash or go to zero
 	c := snapshot.count_committed(p, p3)
 	testing.expect_value(t, c, 2)
+}
+
+@(test)
+test_snapshot_packed_overflow :: proc(t: ^testing.T) {
+	p := setup_snapshot_env(t, "pck_ovf")
+	defer teardown_snapshot_env(p, "pck_ovf")
+
+	// Create more than MAX_HEADERS_PER_PAGE snapshots to trigger overflow
+	n := snapshot.MAX_HEADERS_PER_PAGE + 5
+	first_page: u32
+	last_page: u32
+	for i in 1 ..= n {
+		page, ok := snapshot.create(p, u64(i), last_page, u32(i * 100))
+		testing.expect(t, ok, fmt.tprintf("create snap %d", i))
+		if i == 1 { first_page = page }
+		last_page = page
+	}
+
+	// Verify they form a chain of at least 2 pages
+	c := snapshot.count_committed(p, last_page)
+	testing.expect_value(t, c, n)
+
+	// Verify all IDs are findable
+	for i in 1 ..= n {
+		h, found := snapshot.find_by_id(p, last_page, u64(i))
+		testing.expect(t, found, fmt.tprintf("find snap %d", i))
+		testing.expect_value(t, h.schema_root, u32(i * 100))
+	}
+
+	// Packed pages: first_page should equal last_page since they overflow
+	testing.expect(t, first_page != last_page, "overflow created at least 2 pages")
+}
+
+@(test)
+test_snapshot_load_with_id :: proc(t: ^testing.T) {
+	p := setup_snapshot_env(t, "load_id")
+	defer teardown_snapshot_env(p, "load_id")
+
+	p1, _ := snapshot.create(p, 1, 0, 100)
+	p2, _ := snapshot.create(p, 2, p1, 200)
+	_, _ = snapshot.create(p, 3, p2, 300)
+
+	// load with explicit ID should return the correct header
+	h1, ok1 := snapshot.load(p, p1, 1)
+	testing.expect(t, ok1, "load with id=1")
+	testing.expect_value(t, h1.snapshot_id, u64(1))
+	testing.expect_value(t, h1.schema_root, u32(100))
+
+	h3, ok3 := snapshot.load(p, p1, 3)
+	testing.expect(t, ok3, "load with id=3")
+	testing.expect_value(t, h3.snapshot_id, u64(3))
+	testing.expect_value(t, h3.schema_root, u32(300))
+
+	// load with nonexistent ID should fail
+	_, bad := snapshot.load(p, p1, 999)
+	testing.expect(t, !bad, "load with nonexistent id fails")
+}
+
+@(test)
+test_snapshot_tag_on_packed :: proc(t: ^testing.T) {
+	p := setup_snapshot_env(t, "tag_pck")
+	defer teardown_snapshot_env(p, "tag_pck")
+
+	p1, _ := snapshot.create(p, 1, 0, 42)
+	p2, _ := snapshot.create(p, 2, p1, 84)
+
+	// Set tag on packed page (p1 == p2 with packed format)
+	snapshot.set_tag(p, p1, "packed-tag")
+	tag := snapshot.get_tag(p, p1)
+	testing.expect_value(t, tag, "packed-tag")
+
+	// Tag should be persistent
+	tag2 := snapshot.get_tag(p, p2)
+	testing.expect_value(t, tag2, "packed-tag")
+}
+
+@(test)
+test_snapshot_set_header_state :: proc(t: ^testing.T) {
+	p := setup_snapshot_env(t, "set_hdr")
+	defer teardown_snapshot_env(p, "set_hdr")
+
+	p1, _ := snapshot.create(p, 1, 0, 10)
+	p2, _ := snapshot.create(p, 2, p1, 20)
+	p3, _ := snapshot.create(p, 3, p2, 30)
+
+	// set_header_state on the middle snapshot in a packed page
+	ok := snapshot.set_header_state(p, p2, 2, .ABANDONED)
+	testing.expect(t, ok, "set_header_state for snap 2")
+
+	h, found := snapshot.find_by_id(p, p3, 2)
+	testing.expect(t, found, "snap 2 still findable")
+	testing.expect_value(t, snapshot.Snapshot_State(h.state), snapshot.Snapshot_State.ABANDONED)
+
+	// Other snapshots should still be COMMITTED
+	h1, _ := snapshot.find_by_id(p, p3, 1)
+	testing.expect_value(t, snapshot.Snapshot_State(h1.state), snapshot.Snapshot_State.COMMITTED)
+	h3, _ := snapshot.find_by_id(p, p3, 3)
+	testing.expect_value(t, snapshot.Snapshot_State(h3.state), snapshot.Snapshot_State.COMMITTED)
+
+	// set_header_state on nonexistent snapshot should fail
+	bad := snapshot.set_header_state(p, p3, 999, .ABANDONED)
+	testing.expect(t, !bad, "set_header_state on nonexistent id fails")
 }
