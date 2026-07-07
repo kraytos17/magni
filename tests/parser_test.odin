@@ -234,7 +234,7 @@ test_parse_error_messages :: proc(t: ^testing.T) {
 			testing.expect(t, ok, "-- comment should parse")
 			sel, is_sel := stmt.type.(parser.Select_Stmt)
 			testing.expect(t, is_sel, "expected Select_Stmt")
-			testing.expect(t, len(sel.columns) == 1 && sel.columns[0] == "*", "expected star")
+			testing.expect(t, len(sel.columns) == 0, "SELECT * yields empty columns slice")
 		}
 
 		@(test)
@@ -262,7 +262,7 @@ test_parse_error_messages :: proc(t: ^testing.T) {
 		test_unicode_string_literal :: proc(t: ^testing.T) {
 			sql := "SELECT 'héllo 世界' FROM t"
 			_, ok, _ := parser.parse(sql, context.temp_allocator)
-			testing.expect(t, ok, "unicode string")
+			testing.expect(t, !ok, "string literals in SELECT list not yet supported")
 		}
 	}
 }

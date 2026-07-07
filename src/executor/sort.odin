@@ -9,14 +9,19 @@ import "src:types"
 
 dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	if len(rows) <= 1 { return rows }
-	seen := make(map[u64]bool, len(rows), context.temp_allocator)
-	result := make([dynamic]Row_Entry, context.temp_allocator)
+	seen := make(map[u64][dynamic]int, len(rows), context.temp_allocator)
+	result := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
+	defer {
+		for _, bucket in seen { delete(bucket) }
+		delete(seen)
+	}
 	for r in rows {
 		h := u64(0)
 		for v, i in r.values {
 			if i > 0 {
 				h = hash.fnv64a([]byte{0}, h)
 			}
+
 			switch val in v {
 			case types.Null:
 				h = hash.fnv64a(transmute([]byte)string("NULL"), h)
@@ -36,16 +41,13 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 		}
 
 		fp := h
-		if fp not_in seen {
-			seen[fp] = true
-			append(&result, r)
-		} else {
-			is_dup := false
-			for row in result {
-				if len(row.values) != len(r.values) { continue }
+		is_dup := false
+		if bucket, ok := seen[fp]; ok {
+			for idx in bucket {
+				existing := result[idx]
 				all_eq := true
 				for j in 0 ..< len(r.values) {
-					if !types.value_compare(r.values[j], row.values[j]) {
+					if !types.value_compare(r.values[j], existing.values[j]) {
 						all_eq = false
 						break
 					}
@@ -55,9 +57,12 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 					break
 				}
 			}
-			if !is_dup {
-				append(&result, r)
-			}
+		}
+		if !is_dup {
+			append(&result, r)
+			bucket := seen[fp]
+			append(&bucket, len(result) - 1)
+			seen[fp] = bucket
 		}
 	}
 	return result[:]

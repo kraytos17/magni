@@ -872,3 +872,148 @@ test_group_key_hash :: proc(t: ^testing.T) {
 		"different values differ",
 	)
 }
+
+@(test)
+test_dedup_rows :: proc(t: ^testing.T) {
+	rows := []executor.Row_Entry {
+		{1, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
+		{2, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
+		{3, {types.value_int(2), types.value_text("b"), types.value_real(2.0)}},
+		{4, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
+		{5, {types.value_int(2), types.value_text("b"), types.value_real(2.0)}},
+		{6, {types.value_int(3), types.value_text("c"), types.value_real(3.0)}},
+	}
+
+	deduped := executor.dedup_rows(rows)
+	testing.expect_value(t, len(deduped), 3)
+
+	expected_names := []string{"a", "b", "c"}
+	for i in 0 ..< len(deduped) {
+		name := deduped[i].values[1].(string)
+		expected := expected_names[i]
+		testing.expect(
+			t,
+			name == expected,
+			fmt.tprintf("dedup row %d: expected %q, got %q", i, expected, name),
+		)
+	}
+}
+
+@(test)
+test_dedup_rows_no_duplicates :: proc(t: ^testing.T) {
+	rows := []executor.Row_Entry {
+		{1, {types.value_int(1), types.value_text("x"), types.value_real(1.0)}},
+		{2, {types.value_int(2), types.value_text("y"), types.value_real(2.0)}},
+		{3, {types.value_int(3), types.value_text("z"), types.value_real(3.0)}},
+	}
+
+	deduped := executor.dedup_rows(rows)
+	testing.expect_value(t, len(deduped), 3)
+}
+
+@(test)
+test_dedup_rows_empty_and_single :: proc(t: ^testing.T) {
+	empty := []executor.Row_Entry{}
+	deduped_empty := executor.dedup_rows(empty)
+	testing.expect_value(t, len(deduped_empty), 0)
+
+	single := []executor.Row_Entry{{1, {types.value_int(42)}}}
+	deduped_single := executor.dedup_rows(single)
+	testing.expect_value(t, len(deduped_single), 1)
+}
+
+@(test)
+test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_skewed")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	for i in 1 ..= 100 {
+		free_all(context.temp_allocator)
+		executor.execute(&tree, make_insert_stmt("t1", i64(i), fmt.tprintf("n%d", i), f64(i)))
+	}
+
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols2, types.Column{name = "ref", type = .INTEGER})
+	append(&cols2, types.Column{name = "val", type = .TEXT})
+	variant2 := parser.Create_Stmt {
+		table_name = "t2",
+		columns    = cols2[:],
+	}
+
+	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
+	for i in 1 ..= 55 {
+		free_all(context.temp_allocator)
+		ref := i64(1) if i <= 50 else i64(i - 49)
+		v := parser.Insert_Stmt {
+			table_name = "t2",
+			values     = {types.value_int(ref), types.value_text(fmt.tprintf("v%d", i))},
+		}
+		executor.execute(&tree, parser.Statement{type = v, sql = ""})
+	}
+
+	sql := "SELECT t1.id, t2.val FROM t1 INNER JOIN t2 ON t1.id = t2.ref;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "JOIN should parse")
+
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	ok := executor.exec_select(&tree, sel)
+	testing.expect(t, ok, "skewed-key INNER JOIN should execute")
+}
+
+@(test)
+test_exec_join_string_keys :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_str")
+	defer teardown_executor_env(tree, file)
+
+	cols1 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols1, types.Column{name = "code", type = .TEXT, pk = true})
+	append(&cols1, types.Column{name = "label", type = .TEXT})
+	variant1 := parser.Create_Stmt {
+		table_name = "codes",
+		columns    = cols1[:],
+	}
+
+	executor.execute(&tree, parser.Statement{type = variant1, sql = ""})
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+
+	append(&cols2, types.Column{name = "ref_code", type = .TEXT})
+	append(&cols2, types.Column{name = "amount", type = .INTEGER})
+	variant2 := parser.Create_Stmt {
+		table_name = "txns",
+		columns    = cols2[:],
+	}
+
+	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
+	code_names := []string{"a", "b", "c", "d", "e"}
+	for name, _ in code_names {
+		free_all(context.temp_allocator)
+		v := parser.Insert_Stmt {
+			table_name = "codes",
+			values     = {types.value_text(name), types.value_text(fmt.tprintf("label_%s", name))},
+		}
+		executor.execute(&tree, parser.Statement{type = v, sql = ""})
+	}
+
+	refs := []string{"a", "a", "a", "b", "b", "c", "x"}
+	for r, i in refs {
+		free_all(context.temp_allocator)
+		v := parser.Insert_Stmt {
+			table_name = "txns",
+			values     = {types.value_text(r), types.value_int(i64(i + 1))},
+		}
+		executor.execute(&tree, parser.Statement{type = v, sql = ""})
+	}
+
+	sql := "SELECT codes.label, txns.amount FROM codes INNER JOIN txns ON codes.code = txns.ref_code;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "string-key JOIN should parse")
+
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	ok := executor.exec_select(&tree, sel)
+	testing.expect(t, ok, "string-key INNER JOIN should execute")
+}

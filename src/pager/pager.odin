@@ -80,30 +80,32 @@ find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 }
 
 evict_one_slot :: proc(p: ^Pager) -> Error {
-	for _ in 0 ..< PAGE_CACHE_SIZE {
-		idx := p.evict_hand % PAGE_CACHE_SIZE
-		slot := &p.slots[idx]
-		p.evict_hand = (p.evict_hand + 1) % PAGE_CACHE_SIZE
-		if slot.page.page_num == 0 || slot.page.pin_count > 0 {
-			continue
-		}
-		if slot.referenced {
+	for pass := 0; pass < 2; pass += 1 {
+		for _ in 0 ..< PAGE_CACHE_SIZE {
+			idx := p.evict_hand % PAGE_CACHE_SIZE
+			slot := &p.slots[idx]
+			p.evict_hand = (p.evict_hand + 1) % PAGE_CACHE_SIZE
+			if slot.page.page_num == 0 || slot.page.pin_count > 0 {
+				continue
+			}
+			if slot.referenced {
+				slot.referenced = false
+				if pass == 0 { continue }
+			}
+			if slot.page.dirty {
+				wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
+			}
+
+			delete_key(&p.cache_index, slot.page.page_num)
+			delete_key(&p.page_int_ranges, slot.page.page_num)
+			delete_key(&p.row_counts, slot.page.page_num)
+
+			slot.page = {}
 			slot.referenced = false
-			continue
+			p.slot_count -= 1
+			append(&p.free_slots, slot)
+			return .None
 		}
-		if slot.page.dirty {
-			wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
-		}
-
-		delete_key(&p.cache_index, slot.page.page_num)
-		delete_key(&p.page_int_ranges, slot.page.page_num)
-		delete_key(&p.row_counts, slot.page.page_num)
-
-		slot.page = {}
-		slot.referenced = false
-		p.slot_count -= 1
-		append(&p.free_slots, slot)
-		return .None
 	}
 	return .Cache_Full
 }

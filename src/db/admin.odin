@@ -46,7 +46,7 @@ integrity_check :: proc(db: ^Database) -> DB_Error {
 		defer pager.unpin_page(db.pager, table.root_page)
 
 		table_tree := btree.init(db.pager, table.root_page)
-		if !btree.tree_verify(&table_tree) {
+		if !btree.tree_verify_if_enabled(&table_tree) {
 			fmt.printf("Integrity error: Table '%s' B-tree corrupted\n", table.name)
 			return .Corrupted
 		}

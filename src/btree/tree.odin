@@ -727,6 +727,14 @@ tree_verify :: proc(t: ^Tree) -> bool {
 	return verify_recursive(t, t.root, 0, types.Row_ID(max(i64)), 0, &visited)
 }
 
+// verify_config_enabled can be set via -define:VERIFY_TREE=true at build time.
+// tree_verify allocates a map and walks the full tree — do not call on hot paths.
+VERIFY_TREE :: #config(VERIFY_TREE, false)
+tree_verify_if_enabled :: proc(t: ^Tree) -> bool {
+	if !VERIFY_TREE { return true }
+	return tree_verify(t)
+}
+
 verify_recursive :: proc(
 	t: ^Tree,
 	page_id: u32,

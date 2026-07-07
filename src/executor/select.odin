@@ -235,17 +235,12 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 						}
 						if key_is_int {
 							if len(rows) <= len(right_rows) {
-								ht := make(map[i64][]int, len(rows), context.temp_allocator)
+								ht := make(map[i64][dynamic]int, len(rows), context.temp_allocator)
 								for row, ri in rows {
 									key := row.values[left_idx - left_adjust].(i64)
-									if existing, ok := ht[key]; ok {
-										n := make([]int, len(existing) + 1, context.temp_allocator)
-										copy(n, existing)
-										n[len(existing)] = ri
-										ht[key] = n
-									} else {
-										ht[key] = {ri}
-									}
+									bucket := ht[key]
+									append(&bucket, ri)
+									ht[key] = bucket
 								}
 
 								matched_left := make(
@@ -271,6 +266,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									}
 								}
 
+								for _, bucket in ht { delete(bucket) }
 								delete(ht)
 								if is_left {
 									for li in 0 ..< len(rows) {
@@ -290,17 +286,16 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 								}
 								delete(matched_left)
 							} else {
-								ht := make(map[i64][]int, len(right_rows), context.temp_allocator)
+								ht := make(
+									map[i64][dynamic]int,
+									len(right_rows),
+									context.temp_allocator,
+								)
 								for r_row, ri in right_rows {
 									key := r_row.values[right_idx - right_adjust].(i64)
-									if existing, ok := ht[key]; ok {
-										n := make([]int, len(existing) + 1, context.temp_allocator)
-										copy(n, existing)
-										n[len(existing)] = ri
-										ht[key] = n
-									} else {
-										ht[key] = {ri}
-									}
+									bucket := ht[key]
+									append(&bucket, ri)
+									ht[key] = bucket
 								}
 
 								matched_left := make(
@@ -329,6 +324,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									}
 								}
 
+								for _, bucket in ht { delete(bucket) }
 								delete(ht)
 								if is_left {
 									for li in 0 ..< len(rows) {
@@ -350,17 +346,16 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 							}
 						} else {
 							if len(rows) <= len(right_rows) {
-								ht := make(map[string][]int, len(rows), context.temp_allocator)
+								ht := make(
+									map[string][dynamic]int,
+									len(rows),
+									context.temp_allocator,
+								)
 								for row, ri in rows {
 									key := hash_join_key(row.values[left_idx - left_adjust])
-									if existing, ok := ht[key]; ok {
-										n := make([]int, len(existing) + 1, context.temp_allocator)
-										copy(n, existing)
-										n[len(existing)] = ri
-										ht[key] = n
-									} else {
-										ht[key] = {ri}
-									}
+									bucket := ht[key]
+									append(&bucket, ri)
+									ht[key] = bucket
 								}
 
 								matched_left := make(
@@ -386,6 +381,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									}
 								}
 
+								for _, bucket in ht { delete(bucket) }
 								delete(ht)
 								if is_left {
 									for li in 0 ..< len(rows) {
@@ -406,20 +402,15 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 								delete(matched_left)
 							} else {
 								ht := make(
-									map[string][]int,
+									map[string][dynamic]int,
 									len(right_rows),
 									context.temp_allocator,
 								)
 								for r_row, ri in right_rows {
 									key := hash_join_key(r_row.values[right_idx - right_adjust])
-									if existing, ok := ht[key]; ok {
-										n := make([]int, len(existing) + 1, context.temp_allocator)
-										copy(n, existing)
-										n[len(existing)] = ri
-										ht[key] = n
-									} else {
-										ht[key] = {ri}
-									}
+									bucket := ht[key]
+									append(&bucket, ri)
+									ht[key] = bucket
 								}
 
 								matched_left := make(
@@ -448,6 +439,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									}
 								}
 
+								for _, bucket in ht { delete(bucket) }
 								delete(ht)
 								if is_left {
 									for li in 0 ..< len(rows) {
