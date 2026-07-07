@@ -237,7 +237,9 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 							if len(rows) <= len(right_rows) {
 								ht := make(map[i64][dynamic]int, len(rows), context.temp_allocator)
 								for row, ri in rows {
-									key := row.values[left_idx - left_adjust].(i64)
+									key, key_ok := row.values[left_idx - left_adjust].(i64)
+									if !key_ok { continue }
+
 									bucket := ht[key]
 									append(&bucket, ri)
 									ht[key] = bucket
@@ -249,7 +251,8 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									context.temp_allocator,
 								)
 								for r_row in right_rows {
-									key := r_row.values[right_idx - right_adjust].(i64)
+									key, key_ok := r_row.values[right_idx - right_adjust].(i64)
+									if !key_ok { continue }
 									if matches, has := ht[key]; has {
 										for ri in matches {
 											matched_left[ri] = true
@@ -292,7 +295,9 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									context.temp_allocator,
 								)
 								for r_row, ri in right_rows {
-									key := r_row.values[right_idx - right_adjust].(i64)
+									key, key_ok := r_row.values[right_idx - right_adjust].(i64)
+									if !key_ok { continue }
+
 									bucket := ht[key]
 									append(&bucket, ri)
 									ht[key] = bucket
@@ -304,7 +309,8 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 									context.temp_allocator,
 								)
 								for l_row, li in rows {
-									key := l_row.values[left_idx - left_adjust].(i64)
+									key, key_ok := l_row.values[left_idx - left_adjust].(i64)
+									if !key_ok { continue }
 									if matches, has := ht[key]; has {
 										for ri in matches {
 											matched_left[li] = true

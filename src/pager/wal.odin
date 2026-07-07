@@ -125,7 +125,7 @@ wal_begin_txn :: proc(p: ^Pager) {
 wal_commit_txn :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
 	if !ws.txn_active { return .None }
-	for i in 0 ..< PAGE_CACHE_SIZE {
+	for i in 0 ..< len(p.slots) {
 		slot := &p.slots[i]
 		if slot.page.dirty && slot.page.page_num != 0 {
 			wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
@@ -153,7 +153,7 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 wal_abort_txn :: proc(p: ^Pager) {
 	ws := &p.wal_state
 	clear(&ws.txn_index)
-	for i in 0 ..< PAGE_CACHE_SIZE {
+	for i in 0 ..< len(p.slots) {
 		slot := &p.slots[i]
 		if slot.page.dirty && slot.page.page_num != 0 {
 			slot.page.dirty = false

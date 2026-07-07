@@ -39,7 +39,7 @@ Pager :: struct {
 	file_len:            i64,
 	page_bitmap:         []u64,
 	wal_state:           Wal_State,
-	slots:               [PAGE_CACHE_SIZE]Page_Slot,
+	slots:               []Page_Slot,
 	file_name:           string,
 	page_size:           u32,
 	max_cache_pages:     u32,
@@ -80,11 +80,12 @@ find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 }
 
 evict_one_slot :: proc(p: ^Pager) -> Error {
+	n := len(p.slots)
 	for pass := 0; pass < 2; pass += 1 {
-		for _ in 0 ..< PAGE_CACHE_SIZE {
-			idx := p.evict_hand % PAGE_CACHE_SIZE
+		for _ in 0 ..< n {
+			idx := int(p.evict_hand) % n
 			slot := &p.slots[idx]
-			p.evict_hand = (p.evict_hand + 1) % PAGE_CACHE_SIZE
+			p.evict_hand = u32((int(p.evict_hand) + 1) % n)
 			if slot.page.page_num == 0 || slot.page.pin_count > 0 {
 				continue
 			}
@@ -124,14 +125,16 @@ open :: proc(
 	if p == nil { return nil, .Out_Of_Memory }
 
 	p.allocator = allocator; p.page_size = types.PAGE_SIZE
-	p.max_cache_pages = min(max_pages, PAGE_CACHE_SIZE)
-	p.cache_index = make(map[u32]^Page_Slot, PAGE_CACHE_SIZE, allocator)
+	p.max_cache_pages = clamp(max(max_pages, 1), 1, PAGE_CACHE_SIZE)
+	p.slots = make([]Page_Slot, p.max_cache_pages, allocator)
+	p.cache_index = make(map[u32]^Page_Slot, p.max_cache_pages, allocator)
 	p.wal_state.page_index = make(map[u32]i64, allocator)
 	p.wal_state.txn_index = make(map[u32]i64, allocator)
-	p.free_slots = make([dynamic]^Page_Slot, 0, PAGE_CACHE_SIZE, allocator)
+	p.free_slots = make([dynamic]^Page_Slot, 0, p.max_cache_pages, allocator)
 	p.row_counts = make(map[u32]int, 64, allocator)
 	p.page_int_ranges = make(map[u32]Page_Int_Range, 64, allocator)
 	p.page_format_version = 1
+	p.slot_count = 0
 	for i in 0 ..< p.max_cache_pages {
 		append(&p.free_slots, &p.slots[i])
 	}
@@ -184,6 +187,7 @@ close :: proc(p: ^Pager) -> Error {
 	delete(p.free_slots)
 	delete(p.row_counts)
 	delete(p.page_int_ranges)
+	delete(p.slots)
 	free(p, p.allocator)
 	return .None
 }

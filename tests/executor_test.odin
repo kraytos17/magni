@@ -1017,3 +1017,246 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 	ok := executor.exec_select(&tree, sel)
 	testing.expect(t, ok, "string-key INNER JOIN should execute")
 }
+
+@(test)
+test_dedup_rows_all_duplicates :: proc(t: ^testing.T) {
+	vals := []types.Value{types.value_int(1), types.value_text("dup"), types.value_real(1.0)}
+	rows := []executor.Row_Entry{{1, vals}, {2, vals}, {3, vals}, {4, vals}, {5, vals}}
+	deduped := executor.dedup_rows(rows)
+	testing.expect_value(t, len(deduped), 1)
+	testing.expect(t, deduped[0].values[1].(string) == "dup", "value preserved")
+}
+
+@(test)
+test_dedup_rows_with_nulls :: proc(t: ^testing.T) {
+	rows := []executor.Row_Entry {
+		{1, {types.value_null(), types.value_text("a")}},
+		{2, {types.value_null(), types.value_text("a")}},
+		{3, {types.value_int(1), types.value_null()}},
+		{4, {types.value_int(1), types.value_null()}},
+		{5, {types.value_null(), types.value_null()}},
+	}
+	deduped := executor.dedup_rows(rows)
+	testing.expect_value(t, len(deduped), 3)
+}
+
+@(test)
+test_exec_join_null_int_keys :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_null_int")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	executor.execute(&tree, make_insert_stmt("t1", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t1", 2, "b", 2.0))
+
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols2, types.Column{name = "ref", type = .INTEGER})
+	append(&cols2, types.Column{name = "val", type = .TEXT})
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Create_Stmt{table_name = "t2", columns = cols2[:]},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "t2",
+				values = {types.value_int(1), types.value_text("match")},
+			},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "t2",
+				values = {types.value_null(), types.value_text("null_key")},
+			},
+			sql = "",
+		},
+	)
+
+	sql := "SELECT t1.id, t2.val FROM t1 INNER JOIN t2 ON t1.id = t2.ref;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "INNER JOIN with NULL key should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	ok := executor.exec_select(&tree, sel)
+	testing.expect(t, ok, "INNER JOIN with NULL key should not crash")
+}
+
+@(test)
+test_exec_join_null_string_keys :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_null_str")
+	defer teardown_executor_env(tree, file)
+
+	cols1 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols1, types.Column{name = "code", type = .TEXT, pk = true})
+	append(&cols1, types.Column{name = "label", type = .TEXT})
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Create_Stmt{table_name = "codes", columns = cols1[:]},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "codes",
+				values = {types.value_text("a"), types.value_text("label_a")},
+			},
+			sql = "",
+		},
+	)
+
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols2, types.Column{name = "ref_code", type = .TEXT})
+	append(&cols2, types.Column{name = "amount", type = .INTEGER})
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Create_Stmt{table_name = "txns", columns = cols2[:]},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "txns",
+				values = {types.value_text("a"), types.value_int(1)},
+			},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "txns",
+				values = {types.value_null(), types.value_int(2)},
+			},
+			sql = "",
+		},
+	)
+
+	sql := "SELECT codes.label, txns.amount FROM codes INNER JOIN txns ON codes.code = txns.ref_code;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "string-key INNER JOIN with NULL key should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	ok := executor.exec_select(&tree, sel)
+	testing.expect(t, ok, "string-key INNER JOIN with NULL key should not crash")
+}
+
+@(test)
+test_exec_left_join_null_keys :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "left_join_null")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	executor.execute(&tree, make_insert_stmt("t1", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t1", 2, "b", 2.0))
+
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols2, types.Column{name = "ref", type = .INTEGER})
+	append(&cols2, types.Column{name = "val", type = .TEXT})
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Create_Stmt{table_name = "t2", columns = cols2[:]},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "t2",
+				values = {types.value_int(1), types.value_text("match")},
+			},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "t2",
+				values = {types.value_null(), types.value_text("null_key")},
+			},
+			sql = "",
+		},
+	)
+
+	sql := "SELECT t1.id, t2.val FROM t1 LEFT JOIN t2 ON t1.id = t2.ref;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "LEFT JOIN with NULL key should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	ok := executor.exec_select(&tree, sel)
+	testing.expect(t, ok, "LEFT JOIN with NULL key should not crash")
+}
+
+@(test)
+test_dedup_rows_stress :: proc(t: ^testing.T) {
+	rows := make([]executor.Row_Entry, 1000, context.temp_allocator)
+	for i in 0 ..< 1000 {
+		val := i64(1) if i < 950 else i64(i)
+		name := "common" if i < 950 else fmt.tprintf("u%d", i)
+		vals := make([]types.Value, 3, context.temp_allocator)
+		vals[0] = types.value_int(val)
+		vals[1] = types.value_text(name)
+		vals[2] = types.value_real(1.0)
+		rows[i] = executor.Row_Entry {
+			rowid  = types.Row_ID(i + 1),
+			values = vals,
+		}
+	}
+	deduped := executor.dedup_rows(rows)
+	testing.expect_value(t, len(deduped), 51)
+}
+
+@(test)
+test_exec_join_no_matches :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_nomatch")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	executor.execute(&tree, make_insert_stmt("t1", 1, "a", 1.0))
+
+	cols2 := make([dynamic]types.Column, context.temp_allocator)
+	append(&cols2, types.Column{name = "ref", type = .INTEGER})
+	append(&cols2, types.Column{name = "val", type = .TEXT})
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Create_Stmt{table_name = "t2", columns = cols2[:]},
+			sql = "",
+		},
+	)
+	executor.execute(
+		&tree,
+		parser.Statement {
+			type = parser.Insert_Stmt {
+				table_name = "t2",
+				values = {types.value_int(99), types.value_text("no_match")},
+			},
+			sql = "",
+		},
+	)
+
+	sql := "SELECT t1.id, t2.val FROM t1 INNER JOIN t2 ON t1.id = t2.ref;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "INNER JOIN no matches should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	ok := executor.exec_select(&tree, sel)
+	testing.expect(t, ok, "INNER JOIN no matches should not crash")
+}
