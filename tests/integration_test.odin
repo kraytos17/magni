@@ -1,6 +1,7 @@
 package tests
 
 import "core:fmt"
+import "core:log"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -14,6 +15,7 @@ import "src:snapshot"
 import "src:types"
 
 setup_db :: proc(t: ^testing.T, name: string) -> ^db.Database {
+	context.logger = log.nil_logger()
 	filename := fmt.tprintf("test_int_%s.db", name)
 	if os.exists(filename) {
 		os.remove(filename)
@@ -43,6 +45,7 @@ teardown_db :: proc(db_handle: ^db.Database, name: string) {
 
 @(test)
 test_integration_basic_create_and_insert :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "basic_crud")
 	defer teardown_db(d, "basic_crud")
 
@@ -58,6 +61,7 @@ test_integration_basic_create_and_insert :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_transaction_and_snapshot_chain :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "txn_snap")
 	defer teardown_db(d, "txn_snap")
 
@@ -72,6 +76,7 @@ test_integration_transaction_and_snapshot_chain :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_select_empty_table :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "empty_sel")
 	defer teardown_db(d, "empty_sel")
 
@@ -84,6 +89,7 @@ test_integration_select_empty_table :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_select_with_data :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "sel_data")
 	defer teardown_db(d, "sel_data")
 
@@ -97,6 +103,7 @@ test_integration_select_with_data :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_time_travel_as_of_snapshot :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "tt")
 	defer teardown_db(d, "tt")
 
@@ -126,6 +133,7 @@ test_integration_time_travel_as_of_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_time_travel_with_where :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "tt_where")
 	defer teardown_db(d, "tt_where")
 
@@ -140,6 +148,7 @@ test_integration_time_travel_with_where :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_time_travel_with_limit :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "tt_limit")
 	defer teardown_db(d, "tt_limit")
 
@@ -154,6 +163,7 @@ test_integration_time_travel_with_limit :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_rollback_restores_schema :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "rollback")
 	defer teardown_db(d, "rollback")
 
@@ -169,6 +179,7 @@ test_integration_rollback_restores_schema :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_cross_session_snapshots :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	name := "cross_session"
 	d := setup_db(t, name)
 	db.execute(d, "CREATE TABLE t (id INT);")
@@ -189,6 +200,7 @@ test_integration_cross_session_snapshots :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_keyword_as_identifier :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "keyword_id")
 	defer teardown_db(d, "keyword_id")
 
@@ -198,6 +210,7 @@ test_integration_keyword_as_identifier :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_prune_old_snapshots :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "prune")
 	defer teardown_db(d, "prune")
 
@@ -217,6 +230,7 @@ test_integration_prune_old_snapshots :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_update :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "update")
 	defer teardown_db(d, "update")
 
@@ -239,6 +253,7 @@ test_integration_update :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_delete :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "delete")
 	defer teardown_db(d, "delete")
 
@@ -257,6 +272,7 @@ test_integration_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "join")
 	defer teardown_db(d, "join")
 
@@ -273,6 +289,7 @@ test_integration_join :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_as_of_timestamp :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "tt_ts")
 	defer teardown_db(d, "tt_ts")
 
@@ -296,6 +313,7 @@ test_integration_as_of_timestamp :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_snapshot_restore :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "restore")
 	defer teardown_db(d, "restore")
 
@@ -314,6 +332,7 @@ test_integration_snapshot_restore :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_limit_pushdown :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "limit_push")
 	defer teardown_db(d, "limit_push")
 
@@ -336,6 +355,7 @@ test_integration_limit_pushdown :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_where_pushdown :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "where_push")
 	defer teardown_db(d, "where_push")
 
@@ -358,6 +378,7 @@ test_integration_where_pushdown :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join_cross :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "join_cross")
 	defer teardown_db(d, "join_cross")
 
@@ -374,6 +395,7 @@ test_integration_join_cross :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join_hash :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "join_hash")
 	defer teardown_db(d, "join_hash")
 
@@ -397,6 +419,7 @@ test_integration_join_hash :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join_asymmetric :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "join_asym")
 	defer teardown_db(d, "join_asym")
 
@@ -421,6 +444,7 @@ test_integration_join_asymmetric :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_select_distinct :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "sel_distinct")
 	defer teardown_db(d, "sel_distinct")
 
@@ -435,6 +459,7 @@ test_integration_select_distinct :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_query_as_of_timestamp :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "query_ts")
 	defer teardown_db(d, "query_ts")
 
@@ -460,6 +485,7 @@ test_integration_query_as_of_timestamp :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_begin_commit_stress :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "txn_stress")
 	defer teardown_db(d, "txn_stress")
 
@@ -474,6 +500,7 @@ test_integration_begin_commit_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_wal_rollback_preserves_data :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "wal_rb")
 	defer teardown_db(d, "wal_rb")
 
@@ -498,6 +525,7 @@ test_integration_wal_rollback_preserves_data :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_snapshot_restore_with_verification :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "restore_verify")
 	defer teardown_db(d, "restore_verify")
 
@@ -523,6 +551,7 @@ test_integration_snapshot_restore_with_verification :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_snapshot_rollforward_roundtrip :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "rollfwd")
 	defer teardown_db(d, "rollfwd")
 
@@ -547,6 +576,7 @@ test_integration_snapshot_rollforward_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_as_of_after_restore :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "asof_restore")
 	defer teardown_db(d, "asof_restore")
 
@@ -562,6 +592,7 @@ test_integration_as_of_after_restore :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_expire_and_reclaim :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "expire")
 	defer teardown_db(d, "expire")
 
@@ -583,6 +614,7 @@ test_integration_expire_and_reclaim :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "ckpt")
 
 	db.execute(d, "CREATE TABLE t (id INT);")
@@ -602,6 +634,7 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_batch_snapshot :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "batch_snap")
 	defer teardown_db(d, "batch_snap")
 
@@ -618,6 +651,7 @@ test_integration_batch_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_rebalance :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "rebal")
 	defer teardown_db(d, "rebal")
 
@@ -646,6 +680,7 @@ test_integration_rebalance :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_skip_index :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "skipidx")
 	defer teardown_db(d, "skipidx")
 
@@ -669,6 +704,7 @@ test_integration_skip_index :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_integration :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	columns := []types.Column{{type = .INTEGER, name = "id"}, {type = .INTEGER, name = "score"}}
 	rowids := []types.Row_ID{10, 20, 30}
 	rows := [][]types.Value {
@@ -738,6 +774,7 @@ test_columnar_integration :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_btree_read :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	// Test cursor and tree_find on columnar pages within a real b-tree
 	ctx := setup_tree(t, "colbtree")
 	defer teardown_tree(&ctx)
@@ -861,6 +898,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_insert_conversion :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	// Test that INSERT on a columnar page triggers columnar→row-major conversion
 	ctx := setup_tree(t, "colinsert")
 	defer teardown_tree(&ctx)
@@ -954,6 +992,7 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_update_conversion :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	// Test that UPDATE on a columnar page triggers columnar→row-major conversion
 	ctx := setup_tree(t, "colupdate")
 	defer teardown_tree(&ctx)
@@ -1033,6 +1072,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_semicolon_in_string :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "semi")
 	defer teardown_db(d, "semi")
 
@@ -1047,6 +1087,7 @@ test_insert_semicolon_in_string :: proc(t: ^testing.T) {
 
 @(test)
 test_split_statements :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "splitmulti")
 	defer teardown_db(d, "splitmulti")
 
@@ -1064,6 +1105,7 @@ test_split_statements :: proc(t: ^testing.T) {
 
 @(test)
 test_block_comment :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "blockcmt")
 	defer teardown_db(d, "blockcmt")
 	// Block comments /* like this */ should be ignored
@@ -1077,6 +1119,7 @@ test_block_comment :: proc(t: ^testing.T) {
 
 @(test)
 test_double_semicolon :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "dblsemi")
 	defer teardown_db(d, "dblsemi")
 	// Double semicolon should not produce a spurious error
@@ -1088,6 +1131,7 @@ test_double_semicolon :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_too_many_columns :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "toomany")
 	defer teardown_db(d, "toomany")
 	db.execute(d, "CREATE TABLE t (id INT, val INT);")
@@ -1107,6 +1151,7 @@ test_insert_too_many_columns :: proc(t: ^testing.T) {
 
 @(test)
 test_negative_limit :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	// Verify that negative LIMIT produces an error message (not just generic failure)
 	_, ok, err_msg := parser.parse("SELECT * FROM t LIMIT -5;", context.temp_allocator)
 	testing.expect(t, !ok, "negative LIMIT rejected")
@@ -1115,6 +1160,7 @@ test_negative_limit :: proc(t: ^testing.T) {
 
 @(test)
 test_negative_offset :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	_, ok, err_msg := parser.parse("SELECT * FROM t LIMIT 5 OFFSET -3;", context.temp_allocator)
 	testing.expect(t, !ok, "negative OFFSET rejected")
 	testing.expect(t, strings.contains(err_msg, "non-negative"), "error mentions non-negative")
@@ -1122,6 +1168,7 @@ test_negative_offset :: proc(t: ^testing.T) {
 
 @(test)
 test_select_readonly_no_snapshot :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	// SELECT under shared lock should not create a snapshot
 	d := setup_db(t, "sel_nosnap")
 	defer teardown_db(d, "sel_nosnap")
@@ -1140,6 +1187,7 @@ test_select_readonly_no_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_multiple_selects :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	// Multiple sequential SELECTs should all work under shared lock
 	d := setup_db(t, "multisel")
 	defer teardown_db(d, "multisel")
@@ -1158,6 +1206,7 @@ test_multiple_selects :: proc(t: ^testing.T) {
 
 @(test)
 test_readonly_admin_commands :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "ro_admin")
 	defer teardown_db(d, "ro_admin")
 
@@ -1175,6 +1224,7 @@ test_readonly_admin_commands :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_creates_snapshot :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "ins_snap")
 	defer teardown_db(d, "ins_snap")
 
@@ -1196,6 +1246,7 @@ test_insert_creates_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_write_after_read :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "w_after_r")
 	defer teardown_db(d, "w_after_r")
 
@@ -1218,6 +1269,7 @@ test_write_after_read :: proc(t: ^testing.T) {
 
 @(test)
 test_in_subquery :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	d := setup_db(t, "insubq")
 	defer teardown_db(d, "insubq")
 

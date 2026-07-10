@@ -1,8 +1,8 @@
 package executor
 
 import "core:encoding/endian"
-import "core:fmt"
 import "core:hash"
+import "core:log"
 import "core:slice"
 import "src:parser"
 import "src:types"
@@ -78,7 +78,7 @@ sort_rows :: proc(
 	for o, i in order_clause {
 		idx, col_ok := resolve_qualified_column(cols, table_ranges, o.column)
 		if !col_ok {
-			fmt.eprintln("Error: Unknown column in ORDER BY:", o.column)
+			log.errorf("Error: Unknown column in ORDER BY: %s", o.column)
 			return false
 		}
 		sort_indices[i] = idx

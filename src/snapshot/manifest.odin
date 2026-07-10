@@ -1,6 +1,6 @@
 package snapshot
 
-import "core:fmt"
+import "core:log"
 import "core:mem"
 import "core:strings"
 import "src:pager"
@@ -37,7 +37,7 @@ create_manifest :: proc(p: ^pager.Pager, tables: []types.Table) -> u32 {
 
 	page, err := pager.allocate_page(p)
 	if err != .None {
-		fmt.eprintln("Snapshot: failed to allocate manifest page")
+		log.error("Snapshot: failed to allocate manifest page")
 		return 0
 	}
 

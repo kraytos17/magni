@@ -2,7 +2,7 @@
 package btree
 
 import "core:encoding/endian"
-import "core:fmt"
+import "core:log"
 import "core:mem"
 import "core:strings"
 import "src:cell"
@@ -694,9 +694,9 @@ foreach_recursive :: proc(
 
 tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 	node, err := load_node(t, page_id)
-	if err != .None { fmt.printf("Error reading page %d\n", page_id); return }
-	fmt.printf(
-		"Page %d (type=%v, cells=%d, off=%d, frag=%d)\n",
+	if err != .None { log.debugf("Error reading page %d", page_id); return }
+	log.debugf(
+		"Page %d (type=%v, cells=%d, off=%d, frag=%d)",
 		page_id,
 		node.header.page_type,
 		node.header.cell_count,
@@ -714,10 +714,10 @@ tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 			cell.Config{allocator = t.config.allocator, zero_copy = false},
 		)
 		if !ok {
-			fmt.printf("  Cell %d: [Error Deserializing]\n", i)
+			log.debugf("  Cell %d: [Error Deserializing]", i)
 			continue
 		}
-		fmt.printf("  Cell %d: ", i); cell.debug_print(c); cell.destroy(&c)
+		log.debugf("  Cell %d: ", i); cell.debug_print(c); cell.destroy(&c)
 	}
 }
 
@@ -745,25 +745,25 @@ verify_recursive :: proc(
 ) -> bool {
 	if page_id == 0 { return false }
 	if page_id in visited {
-		fmt.printf("Cycle detected: page %d revisited\n", page_id)
+		log.debugf("Cycle detected: page %d revisited", page_id)
 		return false
 	}
 	if depth > MAX_TREE_DEPTH {
-		fmt.printf("Tree too deep (depth=%d), possible cycle\n", depth)
+		log.debugf("Tree too deep (depth=%d), possible cycle", depth)
 		return false
 	}
 
 	visited[page_id] = true
 	node, err := load_node(t, page_id)
 	if err != .None {
-		fmt.printf("Failed to load page %d\n", page_id)
+		log.debugf("Failed to load page %d", page_id)
 		return false
 	}
 	defer unpin_node(t, node)
 
 	indent := strings.repeat("  ", depth, context.temp_allocator)
-	fmt.printf(
-		"%sPage %d [%v] count=%d\n",
+	log.debugf(
+		"%sPage %d [%v] count=%d",
 		indent,
 		page_id,
 		node.header.page_type,
@@ -777,11 +777,11 @@ verify_recursive :: proc(
 		for i in 0 ..< cell_count {
 			rowid := get_cell_key(node.data, page_id, i, node.layout)
 			if rowid < prev {
-				fmt.printf("Leaf key disorder: %d came after %d\n", rowid, prev)
+				log.debugf("Leaf key disorder: %d came after %d", rowid, prev)
 				return false
 			}
 			if rowid > max_k {
-				fmt.printf("Leaf key %d > max %d\n", rowid, max_k)
+				log.debugf("Leaf key %d > max %d", rowid, max_k)
 				return false
 			}
 			prev = rowid
@@ -794,13 +794,13 @@ verify_recursive :: proc(
 		ptr := get_cell_ptr(node.data, page_id, i, stride)
 		child, r_ok := endian.get_u32(node.data[int(ptr):], .Big)
 		if !r_ok {
-			fmt.printf("Corrupt interior cell at offset %d\n", int(ptr))
+			log.debugf("Corrupt interior cell at offset %d", int(ptr))
 			return false
 		}
 
 		key := get_cell_key(node.data, page_id, i, node.layout)
 		if key < prev_k || key > max_k {
-			fmt.printf("Interior key %d out of bounds [%d, %d]\n", key, prev_k, max_k)
+			log.debugf("Interior key %d out of bounds [%d, %d]", key, prev_k, max_k)
 			return false
 		}
 		if !verify_recursive(t, child, prev_k, key, depth + 1, visited) { return false }

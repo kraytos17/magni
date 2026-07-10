@@ -2,6 +2,7 @@ package snapshot
 
 import "core:encoding/endian"
 import "core:fmt"
+import "core:log"
 import "core:mem"
 import "core:time"
 import "src:pager"
@@ -104,7 +105,7 @@ create :: proc(
 
 	page, err := pager.allocate_page(p)
 	if err != .None {
-		fmt.eprintln("Snapshot: failed to allocate page")
+		log.error("Snapshot: failed to allocate page")
 		return 0, false
 	}
 	defer pager.unpin_page(p, page.page_num)
@@ -307,7 +308,7 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
 		d := cast(^Debug_Data)data
 		tag := get_tag(d.p, page)
-		fmt.printf(
+		buf := fmt.tprintf(
 			"  Snapshot %-4d  page=%-4d  op=%-6s  state=%-9s  ts=%d",
 			h.snapshot_id,
 			page,
@@ -316,13 +317,13 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 			h.timestamp,
 		)
 
-		if tag != "" { fmt.printf("  tag=%s", tag) }
-		fmt.println()
+		if tag != "" { buf = fmt.tprintf("%s  tag=%s", buf, tag) }
+		log.debug(buf)
 		d.count += 1
 		return true
 	})
-	if d.count == 0 { fmt.println("  (empty)") }
-	fmt.println("======================")
+	if d.count == 0 { log.debug("  (empty)") }
+	log.debug("======================")
 }
 
 print_chain :: proc(p: ^pager.Pager, start_page: u32) {

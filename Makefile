@@ -24,7 +24,7 @@ VET_FLAGS     := -vet -vet-shadowing -warnings-as-errors -strict-style
 
 CHECK_FLAGS   := -warnings-as-errors
 
-.PHONY: all build run release test test-verbose test-single clean rebuild \
+.PHONY: all build run release test test-verbose test-single test-cli test-cli-full clean rebuild \
         check vet vet-shadowing vet-style vet-all vet-cast vet-unused \
         check-vet help
 
@@ -81,8 +81,12 @@ test-cli: build
 	 ./build/magni --file "$$TMP2" "$$TMP" 2>&1 | grep -q "42" && echo "    PASS" || echo "    FAIL"; \
 	 echo "  [test] pipe mode reads SQL from stdin"; \
 	 printf "CREATE TABLE t (x INT);\nINSERT INTO t VALUES (99);\nSELECT * FROM t;\n" | \
-	   ./build/magni "$$TMP"2 2>&1 | grep -q "99" && echo "    PASS" || echo "    FAIL"
+	   ./build/magni "$$TMP2" 2>&1 | grep -q "99" && echo "    PASS" || echo "    FAIL"
 	@echo "CLI tests complete."
+
+test-cli-full: build
+	@echo "Running full CLI integration tests..."
+	@bash tests/cli_test.sh
 
 vet:
 	@echo "Running comprehensive vet (fast check on src)..."
@@ -140,6 +144,8 @@ help:
 	@echo "  TEST"
 	@echo "    test          - run all tests (debug)"
 	@echo "    test-verbose  - run all tests with verbose output"
+	@echo "    test-cli      - run basic CLI sanity checks"
+	@echo "    test-cli-full - run comprehensive CLI integration tests"
 	@echo ""
 	@echo "  VET (comprehensive checks)"
 	@echo "    vet           - vet + shadowing + strict-style (fast check)"

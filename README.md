@@ -87,6 +87,7 @@ SELECT * FROM t1 CROSS JOIN t2;
 
 -- Subqueries
 SELECT * FROM (SELECT * FROM t WHERE x > 1) AS sub;
+SELECT * FROM t WHERE x IN (SELECT y FROM t2);
 
 -- EXPLAIN
 EXPLAIN SELECT * FROM users WHERE id = 1;
@@ -118,8 +119,8 @@ ROLLBACK;
 
 | Area | Capabilities |
 |---|---|
-| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (AND/OR/LIKE/IN), JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions |
-| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. |
+| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (AND/OR/LIKE/IN/subquery), JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
+| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **B-tree rebalancing** — auto-merges sparse adjacent leaves. **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
@@ -148,7 +149,7 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `.stats` | Database statistics |
 | `.integrity` | Verify all B-trees |
 | `.checkpoint` | Flush pages + garbage collect |
-| `.expire [keep]` | Expire old snapshots (default 100) and garbage collect |
+| `.expire [keep]` | Expire old snapshots (default 20) and garbage collect |
 | `.snapshots` | Show snapshot chain |
 | `.snapdiff <a> <b>` | Diff two snapshots |
 | `.snapshot tag <id> <label>` | Tag a snapshot |
@@ -209,16 +210,21 @@ echo "SELECT * FROM t;" | ./build/magni mydb.db
 ```
 src/
 ├── main.odin              CLI entry, REPL, dot-commands
-├── btree/                 COW B+tree storage engine
-├── cell/                  Row serialization (SQLite-compatible varint)
-├── db/                    Database handle, execute, admin, snapshots, transactions
-├── executor/              Statement dispatch, SELECT/JOIN/aggregates, WHERE, DML, sort
-├── linedit/               Raw-mode line editor (REPL input)
-├── parser/                Lexer, recursive-descent parser, AST
-├── pager/                 Slab page cache, WAL, freelist
-├── schema/                Table metadata (schema B-tree)
-├── snapshot/              Snapshot chain, manifests, GC, refs, expire
-└── types/                 Core types: Value, Column, Table, SerialType
+├── btree/                 COW B+tree: tree ops, cursor, split/merge, rebalance,
+│                          skip index, page format registry (v1/v2), columnar
+│                          conversion, COW helpers
+├── cell/                  Row/cell serialization: SQLite varint, columnar encoding
+├── db/                    Database handle: open/close, execute, admin, snapshots,
+│                          transactions, programmatic Query_Result API
+├── executor/              Statement dispatch, SELECT/JOIN/aggregates, WHERE/DML,
+│                          sort, display formatting, utility types
+├── linedit/               Raw-mode line editor (main + term/keys/buffer/render/
+│                          history/stub_windows)
+├── parser/                Lexer, recursive-descent parser, AST, free helpers
+├── pager/                 Slab page cache, WAL, freelist, page bitmap, int range
+├── schema/                Table metadata: schema B-tree, column blob serialization
+├── snapshot/              Snapshot chain, manifests, GC, refs, expire, rollforward
+└── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
 └── * _test.odin           292 tests across all packages
 ```
@@ -241,9 +247,10 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 
 ## Limitations
 
-- No secondary indexes (only the primary-key B-tree)
+- No user-managed secondary indexes (only the implicit primary-key B-tree and auto-built skip indexes exist)
 - No `UNION`, `INTERSECT`, `EXCEPT`
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
-- `CHECK` expression limited to simple integer comparisons (col > 0, col < 100)
+- `CHECK` expression limited to simple integer comparisons (col > 0, col < 100, >=, <=, =, !=)
+- Max 10 columns per table
 - REPL line editor: SQL keyword and table/column name completion only (no in-expression or JOIN completion)

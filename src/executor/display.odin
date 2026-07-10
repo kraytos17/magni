@@ -1,6 +1,7 @@
 package executor
 
 import "core:fmt"
+import "core:log"
 import "core:strings"
 import "src:parser"
 import "src:schema"
@@ -70,7 +71,7 @@ build_display_indices :: proc(
 		for req_col in columns {
 			idx, ok := resolve_qualified_column(cols, table_ranges, req_col)
 			if !ok {
-				fmt.eprintln("Error: Unknown column:", req_col)
+				log.errorf("Error: Unknown column: %s", req_col)
 				return nil, false
 			}
 			append(&indices, idx)

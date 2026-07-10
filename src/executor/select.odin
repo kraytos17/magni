@@ -1,6 +1,7 @@
 package executor
 
 import "core:fmt"
+import "core:log"
 import "core:strings"
 import "src:btree"
 import "src:cell"
@@ -22,7 +23,7 @@ exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry,
 
 	table, found := schema.get_table(t, tbl_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Subquery table not found:", tbl_name)
+		log.errorf("Error: Subquery table not found: %s", tbl_name)
 		return nil, nil
 	}
 	defer schema.table_free(table, context.temp_allocator)
@@ -89,7 +90,10 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	col_count_0 := 0
 	if tbl_name, is_table := stmt.from.(string); is_table {
 		info, found = schema.get_table(t, tbl_name, context.temp_allocator)
-		if !found { fmt.eprintln("Error: Table not found:", tbl_name); return false }
+		if !found {
+			log.errorf("Error: Table not found: %s", tbl_name)
+			return false
+		}
 
 		table_ctxs[0] = Table_Context {
 			info = {table = info, tree = btree.init(t.pager, info.root_page)},
@@ -122,7 +126,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		if jt_name, is_table := join.source.(string); is_table {
 			info, found = schema.get_table(t, jt_name, context.temp_allocator)
 			if !found {
-				fmt.eprintln("Error: Table not found:", jt_name)
+				log.errorf("Error: Table not found: %s", jt_name)
 				return false
 			}
 
@@ -587,7 +591,7 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	if !name_ok { return false }
 
 	table, found := schema.get_table(t, tbl_name, context.temp_allocator)
-	if !found { fmt.eprintln("Error: Table not found:", tbl_name); return false }
+	if !found { log.errorf("Error: Table not found: %s", tbl_name); return false }
 	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
@@ -605,7 +609,7 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	   stmt.offset == nil {
 		count, count_err := btree.tree_count_rows(&table_tree)
 		if count_err != .None {
-			fmt.eprintln("Error: Failed to count rows")
+			log.error("Error: Failed to count rows")
 			return false
 		}
 
@@ -669,7 +673,7 @@ exec_select_single_data :: proc(
 
 	table, found := schema.get_table(t, tbl_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", tbl_name)
+		log.errorf("Error: Table not found: %s", tbl_name)
 		return nil, nil, false
 	}
 	defer schema.table_free(table, context.temp_allocator)
@@ -746,7 +750,7 @@ exec_select_aggregate_combined :: proc(
 	for col, i in stmt.group_by {
 		idx, col_ok := resolve_qualified_column(combined_cols, table_ranges, col)
 		if !col_ok {
-			fmt.eprintln("Error: Unknown column in GROUP BY:", col)
+			log.errorf("Error: Unknown column in GROUP BY: %s", col)
 			return false
 		}
 		group_by_indices[i] = idx

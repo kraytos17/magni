@@ -1,7 +1,7 @@
 package executor
 
-import "core:fmt"
 import "core:hash"
+import "core:log"
 import "core:strconv"
 import "core:strings"
 import "src:parser"
@@ -153,13 +153,13 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 		if chk, has_chk := col.check_expr.?; has_chk {
 			parts := strings.split(chk, " ", context.temp_allocator)
 			if len(parts) < 3 {
-				fmt.eprintln("Error: CHECK constraint too complex:", chk)
+				log.errorf("Error: CHECK constraint too complex: %s", chk)
 				return false
 			}
 
 			col_idx, col_ok := resolve_qualified_column(table.columns, nil, parts[0])
 			if !col_ok {
-				fmt.eprintln("Error: CHECK references unknown column:", parts[0])
+				log.errorf("Error: CHECK references unknown column: %s", parts[0])
 				return false
 			}
 
@@ -167,13 +167,13 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 			op_token := parts[1]
 			val_num, parse_num := strconv.parse_i64(parts[2])
 			if !parse_num {
-				fmt.eprintln("Error: CHECK constraint non-integer comparison:", chk)
+				log.errorf("Error: CHECK constraint non-integer comparison: %s", chk)
 				return false
 			}
 
 			left_i64, is_int := left_val.(i64)
 			if !is_int {
-				fmt.eprintln("Error: CHECK column value is not an integer:", chk)
+				log.errorf("Error: CHECK column value is not an integer: %s", chk)
 				return false
 			}
 
@@ -191,11 +191,11 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 			} else if op_token == "!=" || op_token == "<>" {
 				result = left_i64 != val_num
 			} else {
-				fmt.eprintln("Error: CHECK uses unsupported operator:", op_token)
+				log.errorf("CHECK uses unsupported operator: %s", op_token)
 				return false
 			}
 			if !result {
-				fmt.eprintln("Error: CHECK constraint violation:", chk)
+				log.errorf("CHECK constraint violation: %s", chk)
 				return false
 			}
 		}

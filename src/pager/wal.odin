@@ -2,6 +2,7 @@ package pager
 
 import "core:fmt"
 import "core:hash"
+import "core:log"
 import "core:mem"
 import "core:os"
 import "core:strings"
@@ -59,7 +60,7 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	ws.wal_path = strings.clone(wal_path, p.allocator)
 	wal_file, open_err := os.open(wal_path, {.Read, .Write, .Create})
 	if open_err != nil {
-		fmt.eprintln("WAL: failed to open WAL file:", open_err)
+		log.errorf("WAL: failed to open WAL file: %v", open_err)
 		return .File_Open_Failed
 	}
 
@@ -136,7 +137,7 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 	commit_buf: [types.PAGE_SIZE]u8
 	wal_append_frame(p, 0, commit_buf[:], true, 0) or_return
 	if sync_err := os.sync(ws.file); sync_err != nil {
-		fmt.eprintln("WAL: fsync failed:", sync_err)
+		log.errorf("WAL: fsync failed: %v", sync_err)
 		return .IO_Error
 	}
 	// Merge uncommitted frame locations into the committed index.
@@ -294,7 +295,7 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 	os.truncate(ws.file, types.WAL_HEADER_SIZE)
 	os.sync(ws.file)
 	ws.write_offset = i64(types.WAL_HEADER_SIZE)
-	fmt.println("WAL: checkpoint complete,", frame_count, "frames written to main file")
+	log.infof("WAL: checkpoint complete, %d frames written to main file", frame_count)
 	return .None
 }
 
@@ -346,7 +347,7 @@ wal_recover :: proc(p: ^Pager) -> Error {
 			cs2 := fh.checksum2
 			fhv := wal_frame_hash(&fh, page_buf[:])
 			if u32(fhv) != u32(cs1) || u32(fhv >> 32) != u32(cs2) {
-				fmt.eprintln("WAL: checksum mismatch at offset", offset)
+				log.warnf("WAL: checksum mismatch at offset %d", offset)
 				break
 			}
 		}
@@ -373,6 +374,6 @@ wal_recover :: proc(p: ^Pager) -> Error {
 
 	new_len := i64(max_page_num) * i64(types.PAGE_SIZE)
 	if new_len > p.file_len { p.file_len = new_len }
-	fmt.println("WAL: recovery complete,", len(valid_frames), "frames replayed")
+	log.infof("WAL: recovery complete, %d frames replayed", len(valid_frames))
 	return .None
 }

@@ -1,7 +1,7 @@
 // Package pager provides page-level I/O, caching, WAL, freelist, and page bitmap tracking.
 package pager
 
-import "core:fmt"
+import "core:log"
 import "core:mem"
 import "core:os"
 import "core:strings"
@@ -163,7 +163,7 @@ open :: proc(
 		for i := 0; i < bitmap_len; i += 1 { p.page_bitmap[i] = ~u64(0) }
 	}
 	if err := wal_open(p, path); err != .None {
-		fmt.eprintln("Pager: WAL open failed:", err)
+		log.errorf("Pager: WAL open failed: %v", err)
 		os.close(file)
 		free(p)
 		return nil, err

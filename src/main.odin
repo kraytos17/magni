@@ -3,6 +3,7 @@ package main
 import "core:bufio"
 import "core:flags"
 import "core:fmt"
+import "core:log"
 import "core:mem"
 import "core:os"
 import "core:strconv"
@@ -22,8 +23,10 @@ CLI :: struct {
 	database:      string `args:"pos=0,usage=Database file path (default: test.db)"`,
 	file:          string `args:"name=file,usage=Execute SQL from file and exit"`,
 	eval:          string `args:"name=eval,usage=Execute a single SQL statement and exit"`,
-	stop_on_error: bool `args:"name=stop-on-error,usage=Exit on first SQL error in script mode"`,
-	version:       bool `args:"name=version,usage=Print version and exit"`,
+	stop_on_error: bool   `args:"name=stop-on-error,usage=Exit on first SQL error in script mode"`,
+	version:       bool   `args:"name=version,usage=Print version and exit"`,
+	log_level:     string `args:"name=log-level,usage=Log level: debug, info, warn, error (default: info)"`,
+	verbose:       bool   `args:"name=verbose,usage=Enable debug-level logging"`,
 }
 
 main :: proc() {
@@ -45,13 +48,14 @@ main :: proc() {
 		return
 	}
 
+	log_level := resolve_log_level(cli.verbose, cli.log_level)
+	Logger_Opts :: log.Options{.Level, .Terminal_Color}
+	context.logger = log.create_console_logger(log_level, Logger_Opts)
+	defer log.destroy_console_logger(context.logger)
+
 	database, open_err := db.open(cli.database)
 	if open_err != .None {
-		fmt.eprintf(
-			"Fatal: Could not open database '%s': %s\n",
-			cli.database,
-			db.db_error_string(open_err),
-		)
+		log.fatalf("Could not open database '%s': %s", cli.database, db.db_error_string(open_err))
 		os.exit(1)
 	}
 	defer db.close(database)
@@ -63,10 +67,37 @@ main :: proc() {
 		execute_sql(database, cli.eval, stop_on_error)
 	} else if os.is_tty(os.stdin) {
 		fmt.printf("MagniDB v%s\nEnter .help for usage hints.\n", APP_VERSION)
+		context.logger.lowest_level = .Error
 		repl(database)
 	} else {
 		execute_script_stream(database, stop_on_error)
 	}
+}
+
+resolve_log_level :: proc(verbose: bool, level_str: string) -> log.Level {
+	if verbose {
+		return .Debug
+	}
+	if len(level_str) > 0 {
+		switch strings.to_lower(level_str) {
+		case "debug": return .Debug
+		case "info":  return .Info
+		case "warn", "warning": return .Warning
+		case "error": return .Error
+		}
+	}
+
+	env_buf: [256]u8
+	env := os.get_env(env_buf[:], "MAGNI_LOG_LEVEL")
+	if len(env) > 0 {
+		switch env {
+		case "DEBUG": return .Debug
+		case "INFO":  return .Info
+		case "WARN", "WARNING": return .Warning
+		case "ERROR": return .Error
+		}
+	}
+	return .Info
 }
 
 repl :: proc(database: ^db.Database) {
@@ -141,7 +172,7 @@ repl :: proc(database: ^db.Database) {
 			full_sql := strings.to_string(query_buffer)
 			linedit.history_add(&ed.history, strings.trim_space(full_sql))
 			if exec_err := db.execute(database, full_sql); exec_err != .None {
-				fmt.eprintln("Error:", db.db_error_string(exec_err))
+				log.errorf("%s", db.db_error_string(exec_err))
 			}
 			strings.builder_reset(&query_buffer)
 		}
@@ -169,7 +200,7 @@ repl_fallback :: proc(database: ^db.Database) {
 				fmt.println()
 				break
 			}
-			fmt.eprintln("Error reading input:", err)
+			log.errorf("Error reading input: %v", err)
 			break
 		}
 
@@ -184,7 +215,7 @@ repl_fallback :: proc(database: ^db.Database) {
 		if strings.has_suffix(trimmed, ";") {
 			full_sql := strings.to_string(query_buffer)
 			if exec_err := db.execute(database, full_sql); exec_err != .None {
-				fmt.eprintln("Error:", db.db_error_string(exec_err))
+				log.errorf("%s", db.db_error_string(exec_err))
 			}
 			strings.builder_reset(&query_buffer)
 		}
@@ -239,7 +270,7 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			newer, newer_ok := strconv.parse_u64(parts[2])
 			if older_ok && newer_ok {
 				if err := db.snapshot_diff(database, older, newer); err != .None {
-					fmt.eprintln("Error:", db.db_error_string(err))
+					log.errorf("%s", db.db_error_string(err))
 				}
 			} else {
 				fmt.println("Usage: .snapdiff <older_id> <newer_id>")
@@ -249,13 +280,13 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 		}
 	case ".checkpoint":
 		if err := db.checkpoint(database); err != .None {
-			fmt.eprintln("Error:", db.db_error_string(err))
+			log.errorf("%s", db.db_error_string(err))
 		} else {
 			fmt.println("Database flushed to disk.")
 		}
 	case ".integrity":
 		if err := db.integrity_check(database); err != .None {
-			fmt.eprintln("Error:", db.db_error_string(err))
+			log.errorf("%s", db.db_error_string(err))
 		} else {
 			fmt.println("OK")
 		}
@@ -267,7 +298,7 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 				if id_ok && len(parts) >= 4 {
 					tag := strings.join(parts[3:], " ", context.temp_allocator)
 					if err := db.snapshot_tag(database, id, tag); err != .None {
-						fmt.eprintln("Error:", db.db_error_string(err))
+						log.errorf("%s", db.db_error_string(err))
 					} else {
 						fmt.printf("Tagged snapshot %d as '%s'\n", id, tag)
 					}
@@ -283,7 +314,7 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 				id, id_ok := strconv.parse_u64(parts[2])
 				if id_ok {
 					if err := db.snapshot_restore(database, id); err != .None {
-						fmt.eprintln("Error:", db.db_error_string(err))
+						log.errorf("%s", db.db_error_string(err))
 					}
 				} else {
 					fmt.println("Usage: .snapshot restore <id>")
@@ -300,7 +331,7 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			db.expire_snapshots(database, keep)
 		} else if trimmed == ".rollforward" {
 			if err := db.rollforward(database); err != .None {
-				fmt.eprintln("Error:", db.db_error_string(err))
+				log.errorf("%s", db.db_error_string(err))
 			}
 		} else if strings.has_prefix(trimmed, ".dump ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
@@ -313,13 +344,13 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
 				if err := db.describe_table(database, parts[1]); err != .None {
-					fmt.eprintln("Error:", db.db_error_string(err))
+					log.errorf("%s", db.db_error_string(err))
 				}
 			} else {
 				fmt.println("Usage: .desc <table_name>")
 			}
 		} else {
-			fmt.printf("Error: Unknown command '%s'. Try .help\n", trimmed)
+			log.errorf("Unknown command '%s'. Try .help", trimmed)
 		}
 	}
 	return false
@@ -328,7 +359,7 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error: bool = false) {
 	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
 	if err != nil {
-		fmt.eprintf("Error: Could not read file '%s'\n", path)
+		log.errorf("Could not read file '%s'", path)
 		return
 	}
 	execute_sql(database, string(data), stop_on_error)
@@ -337,7 +368,7 @@ execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error:
 execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = false) {
 	data, err := os.read_entire_file_from_file(os.stdin, context.temp_allocator)
 	if err != nil {
-		fmt.eprintf("Error: Could not read from stdin\n")
+		log.errorf("Could not read from stdin")
 		return
 	}
 	execute_sql(database, string(data), stop_on_error)
@@ -351,7 +382,7 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 		if len(trimmed) <= 1 { continue }
 		exec_err := db.execute(database, trimmed)
 		if exec_err != .None && stop_on_error {
-			fmt.eprintf("Error: %s\n", trimmed[:min(len(trimmed), 80)])
+			log.errorf("%s", trimmed[:min(len(trimmed), 80)])
 			os.exit(1)
 		}
 	}
@@ -426,6 +457,8 @@ print_help :: proc() {
 	fmt.println("Flags:")
 	fmt.println("  --version                 Print version and exit")
 	fmt.println("  --stop-on-error           Exit on first SQL error in script mode")
+	fmt.println("  --verbose / -v            Enable debug-level logging")
+	fmt.println("  --log-level <level>       Set log level: debug, info, warn, error")
 	fmt.println()
 	fmt.println("See README.md or ARCH.md for SQL reference.")
 }

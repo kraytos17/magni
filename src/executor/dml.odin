@@ -1,6 +1,6 @@
 package executor
 
-import "core:fmt"
+import "core:log"
 import "src:btree"
 import "src:cell"
 import "src:pager"
@@ -18,11 +18,11 @@ exec_create :: proc(
 	Mutated_Table_Info,
 ) {
 	if ok, msg := schema.validate_columns(stmt.columns); !ok {
-		fmt.eprintln("Schema Error:", msg)
+		log.errorf("Schema Error: %s", msg)
 		return false, t.root, {}
 	}
 	if schema.table_exists(t, stmt.table_name) {
-		fmt.eprintln("Error: Table already exists:", stmt.table_name)
+		log.errorf("Error: Table already exists: %s", stmt.table_name)
 		return false, t.root, {}
 	}
 
@@ -33,7 +33,7 @@ exec_create :: proc(
 		root_page, err = pager.allocate_page(t.pager)
 	}
 	if err != .None {
-		fmt.eprintln("Error: Failed to allocate table root page")
+		log.error("Error: Failed to allocate table root page")
 		return false, t.root, {}
 	}
 	defer pager.unpin_page(t.pager, root_page.page_num)
@@ -42,8 +42,8 @@ exec_create :: proc(
 	pager.mark_dirty(t.pager, root_page.page_num)
 	for fk in stmt.foreign_keys {
 		if !schema.table_exists(t, fk.ref_table) {
-			fmt.eprintf(
-				"Error: Referenced table '%s' does not exist (FOREIGN KEY on '%s')\n",
+			log.errorf(
+				"Error: Referenced table '%s' does not exist (FOREIGN KEY on '%s')",
 				fk.ref_table,
 				fk.col,
 			)
@@ -53,18 +53,18 @@ exec_create :: proc(
 
 	new_root, ok := schema.add_table_cow(t, stmt.table_name, stmt.columns, root_page.page_num, sql)
 	if !ok {
-		fmt.eprintln("Error: Failed to register table in schema")
+		log.error("Error: Failed to register table in schema")
 		return false, t.root, {}
 	}
 
-	fmt.printf("Created table '%s' at Page %d\n", stmt.table_name, root_page.page_num)
+	log.infof("Created table '%s' at Page %d", stmt.table_name, root_page.page_num)
 	return true, new_root, Mutated_Table_Info{name = stmt.table_name, root = root_page.page_num}
 }
 
 exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false
 	}
 	defer schema.table_free(table, context.temp_allocator)
@@ -72,11 +72,11 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	values := stmt.values
 	if len(stmt.columns) > 0 {
 		if len(stmt.columns) != len(stmt.values) {
-			fmt.eprintln("Error: Column list length does not match value count")
+			log.error("Error: Column list length does not match value count")
 			return false
 		}
 		if len(stmt.columns) > len(table.columns) {
-			fmt.eprintfln(
+			log.errorf(
 				"Error: Too many columns in INSERT. Expected at most %d, got %d",
 				len(table.columns),
 				len(stmt.columns),
@@ -96,7 +96,7 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 		for col_name, i in stmt.columns {
 			idx, ok := schema.find_column_index(table.columns, col_name)
 			if !ok {
-				fmt.eprintln("Error: Unknown column:", col_name)
+				log.errorf("Error: Unknown column: %s", col_name)
 				return false
 			}
 			reordered[idx] = stmt.values[i]
@@ -104,7 +104,7 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 		values = reordered
 	}
 	if len(values) != len(table.columns) {
-		fmt.eprintfln(
+		log.errorf(
 			"Error: Column count mismatch. Expected %d, got %d",
 			len(table.columns),
 			len(values),
@@ -112,7 +112,7 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 		return false
 	}
 	if !cell.validate(values, table.columns) {
-		fmt.eprintln("Error: Data type validation failed")
+		log.error("Error: Data type validation failed")
 		return false
 	}
 	if !check_constraints(values, table) { return false }
@@ -138,31 +138,31 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 
 	err := btree.tree_insert(&table_tree, next_rowid, values)
 	if err != .None {
-		fmt.eprintln("Error inserting row:", err)
+		log.errorf("Error inserting row: %v", err)
 		return false
 	}
-	fmt.println("Inserted row", next_rowid)
+	log.infof("Inserted row %d", next_rowid)
 	return true
 }
 
 exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false
 	}
 	defer schema.table_free(table, context.temp_allocator)
 
 	update_map := make(map[int]types.Value, context.temp_allocator)
 	if len(stmt.update_columns) != len(stmt.update_values) {
-		fmt.eprintln("Error: Column/Value count mismatch in UPDATE")
+		log.error("Error: Column/Value count mismatch in UPDATE")
 		return false
 	}
 	for i in 0 ..< len(stmt.update_columns) {
 		col_name := stmt.update_columns[i]
 		idx, ok := schema.find_column_index(table.columns, col_name)
 		if !ok {
-			fmt.eprintln("Error: Unknown column:", col_name)
+			log.errorf("Error: Unknown column: %s", col_name)
 			return false
 		}
 		update_map[idx] = stmt.update_values[i]
@@ -180,16 +180,16 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 					new_row[idx] = val
 				}
 				if !cell.validate(new_row, table.columns) {
-					fmt.eprintln("Error: UPDATE violates column constraints")
+					log.error("Error: UPDATE violates column constraints")
 					return false
 				} else if values_equal(c.values, new_row) {
-					fmt.printf("Updated 0 rows.\n")
+					log.info("Updated 0 rows.")
 				} else {
 					btree.tree_update(&table_tree, target_rowid, new_row)
-					fmt.printf("Updated 1 row.\n")
+					log.info("Updated 1 row.")
 				}
 			} else {
-				fmt.printf("Updated 0 rows.\n")
+				log.info("Updated 0 rows.")
 			}
 			return true
 		}
@@ -216,8 +216,8 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 				new_row[idx] = val
 			}
 			if !cell.validate(new_row, table.columns) {
-				fmt.eprintln(
-					"Warning: Skipping UPDATE row",
+				log.warn(
+					"Skipping UPDATE row",
 					c.rowid,
 					"— violates column constraints",
 				)
@@ -234,14 +234,14 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 			count += 1
 		}
 	}
-	fmt.printf("Updated %d rows.\n", count)
+	log.infof("Updated %d rows.", count)
 	return true
 }
 
 exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false
 	}
 	defer schema.table_free(table, context.temp_allocator)
@@ -251,9 +251,9 @@ exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 	if where_cl, has_where := stmt.where_clause.?; has_where {
 		if target_rowid, pk_ok := try_pk_lookup(table, where_cl); pk_ok {
 			if btree.tree_delete(&table_tree, target_rowid) == .None {
-				fmt.printf("Deleted 1 row.\n")
+				log.info("Deleted 1 row.")
 			} else {
-				fmt.printf("Deleted 0 rows.\n")
+				log.info("Deleted 0 rows.")
 			}
 			return true
 		}
@@ -286,19 +286,19 @@ exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 			count += 1
 		}
 	}
-	fmt.printf("Deleted %d rows.\n", count)
+	log.infof("Deleted %d rows.", count)
 	return true
 }
 
 exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated_Table_Info) {
 	if !schema.table_exists(t, stmt.table_name) {
-		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
 
 	new_root, ok := schema.drop_table_cow(t, stmt.table_name)
 	if ok {
-		fmt.println("Dropped table:", stmt.table_name)
+		log.infof("Dropped table: %s", stmt.table_name)
 		return true, new_root, Mutated_Table_Info{name = stmt.table_name, root = 0}
 	}
 	return false, t.root, {}
@@ -314,7 +314,7 @@ exec_insert_cow :: proc(
 ) {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
 	defer schema.table_free(table, context.temp_allocator)
@@ -322,11 +322,11 @@ exec_insert_cow :: proc(
 	values := stmt.values
 	if len(stmt.columns) > 0 {
 		if len(stmt.columns) != len(stmt.values) {
-			fmt.eprintln("Error: Column list length does not match value count")
+			log.error("Error: Column list length does not match value count")
 			return false, t.root, {}
 		}
 		if len(stmt.columns) > len(table.columns) {
-			fmt.eprintfln(
+			log.errorf(
 				"Error: Too many columns in INSERT. Expected at most %d, got %d",
 				len(table.columns),
 				len(stmt.columns),
@@ -346,7 +346,7 @@ exec_insert_cow :: proc(
 		for col_name, i in stmt.columns {
 			idx, col_ok := schema.find_column_index(table.columns, col_name)
 			if !col_ok {
-				fmt.eprintln("Error: Unknown column:", col_name)
+				log.errorf("Error: Unknown column: %s", col_name)
 				return false, t.root, {}
 			}
 			reordered[idx] = stmt.values[i]
@@ -354,7 +354,7 @@ exec_insert_cow :: proc(
 		values = reordered
 	}
 	if len(values) != len(table.columns) {
-		fmt.eprintfln(
+		log.errorf(
 			"Error: Column count mismatch. Expected %d, got %d",
 			len(table.columns),
 			len(values),
@@ -362,7 +362,7 @@ exec_insert_cow :: proc(
 		return false, t.root, {}
 	}
 	if !cell.validate(values, table.columns) {
-		fmt.eprintln("Error: Data type validation failed")
+		log.error("Error: Data type validation failed")
 		return false, t.root, {}
 	}
 
@@ -384,17 +384,17 @@ exec_insert_cow :: proc(
 
 	new_data_root, ins_err := btree.tree_insert_cow(&table_tree, next_rowid, values)
 	if ins_err != .None {
-		fmt.eprintln("Error inserting row:", ins_err)
+		log.errorf("Error inserting row: %v", ins_err)
 		return false, t.root, {}
 	}
 
 	new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, new_data_root)
 	if !ok {
-		fmt.eprintln("Error: Failed to update schema root page")
+		log.error("Error: Failed to update schema root page")
 		return false, t.root, {}
 	}
 
-	fmt.println("Inserted row", next_rowid)
+	log.infof("Inserted row %d", next_rowid)
 	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = new_data_root}
 }
 
@@ -408,21 +408,21 @@ exec_update_cow :: proc(
 ) {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
 	defer schema.table_free(table, context.temp_allocator)
 
 	update_map := make(map[int]types.Value, context.temp_allocator)
 	if len(stmt.update_columns) != len(stmt.update_values) {
-		fmt.eprintln("Error: Column/Value count mismatch in UPDATE")
+		log.error("Error: Column/Value count mismatch in UPDATE")
 		return false, t.root, {}
 	}
 	for i in 0 ..< len(stmt.update_columns) {
 		col_name := stmt.update_columns[i]
 		idx, col_ok := schema.find_column_index(table.columns, col_name)
 		if !col_ok {
-			fmt.eprintln("Error: Unknown column:", col_name)
+			log.errorf("Error: Unknown column: %s", col_name)
 			return false, t.root, {}
 		}
 		update_map[idx] = stmt.update_values[i]
@@ -439,30 +439,30 @@ exec_update_cow :: proc(
 					new_row[idx] = val
 				}
 				if !cell.validate(new_row, table.columns) {
-					fmt.eprintln("Error: UPDATE violates column constraints")
+					log.error("Error: UPDATE violates column constraints")
 					return false, t.root, {}
 				}
 				if values_equal(c.values, new_row) {
-					fmt.printf("Updated 0 rows.\n")
+					log.info("Updated 0 rows.")
 					return true, t.root, {}
 				}
 
 				nroot, upd_err := btree.tree_update_cow(&table_tree, target_rowid, new_row)
 				if upd_err != .None {
-					fmt.eprintln("Error: Failed to update row")
+					log.error("Error: Failed to update row")
 					return false, t.root, {}
 				}
 
 				new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, nroot)
 				if !ok { return false, t.root, {} }
 
-				fmt.printf("Updated 1 row.\n")
+				log.info("Updated 1 row.")
 				return true, new_schema_root, Mutated_Table_Info {
 					name = stmt.table_name,
 					root = nroot,
 				}
 			}
-			fmt.printf("Updated 0 rows.\n")
+			log.info("Updated 0 rows.")
 			return true, t.root, {}
 		}
 	}
@@ -505,13 +505,13 @@ exec_update_cow :: proc(
 		new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, current_root)
 		if !ok { return false, t.root, {} }
 
-		fmt.printf("Updated %d rows.\n", count)
+		log.infof("Updated %d rows.", count)
 		return true, new_schema_root, Mutated_Table_Info {
 			name = stmt.table_name,
 			root = current_root,
 		}
 	}
-	fmt.printf("Updated 0 rows.\n")
+	log.info("Updated 0 rows.")
 	return true, t.root, {}
 }
 
@@ -525,7 +525,7 @@ exec_delete_cow :: proc(
 ) {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
-		fmt.eprintln("Error: Table not found:", stmt.table_name)
+		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
 	defer schema.table_free(table, context.temp_allocator)
@@ -537,13 +537,13 @@ exec_delete_cow :: proc(
 			if del_err == .None {
 				new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, nroot)
 				if !ok { return false, t.root, {} }
-				fmt.printf("Deleted 1 row.\n")
+				log.info("Deleted 1 row.")
 				return true, new_schema_root, Mutated_Table_Info {
 					name = stmt.table_name,
 					root = nroot,
 				}
 			}
-			fmt.printf("Deleted 0 rows.\n")
+			log.info("Deleted 0 rows.")
 			return true, t.root, {}
 		}
 	}
@@ -580,12 +580,12 @@ exec_delete_cow :: proc(
 		new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, current_root)
 		if !ok { return false, t.root, {} }
 
-		fmt.printf("Deleted %d rows.\n", count)
+		log.infof("Deleted %d rows.", count)
 		return true, new_schema_root, Mutated_Table_Info {
 			name = stmt.table_name,
 			root = current_root,
 		}
 	}
-	fmt.printf("Deleted 0 rows.\n")
+	log.info("Deleted 0 rows.")
 	return true, t.root, {}
 }

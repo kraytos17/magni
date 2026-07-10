@@ -1,7 +1,7 @@
 package db
 
 import "core:encoding/endian"
-import "core:fmt"
+import "core:log"
 import "core:strings"
 import "core:sync"
 import "src:btree"
@@ -134,7 +134,7 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 	db.txn_snapshot_id = 0
 	db.snapshot_index = make(map[u64]u32, 128)
 	if db.is_new {
-		fmt.println("Initializing new database...")
+		log.info("Initializing new database...")
 		if init_err := initialize(db); init_err != .None {
 			close(db)
 			return nil, init_err
@@ -236,7 +236,7 @@ close :: proc(db: ^Database) {
 	update_header(db)
 	if db.pager != nil {
 		if err := pager.close(db.pager); err != .None {
-			fmt.eprintln("Warning: error closing database:", err)
+			log.warnf("error closing database: %v", err)
 		}
 	}
 	delete(db.snapshot_index); delete(db.path); free(db)

@@ -1,6 +1,7 @@
 package db
 
 import "core:fmt"
+import "core:log"
 import "core:sync"
 import "src:btree"
 import "src:cell"
@@ -125,14 +126,14 @@ dump_table :: proc(db: ^Database, table_name: string) {
 	st := Schema_Tree(db)
 	table, found := schema.find_table(&st, table_name, context.temp_allocator)
 	if !found {
-		fmt.printf("Error: Table '%s' not found.\n", table_name)
+		log.errorf("Error: Table '%s' not found.", table_name)
 		return
 	}
 
 	table_tree := btree.init(db.pager, table.root_page)
 	cursor, err := btree.cursor_start(&table_tree, context.temp_allocator)
 	if err != .None {
-		fmt.println("Error: Could not start cursor", err)
+		log.errorf("Error: Could not start cursor: %v", err)
 		return
 	}
 	defer btree.cursor_destroy(&cursor)

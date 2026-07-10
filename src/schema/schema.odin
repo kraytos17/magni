@@ -2,6 +2,7 @@
 package schema
 
 import "core:fmt"
+import "core:log"
 import "core:strings"
 import "src:btree"
 import "src:cell"
@@ -73,10 +74,10 @@ add_table :: proc(
 	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
 		defer cell.destroy(&c, context.temp_allocator)
 		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
-			fmt.eprintln("[Schema] Table already exists:", table_name)
+			log.errorf("[Schema] Table already exists: %s", table_name)
 		} else {
-			fmt.eprintf(
-				"[Schema] Hash collision: '%s' collides with '%s' at key %v\n",
+			log.errorf(
+				"[Schema] Hash collision: '%s' collides with '%s' at key %v",
 				table_name,
 				existing_name,
 				rowid,
@@ -97,7 +98,7 @@ add_table :: proc(
 	values := schema_row_to_values(r)
 	err := btree.tree_insert(t, rowid, values)
 	if err != .None {
-		fmt.eprintln("[Schema] add_table failed:", err)
+		log.errorf("[Schema] add_table failed: %v", err)
 		return false
 	}
 	return true
@@ -117,10 +118,10 @@ add_table_cow :: proc(
 	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
 		defer cell.destroy(&c, context.temp_allocator)
 		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
-			fmt.eprintln("[Schema] Table already exists:", table_name)
+			log.errorf("[Schema] Table already exists: %s", table_name)
 		} else {
-			fmt.eprintf(
-				"[Schema] Hash collision: '%s' collides with '%s' at key %v\n",
+			log.errorf(
+				"[Schema] Hash collision: '%s' collides with '%s' at key %v",
 				table_name,
 				existing_name,
 				rowid,
@@ -141,7 +142,7 @@ add_table_cow :: proc(
 	values := schema_row_to_values(r)
 	new_root, err := btree.tree_insert_cow(t, rowid, values)
 	if err != .None {
-		fmt.eprintln("[Schema] add_table_cow failed:", err)
+		log.errorf("[Schema] add_table_cow failed: %v", err)
 		return t.root, false
 	}
 	return new_root, true
@@ -201,7 +202,7 @@ drop_table :: proc(t: ^btree.Tree, table_name: string) -> bool {
 drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
 	new_root, err := btree.tree_delete_cow(t, types.Row_ID(types.hash_string(table_name)))
 	if err != .None {
-		fmt.eprintln("[Schema] drop_table_cow failed:", err)
+		log.errorf("[Schema] drop_table_cow failed: %v", err)
 		return t.root, false
 	}
 	return new_root, true
@@ -267,8 +268,8 @@ update_root_page_cow :: proc(
 	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
-		fmt.eprintf(
-			"[schema] update_root_page_cow: tree_find failed for '%s' rowid=%v root=%d\n",
+		log.errorf(
+			"[schema] update_root_page_cow: tree_find failed for '%s' rowid=%v root=%d",
 			table_name,
 			rowid,
 			t.root,
@@ -279,8 +280,8 @@ update_root_page_cow :: proc(
 
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {
-		fmt.eprintf(
-			"[schema] update_root_page_cow: schema_row_from_values failed for '%s'\n",
+		log.errorf(
+			"[schema] update_root_page_cow: schema_row_from_values failed for '%s'",
 			table_name,
 		)
 		return t.root, false
@@ -290,8 +291,8 @@ update_root_page_cow :: proc(
 	values := schema_row_to_values(sr)
 	new_root, upd_err := btree.tree_update_cow(t, rowid, values)
 	if upd_err != .None {
-		fmt.eprintf(
-			"[schema] update_root_page_cow: tree_update_cow failed for '%s': %v\n",
+		log.errorf(
+			"[schema] update_root_page_cow: tree_update_cow failed for '%s': %v",
 			table_name,
 			upd_err,
 		)
@@ -311,15 +312,15 @@ update_skip_root_cow :: proc(
 	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
-		fmt.eprintf("[schema] update_skip_root_cow: tree_find failed for '%s'\n", table_name)
+		log.errorf("[schema] update_skip_root_cow: tree_find failed for '%s'", table_name)
 		return t.root, false
 	}
 	defer cell.destroy(&c, context.temp_allocator)
 
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {
-		fmt.eprintf(
-			"[schema] update_skip_root_cow: schema_row_from_values failed for '%s'\n",
+		log.errorf(
+			"[schema] update_skip_root_cow: schema_row_from_values failed for '%s'",
 			table_name,
 		)
 		return t.root, false
@@ -329,8 +330,8 @@ update_skip_root_cow :: proc(
 	values := schema_row_to_values(sr)
 	new_root, upd_err := btree.tree_update_cow(t, rowid, values)
 	if upd_err != .None {
-		fmt.eprintf(
-			"[schema] update_skip_root_cow: tree_update_cow failed for '%s': %v\n",
+		log.errorf(
+			"[schema] update_skip_root_cow: tree_update_cow failed for '%s': %v",
 			table_name,
 			upd_err,
 		)

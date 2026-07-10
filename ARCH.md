@@ -97,6 +97,26 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
    writes WAL frames back to the main file. `wal_abort_txn` discards uncommitted writes without
    touching the main file — no page leak on rollback.
 
+7. **Columnar page encoding** — Pages can be stored in column-major format with delta encoding for
+   integer compression. Read-only scans benefit from contiguous column data. Any mutation
+   (insert/update/delete) or split triggers `ensure_row_major()` conversion back to row format.
+
+8. **Page format versioning** — A format registry (up to 64 versions) decouples page layout from
+   code. v1 uses SQLite-compatible 2-byte cell pointers; v2 uses 10-byte cell entries with
+   embedded 8-byte key, eliminating key re-decoding. Existing files remain readable regardless
+   of version.
+
+9. **Auto-built skip indexes** — When a table scan encounters `WHERE col = <int>` without an
+   existing skip index, one is automatically built mapping integer value ranges to page ranges.
+   Subsequent queries skip irrelevant pages without scanning.
+
+10. **B-tree rebalancing** — Adjacent leaf pages with combined occupancy below 70% are
+    automatically merged during operations, maintaining dense packing and reducing tree depth.
+
+11. **Row count tracking** — Per-page row counts are maintained incrementally on insert/delete
+    and cached in the pager. `COUNT(*)` without WHERE/GROUP BY/DISTINCT/ORDER BY/LIMIT is
+    served directly from the cache without scanning.
+
 ---
 
 ## Layer Architecture
@@ -259,12 +279,13 @@ Page_Header.first_freeblock → [next: u16le] [size: u16le] [...] → 0
 **B-tree operations:**
 
 | Operation | COW variant | Description | Traversals |
-|---|---|---|---|
+|---|---|---|---|---|
 | `tree_insert` | `tree_insert_cow` | Insert cell, split when full. COW copies each page on path before modifying. | 1 |
 | `tree_find` | — | Binary search descending to leaf, then `leaf_lower_bound`. | 1 |
 | `tree_delete` | `tree_delete_cow` | Remove cell by rowid via binary search. COW variant COWs the full path. | 1 |
 | `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
+| `rebalance` | — | Merge adjacent sparse leaves (<70% combined occupancy). Called after mutations. | 1 pass per level |
 
 **Cursor** — fixed-size path stack `[MAX_TREE_DEPTH]Cursor_Stack_Item` (12 entries, ~96 bytes).
 `MAX_TREE_DEPTH :: 12` is the single source of truth for both the cursor stack size and
@@ -339,6 +360,7 @@ Column blob format:
 ```
 [0xFE:marker][version:1][count:varint]
   per column: [name_len:varint][name_bytes][packed:1][default_value?][check_len:varint?][check_bytes?]
+```
 
 Packed byte bits: 0-2 = type, 3 = not_null, 4 = pk, 5 = has_check, 6 = has_default
 ```
@@ -371,6 +393,10 @@ Database :: struct {
 snapshots are only created when `count >= threshold`, reducing write amplification
 for bulk operations.
 
+**`Open_Config`** provides optional configuration at open time: `wal_size_threshold`
+(auto-checkpoint when WAL exceeds a page count) and `snapshot_batch_threshold`
+(overrides the default batch threshold).
+
 ```
 execute(db, sql):
   stmt = parse(sql, temp_allocator)    // no lock yet
@@ -384,8 +410,52 @@ execute(db, sql):
     set_ref("main" → snap_id)
     wal_commit_txn()          // single fsync of WAL, not full cache
   unlock(mu)
- ```
- 
+  ```
+  
+#### 3f. Page Format Versioning — `btree/format.odin`
+
+A format registry supports up to 64 concurrent page layout versions:
+
+| Version | Cell pointer | Key decoding | Compat |
+|---------|-------------|--------------|--------|
+| v1 (legacy) | 2-byte `Cell_Pointer` (SQLite-compatible `u16le` offset) | Key decoded from cell body | Existing databases |
+| v2 (current) | 10-byte `Cell_Entry` with embedded 8-byte key | Key read from entry directly — no body decode | New databases, auto-convert on write |
+
+On write, pages are always written in the database's current format version. Old-format
+pages are converted on first mutation. The version is stored in the database header and
+set at database creation time.
+
+#### 3g. Columnar Page Format — `cell/columnar.odin`
+
+Pages can be stored in column-major encoding (`LEAF_TABLE_COLUMNAR` page type = 14):
+
+```
+Row-major:                 Columnar:
+row 0: [a0, b0, c0]        col A: [a0, a1, a2, ...]
+row 1: [a1, b1, c1]  →     col B: [b0, b1, b2, ...]
+row 2: [a2, b2, c2]        col C: [c0, c1, c2, ...]
+```
+
+- Integers use delta encoding (store difference from previous value) for compression.
+- Columnar pages are **read-only** — any mutation (insert, update, delete) or page split
+  triggers `ensure_row_major()`, converting the page back to row format.
+- The cursor (`cursor.odin`) reads columnar pages transparently, assembling rows on demand.
+- Column count is detected via `detect_columnar_col_count()` from the page header.
+- Benefits: better compression for integer-heavy data, cache-friendly column scans.
+
+#### 3h. Skip Index — `btree/skip_index.odin`
+
+Auto-built integer column index that accelerates `WHERE int_col = <value>` queries:
+
+- Built on demand during `scan_table` when a WHERE clause matches `col = <integer>` and
+  no skip index exists for that column yet.
+- Maps integer value ranges to page ranges: `Skip_Entry{page_min, page_max, min_int, max_int}`.
+- During subsequent queries, `build_skip_index` narrows the scan to pages whose range
+  could contain the target value, skipping irrelevant pages.
+- Stored as a sorted list in the schema B-tree root row.
+- Complementary to `pager.page_int_ranges` which tracks known integer ranges per page
+  and is invalidated on page mutations.
+  
 ### Error Handling: `or_return` Pattern
 
 The codebase uses Odin's `or_return` operator pervasively for error propagation.
@@ -441,6 +511,12 @@ latest_snapshot
 
 Tags (64 bytes) stored at offset 40 in unused page space.
 
+**Multi-header packing**: When multiple snapshot headers fit on one page (each header is 40 bytes,
+up to ~100 per page), new snapshots are packed onto the existing latest snapshot page rather than
+allocating a new page. This reduces page allocation overhead for frequent small transactions. The
+chain diagram above is simplified — in practice a single page may contain several headers chained
+via `prev_snapshot`.
+
 ### Manifest Page
 
 Maps table names to their B-tree root pages at a snapshot point-in-time:
@@ -473,6 +549,8 @@ gc(pager, latest_page, keep_count):
     for each table root in manifest:
       live += root
       btree.collect_pages(root) → live += all sub-pages
+      if table has skip index: live += skip_index_root
+                                btree.collect_pages(skip_index_root)
   sweep:
     if page_bitmap exists:
       for each 64-bit word in bitmap:
@@ -590,6 +668,32 @@ allocator that was passed at creation time — mismatch causes bad-free on strin
 | `set_ref` / `get_ref` | O(refs) | Refs page scan |
 | `log_push` / `log_pop` | O(1) | Ring buffer on refs page |
 
+### Skip Index
+
+| Metric | Value |
+|---|---|
+| Build cost | O(scanned_pages) — first scan that triggers it |
+| Lookup | O(log entries) — binary search on sorted entries |
+| Storage | Entries stored in schema B-tree root row |
+| Invalidation | On any page mutation affecting the indexed column |
+
+### B-tree Rebalancing
+
+| Metric | Value |
+|---|---|
+| Merge threshold | ≤70% combined occupancy in adjacent leaves |
+| Traversal | 1 pass per level |
+| Impact | Reduces tree depth, improves cache density |
+
+### Row Count Tracking (Fast COUNT(*))
+
+| Metric | Value |
+|---|---|
+| Cache location | `pager.row_counts: map[u32]int` |
+| Update cost | O(1) per insert/delete (incremental) |
+| COUNT(*) fast path | O(1) if cached, O(pages) on first access |
+| Bypass conditions | Queries with WHERE, GROUP BY, DISTINCT, ORDER BY, or LIMIT use full scan |
+
 ---
 
 ## Trade-offs & Alternatives
@@ -636,8 +740,8 @@ allocator that was passed at creation time — mismatch causes bad-free on strin
 
 - **No `UNION` / `INTERSECT` / `EXCEPT`**: Set operations absent.
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
-- **No indexes**: Only the implicit primary-key B-tree exists.
-- **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100` format only.
+- **No user-managed indexes**: Only the implicit primary-key B-tree and auto-built skip indexes exist.
+- **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100`, `>=`, `<=`, `=`, `!=` format.
 - **Mixed AND/OR WHERE**: Not supported.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (inline `[dynamic; N]T` scratch buffer).
 - **REPL line editor**: SQL keyword and table/column name completion only (no in-expression or JOIN completion).
@@ -665,6 +769,6 @@ allocator that was passed at creation time — mismatch causes bad-free on strin
 | `.snapshot tag <id> <lbl>` | Tag snapshot | `db.snapshot_tag()` |
 | `.snapshot restore <id>` | Restore | `db.snapshot_restore()` |
 | `.rollforward` | Advance to latest snapshot | `db.rollforward()` |
-| `.expire [keep]` | Expire old snapshots (default 100) | `db.expire_snapshots()` |
+| `.expire [keep]` | Expire old snapshots (default 20) | `db.expire_snapshots()` |
 | `.begin` / `.commit` / `.rollback` | Transaction control | `db.begin/commit/rollback()` |
 | `.snapshot_debug` | Verbose snapshot chain dump | `db.print_snapshot_debug()` |

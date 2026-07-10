@@ -1,6 +1,7 @@
 package tests
 
 import "core:fmt"
+import "core:log"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -13,6 +14,7 @@ import "src:schema"
 import "src:types"
 
 setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
+	context.logger = log.nil_logger()
 	temp_name := fmt.tprintf("test_exec_%s.db", test_name)
 	filename := strings.clone(temp_name, context.allocator)
 	if os.exists(filename) {
@@ -78,6 +80,7 @@ make_insert_stmt :: proc(table: string, id: i64, name: string, score: f64) -> pa
 
 @(test)
 test_exec_create_table :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "create")
 	defer teardown_executor_env(tree, file)
 
@@ -93,6 +96,7 @@ test_exec_create_table :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_select :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "insert")
 	defer teardown_executor_env(tree, file)
 
@@ -116,6 +120,7 @@ test_exec_insert_select :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_validation_failure :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "insert_fail")
 	defer teardown_executor_env(tree, file)
 
@@ -141,6 +146,7 @@ test_exec_insert_validation_failure :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_update :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "update")
 	defer teardown_executor_env(tree, file)
 
@@ -181,6 +187,7 @@ test_exec_update :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_delete :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "delete")
 	defer teardown_executor_env(tree, file)
 
@@ -213,6 +220,7 @@ test_exec_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_page_splitting_stress :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "stress_split")
 	defer teardown_executor_env(tree, file)
 
@@ -255,6 +263,7 @@ test_page_splitting_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_select_empty_table :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "empty_sel")
 	defer teardown_executor_env(tree, file)
 
@@ -267,6 +276,7 @@ test_exec_select_empty_table :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_time_travel_via_schema_root :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "time_travel")
 	defer teardown_executor_env(tree, file)
 
@@ -301,6 +311,7 @@ test_exec_time_travel_via_schema_root :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "as_of")
 	defer teardown_executor_env(tree, file)
 
@@ -323,6 +334,7 @@ test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_distinct :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "distinct")
 	defer teardown_executor_env(tree, file)
 
@@ -343,6 +355,7 @@ test_exec_distinct :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_nulls_first_last :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "nulls_order")
 	defer teardown_executor_env(tree, file)
 
@@ -394,6 +407,7 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "explain")
 	defer teardown_executor_env(tree, file)
 
@@ -406,6 +420,7 @@ test_exec_explain :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_check_constraint :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "check_c")
 	defer teardown_executor_env(tree, file)
 
@@ -428,6 +443,7 @@ test_exec_check_constraint :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_in_literal :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "in_lit")
 	defer teardown_executor_env(tree, file)
 
@@ -442,6 +458,7 @@ test_exec_in_literal :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_in_subquery :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "in_subq")
 	defer teardown_executor_env(tree, file)
 
@@ -457,6 +474,7 @@ test_exec_in_subquery :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_foreign_key :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "fk")
 	defer teardown_executor_env(tree, file)
 
@@ -475,6 +493,7 @@ test_exec_foreign_key :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "distinct_na")
 	defer teardown_executor_env(tree, file)
 
@@ -494,6 +513,7 @@ test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_check_enforcement :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "check_enforce")
 	defer teardown_executor_env(tree, file)
 
@@ -512,6 +532,7 @@ test_exec_check_enforcement :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_subquery_projection :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "subq_proj")
 	defer teardown_executor_env(tree, file)
 
@@ -532,6 +553,7 @@ test_exec_subquery_projection :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_hash_left_join :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "hash_lj")
 	defer teardown_executor_env(tree, file)
 
@@ -576,6 +598,7 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_cow_split_stress :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "cow_split")
 	defer teardown_executor_env(tree, file)
 
@@ -614,6 +637,7 @@ test_exec_cow_split_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain_where :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "explain_where")
 	defer teardown_executor_env(tree, file)
 
@@ -628,6 +652,7 @@ test_exec_explain_where :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain_join :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "explain_join")
 	defer teardown_executor_env(tree, file)
 
@@ -643,6 +668,7 @@ test_exec_explain_join :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_in_literal_list :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "in_list")
 	defer teardown_executor_env(tree, file)
 
@@ -663,6 +689,7 @@ test_exec_in_literal_list :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "check_persist")
 	defer teardown_executor_env(tree, file)
 
@@ -689,6 +716,7 @@ test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_non_equi :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "join_nequi")
 	defer teardown_executor_env(tree, file)
 
@@ -735,6 +763,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_cross_fallback :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "join_cross")
 	defer teardown_executor_env(tree, file)
 
@@ -750,6 +779,7 @@ test_exec_join_cross_fallback :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_order_by_int :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "order_int")
 	defer teardown_executor_env(tree, file)
 
@@ -775,6 +805,7 @@ test_exec_order_by_int :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_freeblock_reuse :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "freeblock")
 	defer teardown_executor_env(tree, file)
 
@@ -816,6 +847,7 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 
 @(test)
 test_group_key_hash :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	// Float-precision regression: values differing beyond %f's 6 decimal places
 	// must produce different hashes (the old stringification approach collapsed them).
 	v1 := []types.Value{types.value_real(1.0000000001), types.value_int(1)}
@@ -875,6 +907,7 @@ test_group_key_hash :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	rows := []executor.Row_Entry {
 		{1, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
 		{2, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
@@ -901,6 +934,7 @@ test_dedup_rows :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_no_duplicates :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	rows := []executor.Row_Entry {
 		{1, {types.value_int(1), types.value_text("x"), types.value_real(1.0)}},
 		{2, {types.value_int(2), types.value_text("y"), types.value_real(2.0)}},
@@ -913,6 +947,7 @@ test_dedup_rows_no_duplicates :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_empty_and_single :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	empty := []executor.Row_Entry{}
 	deduped_empty := executor.dedup_rows(empty)
 	testing.expect_value(t, len(deduped_empty), 0)
@@ -924,6 +959,7 @@ test_dedup_rows_empty_and_single :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "join_skewed")
 	defer teardown_executor_env(tree, file)
 
@@ -965,6 +1001,7 @@ test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_string_keys :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "join_str")
 	defer teardown_executor_env(tree, file)
 
@@ -1020,6 +1057,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_all_duplicates :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	vals := []types.Value{types.value_int(1), types.value_text("dup"), types.value_real(1.0)}
 	rows := []executor.Row_Entry{{1, vals}, {2, vals}, {3, vals}, {4, vals}, {5, vals}}
 	deduped := executor.dedup_rows(rows)
@@ -1029,6 +1067,7 @@ test_dedup_rows_all_duplicates :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_with_nulls :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	rows := []executor.Row_Entry {
 		{1, {types.value_null(), types.value_text("a")}},
 		{2, {types.value_null(), types.value_text("a")}},
@@ -1042,6 +1081,7 @@ test_dedup_rows_with_nulls :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_null_int_keys :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "join_null_int")
 	defer teardown_executor_env(tree, file)
 
@@ -1091,6 +1131,7 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_null_string_keys :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "join_null_str")
 	defer teardown_executor_env(tree, file)
 
@@ -1157,6 +1198,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_left_join_null_keys :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "left_join_null")
 	defer teardown_executor_env(tree, file)
 
@@ -1206,6 +1248,7 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_stress :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	rows := make([]executor.Row_Entry, 1000, context.temp_allocator)
 	for i in 0 ..< 1000 {
 		val := i64(1) if i < 950 else i64(i)
@@ -1225,6 +1268,7 @@ test_dedup_rows_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_no_matches :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
 	tree, file := setup_executor_env(t, "join_nomatch")
 	defer teardown_executor_env(tree, file)
 
