@@ -1983,3 +1983,130 @@ test_integration_join_pushdown :: proc(t: ^testing.T) {
 	testing.expect(t, r4.ok, "ambiguous where")
 	testing.expect_value(t, r4.rows[0][0].(i64), i64(20))
 }
+
+@(test)
+test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "delround")
+	defer teardown_db(d, "delround")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
+	sb: strings.Builder
+	for chunk in 0 ..< 10 {
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "INSERT INTO t VALUES ")
+		for i in 0 ..< 100 {
+			if i > 0 { strings.write_string(&sb, ",") }
+			id := chunk * 100 + i + 1
+			fmt.sbprintf(&sb, "(%d,%d)", id, id * 3)
+		}
+		strings.write_string(&sb, ";")
+		testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "chunk insert")
+	}
+
+	// Delete from the front, middle, and back of the key range so empty and
+	// sparse leaves appear at every position.
+	ok := db.execute(d, "DELETE FROM t WHERE id IN (1,2,3,4,5);") == .None
+	testing.expect(t, ok, "front delete")
+	ok2 := db.execute(d, "DELETE FROM t WHERE id >= 300 AND id <= 320;") == .None
+	testing.expect(t, ok2, "middle delete")
+	ok3 := db.execute(d, "DELETE FROM t WHERE id > 980;") == .None
+	testing.expect(t, ok3, "back delete")
+
+	r := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, r.ok, "count after deletes")
+	expected := 1000 - 5 - 21 - 20
+	testing.expect_value(t, r.rows[0][0].(i64), i64(expected))
+
+	// Spot-check survivors at each position and that the tree stays consistent.
+	r2 := db.query(d, "SELECT v FROM t WHERE id = 6;")
+	testing.expect_value(t, r2.rows[0][0].(i64), i64(18))
+	r3 := db.query(d, "SELECT v FROM t WHERE id = 980;")
+	testing.expect_value(t, r3.rows[0][0].(i64), i64(2940))
+	r4 := db.query(d, "SELECT COUNT(*) AS n FROM t WHERE id IN (1, 310, 995);")
+	testing.expect_value(t, r4.rows[0][0].(i64), i64(0))
+
+	// The state must survive a close/reopen.
+	db.close(d)
+	d2, open_err := db.open(fmt.tprintf("test_int_delround.db"))
+	testing.expect(t, open_err == .None, "reopen after deletes")
+	if open_err == .None {
+		defer db.close(d2)
+		r5 := db.query(d2, "SELECT COUNT(*) AS n FROM t;")
+		testing.expect(t, r5.ok, "count after reopen")
+		testing.expect_value(t, r5.rows[0][0].(i64), i64(expected))
+	}
+}
+
+@(test)
+test_integration_empty_aggregates :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "emptyagg")
+	defer teardown_db(d, "emptyagg")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+
+	r := db.query(d, "SELECT COUNT(*) AS c, SUM(v) AS s, AVG(v) AS a, MIN(v) AS mn, MAX(v) AS mx FROM t WHERE id = 99;")
+	testing.expect(t, r.ok, "empty aggregate query")
+	testing.expect_value(t, len(r.rows), 1)
+	if len(r.rows) == 1 {
+		c, _ := r.rows[0][0].(i64)
+		s, _ := r.rows[0][1].(i64)
+		testing.expect_value(t, c, i64(0))
+		testing.expect_value(t, s, i64(0))
+		testing.expect(t, types.is_null(r.rows[0][2]), "AVG is NULL")
+		testing.expect(t, types.is_null(r.rows[0][3]), "MIN is NULL")
+		testing.expect(t, types.is_null(r.rows[0][4]), "MAX is NULL")
+	}
+}
+
+@(test)
+test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "delvac")
+	defer teardown_db(d, "delvac")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
+	sb: strings.Builder
+	for chunk in 0 ..< 10 {
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "INSERT INTO t VALUES ")
+		for i in 0 ..< 100 {
+			if i > 0 { strings.write_string(&sb, ",") }
+			id := chunk * 100 + i + 1
+			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
+		}
+		strings.write_string(&sb, ";")
+		testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "chunk insert")
+	}
+
+	ids: strings.Builder
+	strings.builder_init(&ids, context.temp_allocator)
+	for id in 1 ..= 800 {
+		if id > 1 { strings.write_string(&ids, ",") }
+		fmt.sbprintf(&ids, "%d", id)
+	}
+	testing.expect(t, db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) == .None, "bulk delete")
+
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum after delete")
+
+	r := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, r.ok, "count after delete+vacuum")
+	testing.expect_value(t, r.rows[0][0].(i64), i64(200))
+
+	r2 := db.query(d, "SELECT MIN(id) AS mn, MAX(id) AS mx FROM t;")
+	testing.expect_value(t, r2.rows[0][0].(i64), i64(801))
+	testing.expect_value(t, r2.rows[0][1].(i64), i64(1000))
+
+	// Reopen must preserve the vacuumed state.
+	db.close(d)
+	d2, open_err := db.open(fmt.tprintf("test_int_delvac.db"))
+	testing.expect(t, open_err == .None, "reopen after vacuum")
+	if open_err == .None {
+		defer db.close(d2)
+		r3 := db.query(d2, "SELECT v FROM t WHERE id = 1000;")
+		testing.expect(t, r3.ok, "survivor after reopen")
+		testing.expect_value(t, r3.rows[0][0].(i64), i64(2000))
+	}
+}
