@@ -2,6 +2,7 @@ package cell
 
 import "core:encoding/endian"
 import "src:types"
+import "src:util/varint"
 
 ENCODING_RAW :: 0
 ENCODING_DELTA :: 1
@@ -40,9 +41,9 @@ serialize_columnar :: proc(
 		id := u64(rowids[i])
 		if i > 0 {
 			prev := u64(rowids[i - 1])
-			data_pos += varint_encode(dest[data_pos:], id - prev)
+			data_pos += varint.encode(dest[data_pos:], id - prev)
 		} else {
-			data_pos += varint_encode(dest[data_pos:], id)
+			data_pos += varint.encode(dest[data_pos:], id)
 		}
 	}
 	for col_i := 0; col_i < len(columns); col_i += 1 {
@@ -57,10 +58,10 @@ serialize_columnar :: proc(
 				if v, ok := rows[ri][col_i].(i64); ok && v < min { min = v }
 			}
 
-			data_pos += varint_encode(dest[data_pos:], u64(min))
+			data_pos += varint.encode(dest[data_pos:], u64(min))
 			for ri := 0; ri < len(rows); ri += 1 {
 				if v, ok := rows[ri][col_i].(i64); ok {
-					data_pos += varint_encode(dest[data_pos:], u64(v - min))
+					data_pos += varint.encode(dest[data_pos:], u64(v - min))
 				}
 			}
 		} else {
@@ -69,7 +70,7 @@ serialize_columnar :: proc(
 				switch v in val {
 				case types.Null:
 				case i64:
-					data_pos += varint_encode(dest[data_pos:], u64(v))
+					data_pos += varint.encode(dest[data_pos:], u64(v))
 				case f64:
 					endian.put_f64(dest[data_pos:], .Big, v)
 					data_pos += 8
@@ -112,12 +113,12 @@ decode_column :: proc(
 			result[i] = types.value_real(val)
 		}
 	} else {
-		min, n1, ok1 := varint_decode(data, pos)
+		min, n1, ok1 := varint.decode(data, pos)
 		if !ok1 { return nil }
 
 		pos += n1
 		for i in 0 ..< count {
-			delta, n2, ok2 := varint_decode(data, pos)
+			delta, n2, ok2 := varint.decode(data, pos)
 			if !ok2 { return nil }
 			pos += n2
 			result[i] = types.value_int(i64(i64(min) + i64(delta)))
@@ -138,7 +139,7 @@ read_columnar_rowid :: proc(
 	pos := base_offset + COLUMNAR_DIR_OFFSET + num_cols * size_of(Col_Header)
 	total: u64 = 0
 	for i := 0; i <= row_index; i += 1 {
-		delta, n, ok := varint_decode(data, pos)
+		delta, n, ok := varint.decode(data, pos)
 		if !ok { return 0, false }
 		total += delta
 		if i == row_index { return types.Row_ID(total), true }
@@ -172,11 +173,11 @@ read_columnar_cell :: proc(
 		val: types.Value
 		if h.encoding == ENCODING_DELTA {
 			pos := base_offset + int(h.byte_offset)
-			min, n1, ok1 := varint_decode(data, pos)
+			min, n1, ok1 := varint.decode(data, pos)
 			if !ok1 { return {}, false }
 			pos += n1
 			for i := 0; i <= row_index; i += 1 {
-				delta, n2, ok2 := varint_decode(data, pos)
+				delta, n2, ok2 := varint.decode(data, pos)
 				if !ok2 { return {}, false }
 				pos += n2
 				if i == row_index {
@@ -195,7 +196,7 @@ read_columnar_cell :: proc(
 					}
 					break
 				}
-				_, n, _ := varint_decode(data, pos)
+				_, n, _ := varint.decode(data, pos)
 				if n > 0 {
 					pos += n
 				} else {

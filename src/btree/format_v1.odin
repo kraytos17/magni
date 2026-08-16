@@ -2,6 +2,7 @@ package btree
 
 import "src:cell"
 import "src:types"
+import "src:util/varint"
 
 @(private)
 v1_get_key :: proc(data: []u8, page_id: u32, i: int) -> types.Row_ID {
@@ -15,7 +16,7 @@ v1_get_key :: proc(data: []u8, page_id: u32, i: int) -> types.Row_ID {
 		return rid
 	}
 
-	sep, _, _ := cell.varint_decode(data, int(ptr) + 4)
+	sep, _, _ := varint.decode(data, int(ptr) + 4)
 	return types.Row_ID(sep)
 }
 

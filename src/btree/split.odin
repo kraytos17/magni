@@ -3,6 +3,7 @@ package btree
 import "core:encoding/endian"
 import "src:cell"
 import "src:pager"
+import "src:util/varint"
 import "src:types"
 
 Split_Result :: struct #all_or_none {
@@ -265,7 +266,7 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if total == 0 { return {}, .Invalid_Cell_Pointer }
 
 	mid_ptr := int(get_cell_ptr(curr.data, curr.id, mid, curr.layout.stride))
-	sep_u64, _, ok := cell.varint_decode(curr.data, mid_ptr + 4)
+	sep_u64, _, ok := varint.decode(curr.data, mid_ptr + 4)
 	if !ok { return {}, .Invalid_Cell_Pointer }
 
 	sep = types.Row_ID(sep_u64)

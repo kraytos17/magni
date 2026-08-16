@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:testing"
 import "src:pager"
+import "src:util/bitmap"
 import "src:types"
 
 create_test_pager_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
@@ -586,29 +587,29 @@ test_bitmap_basic_ops :: proc(t: ^testing.T) {
 	defer delete(bm)
 
 	// Initially all zero
-	testing.expect(t, !pager.bitmap_test(bm, 5), "bit 5 should be 0 initially")
-	testing.expect(t, !pager.bitmap_test(bm, 100), "bit 100 should be 0 initially")
-	testing.expect(t, !pager.bitmap_test(bm, 200), "bit 200 should be 0 initially")
+	testing.expect(t, !bitmap.test(bm, 5), "bit 5 should be 0 initially")
+	testing.expect(t, !bitmap.test(bm, 100), "bit 100 should be 0 initially")
+	testing.expect(t, !bitmap.test(bm, 200), "bit 200 should be 0 initially")
 
 	// Set bit 5
-	pager.bitmap_set(bm, 5)
-	testing.expect(t, pager.bitmap_test(bm, 5), "bit 5 should be 1 after set")
-	testing.expect(t, !pager.bitmap_test(bm, 4), "bit 4 should remain 0")
-	testing.expect(t, !pager.bitmap_test(bm, 6), "bit 6 should remain 0")
+	bitmap.set(bm, 5)
+	testing.expect(t, bitmap.test(bm, 5), "bit 5 should be 1 after set")
+	testing.expect(t, !bitmap.test(bm, 4), "bit 4 should remain 0")
+	testing.expect(t, !bitmap.test(bm, 6), "bit 6 should remain 0")
 
 	// Set bit 100
-	pager.bitmap_set(bm, 100)
-	testing.expect(t, pager.bitmap_test(bm, 100), "bit 100 should be 1 after set")
-	testing.expect(t, pager.bitmap_test(bm, 5), "bit 5 should still be 1")
+	bitmap.set(bm, 100)
+	testing.expect(t, bitmap.test(bm, 100), "bit 100 should be 1 after set")
+	testing.expect(t, bitmap.test(bm, 5), "bit 5 should still be 1")
 
 	// Clear bit 5
-	pager.bitmap_clear(bm, 5)
-	testing.expect(t, !pager.bitmap_test(bm, 5), "bit 5 should be 0 after clear")
-	testing.expect(t, pager.bitmap_test(bm, 100), "bit 100 should still be 1")
+	bitmap.clear(bm, 5)
+	testing.expect(t, !bitmap.test(bm, 5), "bit 5 should be 0 after clear")
+	testing.expect(t, bitmap.test(bm, 100), "bit 100 should still be 1")
 
 	// Clear bit 100
-	pager.bitmap_clear(bm, 100)
-	testing.expect(t, !pager.bitmap_test(bm, 100), "bit 100 should be 0 after clear")
+	bitmap.clear(bm, 100)
+	testing.expect(t, !bitmap.test(bm, 100), "bit 100 should be 0 after clear")
 }
 
 @(test)
@@ -626,7 +627,7 @@ test_bitmap_allocate_sets_bit :: proc(t: ^testing.T) {
 	testing.expect(t, len(p.page_bitmap) > 0, "bitmap should exist")
 	testing.expect(
 		t,
-		pager.bitmap_test(p.page_bitmap, pn),
+		bitmap.test(p.page_bitmap, pn),
 		fmt.tprintf("bit %d should be set after alloc", pn),
 	)
 }
@@ -642,13 +643,13 @@ test_bitmap_free_clears_bit :: proc(t: ^testing.T) {
 	pg2, _ := pager.allocate_page(p)
 	pn := pg2.page_num
 	testing.expect(t, pn > 1, "test page should be > 1")
-	testing.expect(t, pager.bitmap_test(p.page_bitmap, pn), "bit should be set after alloc")
+	testing.expect(t, bitmap.test(p.page_bitmap, pn), "bit should be set after alloc")
 
 	pager.unpin_page(p, pn)
 	pager.free_page(p, pn)
 	testing.expect(
 		t,
-		!pager.bitmap_test(p.page_bitmap, pn),
+		!bitmap.test(p.page_bitmap, pn),
 		fmt.tprintf("bit %d should be cleared after free", pn),
 	)
 }
@@ -683,7 +684,7 @@ test_bitmap_grows_on_allocate :: proc(t: ^testing.T) {
 		bitmap_len_now > initial_len,
 		fmt.tprintf("bitmap should grow (was %d, now %d)", initial_len, bitmap_len_now),
 	)
-	testing.expect(t, pager.bitmap_test(p.page_bitmap, last_pn), "last page bit should be set")
+	testing.expect(t, bitmap.test(p.page_bitmap, last_pn), "last page bit should be set")
 }
 
 @(test)
@@ -694,20 +695,20 @@ test_bitmap_64_range :: proc(t: ^testing.T) {
 	defer delete(bm)
 
 	// Set and test at word boundary (bit 63 = last bit of first word, bit 64 = first bit of second word)
-	pager.bitmap_set(bm, 63)
-	pager.bitmap_set(bm, 64)
-	pager.bitmap_set(bm, 65)
+	bitmap.set(bm, 63)
+	bitmap.set(bm, 64)
+	bitmap.set(bm, 65)
 
-	testing.expect(t, pager.bitmap_test(bm, 63), "bit 63 (last of word 0)")
-	testing.expect(t, pager.bitmap_test(bm, 64), "bit 64 (first of word 1)")
-	testing.expect(t, pager.bitmap_test(bm, 65), "bit 65 (second of word 1)")
-	testing.expect(t, !pager.bitmap_test(bm, 62), "bit 62 should be 0")
-	testing.expect(t, !pager.bitmap_test(bm, 66), "bit 66 should be 0")
+	testing.expect(t, bitmap.test(bm, 63), "bit 63 (last of word 0)")
+	testing.expect(t, bitmap.test(bm, 64), "bit 64 (first of word 1)")
+	testing.expect(t, bitmap.test(bm, 65), "bit 65 (second of word 1)")
+	testing.expect(t, !bitmap.test(bm, 62), "bit 62 should be 0")
+	testing.expect(t, !bitmap.test(bm, 66), "bit 66 should be 0")
 
-	pager.bitmap_clear(bm, 64)
-	testing.expect(t, !pager.bitmap_test(bm, 64), "bit 64 should be 0 after clear")
-	testing.expect(t, pager.bitmap_test(bm, 63), "bit 63 should still be 1")
-	testing.expect(t, pager.bitmap_test(bm, 65), "bit 65 should still be 1")
+	bitmap.clear(bm, 64)
+	testing.expect(t, !bitmap.test(bm, 64), "bit 64 should be 0 after clear")
+	testing.expect(t, bitmap.test(bm, 63), "bit 63 should still be 1")
+	testing.expect(t, bitmap.test(bm, 65), "bit 65 should still be 1")
 }
 
 @(test)

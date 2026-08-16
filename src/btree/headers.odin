@@ -4,6 +4,7 @@ import "core:encoding/endian"
 import "core:mem"
 import "src:cell"
 import "src:types"
+import "src:util/varint"
 
 PAGE_SIZE :: types.PAGE_SIZE
 
@@ -405,11 +406,11 @@ find_interior_insert_index :: proc(
 }
 
 interior_cell_size :: proc(key: types.Row_ID) -> int {
-	return 4 + cell.varint_size(u64(key))
+	return 4 + varint.size(u64(key))
 }
 
 interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
-	_, n, ok := cell.varint_decode(data, offset + 4)
+	_, n, ok := varint.decode(data, offset + 4)
 	if !ok { return 0 }
 	return 4 + n
 }
@@ -437,7 +438,7 @@ insert_interior_cell :: proc(
 	new_offset := content_start - size
 	header.cell_content_offset = u16le(new_offset)
 	endian.put_u32(data[new_offset:], .Big, child_page)
-	cell.varint_encode(data[new_offset + 4:], u64(key))
+	varint.encode(data[new_offset + 4:], u64(key))
 	insert_idx := find_interior_insert_index(data, page_id, key, layout)
 
 	// Shift entries right at insert_idx

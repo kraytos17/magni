@@ -7,6 +7,7 @@ import "core:mem"
 import "core:strings"
 import "src:cell"
 import "src:pager"
+import "src:util/varint"
 import "src:types"
 
 MAX_TREE_DEPTH :: 12
@@ -299,11 +300,11 @@ insert_recursive :: proc(
 
 		stride := curr.layout.stride
 		cell_offset := int(get_cell_ptr(curr.data, curr.id, idx, stride))
-		old_sep_u64, _, ok := cell.varint_decode(curr.data, cell_offset + 4)
+		old_sep_u64, _, ok := varint.decode(curr.data, cell_offset + 4)
 		if !ok { return {}, .Invalid_Cell_Pointer }
 
 		endian.put_u32(curr.data[cell_offset:], .Big, child_result.new_page)
-		cell.varint_encode(curr.data[cell_offset + 4:], u64(child_result.split_key))
+		varint.encode(curr.data[cell_offset + 4:], u64(child_result.split_key))
 		// For v2 the authoritative separator lives in the Cell_Entry, so update
 		// it too (v1 reads the body key updated above; v2 reads entry.key).
 		curr.layout.set_entry(curr.data, curr.id, idx, u16(cell_offset), child_result.split_key)
@@ -488,7 +489,7 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 		rowid_pos := boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
 		current_rid: u64 = 0
 		for i in 0 ..< row_count {
-			delta, n, ok := cell.varint_decode(leaf.data, rowid_pos)
+			delta, n, ok := varint.decode(leaf.data, rowid_pos)
 			if !ok { break }
 
 			current_rid += delta

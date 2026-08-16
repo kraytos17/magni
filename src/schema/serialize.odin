@@ -2,8 +2,8 @@ package schema
 
 import "core:encoding/endian"
 import "core:strings"
-import "src:cell"
 import "src:types"
+import "src:util/varint"
 
 COL_BLOB_MARKER :: 0xFE
 COL_BLOB_VERSION :: 1
@@ -14,9 +14,9 @@ serialize_columns_to_blob :: proc(
 ) -> []u8 {
 	// Estimate size: header (2) + count varint + per-column data
 	size := 2
-	size += cell.varint_size(u64(len(columns)))
+	size += varint.size(u64(len(columns)))
 	for col in columns {
-		size += cell.varint_size(u64(len(col.name))) + len(col.name) + 1
+		size += varint.size(u64(len(col.name))) + len(col.name) + 1
 		if def, ok := col.default_value.?; ok {
 			#partial switch v in def {
 			case types.Null:
@@ -32,7 +32,7 @@ serialize_columns_to_blob :: proc(
 			}
 		}
 		if chk, has_chk := col.check_expr.?; has_chk {
-			size += cell.varint_size(u64(len(chk))) + len(chk)
+			size += varint.size(u64(len(chk))) + len(chk)
 		}
 	}
 
@@ -40,10 +40,10 @@ serialize_columns_to_blob :: proc(
 	offset := 0
 	blob[offset] = COL_BLOB_MARKER; offset += 1
 	blob[offset] = COL_BLOB_VERSION; offset += 1
-	offset += cell.varint_encode(blob[offset:], u64(len(columns)))
+	offset += varint.encode(blob[offset:], u64(len(columns)))
 
 	for col in columns {
-		offset += cell.varint_encode(blob[offset:], u64(len(col.name)))
+		offset += varint.encode(blob[offset:], u64(len(col.name)))
 		copy(blob[offset:], col.name); offset += len(col.name)
 
 		packed: u8 = u8(col.type)
@@ -57,7 +57,7 @@ serialize_columns_to_blob :: proc(
 			serialize_value_to_blob(blob, &offset, def)
 		}
 		if chk, has := col.check_expr.?; has {
-			offset += cell.varint_encode(blob[offset:], u64(len(chk)))
+			offset += varint.encode(blob[offset:], u64(len(chk)))
 			copy(blob[offset:], chk); offset += len(chk)
 		}
 	}
@@ -68,15 +68,15 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER { return nil }
 	if blob[1] != COL_BLOB_VERSION { return nil }
 	offset := 2
-	count, _, cnt_ok := cell.varint_decode(blob, offset)
+	count, _, cnt_ok := varint.decode(blob, offset)
 	if !cnt_ok || count == 0 { return nil }
 
-	offset += cell.varint_size(count)
+	offset += varint.size(count)
 	cols := make([dynamic]types.Column, 0, int(count), allocator)
 	for _ in 0 ..< count {
-		name_len, _, name_ok := cell.varint_decode(blob, offset)
+		name_len, _, name_ok := varint.decode(blob, offset)
 		if !name_ok || name_len == 0 { return nil }
-		offset += cell.varint_size(name_len)
+		offset += varint.size(name_len)
 		if offset + int(name_len) + 1 > len(blob) { return nil }
 
 		name_str := string(blob[offset:offset + int(name_len)])
@@ -96,10 +96,10 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 			col.default_value = def_val
 		}
 		if (packed & 0x20) != 0 {
-			chk_len, _, chk_ok := cell.varint_decode(blob, offset)
+			chk_len, _, chk_ok := varint.decode(blob, offset)
 			if !chk_ok || chk_len == 0 { return nil }
 
-			offset += cell.varint_size(chk_len)
+			offset += varint.size(chk_len)
 			if offset + int(chk_len) > len(blob) { return nil }
 			col.check_expr = strings.clone(string(blob[offset:offset + int(chk_len)]), allocator)
 			offset += int(chk_len)

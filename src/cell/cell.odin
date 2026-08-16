@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "src:types"
+import "src:util/varint"
 
 // Cell represents a serialized row (Record).
 //
@@ -70,15 +71,15 @@ compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serializatio
 	info: Serialization_Info
 	for val in values {
 		serial := serial_type_for_value(val)
-		info.serial_types_size += varint_size(serial)
+		info.serial_types_size += varint.size(serial)
 		content_size, _ := types.serial_type_content_size(serial)
 		info.payload_size += content_size
 	}
 
 	header_bytes :=
-		varint_size(u64(rowid)) + varint_size(u64(info.serial_types_size)) + info.serial_types_size
+		varint.size(u64(rowid)) + varint.size(u64(info.serial_types_size)) + info.serial_types_size
 	total_payload := header_bytes + info.payload_size
-	info.total_size = varint_size(u64(total_payload)) + total_payload
+	info.total_size = varint.size(u64(total_payload)) + total_payload
 	return info
 }
 
@@ -97,18 +98,18 @@ serialize :: proc(
 
 	offset := 0
 	header_bytes :=
-		varint_size(u64(rowid)) + varint_size(u64(info.serial_types_size)) + info.serial_types_size
+		varint.size(u64(rowid)) + varint.size(u64(info.serial_types_size)) + info.serial_types_size
 
 	total_payload := header_bytes + info.payload_size
-	offset += varint_encode(dest[offset:], u64(total_payload))
-	offset += varint_encode(dest[offset:], u64(rowid))
-	offset += varint_encode(dest[offset:], u64(info.serial_types_size))
+	offset += varint.encode(dest[offset:], u64(total_payload))
+	offset += varint.encode(dest[offset:], u64(rowid))
+	offset += varint.encode(dest[offset:], u64(info.serial_types_size))
 	serial_types: [types.MAX_COLS]u64
 	i := 0
 	for val in values {
 		serial := serial_type_for_value(val)
 		serial_types[i] = serial; i += 1
-		offset += varint_encode(dest[offset:], serial)
+		offset += varint.encode(dest[offset:], serial)
 	}
 
 	i = 0
@@ -158,15 +159,15 @@ deserialize :: proc(
 	}
 
 	pos := offset
-	_, n, ok_payload := varint_decode(src, pos)
+	_, n, ok_payload := varint.decode(src, pos)
 	if !ok_payload { return {}, 0, false }
 	pos += n
 
-	rowid_val, n2, ok_rowid := varint_decode(src, pos)
+	rowid_val, n2, ok_rowid := varint.decode(src, pos)
 	if !ok_rowid { return {}, 0, false }
 	pos += n2
 
-	header_size, n3, ok_header := varint_decode(src, pos)
+	header_size, n3, ok_header := varint.decode(src, pos)
 	if !ok_header { return {}, 0, false }
 	pos += n3
 
@@ -175,7 +176,7 @@ deserialize :: proc(
 	serial_count := 0
 
 	for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
-		st, n4, ok_st := varint_decode(src, pos)
+		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st { return {}, 0, false }
 		serial_types[serial_count] = st
 		serial_count += 1
@@ -246,18 +247,18 @@ deserialize :: proc(
 get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	if offset >= len(src) { return 0, false }
 	pos := offset
-	_, n, ok := varint_decode(src, pos)
+	_, n, ok := varint.decode(src, pos)
 	if !ok { return 0, false }
 
 	pos += n
-	rowid, _, ok2 := varint_decode(src, pos)
+	rowid, _, ok2 := varint.decode(src, pos)
 	if !ok2 { return 0, false }
 	return types.Row_ID(rowid), true
 }
 
 get_size :: proc(src: []u8, offset := 0) -> (int, bool) {
 	if offset >= len(src) { return 0, false }
-	payload_size, n, ok := varint_decode(src, offset)
+	payload_size, n, ok := varint.decode(src, offset)
 	if !ok { return 0, false }
 	return n + int(payload_size), true
 }
@@ -295,57 +296,6 @@ validate :: proc(values: []types.Value, columns: []types.Column) -> bool {
 		}
 	}
 	return true
-}
-
-varint_encode :: proc(dest: []u8, value: u64) -> int {
-	v := value
-	i := 0
-	for {
-		if i >= len(dest) { return 0 }
-		b := u8(v & 0x7F)
-		v >>= 7
-		if v != 0 { dest[i] = b | 0x80; i += 1 } else { dest[i] = b; i += 1; break }
-	}
-	return i
-}
-
-varint_decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: int, ok: bool) {
-	if offset >= len(src) { return 0, 0, false }
-	shift: u32; pos := offset
-	for shift < 64 {
-		if pos >= len(src) { return 0, 0, false }
-
-		b := u64(src[pos]); pos += 1; bytes_read += 1
-		value |= (b & 0x7F) << shift
-		if (b & 0x80) == 0 { return value, bytes_read, true }
-
-		shift += 7
-		if bytes_read >= 9 { return 0, 0, false }
-	}
-	return 0, 0, false
-}
-
-varint_size :: proc(v: u64) -> int {
-	switch {
-	case v < (1 << 7):
-		return 1
-	case v < (1 << 14):
-		return 2
-	case v < (1 << 21):
-		return 3
-	case v < (1 << 28):
-		return 4
-	case v < (1 << 35):
-		return 5
-	case v < (1 << 42):
-		return 6
-	case v < (1 << 49):
-		return 7
-	case v < (1 << 56):
-		return 8
-	case:
-		return 9
-	}
 }
 
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {

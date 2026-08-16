@@ -4,6 +4,7 @@ import "core:encoding/endian"
 import "core:mem"
 import "src:cell"
 import "src:pager"
+import "src:util/varint"
 
 Cursor_Stack_Item :: struct {
 	page_id:    u32,
@@ -193,7 +194,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 		if int(item.cell_index) < int(c.cached_cell_count) {
 			if c.col_num_cols > 0 && c.col_rowid_pos > 0 {
 				// Advance rowid for columnar page
-				delta, n, ok := cell.varint_decode(c.cached_page_data, c.col_rowid_pos)
+				delta, n, ok := varint.decode(c.cached_page_data, c.col_rowid_pos)
 				if ok {
 					c.col_rowid += delta
 					c.col_rowid_pos += n
@@ -271,7 +272,7 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 			c.col_rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
 			c.col_rowid = 0
 			for _ in 0 ..< int(item.cell_index) {
-				delta, n, ok := cell.varint_decode(node.data, c.col_rowid_pos)
+				delta, n, ok := varint.decode(node.data, c.col_rowid_pos)
 				if !ok { break }
 
 				c.col_rowid += delta

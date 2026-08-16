@@ -7,6 +7,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "src:types"
+import "src:util/bitmap"
 
 PAGE_CACHE_SIZE :: 256
 
@@ -273,7 +274,7 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 
 	p.cache_index[new_page_num] = slot; p.file_len += i64(p.page_size)
 	bitmap_grow(p, new_page_num)
-	bitmap_set(p.page_bitmap, new_page_num)
+	bitmap.set(p.page_bitmap, new_page_num)
 	return &slot.page, .None
 }
 
@@ -296,7 +297,7 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 
 		p.cache_index[page_num] = slot; p.file_len += i64(p.page_size)
 		bitmap_grow(p, page_num)
-		bitmap_set(p.page_bitmap, page_num)
+		bitmap.set(p.page_bitmap, page_num)
 		return &slot.page, .None
 	}
 	return nil, .Page_Not_Found
@@ -350,34 +351,6 @@ mark_dirty :: proc(p: ^Pager, page_num: u32) {
 	mark_slot_dirty(p, find_slot(p, page_num))
 }
 
-bitmap_set :: proc(bm: []u64, pn: u32) {
-	idx := int(pn) / 64
-	if idx < len(bm) { bm[idx] |= u64(1) << uint(pn % 64) }
-}
-
 bitmap_grow :: proc(p: ^Pager, max_pn: u32) {
-	needed := int(max_pn) / 64 + 1
-	if needed > len(p.page_bitmap) {
-		if len(p.page_bitmap) > 0 {
-			needed = max(needed, len(p.page_bitmap) * 2)
-		}
-		old := p.page_bitmap
-		p.page_bitmap = make([]u64, needed, p.allocator)
-		copy(p.page_bitmap, old)
-		for i := len(old); i < needed; i += 1 { p.page_bitmap[i] = ~u64(0) }
-		delete(old)
-	}
-}
-
-bitmap_clear :: proc(bm: []u64, pn: u32) {
-	idx := int(pn) / 64
-	if idx < len(bm) {
-		mask := ~(u64(1) << uint(pn % 64))
-		bm[idx] &= mask
-	}
-}
-
-bitmap_test :: proc(bm: []u64, pn: u32) -> bool {
-	idx := int(pn) / 64
-	return idx < len(bm) && (bm[idx] & (u64(1) << uint(pn % 64))) != 0
+	p.page_bitmap = bitmap.grow(p.page_bitmap, max_pn, p.allocator)
 }
