@@ -143,7 +143,7 @@ ROLLBACK;
 | **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Auto-built skip indexes with operator-aware range pruning (`>`/`>=` seek the lower bound, `<`/`<=` stop at the upper). Page bitmap grows geometrically (amortized O(1)) and enables O(1) 64-page GC range skips. WAL commit is O(pages dirtied), not O(cache size). GROUP BY/DISTINCT/set-ops use collision-safe chained hashing. |
 | **Logging** | `core:log` with configurable levels (debug/info/warn/error). `--log-level`, `--verbose`/`-v`, `MAGNI_LOG_LEVEL` env var. Logs go to stderr; query output stays clean on stdout. REPL runs at error level. |
 
-See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, and all optimization internals.
+See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, and all optimization internals. See [ARCHITECTURE.md](ARCHITECTURE.md) for the package layering and `@(private)` visibility rules contributors must uphold.
 
 ---
 
