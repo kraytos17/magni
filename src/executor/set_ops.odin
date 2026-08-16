@@ -3,6 +3,7 @@ package executor
 import "core:fmt"
 import "src:btree"
 import "src:parser"
+import "src:schema"
 import "src:types"
 
 // exec_select_data evaluates a SELECT and returns its result rows and columns
@@ -11,6 +12,7 @@ import "src:types"
 exec_select_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
@@ -20,17 +22,17 @@ exec_select_data :: proc(
 		return exec_select_literals(t, stmt)
 	}
 	if _, is_subq := stmt.from.(^parser.Select_Stmt); is_subq {
-		return exec_subquery_data(t, stmt)
+		return exec_subquery_data(t, stmt, cache)
 	}
-	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 {
+	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		// Single-table aggregate/GROUP BY: route through exec_select_single_data
 		// which delegates aggregates to exec_select_aggregate_data.
-		return exec_select_single_data(t, stmt)
+		return exec_select_single_data(t, stmt, cache)
 	}
 	if len(stmt.joins) > 0 {
-		return exec_select_join_data(t, stmt)
+		return exec_select_join_data(t, stmt, cache)
 	}
-	return exec_select_single_data(t, stmt)
+	return exec_select_single_data(t, stmt, cache)
 }
 
 // row_equal compares two rows for value equality (column count must match).
@@ -216,14 +218,14 @@ apply_set_op :: proc(
 exec_compound_data :: proc(
 	t: ^btree.Tree,
 	compound: parser.Compound_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
 	bool,
 ) {
-	acc_rows, acc_cols, ok := exec_select_data(t, compound.first^)
+	acc_rows, acc_cols, ok := exec_select_data(t, compound.first^, cache)
 	if !ok { return nil, nil, false }
-
 	// Precedence: INTERSECT binds tighter than UNION/EXCEPT; all are
 	// left-associative. Reduce in two phases:
 	//   Phase 1: evaluate each maximal run of consecutive INTERSECT ops into a
@@ -243,7 +245,7 @@ exec_compound_data :: proc(
 	i := 0
 	for i < len(compound.operands) {
 		op := compound.operands[i].op
-		other_rows, other_cols, other_ok := exec_select_data(t, compound.operands[i].select^)
+		other_rows, other_cols, other_ok := exec_select_data(t, compound.operands[i].select^, cache)
 
 		if !other_ok { return nil, nil, false }
 		// Set operations require equal column counts across operands.

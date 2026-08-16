@@ -1,7 +1,6 @@
 package tests
 
 import "core:fmt"
-import "core:log"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -13,8 +12,15 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// make_where_clause wraps a single condition in a WHERE clause tree node.
+make_where_clause :: proc(cond: parser.Condition) -> parser.Where_Clause {
+	node := new(parser.Where_Node, context.temp_allocator)
+	node^ = parser.Where_Node{kind = .COND, cond = cond}
+	return parser.Where_Clause{root = node}
+}
+
 setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	temp_name := fmt.tprintf("test_exec_%s.db", test_name)
 	filename := strings.clone(temp_name, context.allocator)
 	if os.exists(filename) {
@@ -71,16 +77,19 @@ make_insert_stmt :: proc(table: string, id: i64, name: string, score: f64) -> pa
 	append(&vals, types.value_text(name))
 	append(&vals, types.value_real(score))
 
+	rows := make([dynamic][]types.Value, context.temp_allocator)
+	append(&rows, vals[:])
+
 	variant := parser.Insert_Stmt {
 		table_name = table,
-		values     = vals[:],
+		values     = rows[:],
 	}
 	return parser.Statement{type = variant, sql = ""}
 }
 
 @(test)
 test_exec_create_table :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "create")
 	defer teardown_executor_env(tree, file)
 
@@ -90,13 +99,16 @@ test_exec_create_table :: proc(t: ^testing.T) {
 	testing.expect(t, success, "CREATE TABLE should succeed")
 	testing.expect(t, schema.table_exists(&tree, "users"), "Table should exist in schema")
 
+	saved, ctx := suppress_expected_errors()
+	context = ctx
 	success_dup, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
 	testing.expect(t, !success_dup, "Duplicate CREATE TABLE should fail")
 }
 
 @(test)
 test_exec_insert_select :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "insert")
 	defer teardown_executor_env(tree, file)
 
@@ -120,7 +132,7 @@ test_exec_insert_select :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_validation_failure :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "insert_fail")
 	defer teardown_executor_env(tree, file)
 
@@ -133,20 +145,23 @@ test_exec_insert_validation_failure :: proc(t: ^testing.T) {
 
 	variant := parser.Insert_Stmt {
 		table_name = "strict_table",
-		values     = vals[:],
+		values     = [][]types.Value{vals[:]},
 	}
 	stmt := parser.Statement {
 		type = variant,
 		sql  = "",
 	}
 
+	saved, ctx := suppress_expected_errors()
+	context = ctx
 	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
 	testing.expect(t, !success, "INSERT with wrong column count should fail")
 }
 
 @(test)
 test_exec_update :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "update")
 	defer teardown_executor_env(tree, file)
 
@@ -159,10 +174,8 @@ test_exec_update :: proc(t: ^testing.T) {
 		operator = .EQUALS,
 		rhs      = types.value_int(1),
 	}
-	where_clause := parser.Where_Clause {
-		conditions = []parser.Condition{cond},
-		is_and     = true,
-	}
+
+	where_clause := make_where_clause(cond)
 	variant := parser.Update_Stmt {
 		table_name     = "inventory",
 		update_columns = []string{"score"},
@@ -187,7 +200,7 @@ test_exec_update :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_delete :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "delete")
 	defer teardown_executor_env(tree, file)
 
@@ -202,7 +215,7 @@ test_exec_delete :: proc(t: ^testing.T) {
 	}
 	variant := parser.Delete_Stmt {
 		table_name = "logs",
-		where_clause = parser.Where_Clause{conditions = []parser.Condition{cond}, is_and = true},
+		where_clause = make_where_clause(cond),
 	}
 	stmt := parser.Statement {
 		type = variant,
@@ -220,7 +233,7 @@ test_exec_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_page_splitting_stress :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "stress_split")
 	defer teardown_executor_env(tree, file)
 
@@ -263,7 +276,7 @@ test_page_splitting_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_select_empty_table :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "empty_sel")
 	defer teardown_executor_env(tree, file)
 
@@ -276,7 +289,7 @@ test_exec_select_empty_table :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_time_travel_via_schema_root :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "time_travel")
 	defer teardown_executor_env(tree, file)
 
@@ -311,7 +324,7 @@ test_exec_time_travel_via_schema_root :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "as_of")
 	defer teardown_executor_env(tree, file)
 
@@ -334,7 +347,7 @@ test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_distinct :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "distinct")
 	defer teardown_executor_env(tree, file)
 
@@ -355,7 +368,7 @@ test_exec_distinct :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_nulls_first_last :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "nulls_order")
 	defer teardown_executor_env(tree, file)
 
@@ -407,7 +420,7 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "explain")
 	defer teardown_executor_env(tree, file)
 
@@ -420,7 +433,7 @@ test_exec_explain :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_check_constraint :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "check_c")
 	defer teardown_executor_env(tree, file)
 
@@ -443,7 +456,7 @@ test_exec_check_constraint :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_in_literal :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "in_lit")
 	defer teardown_executor_env(tree, file)
 
@@ -458,7 +471,7 @@ test_exec_in_literal :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_in_subquery :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "in_subq")
 	defer teardown_executor_env(tree, file)
 
@@ -474,7 +487,7 @@ test_exec_in_subquery :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_foreign_key :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "fk")
 	defer teardown_executor_env(tree, file)
 
@@ -493,7 +506,7 @@ test_exec_foreign_key :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "distinct_na")
 	defer teardown_executor_env(tree, file)
 
@@ -513,7 +526,7 @@ test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_check_enforcement :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "check_enforce")
 	defer teardown_executor_env(tree, file)
 
@@ -532,7 +545,7 @@ test_exec_check_enforcement :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_subquery_projection :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "subq_proj")
 	defer teardown_executor_env(tree, file)
 
@@ -553,7 +566,7 @@ test_exec_subquery_projection :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_hash_left_join :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "hash_lj")
 	defer teardown_executor_env(tree, file)
 
@@ -576,7 +589,7 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	append(&vals2, types.value_text("x"))
 	iv1 := parser.Insert_Stmt {
 		table_name = "t2",
-		values     = vals2[:],
+		values     = [][]types.Value{vals2[:]},
 	}
 	executor.execute(&tree, parser.Statement{type = iv1, sql = ""})
 
@@ -585,7 +598,7 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	append(&vals3, types.value_text("y"))
 	iv2 := parser.Insert_Stmt {
 		table_name = "t2",
-		values     = vals3[:],
+		values     = [][]types.Value{vals3[:]},
 	}
 
 	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
@@ -598,7 +611,7 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_cow_split_stress :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "cow_split")
 	defer teardown_executor_env(tree, file)
 
@@ -637,7 +650,7 @@ test_exec_cow_split_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain_where :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "explain_where")
 	defer teardown_executor_env(tree, file)
 
@@ -652,7 +665,7 @@ test_exec_explain_where :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain_join :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "explain_join")
 	defer teardown_executor_env(tree, file)
 
@@ -668,7 +681,7 @@ test_exec_explain_join :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_in_literal_list :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "in_list")
 	defer teardown_executor_env(tree, file)
 
@@ -681,15 +694,15 @@ test_exec_in_literal_list :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "IN (list) should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
-	testing.expect(t, len(sel.where_clause.?.conditions) == 1, "expected 1 condition")
-	cond := sel.where_clause.?.conditions[0]
+	testing.expect(t, sel.where_clause.?.root != nil, "expected WHERE clause")
+	cond := sel.where_clause.?.root.cond
 	testing.expect(t, cond.operator == .IN, "operator should be IN")
 	testing.expect(t, len(cond.in_values) == 2, "expected 2 IN values")
 }
 
 @(test)
 test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "check_persist")
 	defer teardown_executor_env(tree, file)
 
@@ -716,7 +729,7 @@ test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_non_equi :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_nequi")
 	defer teardown_executor_env(tree, file)
 
@@ -738,7 +751,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {types.value_int(1), types.value_text("a")},
+				values = {{types.value_int(1), types.value_text("a")}},
 			},
 			sql = "",
 		},
@@ -748,7 +761,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {types.value_int(2), types.value_text("x")},
+				values = {{types.value_int(2), types.value_text("x")}},
 			},
 			sql = "",
 		},
@@ -763,7 +776,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_cross_fallback :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_cross")
 	defer teardown_executor_env(tree, file)
 
@@ -779,7 +792,7 @@ test_exec_join_cross_fallback :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_order_by_int :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "order_int")
 	defer teardown_executor_env(tree, file)
 
@@ -805,7 +818,7 @@ test_exec_order_by_int :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_freeblock_reuse :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "freeblock")
 	defer teardown_executor_env(tree, file)
 
@@ -823,7 +836,7 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 		}
 		del := parser.Delete_Stmt {
 			table_name = "t",
-			where_clause = parser.Where_Clause{conditions = {cond}, is_and = true},
+			where_clause = make_where_clause(cond),
 		}
 		executor.execute(&tree, parser.Statement{type = del, sql = ""})
 	}
@@ -847,7 +860,7 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 
 @(test)
 test_group_key_hash :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Float-precision regression: values differing beyond %f's 6 decimal places
 	// must produce different hashes (the old stringification approach collapsed them).
 	v1 := []types.Value{types.value_real(1.0000000001), types.value_int(1)}
@@ -907,7 +920,7 @@ test_group_key_hash :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	rows := []executor.Row_Entry {
 		{1, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
 		{2, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
@@ -934,7 +947,7 @@ test_dedup_rows :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_no_duplicates :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	rows := []executor.Row_Entry {
 		{1, {types.value_int(1), types.value_text("x"), types.value_real(1.0)}},
 		{2, {types.value_int(2), types.value_text("y"), types.value_real(2.0)}},
@@ -947,7 +960,7 @@ test_dedup_rows_no_duplicates :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_empty_and_single :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	empty := []executor.Row_Entry{}
 	deduped_empty := executor.dedup_rows(empty)
 	testing.expect_value(t, len(deduped_empty), 0)
@@ -959,7 +972,7 @@ test_dedup_rows_empty_and_single :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_skewed")
 	defer teardown_executor_env(tree, file)
 
@@ -983,7 +996,7 @@ test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
 		ref := i64(1) if i <= 50 else i64(i - 49)
 		v := parser.Insert_Stmt {
 			table_name = "t2",
-			values     = {types.value_int(ref), types.value_text(fmt.tprintf("v%d", i))},
+			values     = {{types.value_int(ref), types.value_text(fmt.tprintf("v%d", i))}},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
 	}
@@ -1001,7 +1014,7 @@ test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_string_keys :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_str")
 	defer teardown_executor_env(tree, file)
 
@@ -1029,7 +1042,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 		v := parser.Insert_Stmt {
 			table_name = "codes",
-			values     = {types.value_text(name), types.value_text(fmt.tprintf("label_%s", name))},
+			values     = {{types.value_text(name), types.value_text(fmt.tprintf("label_%s", name))}},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
 	}
@@ -1039,7 +1052,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 		v := parser.Insert_Stmt {
 			table_name = "txns",
-			values     = {types.value_text(r), types.value_int(i64(i + 1))},
+			values     = {{types.value_text(r), types.value_int(i64(i + 1))}},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
 	}
@@ -1057,7 +1070,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_all_duplicates :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	vals := []types.Value{types.value_int(1), types.value_text("dup"), types.value_real(1.0)}
 	rows := []executor.Row_Entry{{1, vals}, {2, vals}, {3, vals}, {4, vals}, {5, vals}}
 	deduped := executor.dedup_rows(rows)
@@ -1067,7 +1080,7 @@ test_dedup_rows_all_duplicates :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_with_nulls :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	rows := []executor.Row_Entry {
 		{1, {types.value_null(), types.value_text("a")}},
 		{2, {types.value_null(), types.value_text("a")}},
@@ -1081,7 +1094,7 @@ test_dedup_rows_with_nulls :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_null_int_keys :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_null_int")
 	defer teardown_executor_env(tree, file)
 
@@ -1104,7 +1117,7 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {types.value_int(1), types.value_text("match")},
+				values = {{types.value_int(1), types.value_text("match")}},
 			},
 			sql = "",
 		},
@@ -1114,7 +1127,7 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {types.value_null(), types.value_text("null_key")},
+				values = {{types.value_null(), types.value_text("null_key")}},
 			},
 			sql = "",
 		},
@@ -1131,7 +1144,7 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_null_string_keys :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_null_str")
 	defer teardown_executor_env(tree, file)
 
@@ -1150,7 +1163,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "codes",
-				values = {types.value_text("a"), types.value_text("label_a")},
+				values = {{types.value_text("a"), types.value_text("label_a")}},
 			},
 			sql = "",
 		},
@@ -1171,7 +1184,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "txns",
-				values = {types.value_text("a"), types.value_int(1)},
+				values = {{types.value_text("a"), types.value_int(1)}},
 			},
 			sql = "",
 		},
@@ -1181,7 +1194,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "txns",
-				values = {types.value_null(), types.value_int(2)},
+				values = {{types.value_null(), types.value_int(2)}},
 			},
 			sql = "",
 		},
@@ -1198,7 +1211,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_left_join_null_keys :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "left_join_null")
 	defer teardown_executor_env(tree, file)
 
@@ -1221,7 +1234,7 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {types.value_int(1), types.value_text("match")},
+				values = {{types.value_int(1), types.value_text("match")}},
 			},
 			sql = "",
 		},
@@ -1231,7 +1244,7 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {types.value_null(), types.value_text("null_key")},
+				values = {{types.value_null(), types.value_text("null_key")}},
 			},
 			sql = "",
 		},
@@ -1248,7 +1261,7 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 
 @(test)
 test_dedup_rows_stress :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	rows := make([]executor.Row_Entry, 1000, context.temp_allocator)
 	for i in 0 ..< 1000 {
 		val := i64(1) if i < 950 else i64(i)
@@ -1268,7 +1281,7 @@ test_dedup_rows_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_no_matches :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_nomatch")
 	defer teardown_executor_env(tree, file)
 
@@ -1290,7 +1303,7 @@ test_exec_join_no_matches :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {types.value_int(99), types.value_text("no_match")},
+				values = {{types.value_int(99), types.value_text("no_match")}},
 			},
 			sql = "",
 		},

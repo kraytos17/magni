@@ -1,7 +1,6 @@
 package tests
 
 import "core:fmt"
-import "core:log"
 import "core:os"
 import "core:testing"
 import "src:pager"
@@ -9,7 +8,7 @@ import "src:snapshot"
 import "src:types"
 
 setup_snapshot_env :: proc(t: ^testing.T, test_name: string) -> ^pager.Pager {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_snap_%s.db", test_name)
 	if os.exists(filename) {
 		os.remove(filename)
@@ -38,7 +37,7 @@ teardown_snapshot_env :: proc(p: ^pager.Pager, test_name: string) {
 
 @(test)
 test_snapshot_create_and_load :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "create_load")
 	defer teardown_snapshot_env(p, "create_load")
 
@@ -61,7 +60,7 @@ test_snapshot_create_and_load :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_chain_and_find_by_id :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "chain")
 	defer teardown_snapshot_env(p, "chain")
 
@@ -95,7 +94,7 @@ test_snapshot_chain_and_find_by_id :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_find_from_middle :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "find_mid")
 	defer teardown_snapshot_env(p, "find_mid")
 
@@ -114,7 +113,7 @@ test_snapshot_find_from_middle :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_count_committed :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "count")
 	defer teardown_snapshot_env(p, "count")
 
@@ -134,7 +133,7 @@ test_snapshot_count_committed :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_prune :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "prune")
 	defer teardown_snapshot_env(p, "prune")
 
@@ -150,7 +149,7 @@ test_snapshot_prune :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_manifest :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "manifest")
 	defer teardown_snapshot_env(p, "manifest")
 
@@ -193,7 +192,7 @@ test_snapshot_manifest :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_manifest_empty :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "manifest_empty")
 	defer teardown_snapshot_env(p, "manifest_empty")
 
@@ -207,7 +206,7 @@ test_snapshot_manifest_empty :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_diff :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "diff")
 	defer teardown_snapshot_env(p, "diff")
 
@@ -288,7 +287,7 @@ test_snapshot_diff :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_diff_snapshots :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "diff_snap")
 	defer teardown_snapshot_env(p, "diff_snap")
 
@@ -344,7 +343,7 @@ test_snapshot_diff_snapshots :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_tag :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "tag")
 	defer teardown_snapshot_env(p, "tag")
 
@@ -365,7 +364,7 @@ test_snapshot_tag :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_find_by_timestamp :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "find_ts")
 	defer teardown_snapshot_env(p, "find_ts")
 
@@ -384,7 +383,7 @@ test_snapshot_find_by_timestamp :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_gc :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "gc")
 	defer teardown_snapshot_env(p, "gc")
 
@@ -403,7 +402,7 @@ test_snapshot_gc :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_packed_overflow :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "pck_ovf")
 	defer teardown_snapshot_env(p, "pck_ovf")
 
@@ -435,7 +434,7 @@ test_snapshot_packed_overflow :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_load_with_id :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "load_id")
 	defer teardown_snapshot_env(p, "load_id")
 
@@ -461,7 +460,7 @@ test_snapshot_load_with_id :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_tag_on_packed :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "tag_pck")
 	defer teardown_snapshot_env(p, "tag_pck")
 
@@ -480,7 +479,7 @@ test_snapshot_tag_on_packed :: proc(t: ^testing.T) {
 
 @(test)
 test_snapshot_set_header_state :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p := setup_snapshot_env(t, "set_hdr")
 	defer teardown_snapshot_env(p, "set_hdr")
 

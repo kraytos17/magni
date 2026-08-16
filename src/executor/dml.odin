@@ -69,79 +69,83 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	}
 	defer schema.table_free(table, context.temp_allocator)
 
-	values := stmt.values
-	if len(stmt.columns) > 0 {
-		if len(stmt.columns) != len(stmt.values) {
-			log.error("Error: Column list length does not match value count")
-			return false
+	for row_values in stmt.values {
+		values := row_values
+		if len(stmt.columns) > 0 {
+			if len(stmt.columns) != len(row_values) {
+				log.error("Error: Column list length does not match value count")
+				return false
+			}
+			if len(stmt.columns) > len(table.columns) {
+				log.errorf(
+					"Error: Too many columns in INSERT. Expected at most %d, got %d",
+					len(table.columns),
+					len(stmt.columns),
+				)
+				return false
+			}
+
+			reordered := make([]types.Value, len(table.columns), context.temp_allocator)
+			for i in 0 ..< len(reordered) {
+				if def, ok := table.columns[i].default_value.?; ok {
+					cloned, _ := types.value_clone(def, context.temp_allocator)
+					reordered[i] = cloned
+				} else {
+					reordered[i] = types.value_null()
+				}
+			}
+			for col_name, i in stmt.columns {
+				idx, ok := schema.find_column_index(table.columns, col_name)
+				if !ok {
+					log.errorf("Error: Unknown column: %s", col_name)
+					return false
+				}
+				reordered[idx] = row_values[i]
+			}
+			values = reordered
 		}
-		if len(stmt.columns) > len(table.columns) {
+		if len(values) != len(table.columns) {
 			log.errorf(
-				"Error: Too many columns in INSERT. Expected at most %d, got %d",
+				"Error: Column count mismatch. Expected %d, got %d",
 				len(table.columns),
-				len(stmt.columns),
+				len(values),
 			)
 			return false
 		}
+		if !cell.validate(values, table.columns) {
+			log.error("Error: Data type validation failed")
+			return false
+		}
+		if !check_constraints(values, table) { return false }
 
-		reordered := make([]types.Value, len(table.columns), context.temp_allocator)
-		for i in 0 ..< len(reordered) {
-			if def, ok := table.columns[i].default_value.?; ok {
-				cloned, _ := types.value_clone(def, context.temp_allocator)
-				reordered[i] = cloned
+		table_tree := btree.init(t.pager, table.root_page)
+		// RowID: use PK value if provided, otherwise auto-increment from max rowid.
+		next_rowid: types.Row_ID
+		pk_idx, has_pk := schema.get_pk_column(table.columns)
+		if has_pk {
+			if val, is_int := values[pk_idx].(i64); is_int {
+				next_rowid = types.Row_ID(val)
 			} else {
-				reordered[i] = types.value_null()
+				id, id_err := btree.tree_next_rowid(&table_tree)
+				next_rowid = id if id_err == .None else 1
+				values[pk_idx] = types.value_int(i64(next_rowid))
 			}
-		}
-		for col_name, i in stmt.columns {
-			idx, ok := schema.find_column_index(table.columns, col_name)
-			if !ok {
-				log.errorf("Error: Unknown column: %s", col_name)
-				return false
-			}
-			reordered[idx] = stmt.values[i]
-		}
-		values = reordered
-	}
-	if len(values) != len(table.columns) {
-		log.errorf(
-			"Error: Column count mismatch. Expected %d, got %d",
-			len(table.columns),
-			len(values),
-		)
-		return false
-	}
-	if !cell.validate(values, table.columns) {
-		log.error("Error: Data type validation failed")
-		return false
-	}
-	if !check_constraints(values, table) { return false }
-
-	table_tree := btree.init(t.pager, table.root_page)
-	// RowID: use PK value if provided, otherwise auto-increment from max rowid.
-	next_rowid: types.Row_ID
-	pk_idx, has_pk := schema.get_pk_column(table.columns)
-	if has_pk {
-		if val, is_int := values[pk_idx].(i64); is_int {
-			next_rowid = types.Row_ID(val)
 		} else {
-			next_rowid, _ = btree.tree_next_rowid(&table_tree)
+			id, err := btree.tree_next_rowid(&table_tree)
+			if err != .None {
+				next_rowid = 1
+			} else {
+				next_rowid = id
+			}
 		}
-	} else {
-		id, err := btree.tree_next_rowid(&table_tree)
+
+		err := btree.tree_insert(&table_tree, next_rowid, values)
 		if err != .None {
-			next_rowid = 1
-		} else {
-			next_rowid = id
+			log.errorf("Error inserting row: %v", err)
+			return false
 		}
+		log.infof("Inserted row %d", next_rowid)
 	}
-
-	err := btree.tree_insert(&table_tree, next_rowid, values)
-	if err != .None {
-		log.errorf("Error inserting row: %v", err)
-		return false
-	}
-	log.infof("Inserted row %d", next_rowid)
 	return true
 }
 
@@ -307,111 +311,116 @@ exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated
 exec_insert_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Insert_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	bool,
 	u32,
 	Mutated_Table_Info,
 ) {
-	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
+	table, found := schema.find_table_cached(t, stmt.table_name, cache)
 	if !found {
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	defer schema.table_free(table, context.temp_allocator)
 
-	values := stmt.values
-	if len(stmt.columns) > 0 {
-		if len(stmt.columns) != len(stmt.values) {
-			log.error("Error: Column list length does not match value count")
-			return false, t.root, {}
+	data_root := table.root_page
+	for row_values in stmt.values {
+		values := row_values
+		if len(stmt.columns) > 0 {
+			if len(stmt.columns) != len(row_values) {
+				log.error("Error: Column list length does not match value count")
+				return false, t.root, {}
+			}
+			if len(stmt.columns) > len(table.columns) {
+				log.errorf(
+					"Error: Too many columns in INSERT. Expected at most %d, got %d",
+					len(table.columns),
+					len(stmt.columns),
+				)
+				return false, t.root, {}
+			}
+
+			reordered := make([]types.Value, len(table.columns), context.temp_allocator)
+			for i in 0 ..< len(reordered) {
+				if def, ok := table.columns[i].default_value.?; ok {
+					cloned, _ := types.value_clone(def, context.temp_allocator)
+					reordered[i] = cloned
+				} else {
+					reordered[i] = types.value_null()
+				}
+			}
+			for col_name, i in stmt.columns {
+				idx, col_ok := schema.find_column_index(table.columns, col_name)
+				if !col_ok {
+					log.errorf("Error: Unknown column: %s", col_name)
+					return false, t.root, {}
+				}
+				reordered[idx] = row_values[i]
+			}
+			values = reordered
 		}
-		if len(stmt.columns) > len(table.columns) {
+		if len(values) != len(table.columns) {
 			log.errorf(
-				"Error: Too many columns in INSERT. Expected at most %d, got %d",
+				"Error: Column count mismatch. Expected %d, got %d",
 				len(table.columns),
-				len(stmt.columns),
+				len(values),
 			)
 			return false, t.root, {}
 		}
+		if !cell.validate(values, table.columns) {
+			log.error("Error: Data type validation failed")
+			return false, t.root, {}
+		}
+		if !check_constraints(values, table^) { return false, t.root, {} }
 
-		reordered := make([]types.Value, len(table.columns), context.temp_allocator)
-		for i in 0 ..< len(reordered) {
-			if def, ok := table.columns[i].default_value.?; ok {
-				cloned, _ := types.value_clone(def, context.temp_allocator)
-				reordered[i] = cloned
+		table_tree := btree.init(t.pager, data_root)
+		next_rowid: types.Row_ID
+		pk_idx, has_pk := schema.get_pk_column(table.columns)
+		if has_pk {
+			if val, is_int := values[pk_idx].(i64); is_int {
+				next_rowid = types.Row_ID(val)
 			} else {
-				reordered[i] = types.value_null()
+				id, _ := btree.tree_next_rowid(&table_tree)
+				next_rowid = id
+				values[pk_idx] = types.value_int(i64(id))
 			}
-		}
-		for col_name, i in stmt.columns {
-			idx, col_ok := schema.find_column_index(table.columns, col_name)
-			if !col_ok {
-				log.errorf("Error: Unknown column: %s", col_name)
-				return false, t.root, {}
-			}
-			reordered[idx] = stmt.values[i]
-		}
-		values = reordered
-	}
-	if len(values) != len(table.columns) {
-		log.errorf(
-			"Error: Column count mismatch. Expected %d, got %d",
-			len(table.columns),
-			len(values),
-		)
-		return false, t.root, {}
-	}
-	if !cell.validate(values, table.columns) {
-		log.error("Error: Data type validation failed")
-		return false, t.root, {}
-	}
-
-	table_tree := btree.init(t.pager, table.root_page)
-	next_rowid: types.Row_ID
-	pk_idx, has_pk := schema.get_pk_column(table.columns)
-	if has_pk {
-		if val, is_int := values[pk_idx].(i64); is_int {
-			next_rowid = types.Row_ID(val)
 		} else {
-			id, _ := btree.tree_next_rowid(&table_tree)
-			next_rowid = id
+			id, id_err := btree.tree_next_rowid(&table_tree)
+			next_rowid = id if id_err == .None else 1
 		}
-	} else {
-		id, id_err := btree.tree_next_rowid(&table_tree)
-		next_rowid = id if id_err == .None else 1
-	}
-	if !check_constraints(values, table) { return false, t.root, {} }
 
-	new_data_root, ins_err := btree.tree_insert_cow(&table_tree, next_rowid, values)
-	if ins_err != .None {
-		log.errorf("Error inserting row: %v", ins_err)
-		return false, t.root, {}
+		new_data_root, ins_err := btree.tree_insert_cow(&table_tree, next_rowid, values)
+		if ins_err != .None {
+			log.errorf("Error inserting row: %v", ins_err)
+			return false, t.root, {}
+		}
+		data_root = new_data_root
+		log.infof("Inserted row %d", next_rowid)
 	}
 
-	new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, new_data_root)
+	new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, data_root)
 	if !ok {
 		log.error("Error: Failed to update schema root page")
 		return false, t.root, {}
 	}
 
-	log.infof("Inserted row %d", next_rowid)
-	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = new_data_root}
+	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = data_root}
 }
 
 exec_update_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Update_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	bool,
 	u32,
 	Mutated_Table_Info,
 ) {
-	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
+	table, found := schema.find_table_cached(t, stmt.table_name, cache)
 	if !found {
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	defer schema.table_free(table, context.temp_allocator)
 
 	update_map := make(map[int]types.Value, context.temp_allocator)
 	if len(stmt.update_columns) != len(stmt.update_values) {
@@ -430,7 +439,7 @@ exec_update_cow :: proc(
 
 	table_tree := btree.init(t.pager, table.root_page)
 	if where_clause, has_where := stmt.where_clause.?; has_where {
-		if target_rowid, pk_ok := try_pk_lookup(table, where_clause); pk_ok {
+		if target_rowid, pk_ok := try_pk_lookup(table^, where_clause); pk_ok {
 			c, find_err := btree.tree_find(&table_tree, target_rowid, context.temp_allocator)
 			if find_err == .None {
 				defer cell.destroy(&c, context.temp_allocator)
@@ -518,21 +527,21 @@ exec_update_cow :: proc(
 exec_delete_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Delete_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	bool,
 	u32,
 	Mutated_Table_Info,
 ) {
-	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
+	table, found := schema.find_table_cached(t, stmt.table_name, cache)
 	if !found {
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
 	if where_cl, has_where := stmt.where_clause.?; has_where {
-		if target_rowid, pk_ok := try_pk_lookup(table, where_cl); pk_ok {
+		if target_rowid, pk_ok := try_pk_lookup(table^, where_cl); pk_ok {
 			nroot, del_err := btree.tree_delete_cow(&table_tree, target_rowid)
 			if del_err == .None {
 				new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, nroot)

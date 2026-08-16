@@ -1,7 +1,9 @@
 package executor
 
+import "core:mem"
 import "src:btree"
 import "src:parser"
+import "src:schema"
 import "src:types"
 
 filter_rows :: proc(
@@ -13,7 +15,7 @@ filter_rows :: proc(
 	filtered := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
 	ctx, ctx_ok := init_where_ctx(where_clause, cols, table_ranges, nil, context.temp_allocator).?
 	if !ctx_ok { return filtered[:] }
-	if len(ctx.conditions) == 0 { return rows }
+	if ctx.root == nil { return rows }
 	for entry in rows {
 		if evaluate_where_ctx(ctx, entry.values) {
 			append(&filtered, entry)
@@ -28,99 +30,176 @@ init_where_ctx :: proc(
 	table_ranges: []Table_Col_Range,
 	schema_tree: ^btree.Tree,
 	allocator := context.allocator,
+	cache: ^schema.Table_Cache = nil,
 ) -> Maybe(Where_Eval_Ctx) {
-	if len(clause.conditions) == 0 {
+	if clause == nil || clause.root == nil {
 		return Where_Eval_Ctx{}
 	}
 
-	resolved := make([]Resolved_Condition, len(clause.conditions), allocator)
-	for cond, i in clause.conditions {
-		idx, found := resolve_qualified_column(cols, table_ranges, cond.column)
-		if !found { return nil }
+	root, ok := build_resolved_node(clause.root, cols, table_ranges, schema_tree, allocator, cache)
+	if !ok { return nil }
+	return Where_Eval_Ctx{root = root, schema_tree = schema_tree}
+}
 
-		rc := Resolved_Condition {
-			col_idx       = idx,
-			operator      = cond.operator,
-			has_in        = cond.operator == .IN,
-			has_right_col = false,
-			right_idx     = 0,
-			in_values     = nil,
-			in_subquery   = nil,
+build_resolved_node :: proc(
+	node: ^parser.Where_Node,
+	cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+	schema_tree: ^btree.Tree,
+	allocator: mem.Allocator,
+	cache: ^schema.Table_Cache = nil,
+) -> (^Resolved_Node, bool) {
+	rn := new(Resolved_Node, allocator)
+	switch node.kind {
+	case .COND:
+		rc, ok := resolve_condition(node.cond, cols, table_ranges, schema_tree, allocator, cache)
+		if !ok {
+			free(rn, allocator)
+			return nil, false
 		}
+		rn.kind = .COND
+		rn.cond = rc
+	case .AND, .OR, .NOT:
+		rn.kind = .NOT if node.kind == .NOT else (.AND if node.kind == .AND else .OR)
+		children := make([]^Resolved_Node, len(node.children), allocator)
+		for child, i in node.children {
+			child_rn, ok := build_resolved_node(child, cols, table_ranges, schema_tree, allocator, cache)
+			if !ok {
+				for j in 0 ..< i { free_resolved_node(children[j], allocator) }
+				delete(children, allocator)
+				free(rn, allocator)
+				return nil, false
+			}
+			children[i] = child_rn
+		}
+		rn.children = children
+	}
+	return rn, true
+}
 
-		if rhs_str, is_col := cond.rhs.(string); is_col {
-			right_idx, rc_found := resolve_qualified_column(cols, table_ranges, rhs_str)
-			if !rc_found { return nil }
-			rc.has_right_col = true
-			rc.right_idx = right_idx
-		} else if val, is_val := cond.rhs.(types.Value); is_val {
-			rc.rhs = val
-		}
+free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
+	if n == nil { return }
+	switch n.kind {
+	case .COND:
+		delete(n.cond.in_subquery_results, allocator)
+	case .AND, .OR, .NOT:
+		for child in n.children { free_resolved_node(child, allocator) }
+		delete(n.children, allocator)
+	}
+	free(n, allocator)
+}
 
-		if cond.in_values != nil {
-			rc.in_values = cond.in_values
-		}
-		if cond.in_subquery != nil {
-			rc.in_subquery = cond.in_subquery
-			if schema_tree != nil {
-				subq_rows: []Row_Entry
-				subq_rows, _ = exec_subquery(schema_tree, cond.in_subquery^)
-				rc.in_subquery_results = make([]types.Value, len(subq_rows), allocator)
-				for ri in 0 ..< len(subq_rows) {
-					if len(subq_rows[ri].values) > 0 {
-						rc.in_subquery_results[ri] = subq_rows[ri].values[0]
-					}
+resolve_condition :: proc(
+	cond: parser.Condition,
+	cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+	schema_tree: ^btree.Tree,
+	allocator: mem.Allocator,
+	cache: ^schema.Table_Cache = nil,
+) -> (Resolved_Condition, bool) {
+	idx, found := resolve_qualified_column(cols, table_ranges, cond.column)
+	if !found { return {}, false }
+
+	rc := Resolved_Condition {
+		col_idx       = idx,
+		operator      = cond.operator,
+		negated       = cond.negated,
+		has_in        = cond.operator == .IN,
+		has_right_col = false,
+		right_idx     = 0,
+		in_values     = nil,
+		in_subquery   = nil,
+	}
+
+	if rhs_str, is_col := cond.rhs.(string); is_col {
+		right_idx, rc_found := resolve_qualified_column(cols, table_ranges, rhs_str)
+		if !rc_found { return {}, false }
+		rc.has_right_col = true
+		rc.right_idx = right_idx
+	} else if val, is_val := cond.rhs.(types.Value); is_val {
+		rc.rhs = val
+	}
+
+	if cond.in_values != nil {
+		rc.in_values = cond.in_values
+	}
+	if cond.in_subquery != nil {
+		rc.in_subquery = cond.in_subquery
+		if schema_tree != nil {
+			subq_rows: []Row_Entry
+			subq_rows, _ = exec_subquery(schema_tree, cond.in_subquery^, cache)
+			rc.in_subquery_results = make([]types.Value, len(subq_rows), allocator)
+			for ri in 0 ..< len(subq_rows) {
+				if len(subq_rows[ri].values) > 0 {
+					rc.in_subquery_results[ri] = subq_rows[ri].values[0]
 				}
 			}
 		}
-		resolved[i] = rc
 	}
-	return Where_Eval_Ctx{conditions = resolved, is_and = clause.is_and, schema_tree = schema_tree}
+	return rc, true
 }
 
 evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
-	if len(ctx.conditions) == 0 { return true }
-	match_res := ctx.is_and
-	for rc in ctx.conditions {
-		left_val := row[rc.col_idx]
-		cond_result: bool
-		if rc.has_right_col {
-			cond_result = compare_condition(left_val, rc.operator, row[rc.right_idx])
-		} else {
-			cond_result = compare_condition(left_val, rc.operator, rc.rhs)
+	if ctx.root == nil { return true }
+	return evaluate_node(ctx, ctx.root, row)
+}
+
+evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Value) -> bool {
+	switch node.kind {
+	case .COND:
+		return evaluate_resolved_condition(ctx, node.cond, row)
+	case .AND:
+		for child in node.children {
+			if !evaluate_node(ctx, child, row) { return false }
 		}
-		if rc.has_in && rc.in_values != nil {
-			cond_result = false
-			for v in rc.in_values {
-				if compare_values(left_val, v) == 0 {
-					cond_result = true; break
-				}
-			}
-		} else if rc.has_in && rc.in_subquery_results != nil {
-			cond_result = false
-			for v in rc.in_subquery_results {
-				if compare_values(left_val, v) == 0 {
-					cond_result = true; break
-				}
-			}
-		} else if rc.has_in && rc.in_subquery != nil {
-			cond_result = false
-			subq_rows, _ := exec_subquery(ctx.schema_tree, rc.in_subquery^)
-			for sr in subq_rows {
-				if len(sr.values) > 0 && compare_values(left_val, sr.values[0]) == 0 {
-					cond_result = true; break
-				}
+		return true
+	case .OR:
+		for child in node.children {
+			if evaluate_node(ctx, child, row) { return true }
+		}
+		return false
+	case .NOT:
+		for child in node.children {
+			return !evaluate_node(ctx, child, row)
+		}
+		return false
+	}
+	return false
+}
+
+evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition, row: []types.Value) -> bool {
+	left_val := row[rc.col_idx]
+	cond_result: bool
+	if rc.has_right_col {
+		cond_result = compare_condition(left_val, rc.operator, row[rc.right_idx])
+	} else {
+		cond_result = compare_condition(left_val, rc.operator, rc.rhs)
+	}
+	if rc.has_in && rc.in_values != nil {
+		cond_result = false
+		for v in rc.in_values {
+			if compare_values(left_val, v) == 0 {
+				cond_result = true; break
 			}
 		}
-		if ctx.is_and {
-			match_res = match_res && cond_result
-			if !match_res { return false }
-		} else {
-			match_res = match_res || cond_result
-			if match_res { return true }
+	} else if rc.has_in && rc.in_subquery_results != nil {
+		cond_result = false
+		for v in rc.in_subquery_results {
+			if compare_values(left_val, v) == 0 {
+				cond_result = true; break
+			}
+		}
+	} else if rc.has_in && rc.in_subquery != nil {
+		cond_result = false
+		subq_rows, _ := exec_subquery(ctx.schema_tree, rc.in_subquery^)
+		for sr in subq_rows {
+			if len(sr.values) > 0 && compare_values(left_val, sr.values[0]) == 0 {
+				cond_result = true; break
+			}
 		}
 	}
-	return match_res
+	if rc.negated { cond_result = !cond_result }
+	return cond_result
 }
 
 evaluate_where :: proc(

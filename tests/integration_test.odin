@@ -1,7 +1,6 @@
 package tests
 
 import "core:fmt"
-import "core:log"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -15,7 +14,7 @@ import "src:snapshot"
 import "src:types"
 
 setup_db :: proc(t: ^testing.T, name: string) -> ^db.Database {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_int_%s.db", name)
 	if os.exists(filename) {
 		os.remove(filename)
@@ -45,7 +44,7 @@ teardown_db :: proc(db_handle: ^db.Database, name: string) {
 
 @(test)
 test_integration_basic_create_and_insert :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "basic_crud")
 	defer teardown_db(d, "basic_crud")
 
@@ -61,7 +60,7 @@ test_integration_basic_create_and_insert :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_transaction_and_snapshot_chain :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "txn_snap")
 	defer teardown_db(d, "txn_snap")
 
@@ -76,7 +75,7 @@ test_integration_transaction_and_snapshot_chain :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_select_empty_table :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "empty_sel")
 	defer teardown_db(d, "empty_sel")
 
@@ -89,7 +88,7 @@ test_integration_select_empty_table :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_select_with_data :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "sel_data")
 	defer teardown_db(d, "sel_data")
 
@@ -103,7 +102,7 @@ test_integration_select_with_data :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_time_travel_as_of_snapshot :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "tt")
 	defer teardown_db(d, "tt")
 
@@ -133,7 +132,7 @@ test_integration_time_travel_as_of_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_time_travel_with_where :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "tt_where")
 	defer teardown_db(d, "tt_where")
 
@@ -148,7 +147,7 @@ test_integration_time_travel_with_where :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_time_travel_with_limit :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "tt_limit")
 	defer teardown_db(d, "tt_limit")
 
@@ -163,7 +162,7 @@ test_integration_time_travel_with_limit :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_rollback_restores_schema :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "rollback")
 	defer teardown_db(d, "rollback")
 
@@ -179,7 +178,7 @@ test_integration_rollback_restores_schema :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_cross_session_snapshots :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	name := "cross_session"
 	d := setup_db(t, name)
 	db.execute(d, "CREATE TABLE t (id INT);")
@@ -200,7 +199,7 @@ test_integration_cross_session_snapshots :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_keyword_as_identifier :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "keyword_id")
 	defer teardown_db(d, "keyword_id")
 
@@ -210,7 +209,7 @@ test_integration_keyword_as_identifier :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_prune_old_snapshots :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "prune")
 	defer teardown_db(d, "prune")
 
@@ -230,7 +229,7 @@ test_integration_prune_old_snapshots :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_update :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "update")
 	defer teardown_db(d, "update")
 
@@ -253,7 +252,7 @@ test_integration_update :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_delete :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "delete")
 	defer teardown_db(d, "delete")
 
@@ -272,7 +271,7 @@ test_integration_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "join")
 	defer teardown_db(d, "join")
 
@@ -289,7 +288,7 @@ test_integration_join :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_group_by_non_first_column :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "group_by")
 	defer teardown_db(d, "group_by")
 
@@ -328,7 +327,7 @@ test_integration_group_by_non_first_column :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_group_by_having :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "having")
 	defer teardown_db(d, "having")
 
@@ -365,7 +364,7 @@ test_integration_group_by_having :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_as_of_timestamp :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "tt_ts")
 	defer teardown_db(d, "tt_ts")
 
@@ -389,7 +388,7 @@ test_integration_as_of_timestamp :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_snapshot_restore :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "restore")
 	defer teardown_db(d, "restore")
 
@@ -408,7 +407,7 @@ test_integration_snapshot_restore :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_limit_pushdown :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "limit_push")
 	defer teardown_db(d, "limit_push")
 
@@ -431,7 +430,7 @@ test_integration_limit_pushdown :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_where_pushdown :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "where_push")
 	defer teardown_db(d, "where_push")
 
@@ -454,7 +453,7 @@ test_integration_where_pushdown :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join_cross :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "join_cross")
 	defer teardown_db(d, "join_cross")
 
@@ -471,7 +470,7 @@ test_integration_join_cross :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join_hash :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "join_hash")
 	defer teardown_db(d, "join_hash")
 
@@ -495,7 +494,7 @@ test_integration_join_hash :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_join_asymmetric :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "join_asym")
 	defer teardown_db(d, "join_asym")
 
@@ -520,7 +519,7 @@ test_integration_join_asymmetric :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_select_distinct :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "sel_distinct")
 	defer teardown_db(d, "sel_distinct")
 
@@ -535,7 +534,7 @@ test_integration_select_distinct :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_query_as_of_timestamp :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "query_ts")
 	defer teardown_db(d, "query_ts")
 
@@ -561,7 +560,7 @@ test_integration_query_as_of_timestamp :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_begin_commit_stress :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "txn_stress")
 	defer teardown_db(d, "txn_stress")
 
@@ -576,7 +575,7 @@ test_integration_begin_commit_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_wal_rollback_preserves_data :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "wal_rb")
 	defer teardown_db(d, "wal_rb")
 
@@ -601,7 +600,7 @@ test_integration_wal_rollback_preserves_data :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_snapshot_restore_with_verification :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "restore_verify")
 	defer teardown_db(d, "restore_verify")
 
@@ -627,7 +626,7 @@ test_integration_snapshot_restore_with_verification :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_snapshot_rollforward_roundtrip :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "rollfwd")
 	defer teardown_db(d, "rollfwd")
 
@@ -652,7 +651,7 @@ test_integration_snapshot_rollforward_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_as_of_after_restore :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "asof_restore")
 	defer teardown_db(d, "asof_restore")
 
@@ -668,7 +667,7 @@ test_integration_as_of_after_restore :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_expire_and_reclaim :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "expire")
 	defer teardown_db(d, "expire")
 
@@ -690,7 +689,7 @@ test_integration_expire_and_reclaim :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "ckpt")
 
 	db.execute(d, "CREATE TABLE t (id INT);")
@@ -710,7 +709,7 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_batch_snapshot :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "batch_snap")
 	defer teardown_db(d, "batch_snap")
 
@@ -727,7 +726,7 @@ test_integration_batch_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_rebalance :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "rebal")
 	defer teardown_db(d, "rebal")
 
@@ -756,7 +755,7 @@ test_integration_rebalance :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_skip_index :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "skipidx")
 	defer teardown_db(d, "skipidx")
 
@@ -780,7 +779,7 @@ test_integration_skip_index :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_integration :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	columns := []types.Column{{type = .INTEGER, name = "id"}, {type = .INTEGER, name = "score"}}
 	rowids := []types.Row_ID{10, 20, 30}
 	rows := [][]types.Value {
@@ -850,7 +849,7 @@ test_columnar_integration :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_btree_read :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Test cursor and tree_find on columnar pages within a real b-tree
 	ctx := setup_tree(t, "colbtree")
 	defer teardown_tree(&ctx)
@@ -974,7 +973,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_insert_conversion :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Test that INSERT on a columnar page triggers columnar→row-major conversion
 	ctx := setup_tree(t, "colinsert")
 	defer teardown_tree(&ctx)
@@ -1068,7 +1067,7 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 
 @(test)
 test_columnar_update_conversion :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Test that UPDATE on a columnar page triggers columnar→row-major conversion
 	ctx := setup_tree(t, "colupdate")
 	defer teardown_tree(&ctx)
@@ -1148,7 +1147,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_semicolon_in_string :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "semi")
 	defer teardown_db(d, "semi")
 
@@ -1163,7 +1162,7 @@ test_insert_semicolon_in_string :: proc(t: ^testing.T) {
 
 @(test)
 test_split_statements :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "splitmulti")
 	defer teardown_db(d, "splitmulti")
 
@@ -1181,7 +1180,7 @@ test_split_statements :: proc(t: ^testing.T) {
 
 @(test)
 test_block_comment :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "blockcmt")
 	defer teardown_db(d, "blockcmt")
 	// Block comments /* like this */ should be ignored
@@ -1195,7 +1194,7 @@ test_block_comment :: proc(t: ^testing.T) {
 
 @(test)
 test_double_semicolon :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "dblsemi")
 	defer teardown_db(d, "dblsemi")
 	// Double semicolon should not produce a spurious error
@@ -1207,12 +1206,15 @@ test_double_semicolon :: proc(t: ^testing.T) {
 
 @(test)
 test_insert_too_many_columns :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "toomany")
 	defer teardown_db(d, "toomany")
 	db.execute(d, "CREATE TABLE t (id INT, val INT);")
 	// Column list with more entries than table has columns should be rejected
+	saved, ctx := suppress_expected_errors()
+	context = ctx
 	ok := db.execute(d, "INSERT INTO t (id,val,id,val) VALUES (1,2,3,4);") != .None
+	context = restore_logger(saved)
 	testing.expect(t, ok, "INSERT with too many columns rejected")
 	// Duplicate column names in INSERT should be accepted (last wins)
 	ok = db.execute(d, "INSERT INTO t (id,id) VALUES (1,2);") == .None
@@ -1227,7 +1229,7 @@ test_insert_too_many_columns :: proc(t: ^testing.T) {
 
 @(test)
 test_negative_limit :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Verify that negative LIMIT produces an error message (not just generic failure)
 	_, ok, err_msg := parser.parse("SELECT * FROM t LIMIT -5;", context.temp_allocator)
 	testing.expect(t, !ok, "negative LIMIT rejected")
@@ -1236,7 +1238,7 @@ test_negative_limit :: proc(t: ^testing.T) {
 
 @(test)
 test_negative_offset :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	_, ok, err_msg := parser.parse("SELECT * FROM t LIMIT 5 OFFSET -3;", context.temp_allocator)
 	testing.expect(t, !ok, "negative OFFSET rejected")
 	testing.expect(t, strings.contains(err_msg, "non-negative"), "error mentions non-negative")
@@ -1244,7 +1246,7 @@ test_negative_offset :: proc(t: ^testing.T) {
 
 @(test)
 test_select_readonly_no_snapshot :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// SELECT under shared lock should not create a snapshot
 	d := setup_db(t, "sel_nosnap")
 	defer teardown_db(d, "sel_nosnap")
@@ -1263,7 +1265,7 @@ test_select_readonly_no_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_multiple_selects :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Multiple sequential SELECTs should all work under shared lock
 	d := setup_db(t, "multisel")
 	defer teardown_db(d, "multisel")
@@ -1282,7 +1284,7 @@ test_multiple_selects :: proc(t: ^testing.T) {
 
 @(test)
 test_readonly_admin_commands :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "ro_admin")
 	defer teardown_db(d, "ro_admin")
 
@@ -1294,13 +1296,13 @@ test_readonly_admin_commands :: proc(t: ^testing.T) {
 	db.describe_table(d, "t2")
 	db.stats(d)
 
-	q := db.query(d, "SELECT name FROM t1;")
+	q := db.query(d, "SELECT id FROM t1;")
 	testing.expect(t, q.ok, "query after admin commands")
 }
 
 @(test)
 test_insert_creates_snapshot :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "ins_snap")
 	defer teardown_db(d, "ins_snap")
 
@@ -1322,7 +1324,7 @@ test_insert_creates_snapshot :: proc(t: ^testing.T) {
 
 @(test)
 test_write_after_read :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "w_after_r")
 	defer teardown_db(d, "w_after_r")
 
@@ -1345,7 +1347,7 @@ test_write_after_read :: proc(t: ^testing.T) {
 
 @(test)
 test_in_subquery :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "insubq")
 	defer teardown_db(d, "insubq")
 
@@ -1375,7 +1377,7 @@ test_in_subquery :: proc(t: ^testing.T) {
 
 @(test)
 test_integration_set_ops :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	d := setup_db(t, "setops")
 	defer teardown_db(d, "setops")
 
@@ -1400,7 +1402,7 @@ test_integration_set_ops :: proc(t: ^testing.T) {
 	// UNION ALL keeps duplicates.
 	q2 := db.query(d, "SELECT x FROM a UNION ALL SELECT x FROM b;")
 	testing.expect(t, q2.ok, "UNION ALL should succeed")
-	testing.expect(t, len(q2.rows) == 4, "UNION ALL of {1,1,2} and {1,3} = 4 rows")
+	testing.expect(t, len(q2.rows) == 5, "UNION ALL of {1,1,2} and {1,3} = 5 rows")
 
 	// INTERSECT keeps only shared values.
 	q3 := db.query(d, "SELECT x FROM a INTERSECT SELECT x FROM b;")
@@ -1443,4 +1445,341 @@ test_integration_set_ops :: proc(t: ^testing.T) {
 	q9 := db.query(d, "SELECT 1 UNION SELECT 2;")
 	testing.expect(t, q9.ok, "literal UNION should succeed")
 	testing.expect(t, len(q9.rows) == 2, "SELECT 1 UNION SELECT 2 = 2 rows")
+}
+
+@(test)
+test_integration_where_mixed_logic :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "where_mixed")
+	defer teardown_db(d, "where_mixed")
+
+	db.execute(d, "CREATE TABLE t (a INT, b INT, c INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 2, 0);")
+	db.execute(d, "INSERT INTO t VALUES (1, 9, 0);")
+	db.execute(d, "INSERT INTO t VALUES (0, 2, 3);")
+	db.execute(d, "INSERT INTO t VALUES (0, 9, 3);")
+
+	// AND binds tighter than OR: (a=1 AND b=2) OR c=3.
+	q := db.query(d, "SELECT c FROM t WHERE a=1 AND b=2 OR c=3;")
+	testing.expect(t, q.ok, "mixed AND/OR WHERE should succeed")
+	testing.expect(t, len(q.rows) == 3, "(a=1 AND b=2) OR c=3 matches 3 rows")
+	if len(q.rows) == 3 {
+		testing.expect_value(t, q.rows[0][0].(i64), i64(0))
+		testing.expect_value(t, q.rows[1][0].(i64), i64(3))
+		testing.expect_value(t, q.rows[2][0].(i64), i64(3))
+	}
+
+	// UPDATE/DELETE with mixed logic reuse the same tree evaluation.
+	db.execute(d, "UPDATE t SET c = 9 WHERE a=1 AND b=2 OR c=3;")
+	q2 := db.query(d, "SELECT c FROM t;")
+	testing.expect(t, q2.ok, "select after update should succeed")
+	testing.expect(t, len(q2.rows) == 4, "update touched 3 rows total")
+
+	db.execute(d, "DELETE FROM t WHERE a=1 AND b=9 OR c=3;")
+	q3 := db.query(d, "SELECT c FROM t;")
+	testing.expect(t, q3.ok, "select after delete should succeed")
+	testing.expect(t, len(q3.rows) == 3, "delete with mixed logic removed 1 row, 3 remain")
+}
+
+@(test)
+test_integration_where_parens :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "where_parens")
+	defer teardown_db(d, "where_parens")
+
+	db.execute(d, "CREATE TABLE t (a INT, b INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 3);")
+	db.execute(d, "INSERT INTO t VALUES (2, 3);")
+	db.execute(d, "INSERT INTO t VALUES (1, 9);")
+	db.execute(d, "INSERT INTO t VALUES (5, 9);")
+
+	// Parenthesized OR group under AND.
+	q := db.query(d, "SELECT b FROM t WHERE (a=1 OR a=2) AND b=3;")
+	testing.expect(t, q.ok, "parenthesized WHERE should succeed")
+	testing.expect(t, len(q.rows) == 2, "(a=1 OR a=2) AND b=3 matches 2 rows")
+
+	// Nested parens: (a=1 AND (b=3 OR b=9)) OR a=5.
+	q2 := db.query(d, "SELECT a FROM t WHERE (a=1 AND (b=3 OR b=9)) OR a=5;")
+	testing.expect(t, q2.ok, "nested parenthesized WHERE should succeed")
+	testing.expect(t, len(q2.rows) == 3, "(a=1 AND (b=3 OR b=9)) OR a=5 matches 3 rows")
+}
+
+@(test)
+test_integration_having_mixed :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "having_mixed")
+	defer teardown_db(d, "having_mixed")
+
+	db.execute(d, "CREATE TABLE s (g INT, v INT);")
+	db.execute(d, "INSERT INTO s VALUES (1, 10);")
+	db.execute(d, "INSERT INTO s VALUES (1, 20);")
+	db.execute(d, "INSERT INTO s VALUES (2, 5);")
+	db.execute(d, "INSERT INTO s VALUES (3, 100);")
+
+	// Mixed logic against aggregate and group-column references.
+	q := db.query(d, "SELECT g FROM s GROUP BY g HAVING COUNT(*) >= 2 OR SUM(v) > 50;")
+	testing.expect(t, q.ok, "mixed HAVING should succeed")
+	testing.expect(t, len(q.rows) == 2, "HAVING COUNT(*)>=2 OR SUM(v)>50 keeps groups 1 and 3")
+
+	// Parenthesized group-column HAVING.
+	q2 := db.query(d, "SELECT g FROM s GROUP BY g HAVING (g = 1 OR g = 2) AND COUNT(*) <= 2;")
+	testing.expect(t, q2.ok, "parenthesized HAVING should succeed")
+	testing.expect(t, len(q2.rows) == 2, "HAVING (g=1 OR g=2) AND COUNT(*)<=2 keeps groups 1 and 2")
+
+	// GROUP BY applies even with no select-list aggregates.
+	q3 := db.query(d, "SELECT g FROM s GROUP BY g;")
+	testing.expect(t, q3.ok, "GROUP BY only should succeed")
+	testing.expect(t, len(q3.rows) == 3, "GROUP BY g yields 3 distinct groups")
+
+	// Bare aggregate name in HAVING (no parens).
+	q4 := db.query(d, "SELECT g FROM s GROUP BY g HAVING count > 1;")
+	testing.expect(t, q4.ok, "HAVING count > 1 should succeed")
+	testing.expect(t, len(q4.rows) == 1, "HAVING count > 1 keeps only g=1")
+	if len(q4.rows) == 1 {
+		testing.expect_value(t, q4.rows[0][0].(i64), i64(1))
+	}
+
+	// HAVING with no GROUP BY but a select-list aggregate.
+	q5 := db.query(d, "SELECT COUNT(*) AS n FROM s HAVING count > 3;")
+	testing.expect(t, q5.ok, "HAVING over single aggregate should succeed")
+	testing.expect(t, len(q5.rows) == 1, "COUNT(*) = 4 satisfies HAVING count > 3")
+}
+
+@(test)
+test_integration_join_on_mixed :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "join_on_mixed")
+	defer teardown_db(d, "join_on_mixed")
+
+	db.execute(d, "CREATE TABLE t1 (x INT, y INT);")
+	db.execute(d, "INSERT INTO t1 VALUES (1, 10);")
+	db.execute(d, "INSERT INTO t1 VALUES (2, 20);")
+	db.execute(d, "INSERT INTO t1 VALUES (3, 30);")
+	db.execute(d, "CREATE TABLE t2 (x INT, z INT);")
+	db.execute(d, "INSERT INTO t2 VALUES (1, 100);")
+	db.execute(d, "INSERT INTO t2 VALUES (2, 200);")
+
+	// Mixed logic in a JOIN ON clause.
+	q := db.query(d, "SELECT t1.x FROM t1 INNER JOIN t2 ON t1.x = t2.x AND (t1.y > 15 OR t2.z < 150) ORDER BY t1.x;")
+	testing.expect(t, q.ok, "mixed JOIN ON should succeed")
+	testing.expect(t, len(q.rows) == 2, "ON x=y AND (t1.y>15 OR t2.z<150) matches x=1 and x=2")
+	if len(q.rows) == 2 {
+		testing.expect_value(t, q.rows[0][0].(i64), i64(1))
+		testing.expect_value(t, q.rows[1][0].(i64), i64(2))
+	}
+}
+
+@(test)
+test_integration_where_in_parens :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "where_in_parens")
+	defer teardown_db(d, "where_in_parens")
+
+	db.execute(d, "CREATE TABLE t1 (x INT);")
+	db.execute(d, "INSERT INTO t1 VALUES (1);")
+	db.execute(d, "INSERT INTO t1 VALUES (2);")
+	db.execute(d, "INSERT INTO t1 VALUES (3);")
+	db.execute(d, "CREATE TABLE t2 (x INT);")
+	db.execute(d, "INSERT INTO t2 VALUES (1);")
+	db.execute(d, "INSERT INTO t2 VALUES (3);")
+
+	// IN subquery combined with a mixed-logic predicate.
+	q := db.query(d, "SELECT x FROM t1 WHERE x IN (SELECT x FROM t2) AND x > 1;")
+	testing.expect(t, q.ok, "IN subquery in mixed WHERE should succeed")
+	testing.expect(t, len(q.rows) == 1, "x IN (1,3) AND x > 1 leaves only x=3")
+	if len(q.rows) == 1 {
+		testing.expect_value(t, q.rows[0][0].(i64), i64(3))
+	}
+}
+
+@(test)
+test_integration_column_alias :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "col_alias")
+	defer teardown_db(d, "col_alias")
+
+	db.execute(d, "CREATE TABLE s (g INT, v INT);")
+	db.execute(d, "INSERT INTO s VALUES (1, 10);")
+	db.execute(d, "INSERT INTO s VALUES (1, 20);")
+	db.execute(d, "INSERT INTO s VALUES (2, 5);")
+
+	// Aggregates with aliases return correct data and header names.
+	q := db.query(d, "SELECT g, COUNT(*) AS n, SUM(v) AS sm FROM s GROUP BY g;")
+	testing.expect(t, q.ok, "aliased aggregate SELECT should succeed")
+	testing.expect(t, len(q.rows) == 2, "GROUP BY g yields 2 groups")
+	testing.expect_value(t, q.columns[0], "g")
+	testing.expect_value(t, q.columns[1], "n")
+	testing.expect_value(t, q.columns[2], "sm")
+	if len(q.rows) == 2 {
+		testing.expect_value(t, q.rows[0][1].(i64), i64(2)) // COUNT for g=1
+		testing.expect_value(t, q.rows[1][0].(i64), i64(2)) // g=2
+	}
+
+	// Plain column alias.
+	q2 := db.query(d, "SELECT g AS group_id FROM s WHERE g = 2;")
+	testing.expect(t, q2.ok, "aliased plain SELECT should succeed")
+	testing.expect(t, len(q2.rows) == 1, "g=2 matches 1 row")
+	testing.expect_value(t, q2.columns[0], "group_id")
+
+	// Aggregates with aliases in a set-op operand carry the header.
+	q3 := db.query(d, "SELECT COUNT(*) AS total FROM s UNION SELECT 99 AS total;")
+	testing.expect(t, q3.ok, "aliased aggregate UNION should succeed")
+	testing.expect(t, len(q3.rows) == 2, "UNION yields 2 rows")
+	testing.expect_value(t, q3.columns[0], "total")
+}
+
+@(test)
+test_integration_where_not :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "where_not")
+	defer teardown_db(d, "where_not")
+
+	db.execute(d, "CREATE TABLE t (a INT, b TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'apple');")
+	db.execute(d, "INSERT INTO t VALUES (2, 'banana');")
+	db.execute(d, "INSERT INTO t VALUES (3, 'cherry');")
+
+	// NOT prefix.
+	q := db.query(d, "SELECT a FROM t WHERE NOT a = 1;")
+	testing.expect(t, q.ok, "WHERE NOT a=1 should succeed")
+	testing.expect(t, len(q.rows) == 2, "NOT a=1 leaves 2 rows")
+
+	// NOT IN.
+	q2 := db.query(d, "SELECT a FROM t WHERE a NOT IN (1, 3);")
+	testing.expect(t, q2.ok, "WHERE a NOT IN should succeed")
+	testing.expect(t, len(q2.rows) == 1, "a NOT IN (1,3) leaves a=2")
+	if len(q2.rows) == 1 {
+		testing.expect_value(t, q2.rows[0][0].(i64), i64(2))
+	}
+
+	// NOT with a parenthesized group.
+	q3 := db.query(d, "SELECT a FROM t WHERE NOT (a = 1 OR a = 2);")
+	testing.expect(t, q3.ok, "WHERE NOT (a=1 OR a=2) should succeed")
+	testing.expect(t, len(q3.rows) == 1, "NOT (a=1 OR a=2) leaves a=3")
+	if len(q3.rows) == 1 {
+		testing.expect_value(t, q3.rows[0][0].(i64), i64(3))
+	}
+
+	// NOT LIKE on a text column.
+	q4 := db.query(d, "SELECT b FROM t WHERE b NOT LIKE 'a%';")
+	testing.expect(t, q4.ok, "WHERE b NOT LIKE should succeed")
+	testing.expect(t, len(q4.rows) == 2, "b NOT LIKE 'a%' excludes apple")
+}
+
+@(test)
+test_integration_multi_row_insert :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "multi_row")
+	defer teardown_db(d, "multi_row")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, name TEXT, score REAL DEFAULT 0.0);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'a', 1.5), (2, 'b', 2.5);")
+	db.execute(d, "INSERT INTO t (name, score) VALUES ('c', 3.5), ('d', 4.5);")
+
+	q := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, q.ok, "count after multi-row insert should succeed")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(4))
+
+	q2 := db.query(d, "SELECT id FROM t WHERE name = 'd';")
+	testing.expect(t, q2.ok, "select after column-list multi-row insert")
+	testing.expect(t, len(q2.rows) == 1, "one row for d")
+	if len(q2.rows) == 1 {
+		testing.expect_value(t, q2.rows[0][0].(i64), i64(4))
+	}
+
+	// Omitted PK column gets the auto-increment rowid stored as its value.
+	q3 := db.query(d, "SELECT id, name FROM t ORDER BY id;")
+	testing.expect(t, q3.ok, "select all after PK auto-fill")
+	testing.expect(t, len(q3.rows) == 4, "4 rows total")
+	if len(q3.rows) == 4 {
+		testing.expect_value(t, q3.rows[0][0].(i64), i64(1))
+		testing.expect_value(t, q3.rows[3][0].(i64), i64(4))
+	}
+}
+
+@(test)
+test_integration_multipage_tree :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "multipage")
+	defer teardown_db(d, "multipage")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
+	// Sequential inserts across many page splits (>1 page tree).
+	for i in 1 ..= 500 {
+		sql := fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 2)
+		if db.execute(d, sql) != .None {
+			testing.expect(t, false, fmt.tprintf("insert %d failed", i))
+			return
+		}
+	}
+
+	q := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, q.ok, "count after multipage insert")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(500))
+
+	// Spot-check rows around the first split boundary.
+	q1 := db.query(d, "SELECT v FROM t WHERE id = 185;")
+	testing.expect(t, q1.ok && len(q1.rows) == 1, "row 185 present")
+	if len(q1.rows) == 1 {
+		testing.expect_value(t, q1.rows[0][0].(i64), i64(370))
+	}
+	q2 := db.query(d, "SELECT v FROM t WHERE id = 186;")
+	testing.expect(t, q2.ok && len(q2.rows) == 1, "row 186 present")
+
+	// Update + delete then verify counts.
+	db.execute(d, "UPDATE t SET v = -1 WHERE id = 186;")
+	q3 := db.query(d, "SELECT v FROM t WHERE id = 186;")
+	testing.expect(t, q3.ok && len(q3.rows) == 1, "updated row present")
+	if len(q3.rows) == 1 {
+		testing.expect_value(t, q3.rows[0][0].(i64), i64(-1))
+	}
+	db.execute(d, "DELETE FROM t WHERE id = 186;")
+	q4 := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, q4.ok, "count after delete")
+	testing.expect_value(t, q4.rows[0][0].(i64), i64(499))
+}
+
+@(test)
+test_integration_random_order_splits :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "rand_splits")
+	defer teardown_db(d, "rand_splits")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
+	// Deterministic pseudo-random insert order (7919 coprime with 5000) that
+	// forces non-rightmost leaf splits and interior separator updates.
+	for i in 1 ..= 500 {
+		id := (i * 7919) % 5000 + 1
+		sql := fmt.tprintf("INSERT INTO t VALUES (%d, %d);", id, id)
+		if db.execute(d, sql) != .None {
+			testing.expect(t, false, fmt.tprintf("insert id %d failed", id))
+			return
+		}
+	}
+
+	q := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, q.ok, "count after random-order insert")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(500))
+
+	// Point lookups must find the rows (interior separators intact). All probes
+	// are chosen from the deterministic inserted id set.
+	probes := []int{3, 44, 4932, 4960, 4975, 4988}
+	for pi in 0 ..< len(probes) {
+		probe := probes[pi]
+		sql := fmt.tprintf("SELECT v FROM t WHERE id = %d;", probe)
+		q2 := db.query(d, sql)
+		testing.expect(t, q2.ok && len(q2.rows) == 1, fmt.tprintf("row %d found", probe))
+	}
+
+	// Update + delete on the random-order tree.
+	db.execute(d, "UPDATE t SET v = -3 WHERE id = 4988;")
+	q3 := db.query(d, "SELECT v FROM t WHERE id = 4988;")
+	testing.expect(t, q3.ok && len(q3.rows) == 1, "updated row present")
+	if len(q3.rows) == 1 {
+		testing.expect_value(t, q3.rows[0][0].(i64), i64(-3))
+	}
+	db.execute(d, "DELETE FROM t WHERE id = 4932;")
+	q4 := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, q4.ok, "count after delete")
+	testing.expect_value(t, q4.rows[0][0].(i64), i64(499))
 }

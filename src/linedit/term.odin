@@ -20,15 +20,19 @@ foreign lib {
 }
 
 Term :: struct {
-	fd:     posix.FD,
-	orig:   posix.termios,
-	is_raw: bool,
+	fd:            posix.FD,
+	orig:          posix.termios,
+	is_raw:        bool,
+	width:         int,
+	height:        int,
+	window_resized: bool,
 }
 
+// global_term_ptr points at the single active Term for the process-wide signal
+// handlers (SIGWINCH / SIGINT / SIGTERM), which cannot capture state by closure.
+// A process opens one terminal editor at a time; document this before adding
+// multi-session support.
 global_term_ptr: ^Term
-terminal_width: int = 80
-terminal_height: int = 24
-window_resized: bool = false
 
 Winsize :: struct {
 	ws_row:    u16,
@@ -37,12 +41,12 @@ Winsize :: struct {
 	ws_ypixel: u16,
 }
 
-terminal_query_size :: proc(fd: posix.FD) {
+terminal_query_size :: proc(t: ^Term) {
 	ws: Winsize
-	result := ioctl(c.int(fd), TIOCGWINSZ, &ws)
+	result := ioctl(c.int(t.fd), TIOCGWINSZ, &ws)
 	if result == 0 {
-		terminal_width = max(1, int(ws.ws_col))
-		terminal_height = max(1, int(ws.ws_row))
+		t.width = max(1, int(ws.ws_col))
+		t.height = max(1, int(ws.ws_row))
 	}
 }
 
@@ -69,7 +73,7 @@ term_enable_raw :: proc(t: ^Term) -> bool {
 
 	t.is_raw = true
 	install_restore_handler(t)
-	terminal_query_size(t.fd)
+	terminal_query_size(t)
 	fmt.fprint(os.stdout, "\x1b[?2004h")
 	return true
 }
@@ -105,5 +109,5 @@ restore_and_reraise :: proc "c" (sig: posix.Signal) {
 }
 
 sigwinch_handler :: proc "c" (sig: posix.Signal) {
-	window_resized = true
+	global_term_ptr.window_resized = true
 }

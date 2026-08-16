@@ -58,7 +58,9 @@ Insert_COW_Result :: struct #all_or_none {
 init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree {
 	c := config
 	if c.allocator.procedure == nil { c.allocator = context.allocator }
-	return Tree{pager = p, root = root_page, config = c}
+	t := Tree{pager = p, root = root_page, config = c}
+	attach_stats(&t)
+	return t
 }
 
 is_leaf :: proc(n: Node) -> bool {
@@ -140,7 +142,7 @@ node_insert_leaf_cell :: proc(
 		insert_cell_at(n.data, n.id, idx, u16(free_off), rowid, n.layout.stride)
 		n.header.cell_count += 1
 		pager.mark_dirty(t.pager, n.id)
-		pager.invalidate_page_int_range(t.pager, n.id)
+		invalidate_page_int_range(t, n.id)
 		return .None
 	}
 
@@ -160,7 +162,7 @@ node_insert_leaf_cell :: proc(
 	n.header.cell_count += 1
 	n.header.cell_content_offset = u16le(new_offset)
 	pager.mark_dirty(t.pager, n.id)
-	pager.invalidate_page_int_range(t.pager, n.id)
+	invalidate_page_int_range(t, n.id)
 	return .None
 }
 
@@ -216,8 +218,8 @@ insert_recursive :: proc(
 			if s_err != .None { return {}, s_err }
 
 			mid := original_count / 2
-			t.pager.row_counts[curr.id] = mid
-			t.pager.row_counts[split.right_page] = original_count - mid
+			tree_stats(t).row_counts[curr.id] = mid
+			tree_stats(t).row_counts[split.right_page] = original_count - mid
 			target_id := curr.id
 			if rowid >= split.split_key { target_id = split.right_page }
 
@@ -228,7 +230,7 @@ insert_recursive :: proc(
 			retry_err := node_insert_leaf_cell(t, &target_node, rowid, values)
 			if retry_err != .None { return {}, retry_err }
 
-			t.pager.row_counts[target_id] = int(target_node.header.cell_count)
+			tree_stats(t).row_counts[target_id] = int(target_node.header.cell_count)
 			return Insert_COW_Result {
 					new_page = curr.id,
 					did_split = true,
@@ -238,7 +240,7 @@ insert_recursive :: proc(
 				.None
 		}
 		if e == .None {
-			t.pager.row_counts[curr.id] = int(curr.header.cell_count)
+			tree_stats(t).row_counts[curr.id] = int(curr.header.cell_count)
 		}
 		return Insert_COW_Result {
 				new_page = new_page_num,
@@ -250,12 +252,19 @@ insert_recursive :: proc(
 	}
 
 	child_id := node_find_child(&curr, rowid, curr.layout)
+	was_rightmost := child_id == get_right_ptr(curr.data, curr.id)
 	child_result, c_err := insert_recursive(t, child_id, rowid, values, cow)
 	if c_err != .None { return {}, c_err }
+	// The recursion pinned the child's COW copy; release it now that this node
+	// only needs its page number (pins are transient access, not ownership).
 	if cow && child_result.new_page != child_id {
-		node_update_child_ptr(&curr, rowid, child_result.new_page, curr.layout)
+		pager.unpin_page(t.pager, child_result.new_page)
 	}
 	if !child_result.did_split {
+		if cow && child_result.new_page != child_id {
+			node_update_child_ptr(&curr, rowid, child_result.new_page, curr.layout)
+		}
+
 		update_row_count(t, curr.id, 1)
 		pager.mark_dirty(t.pager, curr.id)
 		return Insert_COW_Result {
@@ -267,28 +276,42 @@ insert_recursive :: proc(
 			.None
 	}
 
-	is_rightmost := child_id == get_right_ptr(curr.data, curr.id)
+	// The child at child_id split into a left half (child_result.new_page) and a
+	// right half (child_result.right_page); child_result.split_key is the left
+	// half's new upper bound. Repoint the parent to the left half and add the
+	// right half as a new entry. In COW mode child_result.new_page differs from
+	// child_id, so use the actual new page (never the frozen original).
 	ptr_for_insert := child_result.right_page
 	insert_key := child_result.split_key
-	if !is_rightmost {
+	if was_rightmost {
+		// Old rightmost child (reachable only via right_ptr): the left half
+		// becomes a new last cell; the right half becomes the new right_ptr.
+		ptr_for_insert = child_result.new_page
+	} else {
+		// Old non-rightmost child (a regular cell): repoint that cell to the
+		// left half with the new upper bound, then add the right half as a new
+		// cell carrying the old upper bound.
 		idx := find_interior_cell_for_child(curr.data, curr.id, child_id, curr.layout)
-		if idx == -1 { return {}, .Invalid_Page_Header }
+		if idx == -1 {
+			return {}, .Invalid_Page_Header
+		}
 
 		stride := curr.layout.stride
 		cell_offset := int(get_cell_ptr(curr.data, curr.id, idx, stride))
 		old_sep_u64, _, ok := cell.varint_decode(curr.data, cell_offset + 4)
 		if !ok { return {}, .Invalid_Cell_Pointer }
 
-		insert_key = types.Row_ID(old_sep_u64)
-		ptr_for_insert = child_result.right_page
+		endian.put_u32(curr.data[cell_offset:], .Big, child_result.new_page)
 		cell.varint_encode(curr.data[cell_offset + 4:], u64(child_result.split_key))
-	} else {
-		ptr_for_insert = child_id
+		// For v2 the authoritative separator lives in the Cell_Entry, so update
+		// it too (v1 reads the body key updated above; v2 reads entry.key).
+		curr.layout.set_entry(curr.data, curr.id, idx, u16(cell_offset), child_result.split_key)
+		insert_key = types.Row_ID(old_sep_u64)
 	}
 
 	ok := insert_interior_cell(curr.data, curr.id, ptr_for_insert, insert_key, curr.layout)
 	if ok {
-		if is_rightmost { set_right_ptr(curr.data, curr.id, child_result.right_page) }
+		if was_rightmost { set_right_ptr(curr.data, curr.id, child_result.right_page) }
 
 		update_row_count(t, curr.id, 1)
 		pager.mark_dirty(t.pager, curr.id)
@@ -313,7 +336,7 @@ insert_recursive :: proc(
 	if t_err != .None { return {}, t_err }
 
 	defer unpin_node(t, target_node)
-	if is_rightmost { set_right_ptr(target_node.data, target_id, child_result.right_page) }
+	if was_rightmost { set_right_ptr(target_node.data, target_id, child_result.right_page) }
 
 	insert_interior_cell(
 		target_node.data,
@@ -356,7 +379,7 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 		e := node_insert_leaf_cell(t, &root_node, rowid, values)
 		if e != .Page_Full {
 			if e == .None {
-				t.pager.row_counts[t.root] = int(root_node.header.cell_count)
+				tree_stats(t).row_counts[t.root] = int(root_node.header.cell_count)
 			}
 			return e
 		}
@@ -511,18 +534,19 @@ tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
 }
 
 tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
-	if c, ok := t.pager.row_counts[t.root]; ok { count = c; return }
-	count = count_recursive(t, t.root) or_return; return
+	if c, ok := tree_stats(t).row_counts[t.root]; ok { count = c; return }
+	count = count_recursive(t, t.root) or_return
+	return
 }
 
 count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
-	if count, ok := t.pager.row_counts[page_id]; ok { result = count; return }
+	if count, ok := tree_stats(t).row_counts[page_id]; ok { result = count; return }
 
 	node := load_node(t, page_id) or_return
 	defer unpin_node(t, node)
 	if is_leaf(node) {
 		result = int(node.header.cell_count)
-		t.pager.row_counts[page_id] = result
+		tree_stats(t).row_counts[page_id] = result
 		return
 	}
 
@@ -537,13 +561,14 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	}
 
 	total += count_recursive(t, get_right_ptr(node.data, page_id)) or_return
-	t.pager.row_counts[page_id] = total
-	result = total; return
+	tree_stats(t).row_counts[page_id] = total
+	result = total
+	return
 }
 
 update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
-	if _, ok := t.pager.row_counts[page_id]; ok {
-		t.pager.row_counts[page_id] += delta
+	if _, ok := tree_stats(t).row_counts[page_id]; ok {
+		tree_stats(t).row_counts[page_id] += delta
 	}
 }
 
@@ -555,7 +580,7 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 	if is_leaf(node) {
 		e := delete_from_leaf(t, &node, key)
 		if e != .None { return false, e }
-		t.pager.row_counts[page_id] = int(node.header.cell_count)
+		tree_stats(t).row_counts[page_id] = int(node.header.cell_count)
 		return true, .None
 	}
 
@@ -609,7 +634,7 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	}
 
 	pager.mark_dirty(t.pager, leaf_node.id)
-	pager.invalidate_page_int_range(t.pager, leaf_node.id)
+	invalidate_page_int_range(t, leaf_node.id)
 	return .None
 }
 
@@ -631,7 +656,7 @@ tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 	if i_err := node_insert_leaf_cell(t, &leaf_node, rowid, values); i_err != .None {
 		return i_err
 	}
-	t.pager.row_counts[leaf_node.id] = int(leaf_node.header.cell_count)
+	tree_stats(t).row_counts[leaf_node.id] = int(leaf_node.header.cell_count)
 	return .None
 }
 

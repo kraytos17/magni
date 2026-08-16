@@ -16,6 +16,7 @@ display_results :: proc(
 	cols: []types.Column,
 	display_indices: []int,
 	limit, offset: Maybe(u64),
+	aliases: []string = nil,
 ) {
 	skip_count := u64(0)
 	if off, has_off := offset.?; has_off { skip_count = off }
@@ -28,7 +29,13 @@ display_results :: proc(
 	}
 
 	header := make([]string, len(display_indices), context.temp_allocator)
-	for idx, i in display_indices { header[i] = cols[idx].name }
+	for idx, i in display_indices {
+		if aliases != nil && i < len(aliases) && aliases[i] != "" {
+			header[i] = aliases[i]
+		} else {
+			header[i] = cols[idx].name
+		}
+	}
 
 	table_rows := make([dynamic][]string, context.temp_allocator)
 	row_count := 0
@@ -177,49 +184,83 @@ evaluate_where_having :: proc(
 	group_cols: []string,
 	aggregates: []parser.Aggregate_Expr,
 ) -> bool {
-	if len(clause.conditions) == 0 { return true }
-	match := clause.is_and
-	for cond in clause.conditions {
-		cond_result := false
-		rhs_val, rhs_is_val := cond.rhs.(types.Value)
-		for col, i in group_cols {
-			if col == cond.column {
-				if rhs_is_val {
-					cond_result = compare_condition(group_keys[i], cond.operator, rhs_val)
-				}
+	if clause.root == nil { return true }
+	return evaluate_having_node(clause.root, group_keys, agg_values, group_cols, aggregates)
+}
+
+evaluate_having_node :: proc(
+	node: ^parser.Where_Node,
+	group_keys: []types.Value,
+	agg_values: []types.Value,
+	group_cols: []string,
+	aggregates: []parser.Aggregate_Expr,
+) -> bool {
+	switch node.kind {
+	case .COND:
+		return evaluate_having_condition(node.cond, group_keys, agg_values, group_cols, aggregates)
+	case .AND:
+		for child in node.children {
+			if !evaluate_having_node(child, group_keys, agg_values, group_cols, aggregates) {
+				return false
+			}
+		}
+		return true
+	case .OR:
+		for child in node.children {
+			if evaluate_having_node(child, group_keys, agg_values, group_cols, aggregates) {
+				return true
+			}
+		}
+		return false
+	case .NOT:
+		for child in node.children {
+			return !evaluate_having_node(child, group_keys, agg_values, group_cols, aggregates)
+		}
+		return false
+	}
+	return false
+}
+
+evaluate_having_condition :: proc(
+	cond: parser.Condition,
+	group_keys: []types.Value,
+	agg_values: []types.Value,
+	group_cols: []string,
+	aggregates: []parser.Aggregate_Expr,
+) -> bool {
+	cond_result := false
+	rhs_val, rhs_is_val := cond.rhs.(types.Value)
+	for col, i in group_cols {
+		if col == cond.column {
+			if rhs_is_val {
+				cond_result = compare_condition(group_keys[i], cond.operator, rhs_val)
+			}
+			break
+		}
+	}
+	if !cond_result {
+		for agg, i in aggregates {
+			name := ""
+			switch agg.func {
+			case .COUNT:
+				name = "count"
+			case .SUM:
+				name = "sum"
+			case .AVG:
+				name = "avg"
+			case .MIN:
+				name = "min"
+			case .MAX:
+				name = "max"
+			}
+			// Compare case-insensitively: HAVING count > 1 and HAVING COUNT > 1
+			// both reference the COUNT aggregate (cond.column is stored as written).
+			if strings.to_lower(cond.column, context.temp_allocator) == name && rhs_is_val {
+				cond_result = compare_condition(agg_values[i], cond.operator, rhs_val)
 				break
 			}
 		}
-		if !cond_result {
-			for agg, i in aggregates {
-				name := ""
-				switch agg.func {
-				case .COUNT:
-					name = "count"
-				case .SUM:
-					name = "sum"
-				case .AVG:
-					name = "avg"
-				case .MIN:
-					name = "min"
-				case .MAX:
-					name = "max"
-				}
-				// Compare case-insensitively: HAVING count > 1 and HAVING COUNT > 1
-				// both reference the COUNT aggregate (cond.column is stored as written).
-				if strings.to_lower(cond.column, context.temp_allocator) == name && rhs_is_val {
-					cond_result = compare_condition(agg_values[i], cond.operator, rhs_val)
-					break
-				}
-			}
-		}
-		if clause.is_and {
-			match = match && cond_result
-			if !match do return false
-		} else {
-			match = match || cond_result
-			if match do return true
-		}
 	}
-	return match
+	if cond.negated { cond_result = !cond_result }
+	return cond_result
 }

@@ -4,42 +4,55 @@ import "core:mem"
 import "src:pager"
 import "src:types"
 
-// Page 1 has a 100-byte database header prefix. When COW copies it,
-// the page header moves from offset 100 to offset 0 in the new copy.
+// copy_on_write copies a page via the pager and, for a special (header-carrying)
+// page, relocates the page-1 database header to offset 0 in the new copy. The
+// pager owns the page-1 semantics; the layout relocation is btree's concern.
 copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 	new_page, err := pager.copy_page(t.pager, page_id)
-	if err != .None { return 0, .Page_Read_Failed }
-	if page_id == 1 {
-		hdr := get_header(new_page.data, 1)
-		if hdr == nil { return 0, .Invalid_Page_Header }
-
-		SRC_HDR_OFF :: types.DATABASE_HEADER_SIZE
-		DST_HDR_OFF :: 0
-
-		if is_columnar(new_page.data, 1) {
-			// Columnar page: move entire data area (header + column directory + data) from offset 100 to 0
-			data_sz := types.PAGE_SIZE - SRC_HDR_OFF
-			tmp := make([]u8, data_sz, context.temp_allocator)
-			copy(tmp, new_page.data[SRC_HDR_OFF:])
-			mem.zero_slice(new_page.data[SRC_HDR_OFF:])
-			copy(new_page.data[DST_HDR_OFF:], tmp)
-		} else {
-			hdr_sz := page_header_size(hdr.page_type)
-			cell_count := int(hdr.cell_count)
-			stride := get_layout(t.pager.page_format_version).stride
-			ptr_sz := cell_count * stride
-			total_sz := hdr_sz + ptr_sz
-			tmp := make([]u8, total_sz, context.temp_allocator)
-			copy(tmp, new_page.data[SRC_HDR_OFF:])
-
-			mem.zero_slice(new_page.data[SRC_HDR_OFF:SRC_HDR_OFF + total_sz])
-			copy(new_page.data[DST_HDR_OFF:], tmp[:hdr_sz])
-			if ptr_sz > 0 {
-				copy(new_page.data[DST_HDR_OFF + hdr_sz:], tmp[hdr_sz:])
-			}
+	if err != .None {
+		return 0, .Page_Read_Failed
+	}
+	if pager.is_special_page(page_id) {
+		if !relocate_copied_page1(new_page, t.pager.page_format_version) {
+			return 0, .Invalid_Page_Header
 		}
 	}
 	return new_page.page_num, .None
+}
+
+// relocate_copied_page1 moves a page-1 copy's data area (which starts at the
+// 100-byte database header boundary) down to offset 0, so the COW copy is a
+// normal B-tree page. Returns false on an invalid page header.
+relocate_copied_page1 :: proc(page: ^pager.Page, format_version: u32) -> bool {
+	hdr := get_header(page.data, 1)
+	if hdr == nil { return false }
+
+	SRC_HDR_OFF :: types.DATABASE_HEADER_SIZE
+	DST_HDR_OFF :: 0
+
+	if is_columnar(page.data, 1) {
+		// Columnar page: move entire data area (header + column directory + data) from offset 100 to 0.
+		data_sz := types.PAGE_SIZE - SRC_HDR_OFF
+		tmp := make([]u8, data_sz, context.temp_allocator)
+		copy(tmp, page.data[SRC_HDR_OFF:])
+		mem.zero_slice(page.data[SRC_HDR_OFF:])
+		copy(page.data[DST_HDR_OFF:], tmp)
+	} else {
+		hdr_sz := page_header_size(hdr.page_type)
+		cell_count := int(hdr.cell_count)
+		stride := get_layout(format_version).stride
+		ptr_sz := cell_count * stride
+		total_sz := hdr_sz + ptr_sz
+		tmp := make([]u8, total_sz, context.temp_allocator)
+
+		copy(tmp, page.data[SRC_HDR_OFF:])
+		mem.zero_slice(page.data[SRC_HDR_OFF:SRC_HDR_OFF + total_sz])
+		copy(page.data[DST_HDR_OFF:], tmp[:hdr_sz])
+		if ptr_sz > 0 {
+			copy(page.data[DST_HDR_OFF + hdr_sz:], tmp[hdr_sz:])
+		}
+	}
+	return true
 }
 
 tree_insert_cow :: proc(
@@ -66,8 +79,8 @@ tree_insert_cow :: proc(
 			pager.unpin_page(t.pager, new_root)
 			return new_root, e
 		}
-		
-		result_root, split_err := split_leaf_root(t, new_root)
+
+		result_root, split_err := split_leaf_root(t, new_root, rowid, values)
 		pager.unpin_page(t.pager, new_root)
 		return result_root, split_err
 	}
@@ -130,6 +143,10 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 		child_id := node_find_child(&node, key, node.layout)
 		child_result, c_err := delete_cow_recursive(t, child_id, key, true)
 		if c_err != .None { return {}, c_err }
+		// Release the child's COW copy pin now that only its page number is used.
+		if child_result.new_page != child_id {
+			pager.unpin_page(t.pager, child_result.new_page)
+		}
 		if child_result.new_page != child_id {
 			node_update_child_ptr(&node, key, child_result.new_page, node.layout)
 		}
@@ -189,6 +206,10 @@ tree_update_cow :: proc(
 		child_id := node_find_child(&node, rowid, node.layout)
 		child_result, c_err := update_recursive(t, child_id, rowid, values, true)
 		if c_err != .None { return {}, c_err }
+		// Release the child's COW copy pin now that only its page number is used.
+		if child_result.new_page != child_id {
+			pager.unpin_page(t.pager, child_result.new_page)
+		}
 		if child_result.new_page != child_id {
 			node_update_child_ptr(&node, rowid, child_result.new_page, node.layout)
 		}

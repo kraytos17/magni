@@ -51,9 +51,21 @@ Mutated_Table_Info :: struct #all_or_none {
 	root: u32,
 }
 
+// Result captures the outcome of executing a statement: a result set for
+// SELECT/Compound (is_select + rows/cols), or affected-table info for DML.
+// It is data-only — rendering is the caller's responsibility.
+Result :: struct {
+	rows:      []Row_Entry,
+	cols:      []types.Column,
+	is_select: bool,
+	mutated:   Mutated_Table_Info,
+	new_root:  u32,
+}
+
 Resolved_Condition :: struct {
 	col_idx:             int, // column index in the row's values array
 	operator:            parser.Token_Type,
+	negated:             bool, // col NOT IN (...) / col NOT LIKE 'x'
 	rhs:                 types.Value, // compared value (ignored if has_right_col or has_in)
 	has_right_col:       bool, // true → rhs is another column at right_idx
 	right_idx:           int,
@@ -66,7 +78,19 @@ Resolved_Condition :: struct {
 }
 
 Where_Eval_Ctx :: struct {
-	conditions:  []Resolved_Condition,
-	is_and:      bool,
+	root:        ^Resolved_Node, // nil = no filter (always true)
 	schema_tree: ^btree.Tree,
+}
+
+Resolved_Node_Kind :: enum u8 {
+	COND,
+	AND,
+	OR,
+	NOT,
+}
+
+Resolved_Node :: struct {
+	kind:     Resolved_Node_Kind,
+	cond:     Resolved_Condition, // valid when kind == .COND
+	children: []^Resolved_Node, // valid when kind == .AND or .OR (n-ary)
 }

@@ -11,6 +11,8 @@ Token :: struct {
 Condition :: struct {
 	column:      string,
 	operator:    Token_Type,
+	negated:     bool, // col NOT IN (...) / col NOT LIKE 'x'
+	agg_column:  string, // aggregate argument for NAME(...) refs ("" for COUNT(*))
 	// rhs: types.Value for literal comparisons, string for column-column comparisons (e.g. t1.a = t2.b)
 	rhs:         union {
 		types.Value,
@@ -20,9 +22,21 @@ Condition :: struct {
 	in_subquery: ^Select_Stmt, // IN (SELECT ...); owned pointer freed by where_clause_free
 }
 
+Where_Kind :: enum u8 {
+	COND,
+	AND,
+	OR,
+	NOT,
+}
+
+Where_Node :: struct {
+	kind:     Where_Kind,
+	cond:     Condition, // valid when kind == .COND
+	children: [dynamic]^Where_Node, // valid when kind == .AND or .OR (n-ary)
+}
+
 Where_Clause :: struct {
-	conditions: []Condition,
-	is_and:     bool,
+	root: ^Where_Node, // nil = no filter (always true)
 }
 
 Create_Stmt :: struct {
@@ -40,7 +54,7 @@ Foreign_Key :: struct {
 Insert_Stmt :: struct {
 	table_name: string,
 	columns:    []string,
-	values:     []types.Value,
+	values:     [][]types.Value, // one row of values per VALUES (...) group
 }
 
 Order_By_Column :: struct {
@@ -96,6 +110,7 @@ Select_Stmt :: struct {
 	from_alias:      string, // e.g. "FROM t AS a" sets from_alias = "a"
 	joins:           []Join_Clause,
 	columns:         []string, // projected column names; empty = *
+	aliases:         []string, // parallel to columns: AS alias or "" when none
 	literal_values:  []types.Value, // FROM-less SELECT: literal column values
 	aggregates:      []Aggregate_Expr,
 	is_distinct:     bool,

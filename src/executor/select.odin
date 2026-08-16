@@ -163,19 +163,22 @@ join_hash_string :: proc(
 	delete(matched_left)
 }
 
-exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []types.Column) {
+exec_subquery :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
+) -> ([]Row_Entry, []types.Column) {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return nil, nil }
 
-	table, found := schema.get_table(t, tbl_name, context.temp_allocator)
+	table, found := schema.find_table_cached(t, tbl_name, cache)
 	if !found {
 		log.errorf("Error: Subquery table not found: %s", tbl_name)
 		return nil, nil
 	}
-	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
-	rows, scan_err := scan_table(&table_tree, &table, nil, nil, t, context.temp_allocator)
+	rows, scan_err := scan_table(&table_tree, table, nil, nil, t, context.temp_allocator, cache)
 	if scan_err { return nil, nil }
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		rows = filter_rows(
@@ -253,16 +256,17 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		indices := make([]int, len(cols), context.temp_allocator)
 		for i in 0 ..< len(cols) { indices[i] = i }
 
-		display_results(rows, cols, indices, nil, nil)
+		display_results(rows, cols, indices, nil, nil, stmt.aliases)
 		return true
 	}
+
 	_, is_subq := stmt.from.(^parser.Select_Stmt)
 	if is_subq { return exec_select_subquery(t, stmt) }
 	if len(stmt.joins) == 0 { return exec_select_single(t, stmt) }
 
 	rows, combined_cols, table_ranges, total_cols, ok := build_join_result(t, stmt)
 	if !ok { return false }
-	if len(stmt.aggregates) > 0 {
+	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_combined(stmt, rows, combined_cols, table_ranges)
 	}
 
@@ -281,7 +285,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	}
 	if stmt.is_distinct { rows = dedup_rows(rows) }
 
-	display_results(rows, combined_cols, display_indices[:], stmt.limit, stmt.offset)
+	display_results(rows, combined_cols, display_indices[:], stmt.limit, stmt.offset, stmt.aliases)
 	return true
 }
 
@@ -294,12 +298,27 @@ single_range_for :: proc(col_count: int) -> []Table_Col_Range {
 	return range0
 }
 
+// select_header_names returns the display names for a SELECT's columns,
+// substituting AS aliases where present.
+select_header_names :: proc(stmt: parser.Select_Stmt) -> []string {
+	names := make([dynamic]string, 0, len(stmt.columns), context.temp_allocator)
+	for col, i in stmt.columns {
+		if i < len(stmt.aliases) && stmt.aliases[i] != "" {
+			append(&names, stmt.aliases[i])
+		} else {
+			append(&names, col)
+		}
+	}
+	return names[:]
+}
+
 // build_join_result resolves a SELECT's table sources, executes its joins, and
 // applies the WHERE filter, returning the combined rows and columns WITHOUT
 // printing. Shared by the printing path and the set-operation data path.
 build_join_result :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
@@ -310,19 +329,19 @@ build_join_result :: proc(
 	table_count := 1 + len(stmt.joins)
 	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
 	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
-	info: types.Table
+	info: ^types.Table
 	found: bool
 	t0_alias: string
 	col_count_0 := 0
 	if tbl_name, is_table := stmt.from.(string); is_table {
-		info, found = schema.get_table(t, tbl_name, context.temp_allocator)
+		info, found = schema.find_table_cached(t, tbl_name, cache)
 		if !found {
 			log.errorf("Error: Table not found: %s", tbl_name)
 			return nil, nil, nil, 0, false
 		}
 
 		table_ctxs[0] = Table_Context {
-			info = {table = info, tree = btree.init(t.pager, info.root_page)},
+			info = {table = info^, tree = btree.init(t.pager, info.root_page)},
 			range = {
 				table_name = stmt.from_alias if stmt.from_alias != "" else tbl_name,
 				start_col = 0,
@@ -334,7 +353,7 @@ build_join_result :: proc(
 		t0_alias = stmt.from_alias if stmt.from_alias != "" else tbl_name
 		col_count_0 = len(info.columns)
 	} else if vt, is_vt := stmt.from.(^parser.Select_Stmt); is_vt {
-		inner_rows, inner_cols := exec_subquery(t, vt^)
+		inner_rows, inner_cols := exec_subquery(t, vt^, cache)
 		if inner_rows == nil { return nil, nil, nil, 0, false }
 
 		table_ctxs[0] = Table_Context {
@@ -350,7 +369,7 @@ build_join_result :: proc(
 	for join, i in stmt.joins {
 		idx := i + 1
 		if jt_name, is_table := join.source.(string); is_table {
-			info, found = schema.get_table(t, jt_name, context.temp_allocator)
+			info, found = schema.find_table_cached(t, jt_name, cache)
 			if !found {
 				log.errorf("Error: Table not found: %s", jt_name)
 				return nil, nil, nil, 0, false
@@ -359,7 +378,7 @@ build_join_result :: proc(
 			prev := table_ctxs[idx - 1].range
 			alias := join.alias if join.alias != "" else jt_name
 			table_ctxs[idx] = Table_Context {
-				info = {table = info, tree = btree.init(t.pager, info.root_page)},
+				info = {table = info^, tree = btree.init(t.pager, info.root_page)},
 				range = {
 					table_name = alias,
 					start_col = prev.start_col + prev.col_count,
@@ -368,7 +387,7 @@ build_join_result :: proc(
 			}
 			table_ranges[idx] = table_ctxs[idx].range
 		} else if subq, is_subquery := join.source.(^parser.Select_Stmt); is_subquery {
-			inner_rows, inner_cols := exec_subquery(t, subq^)
+			inner_rows, inner_cols := exec_subquery(t, subq^, cache)
 			if inner_rows == nil { return nil, nil, nil, 0, false }
 
 			alias := join.alias if join.alias != "" else ""
@@ -407,6 +426,7 @@ build_join_result :: proc(
 			nil,
 			t,
 			context.temp_allocator,
+			cache,
 		)
 		if scan_err { return nil, nil, nil, 0, false }
 		rows = r
@@ -432,13 +452,13 @@ build_join_result :: proc(
 				nil,
 				t,
 				context.temp_allocator,
+				cache,
 			)
 		}
 
 		hash_used := false
-		if on_cl, has_on := jc.on_clause.?; has_on && len(on_cl.conditions) == 1 {
-			cond := on_cl.conditions[0]
-			if cond.operator == .EQUALS {
+		if on_cl, has_on := jc.on_clause.?; has_on {
+			if cond, has_cond := where_single_condition(on_cl); has_cond && cond.operator == .EQUALS {
 				if rhs_str, is_col := cond.rhs.(string); is_col {
 					left_idx, left_ok := resolve_qualified_column(
 						combined_cols,
@@ -532,15 +552,24 @@ build_join_result :: proc(
 exec_select_join_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
 	bool,
 ) {
-	rows, combined_cols, table_ranges, total_cols, ok := build_join_result(t, stmt)
+	rows, combined_cols, table_ranges, total_cols, ok := build_join_result(t, stmt, cache)
 	if !ok { return nil, nil, false }
-	if len(stmt.aggregates) > 0 {
+	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, combined_cols, table_ranges)
+	}
+
+	// Sort on the full combined rows (so qualified ORDER BY names resolve),
+	// then project to the requested columns.
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		if !sort_rows(rows, order_clause, combined_cols, table_ranges) {
+			return nil, nil, false
+		}
 	}
 
 	display_indices, d_ok := build_display_indices(
@@ -559,14 +588,14 @@ exec_select_join_data :: proc(
 	}
 
 	proj_cols := make([]types.Column, len(display_indices), context.temp_allocator)
-	for idx, i in display_indices { proj_cols[i] = combined_cols[idx] }
-
-	out := proj_rows[:]
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		if !sort_rows(out, order_clause, proj_cols, single_range_for(len(proj_cols))) {
-			return nil, nil, false
+	for idx, i in display_indices {
+		proj_cols[i] = combined_cols[idx]
+		if i < len(stmt.aliases) && stmt.aliases[i] != "" {
+			proj_cols[i].name = stmt.aliases[i]
 		}
 	}
+
+	out := proj_rows[:]
 	if stmt.is_distinct { out = dedup_rows(out) }
 	if limit, has_limit := stmt.limit.?; has_limit {
 		off := u64(0)
@@ -616,7 +645,7 @@ exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		}
 	}
 
-	display_results(rows[:], virtual_cols, display_indices[:], stmt.limit, stmt.offset)
+	display_results(rows[:], virtual_cols, display_indices[:], stmt.limit, stmt.offset, stmt.aliases)
 	return true
 }
 
@@ -625,6 +654,7 @@ exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 exec_subquery_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
@@ -633,7 +663,7 @@ exec_subquery_data :: proc(
 	subq, subq_ok := stmt.from.(^parser.Select_Stmt)
 	if !subq_ok { return nil, nil, false }
 
-	inner_rows, virtual_cols := exec_subquery(t, subq^)
+	inner_rows, virtual_cols := exec_subquery(t, subq^, cache)
 	if inner_rows == nil { return nil, nil, false }
 
 	alias := stmt.from_alias
@@ -707,6 +737,7 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	   stmt.aggregates[0].column == "" &&
 	   stmt.where_clause == nil &&
 	   len(stmt.group_by) == 0 &&
+	   stmt.having == nil &&
 	   !stmt.is_distinct &&
 	   !has_order &&
 	   stmt.limit == nil &&
@@ -724,7 +755,7 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		}
 
 		rows_mat[0] = row_strs
-		render_table(stmt.columns, rows_mat)
+		render_table(select_header_names(stmt), rows_mat)
 		fmt.printf("(%d rows)\n", 1)
 		return true
 	}
@@ -745,7 +776,7 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	single_range := []Table_Col_Range {
 		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
 	}
-	if len(stmt.aggregates) > 0 {
+	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_combined(stmt, rows, table.columns, single_range)
 	}
 
@@ -761,13 +792,14 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		if !sort_rows(rows, order_clause, table.columns, single_range) { return false }
 	}
 	if stmt.is_distinct { rows = dedup_rows(rows) }
-	display_results(rows, table.columns, display_indices, stmt.limit, stmt.offset)
+	display_results(rows, table.columns, display_indices, stmt.limit, stmt.offset, stmt.aliases)
 	return true
 }
 
 exec_select_single_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
@@ -776,12 +808,11 @@ exec_select_single_data :: proc(
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return nil, nil, false }
 
-	table, found := schema.get_table(t, tbl_name, context.temp_allocator)
+	table, found := schema.find_table_cached(t, tbl_name, cache)
 	if !found {
 		log.errorf("Error: Table not found: %s", tbl_name)
 		return nil, nil, false
 	}
-	defer schema.table_free(table, context.temp_allocator)
 
 	table_tree := btree.init(t.pager, table.root_page)
 	has_order := false
@@ -791,11 +822,12 @@ exec_select_single_data :: proc(
 	max_rows := stmt.limit if has_lim && !has_order else nil
 	rows, scan_err := scan_table(
 		&table_tree,
-		&table,
+		table,
 		stmt.where_clause,
 		max_rows,
 		t,
 		context.temp_allocator,
+		cache,
 	)
 	if scan_err { return nil, nil, false }
 
@@ -803,8 +835,7 @@ exec_select_single_data :: proc(
 	single_range := []Table_Col_Range {
 		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
 	}
-
-	if len(stmt.aggregates) > 0 {
+	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, table.columns, single_range)
 	}
 	if order_clause, has_o2 := stmt.order_by.?; has_o2 && len(order_clause) > 0 {
@@ -841,7 +872,12 @@ exec_select_single_data :: proc(
 		}
 
 		proj_cols := make([]types.Column, len(indices), context.temp_allocator)
-		for idx, i in indices { proj_cols[i] = table.columns[idx] }
+		for idx, i in indices {
+			proj_cols[i] = table.columns[idx]
+			if i < len(stmt.aliases) && stmt.aliases[i] != "" {
+				proj_cols[i].name = stmt.aliases[i]
+			}
+		}
 		return proj[:], proj_cols, true
 	}
 	return rows, table.columns, true
@@ -850,6 +886,7 @@ exec_select_single_data :: proc(
 exec_query :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
@@ -861,14 +898,40 @@ exec_query :: proc(
 
 	_, is_subq := stmt.from.(^parser.Select_Stmt)
 	if is_subq {
-		inner_rows, inner_cols := exec_subquery(t, stmt)
-		return inner_rows, inner_cols, inner_rows != nil
+		return exec_subquery_data(t, stmt, cache)
 	}
 	if len(stmt.joins) == 0 {
-		return exec_select_single_data(t, stmt)
+		return exec_select_single_data(t, stmt, cache)
 	}
-	ok := exec_select(t, stmt)
-	return nil, nil, ok
+	return exec_select_join_data(t, stmt, cache)
+}
+
+// find_existing_group locates the group whose GROUP BY key equals row_entry's.
+// group_map chains candidate group indices per hash (different keys can collide
+// on the same hash), so every candidate is verified before deciding a new group
+// is needed. Returns (-1, false) when no matching group exists.
+find_existing_group :: proc(
+	group_map: map[u64][dynamic]int,
+	groups: []Group,
+	hash: u64,
+	row_entry: Row_Entry,
+	group_by_indices: []int,
+) -> (
+	int,
+	bool,
+) {
+	if bucket, ok := group_map[hash]; ok {
+		for gi in bucket {
+			if values_equal_by_indices(
+				row_entry.values,
+				groups[gi].key_values,
+				group_by_indices,
+			) {
+				return gi, true
+			}
+		}
+	}
+	return -1, false
 }
 
 exec_select_aggregate_combined :: proc(
@@ -888,7 +951,11 @@ exec_select_aggregate_combined :: proc(
 	}
 
 	groups := make([dynamic]Group, context.temp_allocator)
-	group_map := make(map[u64]int, context.temp_allocator)
+	group_map := make(map[u64][dynamic]int, context.temp_allocator)
+	defer {
+		for _, bucket in group_map { delete(bucket) }
+		delete(group_map)
+	}
 	for row_entry, _ in rows {
 		if len(group_by_indices) == 0 {
 			if len(groups) == 0 {
@@ -897,16 +964,13 @@ exec_select_aggregate_combined :: proc(
 			append(&groups[0].rows, row_entry)
 		} else {
 			hash := group_key_hash(row_entry.values, group_by_indices)
-			gi, exists := group_map[hash]
-			if exists {
-				if !values_equal_by_indices(
-					row_entry.values,
-					groups[gi].key_values,
-					group_by_indices,
-				) {
-					exists = false
-				}
-			}
+			gi, exists := find_existing_group(
+				group_map,
+				groups[:],
+				hash,
+				row_entry,
+				group_by_indices,
+			)
 			if exists {
 				append(&groups[gi].rows, row_entry)
 			} else {
@@ -917,7 +981,9 @@ exec_select_aggregate_combined :: proc(
 
 				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
 				append(&new_grp_rows, row_entry)
-				group_map[hash] = len(groups)
+				bucket := group_map[hash]
+				append(&bucket, len(groups))
+				group_map[hash] = bucket
 				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
 			}
 		}
@@ -959,7 +1025,7 @@ exec_select_aggregate_combined :: proc(
 		append(&rows_mat, row_strs)
 	}
 
-	render_table(stmt.columns, rows_mat[:])
+	render_table(select_header_names(stmt), rows_mat[:])
 	fmt.printf("(%d rows)\n", len(rows_mat))
 	return true
 }
@@ -988,7 +1054,11 @@ exec_select_aggregate_data :: proc(
 	}
 
 	groups := make([dynamic]Group, context.temp_allocator)
-	group_map := make(map[u64]int, context.temp_allocator)
+	group_map := make(map[u64][dynamic]int, context.temp_allocator)
+	defer {
+		for _, bucket in group_map { delete(bucket) }
+		delete(group_map)
+	}
 	for row_entry, _ in rows {
 		if len(group_by_indices) == 0 {
 			if len(groups) == 0 {
@@ -997,16 +1067,13 @@ exec_select_aggregate_data :: proc(
 			append(&groups[0].rows, row_entry)
 		} else {
 			hash := group_key_hash(row_entry.values, group_by_indices)
-			gi, exists := group_map[hash]
-			if exists {
-				if !values_equal_by_indices(
-					row_entry.values,
-					groups[gi].key_values,
-					group_by_indices,
-				) {
-					exists = false
-				}
-			}
+			gi, exists := find_existing_group(
+				group_map,
+				groups[:],
+				hash,
+				row_entry,
+				group_by_indices,
+			)
 			if exists {
 				append(&groups[gi].rows, row_entry)
 			} else {
@@ -1017,7 +1084,9 @@ exec_select_aggregate_data :: proc(
 
 				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
 				append(&new_grp_rows, row_entry)
-				group_map[hash] = len(groups)
+				bucket := group_map[hash]
+				append(&bucket, len(groups))
+				group_map[hash] = bucket
 				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
 			}
 		}
@@ -1061,7 +1130,9 @@ exec_select_aggregate_data :: proc(
 
 	cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 	for name, i in stmt.columns {
-		cols[i] = types.Column {name = name, type = .INTEGER}
+		display := name
+		if i < len(stmt.aliases) && stmt.aliases[i] != "" { display = stmt.aliases[i] }
+		cols[i] = types.Column {name = display, type = .INTEGER}
 	}
 	return result[:], cols, true
 }
@@ -1073,6 +1144,7 @@ scan_table :: proc(
 	max_rows: Maybe(u64),
 	schema_tree: ^btree.Tree = nil,
 	allocator := context.allocator,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	rows: []Row_Entry,
 	err: bool,
@@ -1084,12 +1156,17 @@ scan_table :: proc(
 
 	where_ctx: Maybe(Where_Eval_Ctx)
 	if wc, has_wc := where_clause.?; has_wc {
-		where_ctx = init_where_ctx(&wc, table.columns, nil, schema_tree, allocator)
+		where_ctx = init_where_ctx(&wc, table.columns, nil, schema_tree, allocator, cache)
 	}
-	// Populate skip index bounds from the table's skip index
-	if ctx, ctx_ok := where_ctx.?; ctx_ok && table.skip_root > 0 {
-		for i in 0 ..< len(ctx.conditions) {
-			rc := &ctx.conditions[i]
+	// Skip-index bounds are only safe for a top-level AND chain of single-column
+	// integer comparisons. OR subtrees (or nested boolean groups) disable skipping.
+	skip_conds: []Resolved_Condition
+	if ctx, ctx_ok := where_ctx.?; ctx_ok {
+		skip_conds = skip_chain_conditions(ctx.root)
+	}
+	if table.skip_root > 0 {
+		for i in 0 ..< len(skip_conds) {
+			rc := &skip_conds[i]
 			if rc.has_right_col || rc.has_in { continue }
 			if val, is_int := rc.rhs.(i64); is_int {
 				pmin, pmax, found := btree.query_skip_index(tree.pager, table.skip_root, val)
@@ -1102,14 +1179,14 @@ scan_table :: proc(
 
 	use_where := false
 	where_ctx_val: Where_Eval_Ctx
-	if ctx, ok := where_ctx.?; ok && len(ctx.conditions) > 0 {
+	if ctx, ok := where_ctx.?; ok && ctx.root != nil {
 		use_where = true
 		where_ctx_val = ctx
 	}
 
 	skip_min, skip_max: u32
-	if use_where {
-		for rc in where_ctx_val.conditions {
+	if use_where && len(skip_conds) > 0 {
+		for rc in skip_conds {
 			if rc.skip_page_min > 0 {
 				if skip_min == 0 || rc.skip_page_min < skip_min { skip_min = rc.skip_page_min }
 			}
@@ -1143,7 +1220,7 @@ scan_table :: proc(
 		btree.cursor_advance(&cursor)
 	}
 	if use_where && table.skip_root == 0 && schema_tree != nil {
-		for rc in where_ctx_val.conditions {
+		for rc in skip_conds {
 			if rc.has_right_col || rc.has_in { continue }
 			col_idx := rc.col_idx
 			skip_idx, build_err := btree.build_skip_index(tree, col_idx)
@@ -1155,11 +1232,39 @@ scan_table :: proc(
 				)
 				if ok {
 					schema_tree.root = new_schema_root
-					table.skip_root = skip_idx.root
 				}
 			}
 			break // only build for the first qualifying column
 		}
 	}
 	return r[:], false
+}
+
+// skip_chain_conditions collects the leaf conditions of a top-level AND chain.
+// Skipping is only safe when the predicate is a flat conjunction of comparisons;
+// OR subtrees or nested boolean groups disable the optimization (empty result).
+skip_chain_conditions :: proc(root: ^Resolved_Node) -> []Resolved_Condition {
+	chain := make([dynamic]Resolved_Condition, context.temp_allocator)
+	collect_skip_chain(root, &chain)
+	return chain[:]
+}
+
+collect_skip_chain :: proc(node: ^Resolved_Node, out: ^[dynamic]Resolved_Condition) {
+	if node == nil { return }
+	switch node.kind {
+	case .COND:
+		append(out, node.cond)
+	case .AND:
+		for child in node.children {
+			if child.kind != .COND {
+				clear(out)
+				return
+			}
+			append(out, child.cond)
+		}
+	case .OR:
+		clear(out)
+	case .NOT:
+		clear(out)
+	}
 }

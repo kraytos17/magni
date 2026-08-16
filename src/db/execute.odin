@@ -70,7 +70,8 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		}
 	}
 
-	exec_ok, new_root, _ := executor.execute(&st, stmt)
+	result: executor.Result
+	exec_ok, new_root, _ := executor.execute(&st, stmt, &result, &db.table_cache)
 	if !as_of_override {
 		db.schema_root_page = new_root
 		update_header(db)
@@ -136,8 +137,10 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		}
 		pager.wal_commit_txn(db.pager)
 	}
-
-	if exec_ok { return .None }
+	if exec_ok {
+		if result.is_select { executor.render_result(result) }
+		return .None
+	}
 	return .IO_Error
 }
 
@@ -185,7 +188,7 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 			st.root = snap_h.schema_root
 		}
 
-		rows, cols, q_ok := executor.exec_query(&st, sel)
+		rows, cols, q_ok := executor.exec_query(&st, sel, &db.table_cache)
 		if !q_ok {
 			r.err = .IO_Error
 			return r
@@ -207,7 +210,7 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 		r.rows = flat_rows
 		return r
 	} else if comp, is_comp := stmt.type.(parser.Compound_Stmt); is_comp {
-		rows, cols, q_ok := executor.exec_compound_data(&st, comp)
+		rows, cols, q_ok := executor.exec_compound_data(&st, comp, &db.table_cache)
 		if !q_ok {
 			r.err = .IO_Error
 			return r

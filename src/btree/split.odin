@@ -193,14 +193,39 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 		return {}, .Serialization_Failed
 	}
 	if mid > 0 {
-		dst_off := PAGE_SIZE
-		for i in 0 ..< mid {
-			cell_off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
-			cell_sz, ok := cell.get_size(curr.data, cell_off)
+		// Snapshot all original cell bodies to a temp buffer before repacking:
+		// with random insert order the bodies are not offset-contiguous, so an
+		// in-place downward pack would overwrite unprocessed source cells.
+		Cell_Ref :: struct {
+			off: int,
+			sz:  int,
+		}
+
+		refs := make([]Cell_Ref, total, context.temp_allocator)
+		total_sz := 0
+		for i in 0 ..< total {
+			off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
+			sz, ok := cell.get_size(curr.data, off)
 			if !ok { return {}, .Serialization_Failed }
 
-			dst_off -= cell_sz
-			copy(curr.data[dst_off:dst_off + cell_sz], curr.data[cell_off:cell_off + cell_sz])
+			refs[i] = Cell_Ref{off = off, sz = sz}
+			total_sz += sz
+		}
+
+		buf := make([]u8, total_sz, context.temp_allocator)
+		pos := 0
+		for i in 0 ..< total {
+			copy(buf[pos:pos + refs[i].sz], curr.data[refs[i].off:refs[i].off + refs[i].sz])
+			pos += refs[i].sz
+		}
+
+		dst_off := PAGE_SIZE
+		pos = 0
+		for i in 0 ..< mid {
+			sz := refs[i].sz
+			dst_off -= sz
+			copy(curr.data[dst_off:dst_off + sz], buf[pos:pos + sz])
+			pos += sz
 			curr.layout.set_entry(
 				curr.data,
 				curr.id,
@@ -255,12 +280,35 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	orig_rightmost := get_right_ptr(curr.data, curr.id)
 	set_right_ptr(right_node.data, right_node.id, orig_rightmost)
 	if mid > 0 {
-		dst_off := PAGE_SIZE
-		for i in 0 ..< mid {
+		// Snapshot all original interior cell bodies to a temp buffer before
+		// repacking (interior cells are also non-offset-contiguous after splits).
+		Cell_Ref :: struct { off: int, sz: int }
+
+		refs := make([]Cell_Ref, total, context.temp_allocator)
+		total_sz := 0
+		for i in 0 ..< total {
 			off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
-			cell_sz := interior_cell_size_from_page(curr.data, off)
-			dst_off -= cell_sz
-			copy(curr.data[dst_off:dst_off + cell_sz], curr.data[off:off + cell_sz])
+			sz := interior_cell_size_from_page(curr.data, off)
+			if sz == 0 { return {}, .Serialization_Failed }
+
+			refs[i] = Cell_Ref{off = off, sz = sz}
+			total_sz += sz
+		}
+
+		buf := make([]u8, total_sz, context.temp_allocator)
+		pos := 0
+		for i in 0 ..< total {
+			copy(buf[pos:pos + refs[i].sz], curr.data[refs[i].off:refs[i].off + refs[i].sz])
+			pos += refs[i].sz
+		}
+
+		dst_off := PAGE_SIZE
+		pos = 0
+		for i in 0 ..< mid {
+			sz := refs[i].sz
+			dst_off -= sz
+			copy(curr.data[dst_off:dst_off + sz], buf[pos:pos + sz])
+			pos += sz
 			curr.layout.set_entry(
 				curr.data,
 				curr.id,
@@ -284,7 +332,12 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
 }
 
-split_leaf_root :: proc(t: ^Tree, root_page: u32) -> (new_root: u32, err: Error) {
+split_leaf_root :: proc(
+	t: ^Tree,
+	root_page: u32,
+	rowid: Maybe(types.Row_ID) = nil,
+	values: Maybe([]types.Value) = nil,
+) -> (new_root: u32, err: Error) {
 	left_page, l_err := pager.allocate_page(t.pager)
 	if l_err != .None { return 0, .Page_Full }
 
@@ -320,6 +373,21 @@ split_leaf_root :: proc(t: ^Tree, root_page: u32) -> (new_root: u32, err: Error)
 	}
 
 	sep := get_cell_key(right_node.data, right_node.id, 0, right_node.layout)
+	// Insert the row that overflowed the leaf into the correct half. The COW
+	// caller passes it here; the non-COW caller re-inserts it via insert_recursive.
+	if rid, has_rid := rowid.?; has_rid {
+		vals, has_vals := values.?
+		if !has_vals { return 0, .Serialization_Failed }
+		if rid >= sep {
+			if e := node_insert_leaf_cell(t, &right_node, rid, vals); e != .None {
+				return 0, e
+			}
+		} else {
+			if e := node_insert_leaf_cell(t, &left_node, rid, vals); e != .None {
+				return 0, e
+			}
+		}
+	}
 
 	init_interior_page(root_node.data, root_node.id)
 	pager.mark_dirty(t.pager, root_node.id)

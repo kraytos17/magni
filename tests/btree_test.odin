@@ -2,7 +2,6 @@ package tests
 
 import "core:encoding/endian"
 import "core:fmt"
-import "core:log"
 import "core:mem"
 import "core:os"
 import "core:testing"
@@ -18,7 +17,7 @@ Test_Context :: struct {
 }
 
 setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_%s.db", name)
 	if os.exists(filename) {
 		os.remove(filename)
@@ -67,7 +66,7 @@ make_large_text :: proc(allocator: mem.Allocator, size: int) -> string {
 
 @(test)
 test_basic_operations :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "basic_ops")
 	defer teardown_tree(&ctx)
 
@@ -99,7 +98,7 @@ test_basic_operations :: proc(t: ^testing.T) {
 
 @(test)
 test_persistence :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "persistence")
 	vals := []types.Value{types.value_int(999)}
 	btree.tree_insert(&ctx.tree, 42, vals)
@@ -127,7 +126,7 @@ test_persistence :: proc(t: ^testing.T) {
 
 @(test)
 test_heavy_split_logic :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "splits")
 	defer teardown_tree(&ctx)
 
@@ -161,7 +160,7 @@ test_heavy_split_logic :: proc(t: ^testing.T) {
 
 @(test)
 test_duplicates :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "duplicates")
 	defer teardown_tree(&ctx)
 
@@ -177,7 +176,7 @@ test_duplicates :: proc(t: ^testing.T) {
 
 @(test)
 test_cursor :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "cursor")
 	defer teardown_tree(&ctx)
 
@@ -222,7 +221,7 @@ test_cursor :: proc(t: ^testing.T) {
 
 @(test)
 test_deletion :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "deletion")
 	defer teardown_tree(&ctx)
 
@@ -248,7 +247,7 @@ test_deletion :: proc(t: ^testing.T) {
 
 @(test)
 test_auto_increment :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "autoincrement")
 	defer teardown_tree(&ctx)
 
@@ -264,7 +263,7 @@ test_auto_increment :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_verify :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "verify")
 	defer teardown_tree(&ctx)
 
@@ -280,7 +279,7 @@ test_tree_verify :: proc(t: ^testing.T) {
 
 @(test)
 test_delete_non_existent :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "del_miss")
 	defer teardown_tree(&ctx)
 
@@ -293,7 +292,7 @@ test_delete_non_existent :: proc(t: ^testing.T) {
 
 @(test)
 test_delete_first_last_key :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "del_first_last")
 	defer teardown_tree(&ctx)
 
@@ -320,7 +319,7 @@ test_delete_first_last_key :: proc(t: ^testing.T) {
 
 @(test)
 test_consecutive_deletes :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "consec_del")
 	defer teardown_tree(&ctx)
 
@@ -340,7 +339,7 @@ test_consecutive_deletes :: proc(t: ^testing.T) {
 
 @(test)
 test_reinsert_after_delete :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "reinsert")
 	defer teardown_tree(&ctx)
 
@@ -359,7 +358,7 @@ test_reinsert_after_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_empty_tree_cursor :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "empty_cursor")
 	defer teardown_tree(&ctx)
 
@@ -372,7 +371,7 @@ test_empty_tree_cursor :: proc(t: ^testing.T) {
 
 @(test)
 test_max_fit_value :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "max_fit")
 	defer teardown_tree(&ctx)
 
@@ -388,7 +387,7 @@ test_max_fit_value :: proc(t: ^testing.T) {
 
 @(test)
 test_overflow_value :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "overflow")
 	defer teardown_tree(&ctx)
 
@@ -400,7 +399,7 @@ test_overflow_value :: proc(t: ^testing.T) {
 
 @(test)
 test_load_node_page_zero :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "page0_tree")
 	defer teardown_tree(&ctx)
 
@@ -411,7 +410,7 @@ test_load_node_page_zero :: proc(t: ^testing.T) {
 
 @(test)
 test_page_one_header_offset :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	offset_1 := btree.get_page_header_offset(1)
 	offset_2 := btree.get_page_header_offset(2)
 	offset_3 := btree.get_page_header_offset(3)
@@ -422,7 +421,7 @@ test_page_one_header_offset :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_update :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "tree_update")
 	defer teardown_tree(&ctx)
 
@@ -440,7 +439,7 @@ test_tree_update :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_update_nonexistent :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "tree_update_nonexist")
 	defer teardown_tree(&ctx)
 
@@ -451,7 +450,7 @@ test_tree_update_nonexistent :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_update_cow :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "tree_update_cow")
 	defer teardown_tree(&ctx)
 
@@ -473,7 +472,7 @@ test_tree_update_cow :: proc(t: ^testing.T) {
 
 @(test)
 test_rebalance_merge :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "rebal_merge")
 	defer teardown_tree(&ctx)
 
@@ -527,7 +526,7 @@ test_rebalance_merge :: proc(t: ^testing.T) {
 
 @(test)
 test_rebalance_byte_accounting :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "rebal_bytes")
 	defer teardown_tree(&ctx)
 
@@ -548,7 +547,7 @@ test_rebalance_byte_accounting :: proc(t: ^testing.T) {
 
 @(test)
 test_find_on_empty_tree :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "empty_find")
 	defer teardown_tree(&ctx)
 
@@ -558,7 +557,7 @@ test_find_on_empty_tree :: proc(t: ^testing.T) {
 
 @(test)
 test_delete_on_empty_tree :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "empty_del")
 	defer teardown_tree(&ctx)
 
@@ -569,7 +568,7 @@ test_delete_on_empty_tree :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_collect_pages :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "collect_pg")
 	defer teardown_tree(&ctx)
 
@@ -590,7 +589,7 @@ test_tree_collect_pages :: proc(t: ^testing.T) {
 
 @(test)
 test_foreach_callback :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "foreach")
 	defer teardown_tree(&ctx)
 
@@ -608,7 +607,7 @@ test_foreach_callback :: proc(t: ^testing.T) {
 
 @(test)
 test_page_accessor_v1 :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, err := pager.open("test_accessor_v1.db", 8)
 	defer pager.close(p); os.remove("test_accessor_v1.db"); os.remove("test_accessor_v1.db-wal")
 	if err != nil { testing.fail_now(t, "open failed") }
@@ -669,7 +668,7 @@ test_page_accessor_v1 :: proc(t: ^testing.T) {
 
 @(test)
 test_page_accessor_v2 :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, err := pager.open("test_accessor_v2.db", 8)
 	defer pager.close(p); os.remove("test_accessor_v2.db"); os.remove("test_accessor_v2.db-wal")
 	if err != nil { testing.fail_now(t, "open failed") }
@@ -777,7 +776,7 @@ test_page_accessor_v2 :: proc(t: ^testing.T) {
 
 @(test)
 test_page_accessor_move :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, err := pager.open("test_accessor_move.db", 8)
 	defer pager.close(p)
 	os.remove("test_accessor_move.db"); os.remove("test_accessor_move.db-wal")
@@ -948,12 +947,12 @@ test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label
 
 @(test)
 test_cell_layout_v1_conformance :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	test_layout_conformance(t, btree.get_layout(1), "v1")
 }
 
 @(test)
 test_cell_layout_v2_conformance :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	test_layout_conformance(t, btree.get_layout(2), "v2")
 }

@@ -29,12 +29,20 @@ Page_Int_Range :: struct {
 	max_int:   i64,
 }
 
+// is_special_page reports whether a page carries a fixed-size leading header
+// (page 1 embeds the 100-byte database header). Page-1 semantics belong to the
+// pager/storage layer; consumers that COW-copy page 1 must relocate the header.
+is_special_page :: proc(page_num: u32) -> bool {
+	return page_num == 1
+}
+
 Pager :: struct {
-	mutex:               sync.RW_Mutex,
+	mutex:               sync.RW_Mutex, // guards storage state; see docs/concurrency.md (acquire after db.mu)
 	cache_index:         map[u32]^Page_Slot,
 	free_slots:          [dynamic]^Page_Slot,
 	slot_count:          u32,
 	evict_hand:          u32,
+	dirty_pages:         [dynamic]u32, // pages dirtied in the current WAL txn; iterated by wal_commit/abort
 	file:                ^os.File,
 	file_len:            i64,
 	page_bitmap:         []u64,
@@ -46,8 +54,12 @@ Pager :: struct {
 	first_free_page:     u32,
 	page_format_version: u32,
 	allocator:           mem.Allocator,
-	row_counts:          map[u32]int,
-	page_int_ranges:     map[u32]Page_Int_Range,
+	// Opaque B-tree statistics, owned by the btree package. The pager stores
+	// them (so they survive transient btree.Tree instances) but never
+	// interprets them: it clears entries via on_evict and frees via free_stats.
+	stats:               rawptr,
+	on_evict:            proc(data: rawptr, page_num: u32),
+	free_stats:          proc(data: rawptr),
 }
 
 Error :: enum {
@@ -98,8 +110,7 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 			}
 
 			delete_key(&p.cache_index, slot.page.page_num)
-			delete_key(&p.page_int_ranges, slot.page.page_num)
-			delete_key(&p.row_counts, slot.page.page_num)
+			if p.on_evict != nil { p.on_evict(p.stats, slot.page.page_num) }
 
 			slot.page = {}
 			slot.referenced = false
@@ -131,8 +142,7 @@ open :: proc(
 	p.wal_state.page_index = make(map[u32]i64, allocator)
 	p.wal_state.txn_index = make(map[u32]i64, allocator)
 	p.free_slots = make([dynamic]^Page_Slot, 0, p.max_cache_pages, allocator)
-	p.row_counts = make(map[u32]int, 64, allocator)
-	p.page_int_ranges = make(map[u32]Page_Int_Range, 64, allocator)
+	p.dirty_pages = make([dynamic]u32, 0, 32, allocator)
 	p.page_format_version = 1
 	p.slot_count = 0
 	for i in 0 ..< p.max_cache_pages {
@@ -185,8 +195,9 @@ close :: proc(p: ^Pager) -> Error {
 	delete(p.cache_index)
 	delete(p.page_bitmap)
 	delete(p.free_slots)
-	delete(p.row_counts)
-	delete(p.page_int_ranges)
+	delete(p.dirty_pages)
+	if p.free_stats != nil { p.free_stats(p.stats) }
+
 	delete(p.slots)
 	free(p, p.allocator)
 	return .None
@@ -196,7 +207,8 @@ close :: proc(p: ^Pager) -> Error {
 get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	if page_num < 1 { return nil, .Invalid_Page_Num }
 
-	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
+	sync.rw_mutex_lock(&p.mutex)
+	defer sync.rw_mutex_unlock(&p.mutex)
 	if slot := find_slot(p, page_num); slot != nil {
 		slot.page.pin_count += 1
 		slot.referenced = true
@@ -256,7 +268,9 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 
 	new_page_num := u32(p.file_len / i64(p.page_size)) + 1
 	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
-	slot.page.page_num = new_page_num; slot.page.pin_count = 1; slot.page.dirty = true
+	slot.page.page_num = new_page_num; slot.page.pin_count = 1
+	mark_slot_dirty(p, slot)
+
 	p.cache_index[new_page_num] = slot; p.file_len += i64(p.page_size)
 	bitmap_grow(p, new_page_num)
 	bitmap_set(p.page_bitmap, new_page_num)
@@ -277,7 +291,9 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 		if slot == nil { return nil, .Cache_Full }
 
 		mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
-		slot.page.page_num = page_num; slot.page.pin_count = 1; slot.page.dirty = true
+		slot.page.page_num = page_num; slot.page.pin_count = 1
+		mark_slot_dirty(p, slot)
+
 		p.cache_index[page_num] = slot; p.file_len += i64(p.page_size)
 		bitmap_grow(p, page_num)
 		bitmap_set(p.page_bitmap, page_num)
@@ -314,14 +330,24 @@ copy_page :: proc(p: ^Pager, src_page_num: u32) -> (dst: ^Page, err: Error) {
 	defer unpin_page(p, src_page_num)
 
 	dst = allocate_page(p) or_return
-
 	copy(dst.data, src.data); dst.dirty = true
 	return
 }
 
+// mark_slot_dirty marks a cached page dirty and records it in the current WAL
+// txn's dirty list so wal_commit_txn/wal_abort_txn need only scan dirtied pages.
+// Caller must hold p.mutex.
+mark_slot_dirty :: proc(p: ^Pager, slot: ^Page_Slot) {
+	if slot == nil || slot.page.page_num == 0 { return }
+	if !slot.page.dirty {
+		slot.page.dirty = true
+		append(&p.dirty_pages, slot.page.page_num)
+	}
+}
+
 mark_dirty :: proc(p: ^Pager, page_num: u32) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
-	if slot := find_slot(p, page_num); slot != nil { slot.page.dirty = true }
+	mark_slot_dirty(p, find_slot(p, page_num))
 }
 
 bitmap_set :: proc(bm: []u64, pn: u32) {
@@ -332,6 +358,9 @@ bitmap_set :: proc(bm: []u64, pn: u32) {
 bitmap_grow :: proc(p: ^Pager, max_pn: u32) {
 	needed := int(max_pn) / 64 + 1
 	if needed > len(p.page_bitmap) {
+		if len(p.page_bitmap) > 0 {
+			needed = max(needed, len(p.page_bitmap) * 2)
+		}
 		old := p.page_bitmap
 		p.page_bitmap = make([]u64, needed, p.allocator)
 		copy(p.page_bitmap, old)
@@ -351,8 +380,4 @@ bitmap_clear :: proc(bm: []u64, pn: u32) {
 bitmap_test :: proc(bm: []u64, pn: u32) -> bool {
 	idx := int(pn) / 64
 	return idx < len(bm) && (bm[idx] & (u64(1) << uint(pn % 64))) != 0
-}
-
-invalidate_page_int_range :: proc(p: ^Pager, page_id: u32) {
-	delete_key(&p.page_int_ranges, page_id)
 }

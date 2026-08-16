@@ -1,14 +1,13 @@
 package tests
 
 import "core:fmt"
-import "core:log"
 import "core:os"
 import "core:testing"
 import "src:pager"
 import "src:types"
 
 create_test_pager_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_pager_%s.db", test_name)
 	if os.exists(filename) {
 		os.remove(filename)
@@ -39,7 +38,7 @@ destroy_test_pager_env :: proc(p: ^pager.Pager, filename: string) {
 
 @(test)
 test_pager_open_close :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "open_close")
 	defer destroy_test_pager_env(p, file)
 
@@ -49,7 +48,7 @@ test_pager_open_close :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_allocate_page :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "allocate")
 	defer destroy_test_pager_env(p, file)
 
@@ -68,7 +67,7 @@ test_pager_allocate_page :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_write_and_flush :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "write_flush")
 	defer os.remove(file)
 	defer os.remove(fmt.tprintf("%s-wal", file))
@@ -97,7 +96,7 @@ test_pager_write_and_flush :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_caching_behavior :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "caching")
 	defer destroy_test_pager_env(p, file)
 
@@ -113,7 +112,7 @@ test_pager_caching_behavior :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_get_or_allocate :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "get_alloc")
 	defer destroy_test_pager_env(p, file)
 
@@ -137,7 +136,7 @@ test_pager_get_or_allocate :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_pinning_logic :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "pinning")
 	defer destroy_test_pager_env(p, file)
 
@@ -153,7 +152,7 @@ test_pager_pinning_logic :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_max_cache_eviction :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "eviction")
 	defer destroy_test_pager_env(p, file)
 
@@ -182,7 +181,7 @@ test_pager_max_cache_eviction :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_get_non_existent :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "noexist")
 	defer destroy_test_pager_env(p, file)
 
@@ -192,7 +191,7 @@ test_pager_get_non_existent :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_double_unpin :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "unpin2")
 	defer destroy_test_pager_env(p, file)
 
@@ -208,7 +207,7 @@ test_pager_double_unpin :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_file_len_after_write :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "filelen")
 	defer os.remove(file)
 	defer os.remove(fmt.tprintf("%s-wal", file))
@@ -229,7 +228,7 @@ test_pager_file_len_after_write :: proc(t: ^testing.T) {
 
 @(test)
 test_page_zero_invalid :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "page_zero")
 	defer destroy_test_pager_env(p, file)
 
@@ -239,7 +238,7 @@ test_page_zero_invalid :: proc(t: ^testing.T) {
 
 @(test)
 test_allocate_page_zero_fails :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "alloc_zero")
 	defer destroy_test_pager_env(p, file)
 
@@ -272,7 +271,7 @@ destroy_test_wal_env :: proc(p: ^pager.Pager, filename: string) {
 
 @(test)
 test_wal_open_close :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "open_close")
 	defer destroy_test_wal_env(p, file)
 
@@ -285,7 +284,7 @@ test_wal_open_close :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_allocate_and_read_back :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "alloc_read")
 	defer destroy_test_wal_env(p, file)
 
@@ -306,7 +305,7 @@ test_wal_allocate_and_read_back :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_uncommitted_discarded_on_close :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "uncommitted")
 	defer remove_wal_files(file)
 
@@ -329,7 +328,7 @@ test_wal_uncommitted_discarded_on_close :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_commit_survives_reopen :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "commit_survive")
 	defer remove_wal_files(file)
 
@@ -359,7 +358,7 @@ test_wal_commit_survives_reopen :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_recovery_from_crash :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	file := fmt.tprintf("test_wal_crash.db")
 	wal_file := fmt.tprintf("%s-wal", file)
 	if os.exists(file) { os.remove(file) }
@@ -402,7 +401,7 @@ test_wal_recovery_from_crash :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_checkpoint_resets_wal :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "checkpoint")
 	defer destroy_test_wal_env(p, file)
 
@@ -452,7 +451,7 @@ test_wal_checkpoint_resets_wal :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_multi_txn_read_your_writes :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "read_writes")
 	defer remove_wal_files(file)
 
@@ -493,7 +492,7 @@ test_wal_multi_txn_read_your_writes :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_begin_commit_rollback_stress :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "txn_stress")
 	defer remove_wal_files(file)
 
@@ -534,7 +533,7 @@ test_wal_begin_commit_rollback_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_rollback_does_not_leak_pages :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "ro_noleak")
 	defer remove_wal_files(file)
 
@@ -582,7 +581,7 @@ bytes_to_u32 :: proc(b: []u8) -> u32 {
 
 @(test)
 test_bitmap_basic_ops :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	bm := make([]u64, 4) // context.allocator — safe for explicit delete
 	defer delete(bm)
 
@@ -614,7 +613,7 @@ test_bitmap_basic_ops :: proc(t: ^testing.T) {
 
 @(test)
 test_bitmap_allocate_sets_bit :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "bmap_alloc")
 	defer destroy_test_pager_env(p, file)
 
@@ -634,7 +633,7 @@ test_bitmap_allocate_sets_bit :: proc(t: ^testing.T) {
 
 @(test)
 test_bitmap_free_clears_bit :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "bmap_free")
 	defer destroy_test_pager_env(p, file)
 
@@ -656,7 +655,7 @@ test_bitmap_free_clears_bit :: proc(t: ^testing.T) {
 
 @(test)
 test_bitmap_grows_on_allocate :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Open with a small file to start with a small bitmap
 	filename := "test_bmap_grow.db"
 	if os.exists(filename) { os.remove(filename) }
@@ -689,7 +688,7 @@ test_bitmap_grows_on_allocate :: proc(t: ^testing.T) {
 
 @(test)
 test_bitmap_64_range :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// Test bits across the first 64-word boundary
 	bm := make([]u64, 2) // context.allocator — safe for explicit delete
 	defer delete(bm)
@@ -713,7 +712,7 @@ test_bitmap_64_range :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_checksum :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	filename := "test_wal_checksum.db"
 	wal_name := fmt.tprintf("%s-wal", filename)
 	os.remove(filename)
@@ -741,7 +740,7 @@ test_wal_checksum :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_checksum_corruption :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	filename := "test_wal_cksum_corrupt.db"
 	wal_name := fmt.tprintf("%s-wal", filename)
 	os.remove(filename)

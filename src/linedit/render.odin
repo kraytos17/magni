@@ -3,10 +3,6 @@ package linedit
 
 import "core:fmt"
 import "core:os"
-import "core:sys/posix"
-
-prev_render_rows: int = 1
-prev_search_rows: int = 0
 
 rune_width :: proc(r: rune) -> int {
 	if r < 0x1100 {
@@ -44,18 +40,19 @@ rune_width :: proc(r: rune) -> int {
 	return 1
 }
 
-redraw :: proc(prompt: string, lb: ^Line_Buffer) {
-	if window_resized {
-		terminal_query_size(posix.STDIN_FILENO)
-		window_resized = false
+redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
+	t := &ed.term
+	if t.window_resized {
+		terminal_query_size(t)
+		t.window_resized = false
 	}
 
-	cols := terminal_width
+	cols := t.width
 	if cols <= 0 {
 		cols = 80
 	}
-	if prev_render_rows > 1 {
-		fmt.fprintf(os.stdout, "\x1b[%dA", prev_render_rows - 1)
+	if ed.prev_render_rows > 1 {
+		fmt.fprintf(os.stdout, "\x1b[%dA", ed.prev_render_rows - 1)
 	}
 
 	fmt.fprint(os.stdout, "\r\x1b[J")
@@ -107,19 +104,20 @@ redraw :: proc(prompt: string, lb: ^Line_Buffer) {
 	if cursor_col > 0 {
 		fmt.fprintf(os.stdout, "\x1b[%dC", cursor_col)
 	}
-	prev_render_rows = total_rows
+	ed.prev_render_rows = total_rows
 }
 
-render_search_overlay :: proc(search_prompt: string, matched: string) {
-	if window_resized {
-		terminal_query_size(posix.STDIN_FILENO)
-		window_resized = false
+render_search_overlay :: proc(ed: ^Editor, search_prompt: string, matched: string) {
+	t := &ed.term
+	if t.window_resized {
+		terminal_query_size(t)
+		t.window_resized = false
 	}
 
-	cols := terminal_width
+	cols := t.width
 	if cols <= 0 { cols = 80 }
 
-	rows := prev_search_rows if prev_search_rows > 0 else prev_render_rows
+	rows := ed.prev_search_rows if ed.prev_search_rows > 0 else ed.prev_render_rows
 	if rows > 1 {
 		fmt.fprintf(os.stdout, "\x1b[%dA", rows - 1)
 	}
@@ -142,5 +140,5 @@ render_search_overlay :: proc(search_prompt: string, matched: string) {
 	if prompt_col > 0 {
 		fmt.fprintf(os.stdout, "\x1b[%dC", prompt_col)
 	}
-	prev_search_rows = 2
+	ed.prev_search_rows = 2
 }

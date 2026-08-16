@@ -27,7 +27,7 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 	if c_err != .None { return {}, c_err }
 	defer cursor_destroy(&cursor)
 
-	has_dir := t.pager.page_int_ranges != nil
+	has_dir := tree_stats(t).page_int_ranges != nil
 	current_entry: Skip_Entry
 	entry_active := false
 	for cursor.is_valid {
@@ -50,7 +50,7 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 		min_val := max(i64)
 		max_val := min(i64)
 		if has_dir {
-			if r, cached := t.pager.page_int_ranges[page_id];
+			if r, cached := tree_stats(t).page_int_ranges[page_id];
 			   cached && int(r.col_index) == col_index {
 				min_val = r.min_int
 				max_val = r.max_int
@@ -73,7 +73,7 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 				cell.destroy(&c)
 			}
 			if min_val <= max_val && has_dir {
-				t.pager.page_int_ranges[page_id] = pager.Page_Int_Range {
+				tree_stats(t).page_int_ranges[page_id] = pager.Page_Int_Range {
 					col_index = u8(col_index),
 					min_int   = min_val,
 					max_int   = max_val,

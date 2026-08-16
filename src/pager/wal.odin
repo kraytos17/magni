@@ -122,14 +122,15 @@ wal_begin_txn :: proc(p: ^Pager) {
 wal_commit_txn :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
 	if !ws.txn_active { return .None }
-	for i in 0 ..< len(p.slots) {
-		slot := &p.slots[i]
-		if slot.page.dirty && slot.page.page_num != 0 {
+	for page_num in p.dirty_pages {
+		if page_num == 0 { continue }
+		if slot := find_slot(p, page_num); slot != nil && slot.page.dirty {
 			wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
 			slot.page.dirty = false
 		}
 	}
-
+	
+	clear(&p.dirty_pages)
 	commit_buf: [types.PAGE_SIZE]u8
 	wal_append_frame(p, 0, commit_buf[:], true, 0) or_return
 	if sync_err := os.sync(ws.file); sync_err != nil {
@@ -150,12 +151,13 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 wal_abort_txn :: proc(p: ^Pager) {
 	ws := &p.wal_state
 	clear(&ws.txn_index)
-	for i in 0 ..< len(p.slots) {
-		slot := &p.slots[i]
-		if slot.page.dirty && slot.page.page_num != 0 {
+	for page_num in p.dirty_pages {
+		if page_num == 0 { continue }
+		if slot := find_slot(p, page_num); slot != nil && slot.page.dirty {
 			slot.page.dirty = false
 		}
 	}
+	clear(&p.dirty_pages)
 	ws.txn_active = false
 }
 

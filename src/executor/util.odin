@@ -36,6 +36,14 @@ resolve_qualified_column :: proc(
 	return schema.find_column_index(combined_cols, name)
 }
 
+// where_single_condition returns the lone leaf condition when the clause tree is
+// exactly one comparison (used by the PK fast-path and hash-join optimization).
+where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition, bool) {
+	root := clause.root
+	if root == nil || root.kind != .COND { return {}, false }
+	return root.cond, true
+}
+
 try_pk_lookup :: proc(
 	table: types.Table,
 	clause: parser.Where_Clause,
@@ -43,10 +51,8 @@ try_pk_lookup :: proc(
 	rowid: types.Row_ID,
 	ok: bool,
 ) {
-	if len(clause.conditions) != 1 { return }
-	if !clause.is_and { return }
-
-	cond := clause.conditions[0]
+	cond, has_cond := where_single_condition(clause)
+	if !has_cond { return }
 	if cond.operator != .EQUALS { return }
 
 	pk_idx, has_pk := schema.get_pk_column(table.columns)

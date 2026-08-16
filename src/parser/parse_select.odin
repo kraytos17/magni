@@ -1,5 +1,6 @@
 package parser
 
+import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "src:types"
@@ -112,6 +113,7 @@ parse_single_join :: proc(
 parse_select_columns :: proc(
 	p: ^Parser,
 	columns: ^[dynamic]string,
+	aliases: ^[dynamic]string,
 	literal_values: ^[dynamic]types.Value,
 	aggregates: ^[dynamic]Aggregate_Expr,
 	allocator := context.allocator,
@@ -122,22 +124,7 @@ parse_select_columns :: proc(
 			if tok.type == .IDENTIFIER &&
 			   p.current + 1 < len(p.tokens) &&
 			   p.tokens[p.current + 1].type == .LPAREN {
-				func_name_upper := strings.to_upper(tok.lexeme, context.temp_allocator)
-				agg_func: Aggregate_Func
-				agg_ok := false
-				switch func_name_upper {
-				case "COUNT":
-					agg_func = .COUNT; agg_ok = true
-				case "SUM":
-					agg_func = .SUM; agg_ok = true
-				case "AVG":
-					agg_func = .AVG; agg_ok = true
-				case "MIN":
-					agg_func = .MIN; agg_ok = true
-				case "MAX":
-					agg_func = .MAX; agg_ok = true
-				}
-
+				agg_func, agg_ok := resolve_aggregate_name(tok.lexeme)
 				if !agg_ok {
 					col, cok := parse_identifier(p, allocator)
 					if !cok { return false }
@@ -151,8 +138,8 @@ parse_select_columns :: proc(
 						if !acok { return false }
 						arg_col = var
 					}
-
 					if !match(p, .RPAREN) { return false }
+
 					arg_display := "*" if is_star else arg_col
 					display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
 					append(columns, display)
@@ -175,10 +162,85 @@ parse_select_columns :: proc(
 					append(columns, col)
 				}
 			}
+			consume_column_alias(p, aliases, allocator)
 			if !match(p, .COMMA) { break }
 		}
 	}
 	return true
+}
+
+// resolve_aggregate_name maps a function name (case-insensitive) to its
+// aggregate func, or false if it is not a supported aggregate.
+resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
+	switch strings.to_upper(name, context.temp_allocator) {
+	case "COUNT":
+		return .COUNT, true
+	case "SUM":
+		return .SUM, true
+	case "AVG":
+		return .AVG, true
+	case "MIN":
+		return .MIN, true
+	case "MAX":
+		return .MAX, true
+	}
+	return .COUNT, false
+}
+
+// collect_having_aggregates walks a HAVING boolean tree and registers any
+// aggregate-named leaf conditions (COUNT(*), SUM(v), ...) into `out` so the
+// executor computes them. `out` holds select-list aggregates first; HAVING
+// references are appended (deduped) and their column arg is cloned because
+// both statement_free and condition_free own their strings.
+collect_having_aggregates :: proc(
+	node: ^Where_Node,
+	out: ^[dynamic]Aggregate_Expr,
+	allocator: mem.Allocator,
+) {
+	if node == nil { return }
+	switch node.kind {
+	case .COND:
+		agg_func, is_agg := resolve_aggregate_name(node.cond.column)
+		if !is_agg { return }
+		for agg in out {
+			if agg.func == agg_func && agg.column == node.cond.agg_column {
+				return
+			}
+		}
+
+		append(out, Aggregate_Expr {
+			func = agg_func,
+			column = strings.clone(node.cond.agg_column, allocator),
+		})
+	case .AND, .OR, .NOT:
+		for child in node.children {
+			collect_having_aggregates(child, out, allocator)
+		}
+	}
+}
+
+// consume_column_alias appends the next column's alias entry ("" if none) and
+// consumes an optional `AS <identifier>` or bare `<identifier>` alias. Clause
+// words tokenize as keywords (not IDENTIFIER), so FROM/WHERE/GROUP/ORDER/COMMA
+// can never be mistaken for a bare alias. `AS` in a SELECT column list is always
+// an alias marker (AS OF appears only after the FROM clause).
+consume_column_alias :: proc(
+	p: ^Parser,
+	aliases: ^[dynamic]string,
+	allocator: mem.Allocator,
+) {
+	append(aliases, "")
+	if match(p, .AS) {
+		if al, ok := parse_identifier(p, allocator); ok {
+			aliases[len(aliases) - 1] = al
+		}
+		return
+	}
+	if is_alias(p) {
+		if al, ok := parse_identifier(p, allocator); ok {
+			aliases[len(aliases) - 1] = al
+		}
+	}
 }
 
 parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynamic]Join_Clause {
@@ -226,6 +288,9 @@ parse_select :: proc(
 	columns := make([dynamic]string, allocator)
 	defer if !ok do delete(columns)
 
+	aliases := make([dynamic]string, allocator)
+	defer if !ok do delete(aliases)
+
 	literal_values := make([dynamic]types.Value, allocator)
 	defer if !ok do delete(literal_values)
 
@@ -233,7 +298,7 @@ parse_select :: proc(
 	defer if !ok do delete(aggregates)
 
 	is_distinct := match(p, .DISTINCT)
-	if !parse_select_columns(p, &columns, &literal_values, &aggregates, allocator) {
+	if !parse_select_columns(p, &columns, &aliases, &literal_values, &aggregates, allocator) {
 		return nil, false
 	}
 
@@ -278,6 +343,11 @@ parse_select :: proc(
 
 	having_cl: Maybe(Where_Clause)
 	if match(p, .HAVING) { having_cl = parse_where_clause(p, allocator) or_return }
+	// Register aggregates referenced only by HAVING (e.g. `HAVING COUNT(*) >= 2`
+	// with no aggregate in the SELECT list) so the executor computes them.
+	if hc, has_h := having_cl.?; has_h {
+		collect_having_aggregates(hc.root, &aggregates, allocator)
+	}
 
 	order_by: Maybe([]Order_By_Column)
 	limit: Maybe(u64)
@@ -290,6 +360,7 @@ parse_select :: proc(
 			from_alias = from_alias,
 			joins = joins[:],
 			columns = columns[:],
+			aliases = aliases[:],
 			literal_values = literal_values[:],
 			aggregates = aggregates[:],
 			is_distinct = is_distinct,

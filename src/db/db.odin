@@ -91,7 +91,8 @@ Database :: struct {
 	refs_page:                u32,
 	snapshot_batch_count:     int,
 	snapshot_batch_threshold: int,
-	mu:                       sync.RW_Mutex,
+	table_cache:              schema.Table_Cache, // in-memory catalog cache; invalidated on schema-root change
+	mu:                       sync.RW_Mutex, // guards database state; see docs/concurrency.md (acquire before pager.mutex)
 }
 
 Header :: struct #packed {
@@ -133,6 +134,7 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 	db.txn_state = .NONE
 	db.txn_snapshot_id = 0
 	db.snapshot_index = make(map[u64]u32, 128)
+	db.table_cache.allocator = context.allocator
 	if db.is_new {
 		log.info("Initializing new database...")
 		if init_err := initialize(db); init_err != .None {
@@ -239,6 +241,7 @@ close :: proc(db: ^Database) {
 			log.warnf("error closing database: %v", err)
 		}
 	}
+	schema.table_cache_free(&db.table_cache)
 	delete(db.snapshot_index); delete(db.path); free(db)
 }
 

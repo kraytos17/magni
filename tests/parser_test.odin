@@ -6,6 +6,27 @@ import "core:testing"
 import "src:parser"
 import "src:types"
 
+// where_leaf_conditions flattens a top-level AND chain of comparisons into leaf
+// conditions (for asserting on parsed WHERE/HAVING/ON trees in tests).
+where_leaf_conditions :: proc(clause: parser.Where_Clause) -> []parser.Condition {
+	if clause.root == nil { return nil }
+	if clause.root.kind == .COND {
+		conds := make([dynamic]parser.Condition, context.temp_allocator)
+		append(&conds, clause.root.cond)
+		return conds[:]
+	}
+	if clause.root.kind == .AND {
+		conds := make([dynamic]parser.Condition, context.temp_allocator)
+		for child in clause.root.children {
+			if child.kind == .COND {
+				append(&conds, child.cond)
+			}
+		}
+		return conds[:]
+	}
+	return nil
+}
+
 @(test)
 test_tokenize_basic :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM users WHERE id = 1;"
@@ -76,18 +97,19 @@ test_parse_insert :: proc(t: ^testing.T) {
 	testing.expect(t, is_insert, "Expected Insert_Stmt variant")
 
 	testing.expect(t, insert_stmt.table_name == "users", "Wrong table")
-	testing.expect(t, len(insert_stmt.values) == 4, "Value count mismatch")
+	testing.expect(t, len(insert_stmt.values) == 1, "Row count mismatch")
+	testing.expect(t, len(insert_stmt.values[0]) == 4, "Value count mismatch")
 
-	v0 := insert_stmt.values[0].(i64)
+	v0 := insert_stmt.values[0][0].(i64)
 	testing.expect(t, v0 == 1, "Val 0 mismatch")
 
-	v1 := insert_stmt.values[1].(string)
+	v1 := insert_stmt.values[0][1].(string)
 	testing.expect(t, v1 == "Alice", "Val 1 mismatch")
 
-	_, is_null := insert_stmt.values[2].(types.Null)
+	_, is_null := insert_stmt.values[0][2].(types.Null)
 	testing.expect(t, is_null, "Val 2 should be NULL")
 
-	v3 := insert_stmt.values[3].(f64)
+	v3 := insert_stmt.values[0][3].(f64)
 	testing.expect(t, v3 == 99.9, "Val 3 mismatch")
 }
 
@@ -131,16 +153,17 @@ test_parse_select_where :: proc(t: ^testing.T) {
 
 	clause, has_clause := sel.where_clause.?
 	testing.expect(t, has_clause, "Missing WHERE clause")
-	testing.expect(t, clause.is_and == true, "Should be AND logic")
-	testing.expect(t, len(clause.conditions) == 2, "Should have 2 conditions")
+	testing.expect(t, clause.root.kind == .AND, "Should be AND logic")
+	conds := where_leaf_conditions(clause)
+	testing.expect(t, len(conds) == 2, "Should have 2 conditions")
 
-	c1 := clause.conditions[0]
+	c1 := conds[0]
 	testing.expect(t, c1.column == "age", "C1 column mismatch")
 	testing.expect(t, c1.operator == .GREATER_EQUAL, "C1 op mismatch")
 	c1_val, c1_val_ok := c1.rhs.(types.Value)
 	testing.expect(t, c1_val_ok && c1_val.(i64) == 18, "C1 val mismatch")
 
-	c2 := clause.conditions[1]
+	c2 := conds[1]
 	testing.expect(t, c2.column == "status", "C2 column mismatch")
 	testing.expect(t, c2.operator == .EQUALS, "C2 op mismatch")
 	c2_val, c2_val_ok := c2.rhs.(types.Value)
@@ -176,8 +199,8 @@ test_parse_delete :: proc(t: ^testing.T) {
 	testing.expect(t, del.table_name == "logs", "Wrong table")
 
 	clause, _ := del.where_clause.?
-	testing.expect(t, len(clause.conditions) == 1, "Cond count mismatch")
-	testing.expect(t, clause.conditions[0].operator == .LESS_THAN, "Op mismatch")
+	testing.expect(t, clause.root.kind == .COND, "Cond count mismatch")
+	testing.expect(t, clause.root.cond.operator == .LESS_THAN, "Op mismatch")
 }
 
 @(test)
@@ -192,10 +215,74 @@ test_parse_drop :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_parse_error_mixed_logic :: proc(t: ^testing.T) {
+test_parse_mixed_logic_precedence :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t WHERE a=1 AND b=2 OR c=3;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Mixed AND/OR should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, has := sel.where_clause.?
+	testing.expect(t, has, "WHERE clause missing")
+	// AND binds tighter than OR: (a=1 AND b=2) OR c=3
+	testing.expect(t, clause.root.kind == .OR, "Root should be OR (AND precedence)")
+	testing.expect_value(t, len(clause.root.children), 2)
+	left := clause.root.children[0]
+	testing.expect(t, left.kind == .AND, "Left should be AND")
+	testing.expect_value(t, len(left.children), 2)
+	right := clause.root.children[1]
+	testing.expect(t, right.kind == .COND, "Right should be a condition")
+	testing.expect_value(t, right.cond.column, "c")
+}
+
+@(test)
+test_parse_parenthesized_where :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE (a=1 OR a=2) AND b=3;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Parenthesized WHERE should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, has := sel.where_clause.?
+	testing.expect(t, has, "WHERE clause missing")
+	testing.expect(t, clause.root.kind == .AND, "Root should be AND")
+	testing.expect_value(t, len(clause.root.children), 2)
+	left := clause.root.children[0]
+	testing.expect(t, left.kind == .OR, "Parenthesized group should be OR")
+	testing.expect_value(t, len(left.children), 2)
+}
+
+@(test)
+test_parse_nested_parenthesized_where :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE (a=1 AND (b=2 OR b=3)) OR c=4;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Nested parenthesized WHERE should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, has := sel.where_clause.?
+	testing.expect(t, has, "WHERE clause missing")
+	testing.expect(t, clause.root.kind == .OR, "Root should be OR")
+	left := clause.root.children[0]
+	testing.expect(t, left.kind == .AND, "Left should be AND")
+	testing.expect(t, left.children[0].kind == .COND, "a=1 should be a leaf")
+	grp := left.children[1]
+	testing.expect(t, grp.kind == .OR, "Inner parens should be OR")
+	testing.expect_value(t, len(grp.children), 2)
+	right := clause.root.children[1]
+	testing.expect(t, right.kind == .COND, "Right should be a condition")
+	testing.expect_value(t, right.cond.column, "c")
+}
+
+@(test)
+test_parse_error_dangling_and :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE a=1 AND;"
 	_, ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, !ok, "Should fail on mixed AND/OR logic")
+	testing.expect(t, !ok, "Dangling AND should fail to parse")
+}
+
+@(test)
+test_parse_error_unclosed_paren :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE (a=1 OR b=2;"
+	_, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, !ok, "Unclosed parenthesis should fail to parse")
 }
 
 @(test)
@@ -281,8 +368,8 @@ test_parse_or_clause :: proc(t: ^testing.T) {
 	testing.expect(t, is_select, "Expected Select_Stmt")
 	clause, has := sel.where_clause.?
 	testing.expect(t, has, "WHERE clause missing")
-	testing.expect(t, !clause.is_and, "Should be OR logic")
-	testing.expect_value(t, len(clause.conditions), 2)
+	testing.expect(t, clause.root.kind == .OR, "Should be OR logic")
+	testing.expect_value(t, len(clause.root.children), 2)
 }
 
 @(test)
@@ -293,7 +380,156 @@ test_parse_not_equals :: proc(t: ^testing.T) {
 	sel, is_select := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_select, "Expected Select_Stmt")
 	clause, _ := sel.where_clause.?
-	testing.expect_value(t, clause.conditions[0].operator, parser.Token_Type.NOT_EQUALS)
+	testing.expect_value(t, clause.root.cond.operator, parser.Token_Type.NOT_EQUALS)
+}
+
+@(test)
+test_parse_column_alias_aggregate :: proc(t: ^testing.T) {
+	sql := "SELECT g, COUNT(*) AS n, SUM(v) AS sm FROM s GROUP BY g;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Aliased aggregate SELECT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	_, is_nf := sel.from.(parser.No_From)
+	testing.expect(t, !is_nf, "FROM should be parsed (not a FROM-less literal select)")
+	testing.expect_value(t, len(sel.aliases), 3)
+	testing.expect_value(t, sel.aliases[0], "")
+	testing.expect_value(t, sel.aliases[1], "n")
+	testing.expect_value(t, sel.aliases[2], "sm")
+	testing.expect(t, len(sel.group_by) == 1, "GROUP BY should be parsed")
+	testing.expect(t, len(sel.aggregates) == 2, "aggregates should be parsed")
+}
+
+@(test)
+test_parse_column_alias_plain :: proc(t: ^testing.T) {
+	sql := "SELECT a AS x, b FROM t WHERE a = 1;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Plain column alias should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect_value(t, len(sel.aliases), 2)
+	testing.expect_value(t, sel.aliases[0], "x")
+	testing.expect_value(t, sel.aliases[1], "")
+	_, is_nf := sel.from.(parser.No_From)
+	testing.expect(t, !is_nf, "FROM should be parsed")
+	testing.expect(t, sel.where_clause != nil, "WHERE should be present after aliased columns")
+}
+
+@(test)
+test_parse_literal_alias :: proc(t: ^testing.T) {
+	sql := "SELECT 1 AS x;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Literal alias should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect_value(t, len(sel.aliases), 1)
+	testing.expect_value(t, sel.aliases[0], "x")
+}
+
+@(test)
+test_parse_not_prefix :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE NOT a = 1;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "NOT prefix should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, has := sel.where_clause.?
+	testing.expect(t, has, "WHERE clause missing")
+	testing.expect(t, clause.root.kind == .NOT, "Root should be NOT node")
+	testing.expect(t, len(clause.root.children) == 1, "NOT has one child")
+	testing.expect(t, clause.root.children[0].kind == .COND, "NOT child is a condition")
+}
+
+@(test)
+test_parse_not_in :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE a NOT IN (1, 3);"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "NOT IN should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, _ := sel.where_clause.?
+	testing.expect(t, clause.root.kind == .COND, "Root should be a condition")
+	testing.expect(t, clause.root.cond.negated, "Condition should be negated")
+	testing.expect(t, clause.root.cond.operator == .IN, "Operator should be IN")
+}
+
+@(test)
+test_parse_not_like :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE name NOT LIKE 'x%';"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "NOT LIKE should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, _ := sel.where_clause.?
+	testing.expect(t, clause.root.kind == .COND, "Root should be a condition")
+	testing.expect(t, clause.root.cond.negated, "Condition should be negated")
+	testing.expect(t, clause.root.cond.operator == .LIKE, "Operator should be LIKE")
+}
+
+@(test)
+test_parse_not_paren_group :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE NOT (a = 1 OR b = 2);"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "NOT (paren group) should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, _ := sel.where_clause.?
+	testing.expect(t, clause.root.kind == .NOT, "Root should be NOT node")
+	testing.expect(t, clause.root.children[0].kind == .OR, "NOT wraps an OR group")
+}
+
+@(test)
+test_parse_bare_identifier_alias :: proc(t: ^testing.T) {
+	sql := "SELECT a b, c FROM t;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Bare identifier alias should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect_value(t, len(sel.aliases), 2)
+	testing.expect_value(t, sel.aliases[0], "b")
+	testing.expect_value(t, sel.aliases[1], "")
+	_, is_nf := sel.from.(parser.No_From)
+	testing.expect(t, !is_nf, "FROM should be parsed")
+}
+
+@(test)
+test_parse_multi_row_insert :: proc(t: ^testing.T) {
+	sql := "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c');"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Multi-row INSERT should parse")
+	ins, is_insert := stmt.type.(parser.Insert_Stmt)
+	testing.expect(t, is_insert, "Expected Insert_Stmt")
+	testing.expect_value(t, len(ins.values), 3)
+	testing.expect(t, len(ins.values[0]) == 2, "Row 0 has 2 values")
+	testing.expect(t, len(ins.values[1]) == 2, "Row 1 has 2 values")
+	testing.expect(t, len(ins.values[2]) == 2, "Row 2 has 2 values")
+	testing.expect_value(t, ins.values[2][0].(i64), i64(3))
+}
+
+@(test)
+test_parse_having_aggregate :: proc(t: ^testing.T) {
+	sql := "SELECT g FROM s GROUP BY g HAVING COUNT(*) >= 2 OR SUM(v) > 50;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "HAVING with aggregate refs should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect(t, len(sel.aggregates) == 2, "HAVING aggregates registered")
+	if len(sel.aggregates) == 2 {
+		testing.expect_value(t, sel.aggregates[0].func, parser.Aggregate_Func.COUNT)
+		testing.expect_value(t, sel.aggregates[0].column, "")
+		testing.expect_value(t, sel.aggregates[1].func, parser.Aggregate_Func.SUM)
+		testing.expect_value(t, sel.aggregates[1].column, "v")
+	}
+}
+
+@(test)
+test_parse_having_aggregate_dedup :: proc(t: ^testing.T) {
+	sql := "SELECT g, COUNT(*) FROM s GROUP BY g HAVING count > 1;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "HAVING with dup aggregate ref should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect(t, len(sel.aggregates) == 1, "HAVING aggregate deduped against select list")
 }
 
 @(test)
@@ -329,8 +565,9 @@ test_parse_blob_literal :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "INSERT with BLOB literal should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
-	testing.expect_value(t, len(ins.values), 2)
-	blob_val, is_blob := ins.values[1].([]u8)
+	testing.expect_value(t, len(ins.values), 1)
+	testing.expect_value(t, len(ins.values[0]), 2)
+	blob_val, is_blob := ins.values[0][1].([]u8)
 	testing.expect(t, is_blob, "Second value should be a BLOB")
 	testing.expect_value(t, blob_val[0], u8(0xDE))
 	testing.expect_value(t, blob_val[1], u8(0xAD))
@@ -345,7 +582,7 @@ test_parse_blob_literal_lowercase :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "Lowercase x'...' should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
-	blob_val, is_blob := ins.values[1].([]u8)
+	blob_val, is_blob := ins.values[0][1].([]u8)
 	testing.expect(t, is_blob, "Second value should be a BLOB")
 	testing.expect_value(t, len(blob_val), 4)
 }
@@ -357,7 +594,7 @@ test_parse_blob_literal_empty :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "Empty BLOB literal should parse")
 	ins, is_insert := stmt.type.(parser.Insert_Stmt)
 	testing.expect(t, is_insert, "Expected Insert_Stmt")
-	blob_val, is_blob := ins.values[1].([]u8)
+	blob_val, is_blob := ins.values[0][1].([]u8)
 	testing.expect(t, is_blob, "Second value should be a BLOB")
 	testing.expect_value(t, len(blob_val), 0)
 }
@@ -448,9 +685,9 @@ test_parse_like_where :: proc(t: ^testing.T) {
 	testing.expect(t, is_sel, "Expected Select_Stmt")
 	wc, has_where := sel.where_clause.?
 	testing.expect(t, has_where, "should have WHERE")
-	testing.expect_value(t, len(wc.conditions), 1)
-	testing.expect_value(t, wc.conditions[0].operator, parser.Token_Type.LIKE)
-	pattern_val, val_ok := wc.conditions[0].rhs.(types.Value)
+	testing.expect(t, wc.root != nil && wc.root.kind == .COND, "WHERE should be a single condition")
+	testing.expect_value(t, wc.root.cond.operator, parser.Token_Type.LIKE)
+	pattern_val, val_ok := wc.root.cond.rhs.(types.Value)
 	testing.expect(t, val_ok, "LIKE value should be Value")
 	p_str, is_str := pattern_val.(string)
 	testing.expect(t, is_str, "LIKE value should be string")
@@ -594,9 +831,9 @@ test_parse_inner_join :: proc(t: ^testing.T) {
 	testing.expect_value(t, tbl_name, "t2")
 	on_cl, has_on := sel.joins[0].on_clause.?
 	testing.expect(t, has_on, "INNER JOIN should have ON clause")
-	testing.expect_value(t, len(on_cl.conditions), 1)
-	testing.expect_value(t, on_cl.conditions[0].column, "t1.id")
-	testing.expect(t, on_cl.conditions[0].operator == .EQUALS, "Expected = operator")
+	testing.expect(t, on_cl.root != nil && on_cl.root.kind == .COND, "ON should be a single condition")
+	testing.expect_value(t, on_cl.root.cond.column, "t1.id")
+	testing.expect(t, on_cl.root.cond.operator == .EQUALS, "Expected = operator")
 }
 
 @(test)
@@ -623,8 +860,8 @@ test_parse_equi_join :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sel.joins), 1)
 	on_cl, has_on := sel.joins[0].on_clause.?
 	testing.expect(t, has_on, "Equi-join should have ON clause")
-	testing.expect_value(t, len(on_cl.conditions), 1)
-	cond := on_cl.conditions[0]
+	testing.expect(t, on_cl.root != nil && on_cl.root.kind == .COND, "ON should be a single condition")
+	cond := on_cl.root.cond
 	testing.expect_value(t, cond.column, "t1.x")
 	testing.expect(t, cond.operator == .EQUALS, "Expected = operator")
 	rc, has_rc := cond.rhs.(string)

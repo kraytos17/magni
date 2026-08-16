@@ -81,8 +81,9 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 1. **Copy-on-write (COW)** — No page is ever modified in-place. Every mutation creates new pages
    along the path from root to leaf. Old pages remain readable for time-travel.
 
-2. **Append-only history** — Snapshot chain never mutates. `snapshot_restore` creates a new
-   `.RESTORE` snapshot rather than rewriting history.
+2. **Append-only history** — Snapshot chain never mutates. `snapshot_restore` points the `main`
+   ref at the target snapshot and updates the schema root; history is not rewritten. The refs-page
+   rollforward log records the previous ref so `rollforward` can undo a restore.
 
 3. **Single-traversal mutations** — Delete + re-insert (the core pattern for UPDATE) is done in
    one root-to-leaf traversal, not two.
@@ -129,7 +130,7 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 ### 1. SQL Layer — `parser/` and `executor/`
 
 **Parser** (`parser.odin`):
-- Lexer: character-by-character scanner producing `[]Token` (73 token types as `enum u8`,
+- Lexer: character-by-character scanner producing `[]Token` (76 token types as `enum u8`,
   including `.EOF`).
 - Recursive-descent parser: one function per grammar rule (`parse_create_table`,
   `parse_insert`, `parse_select`, `parse_update`, `parse_delete`, `parse_drop_table`).
@@ -138,10 +139,33 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 - `LIMIT` without `ORDER BY` uses pushdown: `scan_table` stops early when `max_rows` is reached.
 
 **Executor** (`executor.odin`):
-- Entry: `execute(schema_tree, stmt) -> (ok, new_schema_root)`.
+- Entry: `execute(schema_tree, stmt, out: ^Result = nil, cache: ^schema.Table_Cache = nil) -> (ok, new_schema_root)`.
+- **Schema catalog cache**: `db.Database.table_cache` (a `schema.Table_Cache`) lazily caches
+  deserialized `types.Table` catalog entries keyed by table name, invalidated implicitly by the
+  schema-root version (`cache.root != t.root` clears it — any DDL changes the root). Executor
+  table lookups use `schema.find_table_cached` (borrowed reference; the cache owns the tables, so
+  callers never call `table_free`). The cache has its own mutex (acquired under `db.mu`, before
+  `pager.mutex`).
+- **Core executor is pure**: it never prints or does direct I/O. SELECT/Compound statements are
+  evaluated through the data-returning paths (`exec_query` / `exec_compound_data` /
+  `exec_select_join_data` / `exec_subquery_data`) and their rows/columns are captured into the
+  optional `out: ^Result`. Rendering happens in the CLI layer (`db.execute` →
+  `executor.render_result`), so the engine is embeddable behind any frontend.
+- `EXPLAIN` is **side-effect-free**: it returns a single-row `QUERY PLAN` description of the
+  statement instead of executing it.
 - DML dispatch (CREATE, INSERT, SELECT, UPDATE, DELETE, DROP).
 - Stream COW: UPDATE/DELETE apply mutations directly in the scan loop instead of
   batch-collecting all ops first — O(1) peak memory per operation regardless of row count.
+- `INSERT` supports multi-row `VALUES (..),(..),...`; `exec_insert_cow` inserts each row with COW,
+  threading the data root between rows and applying a single `update_root_page_cow` at the end.
+  When a column list omits the primary-key column (or provides NULL), the auto-increment rowid is
+  written back into the stored PK value (SQLite `INTEGER PRIMARY KEY` semantics).
+- `SELECT` column lists support `AS <alias>` and bare-identifier aliases; aliases are stored
+  parallel to `columns` (base names kept for resolution) and used for output headers.
+- GROUP BY/HAVING are honored even when the SELECT list carries no aggregates: the parser registers
+  aggregate references found in the HAVING clause (`COUNT(*)`, `SUM(v)`, ...) into `stmt.aggregates`,
+  and the executor routes such queries to the aggregate path. `db.query` uses the data-returning
+  join evaluator (`exec_select_join_data`) so JOIN results are returned, not just printed.
 
 Key subroutines:
 
@@ -149,7 +173,7 @@ Key subroutines:
 |---|---|---|
 | `scan_table` | Full table scan via cursor | Moves cell values directly (no deep copy) |
 | `try_pk_lookup` | Fast-path: `WHERE pk = literal` | O(log n) tree_find vs full scan |
-| `evaluate_where_ctx` | Filter rows (pre-resolved column indices) | Index resolution done once, not per row |
+| `evaluate_where_ctx` | Filter rows via boolean-expression tree (AND/OR/parens, short-circuit) | Columns pre-resolved once; recursive eval per row |
 | `try_join_match` | Combine rows + ON evaluation | Uses temp_allocator only on match |
 | `dedup_rows` | DISTINCT via hash-set (FNV fingerprint) | O(n), non-adjacent duplicates handled |
 | `sort_rows` | ORDER BY with integer fast path | Single-column int: `[]i64` + index sort |
@@ -161,12 +185,26 @@ Key subroutines:
 | `intersect`/`except` | Set membership (distinct) | O(n+m) via fingerprint index of the right operand |
 | `intersect_all`/`except_all` | Set membership (multiset) | O(n+m) via fingerprint→count maps |
 
+**WHERE** conditions parse into a boolean-expression tree with standard SQL precedence (AND binds
+tighter than OR), parentheses, and `NOT` support — both prefix (`NOT <expr>` wraps its child in a
+`.NOT` node) and infix (`col NOT IN (...)` / `col NOT LIKE 'x'` negate the leaf condition):
+`a = 1 AND b = 2 OR c = 3` parses as `(a = 1 AND b = 2) OR c = 3`. `parse_where_clause` builds the
+tree in `parse_where.odin`
+(`parse_or_expr` / `parse_and_expr` / `parse_primary`); HAVING and JOIN `ON` clauses reuse it.
+`init_where_ctx` resolves each leaf once into a `Resolved_Node` tree (column indices, column-column
+comparisons, `IN` lists, materialized `IN` subqueries), and `evaluate_where_ctx` recurses with
+short-circuiting (AND fails fast, OR succeeds fast, NOT inverts). The skip-index range optimization in
+`scan_table` only applies to a flat top-level AND chain of single-column integer comparisons; OR, NOT,
+or nested groups disable skipping (full scan).
+
 **GROUP BY** uses direct FNV-1a hashing of `Value` union data (raw bit pattern for `f64`,
 `u64` for `i64`, FNV of bytes for strings/blobs) keyed on `map[u64]int` with a collision
 fallback equality check — no stringification, no allocation per row, and no float-precision
 loss. Groups are printed using the original `key_values` `[]types.Value` stored in each `Group` struct.
 
-**HAVING** evaluates against both group-key values and computed aggregate values. Supports
+**HAVING** evaluates the same boolean-expression tree (`evaluate_where_having` in `display.odin`,
+recursive over `parser.Where_Node`) against both group-key values and computed aggregate values.
+Supports
 aggregate function references (e.g., `HAVING count > 1`) as well as group-by column comparisons.
 Aggregate names are compared case-insensitively, so `HAVING COUNT > 1` and `HAVING count > 1`
 are equivalent. The `(N rows)` footer reports the number of rows after HAVING filtering, not the
@@ -391,7 +429,6 @@ Column blob format:
 ```
 
 Packed byte bits: 0-2 = type, 3 = not_null, 4 = pk, 5 = has_check, 6 = has_default
-```
 
 All mutations use COW and return a new schema root. Both `add_table` and `add_table_cow`
 call `tree_find` at the candidate hash key before inserting — if a row exists with a
@@ -438,8 +475,8 @@ execute(db, sql):
     set_ref("main" → snap_id)
     wal_commit_txn()          // single fsync of WAL, not full cache
   unlock(mu)
-  ```
-  
+```
+
 #### 3f. Page Format Versioning — `btree/format.odin`
 
 A format registry supports up to 64 concurrent page layout versions:
@@ -447,11 +484,15 @@ A format registry supports up to 64 concurrent page layout versions:
 | Version | Cell pointer | Key decoding | Compat |
 |---------|-------------|--------------|--------|
 | v1 (legacy) | 2-byte `Cell_Pointer` (SQLite-compatible `u16le` offset) | Key decoded from cell body | Existing databases |
-| v2 (current) | 10-byte `Cell_Entry` with embedded 8-byte key | Key read from entry directly — no body decode | New databases, auto-convert on write |
+| v2 (current) | 10-byte `Cell_Entry` with embedded 8-byte key | Key read from entry directly — no body decode | New databases |
 
-On write, pages are always written in the database's current format version. Old-format
-pages are converted on first mutation. The version is stored in the database header and
-set at database creation time.
+`page_format_version` is a **database-wide** value stored in the database header and applied to
+every page via `get_layout(pager.page_format_version)`. New databases are created with v2
+(`PAGE_FORMAT_VERSION :: 2`); existing databases retain whatever version is stored in their
+header. There is **no automatic v1→v2 migration**: a v1 database opened for writing stays v1
+(the header version is never bumped on write). The pager initializes `page_format_version` to
+`1`; `db.open` overrides it to `PAGE_FORMAT_VERSION` for new databases or reads it from the
+header for existing ones.
 
 #### 3g. Columnar Page Format — `cell/columnar.odin`
 
@@ -480,10 +521,13 @@ Auto-built integer column index that accelerates `WHERE int_col = <value>` queri
 - Maps integer value ranges to page ranges: `Skip_Entry{page_min, page_max, min_int, max_int}`.
 - During subsequent queries, `build_skip_index` narrows the scan to pages whose range
   could contain the target value, skipping irrelevant pages.
+- Only applied to a flat top-level **AND chain** of single-column integer comparisons in the
+  WHERE boolean tree; OR subtrees or nested parenthesized groups disable the optimization
+  (a union of page ranges is not a safe scan bound), falling back to a full scan.
 - Stored as a sorted list in the schema B-tree root row.
 - Complementary to `pager.page_int_ranges` which tracks known integer ranges per page
   and is invalidated on page mutations.
-  
+
 ### Error Handling: `or_return` Pattern
 
 The codebase uses Odin's `or_return` operator pervasively for error propagation.
@@ -816,12 +860,29 @@ assignment rather than relying on composite-literal aliasing.
 
 ---
 
+## Conventions
+
+### Allocator ownership
+
+`context.temp_allocator` is the default scratch arena for per-statement work; it is
+reset wholesale (REPL per iteration, scripts at exit). Anything a function returns
+to a caller must either live past the next reset or be explicitly documented. Two
+conventions keep this visible:
+
+- `// scratch-only: valid until the next temp_allocator reset` — the return value
+  is consumed within the current statement scope.
+- `// caller-owned: uses the passed allocator, not temp` — the function takes an
+  explicit `allocator` parameter and the caller owns the lifetime.
+
+Prefer passing an explicit `allocator` when a returned value outlives the current
+scope (many functions already do, e.g. `schema.find_table(..., allocator :=
+context.allocator)`).
+
 ## Limitations
 
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
 - **No user-managed indexes**: Only the implicit primary-key B-tree and auto-built skip indexes exist.
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100`, `>=`, `<=`, `=`, `!=` format.
-- **Mixed AND/OR WHERE**: Not supported.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (inline `[dynamic; N]T` scratch buffer).
 - **REPL line editor**: SQL keyword and table/column name completion only (no in-expression or JOIN completion).
 

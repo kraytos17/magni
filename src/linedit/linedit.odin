@@ -16,10 +16,12 @@ Tab_Complete_Callback :: #type proc(
 ) -> []string
 
 Editor :: struct {
-	term:        Term,
-	history:     History,
-	complete_fn: Tab_Complete_Callback,
-	complete_ud: rawptr,
+	term:            Term,
+	history:         History,
+	complete_fn:     Tab_Complete_Callback,
+	complete_ud:     rawptr,
+	prev_render_rows: int,
+	prev_search_rows: int,
 }
 
 init :: proc(fd: posix.FD, history_path: string) -> (ed: Editor, ok: bool) {
@@ -49,7 +51,7 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 	defer lb_destroy(&lb)
 
 	ed.history.nav_index = -1
-	redraw(prompt, &lb)
+	redraw(ed, prompt, &lb)
 	for {
 		ev, read_ok := read_key(ed.term.fd)
 		if !read_ok {
@@ -84,7 +86,7 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 			lb_kill_to_end(&lb)
 		case .Ctrl_L:
 			fmt.fprint(os.stdout, "\x1b[2J\x1b[H")
-			prev_render_rows = 1
+			ed.prev_render_rows = 1
 		case .Ctrl_U:
 			lb_kill_to_start(&lb)
 		case .Ctrl_W:
@@ -112,7 +114,7 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 		case .Char:
 			lb_insert(&lb, ev.char)
 		}
-		redraw(prompt, &lb)
+		redraw(ed, prompt, &lb)
 	}
 }
 
@@ -127,10 +129,10 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	matched_entry := original
 
 	defer {
-		if prev_search_rows > 0 {
+		if ed.prev_search_rows > 0 {
 			fmt.fprintf(os.stdout, "\x1b[%dA", 1)
 		}
-		prev_search_rows = 0
+		ed.prev_search_rows = 0
 	}
 
 	for {
@@ -140,9 +142,9 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 		} else if search_wrapped {
 			prompt_prefix = "(wrapped reverse-i-search)"
 		}
+		
 		search_prompt := fmt.tprintf("%s`%s': ", prompt_prefix, strings.to_string(query))
-		render_search_overlay(search_prompt, matched_entry)
-
+		render_search_overlay(ed, search_prompt, matched_entry)
 		ev, ok := read_key(ed.term.fd)
 		if !ok { break }
 

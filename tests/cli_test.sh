@@ -131,6 +131,36 @@ ok "WHERE LIKE" has "apple"
 run "CREATE TABLE t (a INT); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); INSERT INTO t VALUES (3); SELECT * FROM t WHERE a IN (1, 3);"
 ok "WHERE IN (literal list)" has "3"
 
+run "CREATE TABLE t (a INT, b INT, c INT); INSERT INTO t VALUES (1, 2, 0); INSERT INTO t VALUES (1, 9, 0); INSERT INTO t VALUES (0, 2, 3); INSERT INTO t VALUES (0, 9, 3); SELECT a, b, c FROM t WHERE a = 1 AND b = 2 OR c = 3 ORDER BY a, b, c;"
+ok "WHERE mixed AND/OR" has "1|2|0"
+ok "WHERE mixed AND/OR includes OR leg" has "0|2|3"
+
+run "CREATE TABLE t (a INT, b TEXT); INSERT INTO t VALUES (1, 'one'); INSERT INTO t VALUES (2, 'two'); SELECT b AS name, COUNT(*) AS n FROM t GROUP BY b;"
+ok "aggregate AS alias header" has "|name|n|"
+
+run "SELECT 1; SELECT 2;"
+ok "multi-SELECT script renders first result" has "|1|"
+ok "multi-SELECT script renders all results" has "|2|"
+
+run "CREATE TABLE t (a INT, b TEXT); INSERT INTO t VALUES (1, 'x'); INSERT INTO t VALUES (2, 'y'); INSERT INTO t VALUES (3, 'z'); SELECT a FROM t WHERE NOT a = 1;"
+ok "WHERE NOT prefix" has "2"
+ok "WHERE NOT prefix excludes match" no_err
+
+run "CREATE TABLE t (a INT, b TEXT); INSERT INTO t VALUES (1, 'one'); INSERT INTO t VALUES (2, 'two'); SELECT a id FROM t;"
+ok "bare identifier alias header" has "|id|"
+
+run "CREATE TABLE t (a INT); INSERT INTO t VALUES (1), (2), (3); SELECT COUNT(*) FROM t;"
+ok "multi-row VALUES insert" has "3"
+
+run "CREATE TABLE t (id INT PRIMARY KEY, name TEXT); INSERT INTO t (name) VALUES ('a'), ('b'); SELECT id FROM t ORDER BY id;"
+ok "omitted PK auto-fills rowid" has "(2 rows)"
+ok "omitted PK values are 1 and 2" has "1 "
+ok "omitted PK second value is 2" has "2 "
+
+run "CREATE TABLE s (g INT, v INT); INSERT INTO s VALUES (1,10),(1,20),(2,5),(3,100); SELECT g FROM s GROUP BY g HAVING count > 1;"
+ok "GROUP BY HAVING (no select aggregate)" has "|1|"
+ok "GROUP BY HAVING output clean" no_err
+
 run "CREATE TABLE t1 (a INT); CREATE TABLE t2 (b INT); INSERT INTO t1 VALUES (1); INSERT INTO t1 VALUES (2); INSERT INTO t2 VALUES (1); SELECT * FROM t1 WHERE a IN (SELECT b FROM t2);"
 ok "WHERE IN (subquery)" has "1"
 

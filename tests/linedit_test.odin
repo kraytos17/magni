@@ -778,26 +778,22 @@ test_rune_width_fullwidth :: proc(t: ^testing.T) {
 
 @(test)
 test_terminal_query_size_pipe :: proc(t: ^testing.T) {
-	// On a pipe FD, ioctl returns nonzero, and the defaults should be preserved
-	old_w := linedit.terminal_width
-	old_h := linedit.terminal_height
-
-	linedit.terminal_width = 42
-	linedit.terminal_height = 10
+	// On a pipe FD, ioctl returns nonzero, and the current values are preserved.
+	term: linedit.Term
+	term.width = 42
+	term.height = 10
 
 	fds: [2]posix.FD
 	result := posix.pipe(&fds)
 	testing.expect(t, result == .OK, "pipe creation")
-	linedit.terminal_query_size(fds[0])
+	term.fd = fds[0]
+	linedit.terminal_query_size(&term)
 	posix.close(fds[0])
 	posix.close(fds[1])
 
-	// On a pipe, ioctl should fail and leave defaults unchanged
-	testing.expect_value(t, linedit.terminal_width, 42)
-	testing.expect_value(t, linedit.terminal_height, 10)
-
-	linedit.terminal_width = old_w
-	linedit.terminal_height = old_h
+	// On a pipe, ioctl should fail and leave the values unchanged.
+	testing.expect_value(t, term.width, 42)
+	testing.expect_value(t, term.height, 10)
 }
 
 @(test)

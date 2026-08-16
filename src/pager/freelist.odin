@@ -15,13 +15,17 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	offset := i64(free_page_num - 1) * i64(p.page_size)
 	bytes_read, read_err := os.read_at(p.file, slot._data_buf[:], offset)
 	if read_err != nil || bytes_read < int(p.page_size) {
-		slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1; return nil, .IO_Error
+		slot.page.page_num = 0
+		slot.page.data = nil
+		p.slot_count -= 1
+		return nil, .IO_Error
 	}
 
 	next_free := (^u32)(raw_data(slot._data_buf[:]))^
 	p.first_free_page = next_free
 	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
-	slot.page.page_num = free_page_num; slot.page.pin_count = 1; slot.page.dirty = true
+	slot.page.page_num = free_page_num; slot.page.pin_count = 1
+	mark_slot_dirty(p, slot)
 	p.cache_index[free_page_num] = slot
 	bitmap_grow(p, free_page_num)
 	bitmap_set(p.page_bitmap, free_page_num)
@@ -38,9 +42,8 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 		(^u32)(raw_data(slot._data_buf[:]))^ = p.first_free_page
 		slot.page.dirty = true
 		wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
-
 		delete_key(&p.cache_index, page_num)
-		delete_key(&p.row_counts, page_num)
+		if p.on_evict != nil { p.on_evict(p.stats, page_num) }
 		slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
 	}
 	p.first_free_page = page_num

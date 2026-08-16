@@ -2,19 +2,37 @@ package parser
 
 import "src:types"
 
-where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
-	for cond in w.conditions {
-		delete(cond.column, allocator)
-		if rc, ok := cond.rhs.(string); ok { delete(rc, allocator) }
-		if val, ok := cond.rhs.(types.Value); ok { types.value_delete(val, allocator) }
+condition_free :: proc(cond: Condition, allocator := context.allocator) {
+	delete(cond.column, allocator)
+	delete(cond.agg_column, allocator)
+	if rc, ok := cond.rhs.(string); ok { delete(rc, allocator) }
+	if val, ok := cond.rhs.(types.Value); ok { types.value_delete(val, allocator) }
 
-		types.values_delete(cond.in_values, allocator)
-		if subq := cond.in_subquery; subq != nil {
-			statement_free(Statement{type = subq^, sql = ""}, allocator)
-			free(subq, allocator)
-		}
+	types.values_delete(cond.in_values, allocator)
+	if subq := cond.in_subquery; subq != nil {
+		statement_free(Statement{type = subq^, sql = ""}, allocator)
+		free(subq, allocator)
 	}
-	delete(w.conditions, allocator)
+}
+
+where_node_free :: proc(node: ^Where_Node, allocator := context.allocator) {
+	if node == nil { return }
+	#partial switch node.kind {
+	case .COND:
+		condition_free(node.cond, allocator)
+	case .AND, .OR, .NOT:
+		where_nodes_free(node.children, allocator)
+	}
+	free(node, allocator)
+}
+
+where_nodes_free :: proc(nodes: [dynamic]^Where_Node, allocator := context.allocator) {
+	for n in nodes { where_node_free(n, allocator) }
+	delete(nodes)
+}
+
+where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
+	where_node_free(w.root, allocator)
 }
 
 statement_free :: proc(stmt: Statement, allocator := context.allocator) {
@@ -33,13 +51,13 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 			delete(fk.ref_table, allocator)
 			delete(fk.ref_col, allocator)
 		}
-
 		delete(s.foreign_keys, allocator)
 	case Insert_Stmt:
 		delete(s.table_name, allocator)
 		for col in s.columns { delete(col, allocator) }
 		delete(s.columns, allocator)
-		types.values_delete(s.values, allocator)
+		for row in s.values { types.values_delete(row, allocator) }
+		delete(s.values, allocator)
 	case Select_Stmt:
 		#partial switch src in s.from {
 		case string:
@@ -66,6 +84,9 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		for col in s.columns { delete(col, allocator) }
 
 		delete(s.columns, allocator)
+		for al in s.aliases { delete(al, allocator) }
+
+		delete(s.aliases, allocator)
 		types.values_delete(s.literal_values, allocator)
 		for agg in s.aggregates { delete(agg.column, allocator) }
 

@@ -3,7 +3,9 @@ package schema
 
 import "core:fmt"
 import "core:log"
+import "core:mem"
 import "core:strings"
+import "core:sync"
 import "src:btree"
 import "src:cell"
 import "src:types"
@@ -168,6 +170,87 @@ find_table :: proc(
 		return {}, false
 	}
 	return table, true
+}
+
+// Table_Cache is a lazily-populated catalog cache. It is valid only for the
+// schema root it was built against (cache.root); any DDL that mutates the schema
+// changes the root and implicitly invalidates it. Cached tables are owned by the
+// cache and must not be freed by callers.
+Table_Cache :: struct {
+	root:      u32,
+	tables:    map[string]^types.Table,
+	allocator: mem.Allocator,
+	mu:        sync.RW_Mutex, // guards the cache; taken under db.mu, before pager.mutex
+}
+
+// clear_table_cache frees every cached table entry; caller must hold cache.mu.
+clear_table_cache :: proc(cache: ^Table_Cache) {
+	for _, tbl in cache.tables {
+		table_free(tbl^, cache.allocator)
+		free(tbl, cache.allocator)
+	}
+	clear(&cache.tables)
+}
+
+table_cache_free :: proc(cache: ^Table_Cache) {
+	sync.rw_mutex_lock(&cache.mu)
+	defer sync.rw_mutex_unlock(&cache.mu)
+	clear_table_cache(cache)
+	if cache.tables != nil {
+		delete(cache.tables)
+	}
+	cache.tables = nil
+	cache.root = 0
+}
+
+// find_table_cached returns a borrowed reference to the table's cached catalog
+// entry (or populates it on a miss). The returned table is owned by the cache;
+// callers must not call table_free on it.
+find_table_cached :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	cache: ^Table_Cache,
+) -> (
+	^types.Table,
+	bool,
+) {
+	if cache == nil {
+		table, ok := find_table(t, table_name, context.temp_allocator)
+		if !ok { return nil, false }
+		tbl := new(types.Table, context.temp_allocator)
+		tbl^ = table
+		return tbl, true
+	}
+
+	sync.rw_mutex_lock(&cache.mu)
+	defer sync.rw_mutex_unlock(&cache.mu)
+	if cache.tables == nil {
+		cache.tables = make(map[string]^types.Table, 16, cache.allocator)
+	}
+	if cache.root != t.root {
+		clear_table_cache(cache)
+		cache.root = t.root
+	}
+	if tbl, ok := cache.tables[table_name]; ok {
+		return tbl, true
+	}
+
+	rowid := types.Row_ID(types.hash_string(table_name))
+	c, err := btree.tree_find(t, rowid, context.temp_allocator)
+	if err != .None { return nil, false }
+	defer cell.destroy(&c, context.temp_allocator)
+
+	table, ok := table_from_values(c.values, cache.allocator)
+	if !ok { return nil, false }
+	if table.name != table_name {
+		table_free(table, cache.allocator)
+		return nil, false
+	}
+
+	tbl := new(types.Table, cache.allocator)
+	tbl^ = table
+	cache.tables[table_name] = tbl
+	return tbl, true
 }
 
 get_table :: proc(

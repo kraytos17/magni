@@ -74,6 +74,9 @@ SELECT DISTINCT name FROM users;
 SELECT * FROM users WHERE score > 50 AND name != 'Bob';
 SELECT * FROM users WHERE name LIKE 'A%';
 SELECT * FROM users WHERE id IN (1, 3, 5);
+SELECT * FROM users WHERE id NOT IN (1, 3) AND NOT (name LIKE 'A%');
+-- Boolean expressions: AND binds tighter than OR; parens group
+SELECT * FROM users WHERE (age < 30 OR age > 60) AND score > 50;
 
 -- Sorting & pagination
 SELECT * FROM users ORDER BY score DESC;
@@ -131,7 +134,7 @@ ROLLBACK;
 
 | Area | Capabilities |
 |---|---|
-| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (AND/OR/LIKE/IN/subquery), JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
+| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE), column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
 | **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **B-tree rebalancing** — auto-merges sparse adjacent leaves. **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
@@ -199,7 +202,7 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `--help` | Print usage |
 | `--version` | Print version and exit |
 | `--stop-on-error` | Exit on first SQL error in script/pipe mode |
-| `--log-level <level>` | Set log level: `debug`, `info`, `warn`, `error` (default: `info`) 
+| `--log-level <level>` | Set log level: `debug`, `info`, `warn`, `error` (default: `info`) |
 | `--verbose` / `-v` | Enable debug-level logging (alias for `--log-level debug`) |
 
 ### CLI Modes
@@ -299,13 +302,16 @@ make clean         # Remove build directory
 
 Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 
+> **Platform support:** Linux and macOS are supported. The Windows build compiles
+> but the line editor is a stub (`read_line` always fails), so the interactive REPL
+> is not usable on Windows yet.
+
 ---
 
 ## Limitations
 
 - No user-managed secondary indexes (only the implicit primary-key B-tree and auto-built skip indexes exist)
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
-- Mixed `AND`/`OR` in WHERE not supported (must be uniform)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100, >=, <=, =, !=)
 - Max 10 columns per table
 - REPL line editor: SQL keyword and table/column name completion only (no in-expression or JOIN completion)

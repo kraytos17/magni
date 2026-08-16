@@ -1,7 +1,6 @@
 package tests
 
 import "core:fmt"
-import "core:log"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -11,7 +10,7 @@ import "src:schema"
 import "src:types"
 
 setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_schema_%s.db", test_name)
 	safe_filename, _ := strings.clone(filename, context.allocator)
 	os.remove(safe_filename)
@@ -41,7 +40,7 @@ teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
 
 @(test)
 test_column_blob_roundtrip :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	cols := []types.Column {
 		{name = "id", type = .INTEGER, pk = true, not_null = true},
 		{name = "username", type = .TEXT, pk = false, not_null = true},
@@ -66,7 +65,7 @@ test_column_blob_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_add_and_find_table :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "basic_ops")
 	defer teardown_schema_env(tree, file)
 
@@ -88,7 +87,7 @@ test_add_and_find_table :: proc(t: ^testing.T) {
 
 @(test)
 test_table_persistence :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "persistence")
 	schema_root := tree.root
 	cols := []types.Column{{name = "x", type = .INTEGER}}
@@ -107,7 +106,7 @@ test_table_persistence :: proc(t: ^testing.T) {
 
 @(test)
 test_list_tables :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "list")
 	defer teardown_schema_env(tree, file)
 
@@ -129,7 +128,7 @@ test_list_tables :: proc(t: ^testing.T) {
 
 @(test)
 test_drop_table :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "drop")
 	defer teardown_schema_env(tree, file)
 
@@ -144,7 +143,7 @@ test_drop_table :: proc(t: ^testing.T) {
 
 @(test)
 test_column_validation :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	c1 := []types.Column{{name = "ok", type = .INTEGER}}
 	ok1, _ := schema.validate_columns(c1)
 	testing.expect(t, ok1, "Valid column failed")
@@ -162,7 +161,7 @@ test_column_validation :: proc(t: ^testing.T) {
 
 @(test)
 test_get_table_deep_copy :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "deep_copy")
 	defer teardown_schema_env(tree, file)
 
@@ -180,7 +179,7 @@ test_get_table_deep_copy :: proc(t: ^testing.T) {
 
 @(test)
 test_find_nonexistent_table :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "find_nonexist")
 	defer teardown_schema_env(tree, file)
 
@@ -190,7 +189,7 @@ test_find_nonexistent_table :: proc(t: ^testing.T) {
 
 @(test)
 test_drop_nonexistent_table :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "drop_nonexist")
 	defer teardown_schema_env(tree, file)
 
@@ -200,7 +199,7 @@ test_drop_nonexistent_table :: proc(t: ^testing.T) {
 
 @(test)
 test_duplicate_table_name :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "dup_name")
 	defer teardown_schema_env(tree, file)
 
@@ -208,13 +207,16 @@ test_duplicate_table_name :: proc(t: ^testing.T) {
 	ok1 := schema.add_table(&tree, "dup", cols, 2, "")
 	testing.expect(t, ok1, "First add should succeed")
 
+	saved, ctx := suppress_expected_errors()
+	context = ctx
 	ok2 := schema.add_table(&tree, "dup", cols, 3, "")
+	context = restore_logger(saved)
 	testing.expect(t, !ok2, "Duplicate add should fail")
 }
 
 @(test)
 test_schema_hash_collision :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "hashcol")
 	defer teardown_schema_env(tree, file)
 
@@ -225,7 +227,10 @@ test_schema_hash_collision :: proc(t: ^testing.T) {
 	testing.expect(t, ok1, "First add succeeds")
 
 	// Same name again fails (duplicate detection)
+	saved, ctx := suppress_expected_errors()
+	context = ctx
 	ok_dup := schema.add_table(&tree, "mytable", cols, 99, "")
+	context = restore_logger(saved)
 	testing.expect(t, !ok_dup, "Duplicate name rejected")
 
 	// Force a hash collision: manually insert a row at "mytable"'s hash with a different name.
@@ -263,7 +268,7 @@ test_schema_hash_collision :: proc(t: ^testing.T) {
 
 @(test)
 test_schema_row_roundtrip :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	r := schema.Schema_Row {
 		kind         = "table",
 		name         = "test_tbl",
@@ -322,7 +327,7 @@ test_schema_row_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_column_blob_version :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// A blob with a marker byte but wrong version should be rejected
 	bad_blob := []u8{0xFE, 0xFF, 0x01} // marker=0xFE, version=0xFF, count=1
 	result := schema.deserialize_columns(bad_blob, context.temp_allocator)
@@ -331,7 +336,7 @@ test_column_blob_version :: proc(t: ^testing.T) {
 
 @(test)
 test_list_tables_empty :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "list_empty")
 	defer teardown_schema_env(tree, file)
 
@@ -341,7 +346,7 @@ test_list_tables_empty :: proc(t: ^testing.T) {
 
 @(test)
 test_schema_unknown_kind :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// A row with kind=5 (unknown, not 0=table) should be rejected
 	vals := []types.Value {
 		types.value_int(5),
@@ -356,7 +361,7 @@ test_schema_unknown_kind :: proc(t: ^testing.T) {
 
 @(test)
 test_schema_special_char_names :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "spec_names")
 	defer teardown_schema_env(tree, file)
 
@@ -372,7 +377,7 @@ test_schema_special_char_names :: proc(t: ^testing.T) {
 
 @(test)
 test_schema_row_kind_as_string :: proc(t: ^testing.T) {
-	context.logger = log.nil_logger()
+	context.logger.lowest_level = .Error
 	// kind must be an int, not a string
 	vals := []types.Value {
 		types.value_text("table"),

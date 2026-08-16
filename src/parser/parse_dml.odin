@@ -33,24 +33,42 @@ parse_insert :: proc(
 		return nil, false
 	}
 
-	values := make([dynamic]types.Value, allocator)
+	rows := make([dynamic][]types.Value, allocator)
 	defer if !ok {
-		for v in values { types.value_delete(v, allocator) }
+		for r in rows { types.values_delete(r, allocator) }
 		delete(table_name, allocator)
-		delete(values)
+		delete(rows)
 	}
 	for {
-		val, val_ok := parse_value(
-			p,
-			allocator,
-		); if !val_ok { return err(p, "Invalid value in INSERT") }
-		append(&values, val)
-		if match(
-			p,
-			.RPAREN,
-		) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") { return nil, false }
+		values := make([dynamic]types.Value, allocator)
+		for {
+			val, val_ok := parse_value(
+				p,
+				allocator,
+			); if !val_ok {
+				for v in values { types.value_delete(v, allocator) }
+				delete(values)
+				return err(p, "Invalid value in INSERT")
+			}
+
+			append(&values, val)
+			if match(
+				p,
+				.RPAREN,
+			) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") {
+				for v in values { types.value_delete(v, allocator) }
+				delete(values)
+				return nil, false
+			}
+		}
+
+		append(&rows, values[:])
+		if !match(p, .COMMA) { break }
+		if !expect_match(p, .LPAREN, "Expected ( after , for next VALUES row") {
+			return nil, false
+		}
 	}
-	return Insert_Stmt{table_name = table_name, columns = columns[:], values = values[:]}, true
+	return Insert_Stmt{table_name = table_name, columns = columns[:], values = rows[:]}, true
 }
 
 parse_update :: proc(
