@@ -726,35 +726,6 @@ test_integration_batch_snapshot :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_integration_rebalance :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
-	d := setup_db(t, "rebal")
-	defer teardown_db(d, "rebal")
-
-	db.execute(d, "CREATE TABLE t (id INT, val TEXT);")
-	for i in 1 ..= 50 {
-		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'row%d');", i, i))
-	}
-	// Delete half the rows to create sparse pages
-	for i in 1 ..= 25 {
-		db.execute(d, fmt.tprintf("DELETE FROM t WHERE id = %d;", i * 2))
-	}
-
-	// Run rebalance
-	st := db.Schema_Tree(d)
-	tables := schema.list_tables(&st, context.temp_allocator)
-	if len(tables) > 0 {
-		tree := btree.init(d.pager, tables[0].root_page)
-		btree.rebalance(&tree)
-	}
-
-	// Verify data is still accessible
-	q := db.query(d, "SELECT id, val FROM t ORDER BY id;")
-	testing.expect(t, q.ok, "SELECT after rebalance")
-	testing.expect(t, len(q.rows) > 0, "rows exist after rebalance")
-}
-
-@(test)
 test_integration_skip_index :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "skipidx")

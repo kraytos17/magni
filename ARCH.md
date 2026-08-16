@@ -112,11 +112,11 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
    existing skip index, one is automatically built mapping integer value ranges to page ranges.
    Subsequent queries skip irrelevant pages without scanning.
 
-10. **B-tree rebalancing** — `btree.rebalance` merges adjacent leaf pages with combined
-    occupancy below 70%, reducing tree depth and improving cache density. It is currently a
-    library entry point exercised by tests only: the production delete paths
-    (`tree_delete`/`tree_delete_cow`) remove cells without merging, so delete-heavy workloads
-    do not yet self-heal the tree shape.
+10. **Space reclamation via `.vacuum`** — Delete paths remove cells but do not merge sparse
+    leaves, so delete-heavy workloads leave sparse pages behind. `btree.tree_vacuum` rebuilds a
+    table's tree into fresh, densely packed pages (COW-safe: old pages stay readable by
+    snapshots and are reclaimed by the next GC pass), exposed as the `.vacuum` dot-command /
+    `db.vacuum`. Run it periodically to reclaim space.
 
 11. **Row count tracking** — Per-page row counts are maintained incrementally on insert/delete
     and cached in the pager. `COUNT(*)` without WHERE/GROUP BY/DISTINCT/ORDER BY/LIMIT is
@@ -359,7 +359,7 @@ Page_Header.first_freeblock → [next: u16le] [size: u16le] [...] → 0
 | `tree_delete` | `tree_delete_cow` | Remove cell by rowid via binary search. COW variant COWs the full path. | 1 |
 | `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
-| `rebalance` | — | Merge adjacent sparse leaves (<70% combined occupancy). Library entry point; not invoked automatically by delete paths (test-only today). | 1 pass per level |
+| `tree_vacuum` | — | Rebuild the whole tree into fresh, densely packed pages (COW-safe). Exposed via `.vacuum`. | full scan |
 
 **Cursor** — fixed-size path stack `[MAX_TREE_DEPTH]Cursor_Stack_Item` (12 entries, ~96 bytes).
 `MAX_TREE_DEPTH :: 12` is the single source of truth for both the cursor stack size and
@@ -821,14 +821,14 @@ assignment rather than relying on composite-literal aliasing.
 | Storage | Entries stored in schema B-tree root row; header records the indexed column |
 | Invalidation | On any page mutation affecting the indexed column |
 
-### B-tree Rebalancing
+### Space Reclamation (`.vacuum`)
 
 | Metric | Value |
 |---|---|
-| Merge threshold | ≤70% combined occupancy in adjacent leaves |
-| Traversal | 1 pass per level |
-| Impact | Reduces tree depth, improves cache density |
-| Wiring | Library entry point only (`btree.rebalance`); not invoked automatically by delete paths yet |
+| Operation | `btree.tree_vacuum` — full COW-safe rebuild into packed pages |
+| Surface | `.vacuum` dot-command / `db.vacuum` |
+| Cost | O(n) rebuild per table; old pages reclaimed by the next GC pass |
+| Scope | Manual maintenance; delete paths do not auto-merge sparse leaves |
 
 ### Row Count Tracking (Fast COUNT(*))
 

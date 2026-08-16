@@ -135,7 +135,7 @@ ROLLBACK;
 | Area | Capabilities |
 |---|---|
 | **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE), column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
-| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **B-tree rebalancing** (`btree.rebalance`) is available but not yet wired into production delete paths. **Row count tracking** with fast `COUNT(*)` via incremental cache. |
+| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **Space reclamation** via `.vacuum` — rebuilds tables into densely packed pages (COW-safe; delete paths do not merge leaves automatically). **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Commit/abort iterate only the dirtied-page list instead of scanning the whole page cache. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
@@ -269,8 +269,8 @@ default `info`. The interactive REPL always runs at `error` level to keep the pr
 ```
 src/
 ├── main.odin              CLI entry, REPL, dot-commands
-├── btree/                 COW B+tree: tree ops, cursor, split/merge, rebalance,
-│                          skip index, page format registry (v1/v2), columnar
+├── btree/                 COW B+tree: tree ops, cursor, split, vacuum,
+│                          skip index, vacuum (space reclamation), page format registry (v1/v2), columnar
 │                          conversion, COW helpers
 ├── cell/                  Row/cell serialization: SQLite varint, columnar encoding
 ├── db/                    Database handle: open/close, execute, admin, snapshots,

@@ -4,7 +4,7 @@
 // Public API: Tree, Config, Error, init, tree_insert(_cow), tree_find,
 // tree_update(_cow), tree_delete(_cow), tree_next_rowid, tree_count_rows,
 // tree_foreach, tree_verify_if_enabled, cursor_start/advance/get_cell/destroy,
-// cursor_start_at_page, build_skip_index, query_skip_index_range, rebalance,
+// cursor_start_at_page, build_skip_index, query_skip_index_range,
 // attach_stats. Everything else is @(private) to this package.
 package btree
 
