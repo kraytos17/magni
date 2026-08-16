@@ -92,6 +92,15 @@ SELECT * FROM t1 CROSS JOIN t2;
 SELECT * FROM (SELECT * FROM t WHERE x > 1) AS sub;
 SELECT * FROM t WHERE x IN (SELECT y FROM t2);
 
+-- Set operations
+SELECT x FROM t1 UNION SELECT x FROM t2;
+SELECT x FROM t1 UNION ALL SELECT x FROM t2;
+SELECT x FROM t1 INTERSECT SELECT x FROM t2;
+SELECT x FROM t1 EXCEPT SELECT x FROM t2;
+
+-- FROM-less SELECT (literal columns)
+SELECT 1, 'a', NULL;
+
 -- EXPLAIN
 EXPLAIN SELECT * FROM users WHERE id = 1;
 ```
@@ -122,7 +131,7 @@ ROLLBACK;
 
 | Area | Capabilities |
 |---|---|
-| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (AND/OR/LIKE/IN/subquery), JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
+| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (AND/OR/LIKE/IN/subquery), JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
 | **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **B-tree rebalancing** — auto-merges sparse adjacent leaves. **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
@@ -211,18 +220,17 @@ echo "SELECT * FROM t;" | ./build/magni mydb.db
 
 ### Output Format
 
-Query results and the table-valued dot-commands `.desc` and `.dump` are rendered as bordered
-tables via Odin's `core:text/table` package, using `-`/`+` separators and ` | ` column padding.
-Column widths are computed with `unicode_width_proc`, so multi-byte CJK characters align
-correctly. A footer line `(N rows)` reports the number of rows printed. `.tables` lists table
-names as plain indented lines; `.schema` prints the stored `CREATE TABLE` statements verbatim.
+Query results and the table-valued dot-commands `.desc` and `.dump` are rendered as markdown
+tables via Odin's `core:text/table` package: pipe-separated columns with an alignment divider
+row (`:---`) below the header. Column widths are computed with `unicode_width_proc`, so
+multi-byte CJK characters align correctly. A footer line `(N rows)` reports the number of rows
+printed. `.tables` lists table names as plain indented lines; `.schema` prints the stored
+`CREATE TABLE` statements verbatim.
 
 ```
---+---+--
- | a | b |
---+---+--
- | 1 | x |
---+---+--
+|a|b|
+|:-|:-|
+|1|x|
 (1 rows)
 ```
 
@@ -264,7 +272,8 @@ src/
 ├── db/                    Database handle: open/close, execute, admin, snapshots,
 │                          transactions, programmatic Query_Result API
 ├── executor/              Statement dispatch, SELECT/JOIN/aggregates, WHERE/DML,
-│                          sort, result rendering (core:text/table), utility types
+│                          sort, set operations, result rendering (core:text/table),
+│                          utility types
 ├── linedit/               Raw-mode line editor (main + term/keys/buffer/render/
 │                          history/stub_windows)
 ├── parser/                Lexer, recursive-descent parser, AST, free helpers
@@ -273,7 +282,7 @@ src/
 ├── snapshot/              Snapshot chain, manifests, GC, refs, expire, rollforward
 └── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
-└── * _test.odin           311 test functions across all packages
+└── * _test.odin           318 test functions across all packages
 ```
 
 ---
@@ -295,7 +304,6 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 ## Limitations
 
 - No user-managed secondary indexes (only the implicit primary-key B-tree and auto-built skip indexes exist)
-- No `UNION`, `INTERSECT`, `EXCEPT`
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - Mixed `AND`/`OR` in WHERE not supported (must be uniform)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100, >=, <=, =, !=)

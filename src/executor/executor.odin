@@ -26,6 +26,8 @@ execute :: proc(
 		return ok, new_root, mutated
 	case parser.Select_Stmt:
 		return exec_select(schema_tree, s), schema_tree.root, {}
+	case parser.Compound_Stmt:
+		return exec_compound(schema_tree, s), schema_tree.root, {}
 	case parser.Update_Stmt:
 		ok, new_root, mutated = exec_update_cow(schema_tree, s)
 		schema_tree.root = new_root

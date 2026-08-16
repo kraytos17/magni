@@ -2,6 +2,7 @@ package parser
 
 import "core:strconv"
 import "core:strings"
+import "src:types"
 
 parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: string, ok: bool) {
 	tok := peek(p)
@@ -111,6 +112,7 @@ parse_single_join :: proc(
 parse_select_columns :: proc(
 	p: ^Parser,
 	columns: ^[dynamic]string,
+	literal_values: ^[dynamic]types.Value,
 	aggregates: ^[dynamic]Aggregate_Expr,
 	allocator := context.allocator,
 ) -> bool {
@@ -158,9 +160,20 @@ parse_select_columns :: proc(
 					append(aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
 				}
 			} else {
-				col, cok := parse_qualified_identifier(p, allocator)
-				if !cok { return false }
-				append(columns, col)
+				// Literal tokens (NUMBER/STRING/BLOB_LITERAL/NULL) are allowed in a
+				// FROM-less SELECT; their values are captured for materialization.
+				#partial switch tok.type {
+				case .NUMBER, .STRING, .BLOB_LITERAL, .NULL:
+					val, vok := parse_value(p, allocator)
+					if !vok { return false }
+
+					append(columns, strings.clone(tok.lexeme, allocator))
+					append(literal_values, val)
+				case:
+					col, cok := parse_qualified_identifier(p, allocator)
+					if !cok { return false }
+					append(columns, col)
+				}
 			}
 			if !match(p, .COMMA) { break }
 		}
@@ -205,6 +218,7 @@ parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynam
 parse_select :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
+	consume_order_limit: bool = true,
 ) -> (
 	stmt: Statement_Variant,
 	ok: bool,
@@ -212,18 +226,30 @@ parse_select :: proc(
 	columns := make([dynamic]string, allocator)
 	defer if !ok do delete(columns)
 
+	literal_values := make([dynamic]types.Value, allocator)
+	defer if !ok do delete(literal_values)
+
 	aggregates := make([dynamic]Aggregate_Expr, allocator)
 	defer if !ok do delete(aggregates)
 
 	is_distinct := match(p, .DISTINCT)
-	if !parse_select_columns(p, &columns, &aggregates, allocator) { return nil, false }
-	if !match(p, .FROM) { return nil, false }
+	if !parse_select_columns(p, &columns, &literal_values, &aggregates, allocator) {
+		return nil, false
+	}
 
-	js := parse_join_source(p, allocator)
-	if !js.success { return nil, false }
+	// FROM is optional. A SELECT without FROM evaluates its columns as literals
+	// (e.g. `SELECT 1, 'a'`) producing a single row.
+	from_val: From_Source = No_From{}
+	from_alias := ""
+	joins: [dynamic]Join_Clause
+	has_from := match(p, .FROM)
+	if has_from {
+		js := parse_join_source(p, allocator)
+		if !js.success { return nil, false }
 
-	from_val := js.source; from_alias := js.alias
-	joins := parse_join_clauses(p, allocator)
+		from_val = js.source; from_alias = js.alias
+		joins = parse_join_clauses(p, allocator)
+	}
 	defer if !ok do delete(joins)
 
 	as_of_snapshot: Maybe(u64); as_of_timestamp: Maybe(u64)
@@ -254,8 +280,44 @@ parse_select :: proc(
 	if match(p, .HAVING) { having_cl = parse_where_clause(p, allocator) or_return }
 
 	order_by: Maybe([]Order_By_Column)
+	limit: Maybe(u64)
+	offset: Maybe(u64)
+	if consume_order_limit {
+		order_by, limit, offset = parse_order_limit(p, allocator) or_return
+	}
+	return Select_Stmt {
+			from = from_val,
+			from_alias = from_alias,
+			joins = joins[:],
+			columns = columns[:],
+			literal_values = literal_values[:],
+			aggregates = aggregates[:],
+			is_distinct = is_distinct,
+			where_clause = where_clause,
+			order_by = order_by,
+			limit = limit,
+			offset = offset,
+			group_by = group_by[:],
+			having = having_cl,
+			as_of_snapshot = as_of_snapshot,
+			as_of_timestamp = as_of_timestamp,
+		},
+		true
+}
+
+// parse_order_limit parses a trailing `ORDER BY ... LIMIT n OFFSET m` clause.
+// Used by both single SELECTs and compound (set-operation) statements.
+parse_order_limit :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	order_by: Maybe([]Order_By_Column),
+	limit: Maybe(u64),
+	offset: Maybe(u64),
+	ok: bool,
+) {
 	if match(p, .ORDER) {
-		if !match(p, .BY) { return nil, false }
+		if !match(p, .BY) { return {}, {}, {}, false }
 		order_cols := make([dynamic]Order_By_Column, allocator)
 		defer if !ok do delete(order_cols)
 		for {
@@ -274,36 +336,97 @@ parse_select :: proc(
 		}
 		order_by = order_cols[:]
 	}
-
-	limit: Maybe(u64); offset: Maybe(u64)
 	if match(p, .LIMIT) {
 		limit_token := expect(p, .NUMBER) or_return
 		lv, lu_ok := strconv.parse_u64(limit_token.lexeme)
-		if !lu_ok { return err(p, "LIMIT must be a non-negative integer") }
+		if !lu_ok {
+			err(p, "LIMIT must be a non-negative integer")
+			return {}, {}, {}, false
+		}
 
 		limit = lv
 		if match(p, .OFFSET) {
 			offset_token := expect(p, .NUMBER) or_return
 			ov, ou_ok := strconv.parse_u64(offset_token.lexeme)
-			if !ou_ok { return err(p, "OFFSET must be a non-negative integer") }
+			if !ou_ok {
+				err(p, "OFFSET must be a non-negative integer")
+				return {}, {}, {}, false
+			}
 			offset = ov
 		}
 	}
-	return Select_Stmt {
-			from = from_val,
-			from_alias = from_alias,
-			joins = joins[:],
-			columns = columns[:],
-			aggregates = aggregates[:],
-			is_distinct = is_distinct,
-			where_clause = where_clause,
+	return order_by, limit, offset, true
+}
+
+// parse_set_op reads a single set-operation keyword, consuming `ALL` when present.
+parse_set_op :: proc(p: ^Parser) -> (op: Set_Op, ok: bool) {
+	if match(p, .UNION) {
+		return .UNION_ALL if match(p, .ALL) else .UNION, true
+	}
+	if match(p, .INTERSECT) {
+		return .INTERSECT_ALL if match(p, .ALL) else .INTERSECT, true
+	}
+	if match(p, .EXCEPT) {
+		return .EXCEPT_ALL if match(p, .ALL) else .EXCEPT, true
+	}
+	return {}, false
+}
+
+// parse_compound_select parses `SELECT ... [UNION|INTERSECT|EXCEPT [ALL] SELECT ...]...`
+// followed by an optional compound-level ORDER BY / LIMIT. Returns a Compound_Stmt
+// when a set-operation follows the first SELECT, otherwise the plain Select_Stmt.
+parse_compound_select :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
+	first_variant, first_ok := parse_select(p, allocator)
+	if !first_ok { return nil, false }
+
+	first_sel, _ := first_variant.(Select_Stmt)
+	op, has_op := parse_set_op(p)
+	if !has_op { return first_variant, true }
+
+	first_ptr := new(Select_Stmt, allocator)
+	first_ptr^ = first_sel
+	operands := make([dynamic]Set_Operand, allocator)
+	for {
+		// Each operand begins with its own `SELECT` keyword (the dispatch consumed
+		// only the first one).
+		if !match(p, .SELECT) {
+			free(first_ptr, allocator)
+			return nil, false
+		}
+
+		sel_variant, sel_ok := parse_select(p, allocator, false)
+		if !sel_ok {
+			free(first_ptr, allocator)
+			return nil, false
+		}
+
+		sel, _ := sel_variant.(Select_Stmt)
+		sel_ptr := new(Select_Stmt, allocator)
+		sel_ptr^ = sel
+
+		append(&operands, Set_Operand{select = sel_ptr, op = op})
+		next_op, has_next := parse_set_op(p)
+		if !has_next { break }
+		op = next_op
+	}
+
+	order_by, limit, offset, o_ok := parse_order_limit(p, allocator)
+	if !o_ok {
+		free(first_ptr, allocator)
+		return nil, false
+	}
+	return Compound_Stmt {
+			first    = first_ptr,
+			operands = operands[:],
 			order_by = order_by,
-			limit = limit,
-			offset = offset,
-			group_by = group_by[:],
-			having = having_cl,
-			as_of_snapshot = as_of_snapshot,
-			as_of_timestamp = as_of_timestamp,
+			limit    = limit,
+			offset   = offset,
 		},
 		true
 }

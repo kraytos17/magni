@@ -1362,8 +1362,8 @@ test_in_subquery :: proc(t: ^testing.T) {
 	testing.expect(t, q.ok, "IN subquery execute")
 	testing.expect(t, len(q.rows) == 2, "2 rows from IN subquery")
 	if len(q.rows) >= 2 {
-		name0, _ := q.rows[0][1].(string)
-		name1, _ := q.rows[1][1].(string)
+		name0, _ := q.rows[0][0].(string)
+		name1, _ := q.rows[1][0].(string)
 		testing.expect_value(t, name0, "Alice")
 		testing.expect_value(t, name1, "Charlie")
 	}
@@ -1371,4 +1371,76 @@ test_in_subquery :: proc(t: ^testing.T) {
 	q2 := db.query(d, "SELECT name FROM t WHERE id IN (1, 3) ORDER BY name;")
 	testing.expect(t, q2.ok, "IN literal execute")
 	testing.expect(t, len(q2.rows) == 2, "2 rows from IN literal")
+}
+
+@(test)
+test_integration_set_ops :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
+	d := setup_db(t, "setops")
+	defer teardown_db(d, "setops")
+
+	db.execute(d, "CREATE TABLE a (x INT);")
+	db.execute(d, "INSERT INTO a VALUES (1);")
+	db.execute(d, "INSERT INTO a VALUES (1);")
+	db.execute(d, "INSERT INTO a VALUES (2);")
+	db.execute(d, "CREATE TABLE b (x INT);")
+	db.execute(d, "INSERT INTO b VALUES (1);")
+	db.execute(d, "INSERT INTO b VALUES (3);")
+
+	// UNION dedups across both sets.
+	q := db.query(d, "SELECT x FROM a UNION SELECT x FROM b;")
+	testing.expect(t, q.ok, "UNION should succeed")
+	testing.expect(t, len(q.rows) == 3, "UNION of {1,1,2} and {1,3} = {1,2,3}")
+	if len(q.rows) == 3 {
+		testing.expect_value(t, q.rows[0][0].(i64), i64(1))
+		testing.expect_value(t, q.rows[1][0].(i64), i64(2))
+		testing.expect_value(t, q.rows[2][0].(i64), i64(3))
+	}
+
+	// UNION ALL keeps duplicates.
+	q2 := db.query(d, "SELECT x FROM a UNION ALL SELECT x FROM b;")
+	testing.expect(t, q2.ok, "UNION ALL should succeed")
+	testing.expect(t, len(q2.rows) == 4, "UNION ALL of {1,1,2} and {1,3} = 4 rows")
+
+	// INTERSECT keeps only shared values.
+	q3 := db.query(d, "SELECT x FROM a INTERSECT SELECT x FROM b;")
+	testing.expect(t, q3.ok, "INTERSECT should succeed")
+	testing.expect(t, len(q3.rows) == 1, "INTERSECT of {1,1,2} and {1,3} = {1}")
+	if len(q3.rows) == 1 {
+		testing.expect_value(t, q3.rows[0][0].(i64), i64(1))
+	}
+
+	// EXCEPT keeps left-only values.
+	q4 := db.query(d, "SELECT x FROM a EXCEPT SELECT x FROM b;")
+	testing.expect(t, q4.ok, "EXCEPT should succeed")
+	testing.expect(t, len(q4.rows) == 1, "EXCEPT of {1,1,2} and {1,3} = {2}")
+	if len(q4.rows) == 1 {
+		testing.expect_value(t, q4.rows[0][0].(i64), i64(2))
+	}
+
+	// INTERSECT ALL respects multiplicity.
+	q5 := db.query(d, "SELECT x FROM a INTERSECT ALL SELECT x FROM b;")
+	testing.expect(t, q5.ok, "INTERSECT ALL should succeed")
+	testing.expect(t, len(q5.rows) == 1, "INTERSECT ALL of {1,1,2} and {1,3} = {1}")
+
+	// EXCEPT ALL keeps left multiplicity minus right.
+	q6 := db.query(d, "SELECT x FROM a EXCEPT ALL SELECT x FROM b;")
+	testing.expect(t, q6.ok, "EXCEPT ALL should succeed")
+	testing.expect(t, len(q6.rows) == 2, "EXCEPT ALL of {1,1,2} and {1,3} = {1,2}")
+
+	// Precedence: INTERSECT binds tighter than UNION.
+	q7 := db.query(d, "SELECT x FROM a UNION SELECT x FROM b INTERSECT SELECT x FROM a;")
+	testing.expect(t, q7.ok, "precedence UNION/INTERSECT should succeed")
+	// b INTERSECT a = {1}; a UNION {1} = {1,2}
+	testing.expect(t, len(q7.rows) == 2, "a UNION (b INTERSECT a) = {1,2}")
+
+	// Compound ORDER BY LIMIT.
+	q8 := db.query(d, "SELECT x FROM a UNION SELECT x FROM b ORDER BY x LIMIT 2;")
+	testing.expect(t, q8.ok, "compound ORDER BY LIMIT should succeed")
+	testing.expect(t, len(q8.rows) == 2, "compound LIMIT 2 = 2 rows")
+
+	// Literal operands.
+	q9 := db.query(d, "SELECT 1 UNION SELECT 2;")
+	testing.expect(t, q9.ok, "literal UNION should succeed")
+	testing.expect(t, len(q9.rows) == 2, "SELECT 1 UNION SELECT 2 = 2 rows")
 }

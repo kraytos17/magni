@@ -14,7 +14,7 @@ keyword_table := []Keyword_Entry{
 	{"in", .IN}, {"of", .OF}, {"on", .ON}, {"as", .AS}, {"by", .BY}, {"or", .OR},
 	// len 3
 	{"int", .INTEGER}, {"not", .NOT}, {"set", .SET}, {"key", .KEY}, {"and", .AND},
-	{"asc", .ASC},
+	{"asc", .ASC}, {"all", .ALL},
 	// len 4
 	{"from", .FROM}, {"into", .INTO}, {"join", .JOIN}, {"like", .LIKE}, {"null", .NULL},
 	{"text", .TEXT}, {"blob", .BLOB}, {"real", .REAL}, {"drop", .DROP}, {"last", .LAST},
@@ -23,17 +23,18 @@ keyword_table := []Keyword_Entry{
 	{"table", .TABLE}, {"where", .WHERE}, {"limit", .LIMIT}, {"group", .GROUP},
 	{"order", .ORDER}, {"check", .CHECK}, {"inner", .INNER}, {"cross", .CROSS},
 	{"first", .FIRST}, {"right", .RIGHT}, {"outer", .OUTER}, {"begin", .BEGIN},
-	{"nulls", .NULLS},
+	{"nulls", .NULLS}, {"union", .UNION},
 	// len 6
 	{"select", .SELECT}, {"delete", .DELETE}, {"update", .UPDATE}, {"create", .CREATE},
 	{"insert", .INSERT}, {"offset", .OFFSET}, {"having", .HAVING}, {"values", .VALUES},
+	{"except", .EXCEPT},
 	// len 7
 	{"default", .DEFAULT}, {"primary", .PRIMARY}, {"integer", .INTEGER},
 	{"explain", .EXPLAIN}, {"foreign", .FOREIGN},
 	// len 8
 	{"distinct", .DISTINCT}, {"rollback", .ROLLBACK}, {"snapshot", .SNAPSHOT},
 	// len 9
-	{"timestamp", .TIMESTAMP},
+	{"timestamp", .TIMESTAMP}, {"intersect", .INTERSECT},
 	// len 11
 	{"references", .REFERENCES},
 }
@@ -41,7 +42,7 @@ keyword_table := []Keyword_Entry{
 // keyword_bucket_offsets[i] = start index into keyword_table for words of length i+2.
 // The final value equals len(keyword_table); the bucket for length N spans
 // keyword_table[offsets[N-2]:offsets[N-1]].
-keyword_bucket_offsets := [10]int{0, 6, 12, 24, 37, 45, 50, 53, 54, 55}
+keyword_bucket_offsets := [10]int{0, 6, 13, 25, 39, 48, 53, 56, 58, 58}
 
 match_keyword :: proc(ident: string) -> Token_Type {
 	if len(ident) < 2 || len(ident) > 11 {

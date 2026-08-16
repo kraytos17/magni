@@ -78,7 +78,12 @@ Join_Clause :: struct {
 From_Source :: union {
 	string,
 	^Select_Stmt,
+	No_From,
 }
+
+// No_From marks a FROM-less SELECT whose columns are literal expressions
+// (e.g. `SELECT 1, 'a'`), producing a single row.
+No_From :: struct {}
 
 Join_Source_Result :: struct {
 	source:  From_Source,
@@ -87,10 +92,11 @@ Join_Source_Result :: struct {
 }
 
 Select_Stmt :: struct {
-	from:            From_Source, // table name string or subquery ^Select_Stmt
+	from:            From_Source, // table name string, subquery ^Select_Stmt, or No_From
 	from_alias:      string, // e.g. "FROM t AS a" sets from_alias = "a"
 	joins:           []Join_Clause,
 	columns:         []string, // projected column names; empty = *
+	literal_values:  []types.Value, // FROM-less SELECT: literal column values
 	aggregates:      []Aggregate_Expr,
 	is_distinct:     bool,
 	where_clause:    Maybe(Where_Clause),
@@ -129,10 +135,38 @@ Txn_Stmt :: struct {
 	op: Txn_Op,
 }
 
+Set_Op :: enum {
+	UNION,
+	UNION_ALL,
+	INTERSECT,
+	INTERSECT_ALL,
+	EXCEPT,
+	EXCEPT_ALL,
+}
+
+// Set_Operand is a SELECT joined to the compound result by `op`.
+Set_Operand :: struct {
+	select: ^Select_Stmt,
+	op:     Set_Op,
+}
+
+// Compound_Stmt is a chain of SELECTs combined with UNION / INTERSECT / EXCEPT.
+// `first` is the leftmost SELECT; `operands` hold the rest, each with the
+// operator that connects it to the accumulated result. `order_by`/`limit`/
+// `offset` apply to the combined result.
+Compound_Stmt :: struct {
+	first:    ^Select_Stmt,
+	operands: []Set_Operand,
+	order_by: Maybe([]Order_By_Column),
+	limit:    Maybe(u64),
+	offset:   Maybe(u64),
+}
+
 Statement_Variant :: union {
 	Create_Stmt,
 	Insert_Stmt,
 	Select_Stmt,
+	Compound_Stmt,
 	Update_Stmt,
 	Delete_Stmt,
 	Drop_Stmt,

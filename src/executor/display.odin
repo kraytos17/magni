@@ -8,24 +8,7 @@ import "src:schema"
 import "src:types"
 
 value_string :: proc(v: types.Value) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	switch val in v {
-	case types.Null:
-		strings.write_string(&b, "NULL")
-	case i64:
-		strings.write_i64(&b, val)
-	case f64:
-		strings.write_f64(&b, val, 'f')
-	case string:
-		strings.write_string(&b, val)
-	case []u8:
-		strings.write_string(&b, "<BLOB ")
-		strings.write_int(&b, len(val))
-		strings.write_string(&b, " bytes>")
-	case:
-		strings.write_string(&b, "<?>")
-	}
-	return strings.to_string(b)
+	return types.value_to_string(v)
 }
 
 display_results :: proc(
@@ -57,7 +40,7 @@ display_results :: proc(
 
 		row_strs := make([]string, len(display_indices), context.temp_allocator)
 		for idx, i in display_indices { row_strs[i] = value_string(entry.values[idx]) }
-		
+
 		append(&table_rows, row_strs)
 		row_count += 1
 		if has_limit && u64(row_count) >= limit_count { break }

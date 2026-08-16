@@ -155,7 +155,11 @@ Key subroutines:
 | `sort_rows` | ORDER BY with integer fast path | Single-column int: `[]i64` + index sort |
 | `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | `@(fast_math)` on f64 reduction for auto-vectorization |
 | `check_constraints` | CHECK enforcement on INSERT/UPDATE | Fail-closed: rejects non-integer, unknown col |
-| `render_table` | Query/command result rendering | `core:text/table` decorated output; `unicode_width_proc` for CJK-aligned columns |
+| `render_table` | Query/command result rendering | `core:text/table` markdown output; `unicode_width_proc` for CJK-aligned columns |
+| `exec_select_data` | Data-returning SELECT evaluator (operands for set ops) | Returns `(rows, cols)` without printing; covers literals, single-table, subqueries, joins, aggregates |
+| `row_fingerprint` | FNV-1a hash of a row's values | Shared by `dedup_rows` (DISTINCT) and set-op membership |
+| `intersect`/`except` | Set membership (distinct) | O(n+m) via fingerprint index of the right operand |
+| `intersect_all`/`except_all` | Set membership (multiset) | O(n+m) via fingerprint→count maps |
 
 **GROUP BY** uses direct FNV-1a hashing of `Value` union data (raw bit pattern for `f64`,
 `u64` for `i64`, FNV of bytes for strings/blobs) keyed on `map[u64]int` with a collision
@@ -167,6 +171,20 @@ aggregate function references (e.g., `HAVING count > 1`) as well as group-by col
 Aggregate names are compared case-insensitively, so `HAVING COUNT > 1` and `HAVING count > 1`
 are equivalent. The `(N rows)` footer reports the number of rows after HAVING filtering, not the
 total number of groups.
+
+**Set operations** (`UNION` / `INTERSECT` / `EXCEPT`, with `ALL` variants) combine the result
+sets of two or more `SELECT` statements. Precedence follows the SQL standard: `INTERSECT` binds
+tighter than `UNION` / `EXCEPT`; all are left-associative. The first operand's column names form
+the output header; all operands must have equal column counts. `exec_select_data` evaluates each
+operand to `(rows, cols)` without printing, then the segment-based reducer in `set_ops.odin`
+applies INTERSECT runs before folding UNION/EXCEPT left-to-right. The set primitives
+(`union_op`, `union_all_op`, `intersect`, `intersect_all`, `except`, `except_all`) build a
+fingerprint index of the right operand once and probe it per row, giving O(n+m) membership; the
+`ALL` variants track multiplicities via count maps. A trailing `ORDER BY` / `LIMIT` / `OFFSET`
+applies to the combined result. `SELECT` also supports FROM-less literal columns (e.g.
+`SELECT 1, 'a'`), which produce a single row and can participate in set operations. Value
+rendering is centralized in `types.value_to_string` (compact `%g` floats); `executor.value_string`
+delegates to it.
 
 ### 2. Line Editor — `linedit/`
 
@@ -800,7 +818,6 @@ assignment rather than relying on composite-literal aliasing.
 
 ## Limitations
 
-- **No `UNION` / `INTERSECT` / `EXCEPT`**: Set operations absent.
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
 - **No user-managed indexes**: Only the implicit primary-key B-tree and auto-built skip indexes exist.
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100`, `>=`, `<=`, `=`, `!=` format.

@@ -260,9 +260,14 @@ test_parse_error_messages :: proc(t: ^testing.T) {
 
 		@(test)
 		test_unicode_string_literal :: proc(t: ^testing.T) {
-			sql := "SELECT 'héllo 世界' FROM t"
-			_, ok, _ := parser.parse(sql, context.temp_allocator)
-			testing.expect(t, !ok, "string literals in SELECT list not yet supported")
+			sql := "SELECT 'héllo 世界'"
+			stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+			testing.expect(t, ok, "string literals in SELECT list should parse")
+			if ok {
+				sel, is_select := stmt.type.(parser.Select_Stmt)
+				testing.expect(t, is_select, "Expected Select_Stmt")
+				testing.expect_value(t, len(sel.literal_values), 1)
+			}
 		}
 	}
 }
@@ -785,4 +790,68 @@ test_parse_as_of_snapshot_snapshot_as_table_name :: proc(t: ^testing.T) {
 	testing.expect(t, is_sel, "Expected Select_Stmt")
 	testing.expect(t, len(sel.columns) == 1, "Expected 1 column")
 	testing.expect_value(t, sel.columns[0], "snapshot")
+}
+
+@(test)
+test_parse_union :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse("SELECT x FROM a UNION SELECT y FROM b;", context.temp_allocator)
+	testing.expect(t, ok, "UNION should parse")
+	comp, is_comp := stmt.type.(parser.Compound_Stmt)
+	testing.expect(t, is_comp, "Expected Compound_Stmt")
+	testing.expect_value(t, len(comp.operands), 1)
+	testing.expect(t, comp.operands[0].op == .UNION, "Expected UNION op")
+}
+
+@(test)
+test_parse_union_all :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse("SELECT x FROM a UNION ALL SELECT y FROM b;", context.temp_allocator)
+	testing.expect(t, ok, "UNION ALL should parse")
+	comp, is_comp := stmt.type.(parser.Compound_Stmt)
+	testing.expect(t, is_comp, "Expected Compound_Stmt")
+	testing.expect(t, comp.operands[0].op == .UNION_ALL, "Expected UNION_ALL op")
+}
+
+@(test)
+test_parse_intersect_except :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse("SELECT x FROM a INTERSECT SELECT y FROM b EXCEPT SELECT z FROM c;", context.temp_allocator)
+	testing.expect(t, ok, "INTERSECT/EXCEPT chain should parse")
+	comp, is_comp := stmt.type.(parser.Compound_Stmt)
+	testing.expect(t, is_comp, "Expected Compound_Stmt")
+	testing.expect_value(t, len(comp.operands), 2)
+	testing.expect(t, comp.operands[0].op == .INTERSECT, "Expected INTERSECT op")
+	testing.expect(t, comp.operands[1].op == .EXCEPT, "Expected EXCEPT op")
+}
+
+@(test)
+test_parse_compound_order_limit :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse("SELECT x FROM a UNION SELECT y FROM b ORDER BY x LIMIT 5;", context.temp_allocator)
+	testing.expect(t, ok, "compound ORDER BY LIMIT should parse")
+	comp, is_comp := stmt.type.(parser.Compound_Stmt)
+	testing.expect(t, is_comp, "Expected Compound_Stmt")
+	order, has_order := comp.order_by.?
+	testing.expect(t, has_order, "Expected compound ORDER BY")
+	_ = order
+	lim, has_lim := comp.limit.?
+	testing.expect(t, has_lim, "Expected compound LIMIT")
+	testing.expect_value(t, lim, u64(5))
+}
+
+@(test)
+test_parse_fromless_literal_select :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse("SELECT 1, 'a', X'CAFE', NULL;", context.temp_allocator)
+	testing.expect(t, ok, "FROM-less literal SELECT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect_value(t, len(sel.literal_values), 4)
+	testing.expect(t, len(sel.columns) == 4, "Expected 4 columns")
+}
+
+@(test)
+test_parse_literal_union :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse("SELECT 1 UNION SELECT 2;", context.temp_allocator)
+	testing.expect(t, ok, "literal UNION should parse")
+	comp, is_comp := stmt.type.(parser.Compound_Stmt)
+	testing.expect(t, is_comp, "Expected Compound_Stmt")
+	testing.expect_value(t, len(comp.operands), 1)
+	testing.expect(t, comp.operands[0].op == .UNION, "Expected UNION op")
 }

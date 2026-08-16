@@ -87,6 +87,10 @@ Token_Type :: enum u8 {
 	IN,
 	FOREIGN,
 	REFERENCES,
+	UNION,
+	INTERSECT,
+	EXCEPT,
+	ALL,
 }
 
 parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, string) {
@@ -107,7 +111,7 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, 
 	case .INSERT:
 		advance(&parser); variant, success = parse_insert(&parser, allocator)
 	case .SELECT:
-		advance(&parser); variant, success = parse_select(&parser, allocator)
+		advance(&parser); variant, success = parse_compound_select(&parser, allocator)
 	case .UPDATE:
 		advance(&parser); variant, success = parse_update(&parser, allocator)
 	case .DELETE:

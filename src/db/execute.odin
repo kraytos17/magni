@@ -20,6 +20,8 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 	#partial switch s in stmt.type {
 	case parser.Select_Stmt:
 		is_read = true
+	case parser.Compound_Stmt:
+		is_read = true
 	}
 
 	if is_read {
@@ -184,6 +186,28 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 		}
 
 		rows, cols, q_ok := executor.exec_query(&st, sel)
+		if !q_ok {
+			r.err = .IO_Error
+			return r
+		}
+
+		col_names := make([]string, len(cols), context.temp_allocator)
+		col_types := make([]types.Column_Type, len(cols), context.temp_allocator)
+		for col, i in cols {
+			col_names[i] = col.name
+			col_types[i] = col.type
+		}
+
+		flat_rows := make([][]types.Value, len(rows), context.temp_allocator)
+		for entry, i in rows { flat_rows[i] = entry.values }
+
+		r.ok = true
+		r.columns = col_names
+		r.col_types = col_types
+		r.rows = flat_rows
+		return r
+	} else if comp, is_comp := stmt.type.(parser.Compound_Stmt); is_comp {
+		rows, cols, q_ok := executor.exec_compound_data(&st, comp)
 		if !q_ok {
 			r.err = .IO_Error
 			return r

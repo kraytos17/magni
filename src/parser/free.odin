@@ -64,10 +64,12 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 
 		delete(s.joins, allocator)
 		for col in s.columns { delete(col, allocator) }
-		delete(s.columns, allocator)
-		for agg in s.aggregates { delete(agg.column, allocator) }
-		delete(s.aggregates, allocator)
 
+		delete(s.columns, allocator)
+		types.values_delete(s.literal_values, allocator)
+		for agg in s.aggregates { delete(agg.column, allocator) }
+
+		delete(s.aggregates, allocator)
 		if w, ok := s.where_clause.?; ok { where_clause_free(w, allocator) }
 		if order, ok := s.order_by.?; ok {
 			for o in order {
@@ -76,11 +78,28 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 			delete(order, allocator)
 		}
 		for col in s.group_by { delete(col, allocator) }
+
 		delete(s.group_by, allocator)
 		if h, ok := s.having.?; ok { where_clause_free(h, allocator) }
+	case Compound_Stmt:
+		statement_free(Statement{type = s.first^, sql = ""}, allocator)
+		free(s.first, allocator)
+		for operand in s.operands {
+			statement_free(Statement{type = operand.select^, sql = ""}, allocator)
+			free(operand.select, allocator)
+		}
+
+		delete(s.operands, allocator)
+		if order, ok := s.order_by.?; ok {
+			for o in order {
+				delete(o.column, allocator)
+			}
+			delete(order, allocator)
+		}
 	case Update_Stmt:
 		delete(s.table_name, allocator)
 		for col in s.update_columns { delete(col, allocator) }
+
 		delete(s.update_columns, allocator)
 		types.values_delete(s.update_values, allocator)
 		if w, ok := s.where_clause.?; ok { where_clause_free(w, allocator) }

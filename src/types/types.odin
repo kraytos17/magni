@@ -156,7 +156,7 @@ value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string
 	case i64:
 		return fmt.aprintf("%d", val, allocator = allocator)
 	case f64:
-		return fmt.aprintf("%f", val, allocator = allocator)
+		return fmt.aprintf("%g", val, allocator = allocator)
 	case string:
 		return strings.clone(val, allocator)
 	case []u8:
