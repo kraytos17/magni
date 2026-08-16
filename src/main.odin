@@ -67,6 +67,7 @@ main :: proc() {
 	}
 }
 
+@(private="file")
 resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Level {
 	if verbose || v {
 		return .Debug
@@ -93,6 +94,7 @@ resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Leve
 	return .Info
 }
 
+@(private)
 print_help :: proc() {
 	fmt.println("Commands:")
 	fmt.println("  .tables                   List all tables")

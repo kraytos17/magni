@@ -7,6 +7,7 @@ import "src:schema"
 import "src:snapshot"
 import "src:types"
 
+@(private)
 begin_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state == .ACTIVE {
 		log.warn("Transaction already in progress")
@@ -20,6 +21,7 @@ begin_impl :: proc(db: ^Database) -> DB_Error {
 	return .None
 }
 
+@(private)
 commit_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state != .ACTIVE {
 		log.warn("No active transaction to commit")
@@ -62,6 +64,7 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 	return .None
 }
 
+@(private)
 rollback_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state != .ACTIVE {
 		log.warn("No active transaction to roll back")

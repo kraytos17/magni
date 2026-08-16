@@ -1,4 +1,11 @@
-// Package btree implements a B+tree with COW (copy-on-write) for row storage.
+// Package btree implements the copy-on-write B+tree. Layer 2 — depends on
+// cell, pager, types.
+//
+// Public API: Tree, Config, Error, init, tree_insert(_cow), tree_find,
+// tree_update(_cow), tree_delete(_cow), tree_next_rowid, tree_count_rows,
+// tree_foreach, tree_verify_if_enabled, cursor_start/advance/get_cell/destroy,
+// cursor_start_at_page, build_skip_index, query_skip_index_range, rebalance,
+// attach_stats. Everything else is @(private) to this package.
 package btree
 
 import "core:encoding/endian"
@@ -64,16 +71,20 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 	return t
 }
 
+@(private)
 is_leaf :: proc(n: Node) -> bool {
 	return n.header.page_type == .LEAF_TABLE || n.header.page_type == .LEAF_TABLE_COLUMNAR
 }
 
+@(private)
 node_leaf :: proc(n: Node) -> ^Leaf_Header { return get_leaf_header(n.data, n.id) }
 
+@(private)
 node_interior :: proc(n: Node) -> ^Interior_Header {
 	return get_interior_header(n.data, n.id)
 }
 
+@(private)
 unpin_node :: proc(t: ^Tree, n: Node) { pager.unpin_page(t.pager, n.id) }
 
 load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
@@ -82,12 +93,14 @@ load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	return node_from_bytes(page_id, page.data, get_layout(t.pager.page_format_version))
 }
 
+@(private)
 node_from_bytes :: proc(id: u32, data: []u8, layout: ^Cell_Layout) -> (Node, Error) {
 	common_hdr := get_header(data, id)
 	if common_hdr == nil { return {}, .Invalid_Page_Header }
 	return Node{id = id, data = data, header = common_hdr, layout = layout}, .None
 }
 
+@(private="file")
 leaf_lower_bound :: proc(
 	data: []u8,
 	page_id: u32,
@@ -107,10 +120,12 @@ leaf_lower_bound :: proc(
 	return left, true
 }
 
+@(private)
 node_find_child :: proc(n: ^Node, key: types.Row_ID, layout: ^Cell_Layout) -> (u32, int) {
 	return node_find_child_data(n.data, n.id, key, layout)
 }
 
+@(private)
 node_insert_leaf_cell :: proc(
 	t: ^Tree,
 	n: ^Node,
@@ -167,6 +182,7 @@ node_insert_leaf_cell :: proc(
 	return .None
 }
 
+@(private)
 node_update_child_ptr :: proc(
 	n: ^Node,
 	key: types.Row_ID,
@@ -187,11 +203,13 @@ node_update_child_ptr :: proc(
 	return false
 }
 
+@(private="file")
 node_find_insert_index :: proc(n: ^Node, target_rowid: types.Row_ID, layout: ^Cell_Layout) -> int {
 	idx, _ := leaf_lower_bound(n.data, n.id, target_rowid, layout)
 	return idx
 }
 
+@(private)
 insert_recursive :: proc(
 	t: ^Tree,
 	page_id: u32,
@@ -359,6 +377,7 @@ insert_recursive :: proc(
 		.None
 }
 
+@(private="file")
 rowid_exists :: proc(
 	data: []u8,
 	page_id: u32,
@@ -415,6 +434,7 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 	return .None
 }
 
+@(private="file")
 descend_to_leaf :: proc(
 	t: ^Tree,
 	get_child: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32,
@@ -432,6 +452,7 @@ descend_to_leaf :: proc(
 	}
 }
 
+@(private="file")
 node_find_child_data :: proc(
 	data: []u8,
 	page_id: u32,
@@ -452,6 +473,7 @@ node_find_child_data :: proc(
 	return child, idx
 }
 
+@(private="file")
 descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	return get_right_ptr(data, page_id)
 }
@@ -461,6 +483,7 @@ Descend_Key_Ctx :: struct {
 	layout: ^Cell_Layout,
 }
 
+@(private="file")
 descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	dk := (^Descend_Key_Ctx)(ctx)
 	child, _ := node_find_child_data(data, page_id, dk.key, dk.layout)
@@ -548,6 +571,7 @@ tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
 	return
 }
 
+@(private="file")
 count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	if count, ok := tree_stats(t).row_counts[page_id]; ok { result = count; return }
 
@@ -575,12 +599,14 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	return
 }
 
+@(private="file")
 update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
 	if _, ok := tree_stats(t).row_counts[page_id]; ok {
 		tree_stats(t).row_counts[page_id] += delta
 	}
 }
 
+@(private="file")
 delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Error) {
 	node, err := load_node(t, page_id)
 	if err != .None { return false, err }
@@ -602,6 +628,7 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 	return deleted, .None
 }
 
+@(private)
 delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error {
 	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
 
@@ -677,6 +704,7 @@ tree_foreach :: proc(
 	return foreach_recursive(t, t.root, callback, user_data)
 }
 
+@(private="file")
 foreach_recursive :: proc(
 	t: ^Tree,
 	page_id: u32,
@@ -758,6 +786,7 @@ tree_verify_if_enabled :: proc(t: ^Tree) -> bool {
 	return tree_verify(t)
 }
 
+@(private="file")
 verify_recursive :: proc(
 	t: ^Tree,
 	page_id: u32,

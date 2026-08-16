@@ -2,6 +2,7 @@ package parser
 
 import "src:types"
 
+@(private)
 condition_free :: proc(cond: Condition, allocator := context.allocator) {
 	delete(cond.column, allocator)
 	delete(cond.agg_column, allocator)
@@ -15,6 +16,7 @@ condition_free :: proc(cond: Condition, allocator := context.allocator) {
 	}
 }
 
+@(private)
 where_node_free :: proc(node: ^Where_Node, allocator := context.allocator) {
 	if node == nil { return }
 	#partial switch node.kind {
@@ -26,15 +28,18 @@ where_node_free :: proc(node: ^Where_Node, allocator := context.allocator) {
 	free(node, allocator)
 }
 
+@(private)
 where_nodes_free :: proc(nodes: [dynamic]^Where_Node, allocator := context.allocator) {
 	for n in nodes { where_node_free(n, allocator) }
 	delete(nodes)
 }
 
+@(private)
 where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
 	where_node_free(w.root, allocator)
 }
 
+@(private)
 statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 	delete(stmt.sql, allocator)
 	switch s in stmt.type {

@@ -1,4 +1,10 @@
-// Package pager provides page-level I/O, caching, WAL, freelist, and page bitmap tracking.
+// Package pager provides page-level I/O, the slab page cache, WAL, freelist,
+// and page bitmap. Layer 1 — depends only on types and util/bitmap.
+//
+// Public API: open, close, get_page, allocate_page, get_or_allocate_page,
+// unpin_page, mark_dirty, page_count, page_in_cache, copy_page, and the WAL
+// entry points in wal.odin (wal_open/close/begin_txn/commit_txn/abort_txn/
+// checkpoint).
 package pager
 
 import "core:log"
@@ -73,8 +79,10 @@ Error :: enum {
 	Invalid_Page_Num,
 }
 
+@(private)
 find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return p.cache_index[page_num] }
 
+@(private)
 find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 	if p.slot_count >= p.max_cache_pages {
 		if evict_one_slot(p) != .None {
@@ -92,6 +100,7 @@ find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 	return slot
 }
 
+@(private="file")
 evict_one_slot :: proc(p: ^Pager) -> Error {
 	n := len(p.slots)
 	for pass := 0; pass < 2; pass += 1 {
@@ -338,6 +347,7 @@ copy_page :: proc(p: ^Pager, src_page_num: u32) -> (dst: ^Page, err: Error) {
 // mark_slot_dirty marks a cached page dirty and records it in the current WAL
 // txn's dirty list so wal_commit_txn/wal_abort_txn need only scan dirtied pages.
 // Caller must hold p.mutex.
+@(private)
 mark_slot_dirty :: proc(p: ^Pager, slot: ^Page_Slot) {
 	if slot == nil || slot.page.page_num == 0 { return }
 	if !slot.page.dirty {
@@ -351,6 +361,7 @@ mark_dirty :: proc(p: ^Pager, page_num: u32) {
 	mark_slot_dirty(p, find_slot(p, page_num))
 }
 
+@(private)
 bitmap_grow :: proc(p: ^Pager, max_pn: u32) {
 	p.page_bitmap = bitmap.grow(p.page_bitmap, max_pn, p.allocator)
 }

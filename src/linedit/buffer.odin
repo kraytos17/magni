@@ -15,6 +15,7 @@ Line_Buffer :: struct {
 	undo_stack: [dynamic]Undo_State,
 }
 
+@(private="file")
 lb_save_undo :: proc(lb: ^Line_Buffer) {
 	if len(lb.undo_stack) >= UNDO_LIMIT {
 		s := lb.undo_stack[0]

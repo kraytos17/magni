@@ -5,6 +5,7 @@ import "core:os"
 import "core:strings"
 import "src:db"
 
+@(private)
 execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error: bool = false) {
 	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
 	if err != nil {
@@ -14,6 +15,7 @@ execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error:
 	execute_sql(database, string(data), stop_on_error)
 }
 
+@(private)
 execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = false) {
 	data, err := os.read_entire_file_from_file(os.stdin, context.temp_allocator)
 	if err != nil {
@@ -23,6 +25,7 @@ execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = fals
 	execute_sql(database, string(data), stop_on_error)
 }
 
+@(private)
 execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = false) {
 	statements := split_statements(sql)
 	defer delete(statements)
@@ -37,6 +40,7 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 	}
 }
 
+@(private="file")
 split_statements :: proc(sql: string) -> []string {
 	result := make([dynamic]string, context.allocator)
 	start := 0

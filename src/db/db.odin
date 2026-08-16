@@ -1,3 +1,11 @@
+// Package db is the top-level facade. Layer 5 — depends on btree, cell,
+// executor, pager, parser, schema, snapshot, types.
+//
+// Public API: Database, Open_Config, DB_Error, open, close, execute, query,
+// Query_Result, Schema_Tree, begin/commit/rollback, expire_snapshots,
+// rollforward, snapshot_diff/tag/restore. Presentation/introspection commands
+// live in src/admin. Internal helpers (db_check, update_header, verify_header,
+// header layout) are @(private).
 package db
 
 import "core:encoding/endian"
@@ -245,6 +253,7 @@ close :: proc(db: ^Database) {
 	delete(db.snapshot_index); delete(db.path); free(db)
 }
 
+@(private="file")
 initialize :: proc(db: ^Database) -> DB_Error {
 	page1, err := pager.allocate_page(db.pager)
 	if err != .None {

@@ -7,6 +7,7 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+@(private)
 resolve_qualified_column :: proc(
 	combined_cols: []types.Column,
 	table_ranges: []Table_Col_Range,
@@ -38,6 +39,7 @@ resolve_qualified_column :: proc(
 // where_single_condition returns the lone leaf condition when the clause tree is
 // exactly one comparison (used by the PK fast-path and hash-join optimization).
 
+@(private)
 where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition, bool) {
 	root := clause.root
 	if root == nil || root.kind != .COND { return {}, false }
@@ -45,6 +47,7 @@ where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition
 }
 
 
+@(private)
 try_pk_lookup :: proc(
 	table: types.Table,
 	clause: parser.Where_Clause,
@@ -66,6 +69,7 @@ try_pk_lookup :: proc(
 }
 
 
+@(private)
 values_equal :: proc(a, b: []types.Value) -> bool {
 	if len(a) != len(b) { return false }
 	for v, i in a {
@@ -89,6 +93,7 @@ values_equal_by_indices :: proc(
 }
 
 
+@(private)
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	new_values := make([]types.Value, len(values), context.temp_allocator)
 	for v, i in values {
@@ -98,6 +103,7 @@ deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 }
 
 
+@(private)
 check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 	for col in table.columns {
 		if chk, has_chk := col.check_expr.?; has_chk {
@@ -155,6 +161,7 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 
 @(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
 
+@(private)
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	if types.is_null(a) && types.is_null(b) do return 0
 	if types.is_null(a) do return -1

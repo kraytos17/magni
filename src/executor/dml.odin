@@ -8,6 +8,7 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+@(private)
 exec_create :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Create_Stmt,
@@ -61,6 +62,7 @@ exec_create :: proc(
 	return true, new_root, Mutated_Table_Info{name = stmt.table_name, root = root_page.page_num}
 }
 
+@(private="file")
 exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -149,6 +151,7 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	return true
 }
 
+@(private="file")
 exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -242,6 +245,7 @@ exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	return true
 }
 
+@(private="file")
 exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -294,6 +298,7 @@ exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 	return true
 }
 
+@(private)
 exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated_Table_Info) {
 	if !schema.table_exists(t, stmt.table_name) {
 		log.errorf("Error: Table not found: %s", stmt.table_name)
@@ -308,6 +313,7 @@ exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated
 	return false, t.root, {}
 }
 
+@(private)
 exec_insert_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Insert_Stmt,
@@ -407,6 +413,7 @@ exec_insert_cow :: proc(
 	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = data_root}
 }
 
+@(private)
 exec_update_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Update_Stmt,
@@ -524,6 +531,7 @@ exec_update_cow :: proc(
 	return true, t.root, {}
 }
 
+@(private)
 exec_delete_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Delete_Stmt,

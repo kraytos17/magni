@@ -5,6 +5,7 @@ import "src:types"
 import "src:util/varint"
 
 
+@(private)
 find_interior_cell_for_child :: proc(
 	data: []u8,
 	page_id: u32,
@@ -23,6 +24,7 @@ find_interior_cell_for_child :: proc(
 }
 
 
+@(private)
 interior_lower_bound :: proc(
 	data: []u8,
 	page_id: u32,
@@ -47,6 +49,7 @@ interior_lower_bound :: proc(
 }
 
 
+@(private="file")
 find_interior_insert_index :: proc(
 	data: []u8,
 	page_id: u32,
@@ -58,11 +61,13 @@ find_interior_insert_index :: proc(
 }
 
 
+@(private="file")
 interior_cell_size :: proc(key: types.Row_ID) -> int {
 	return 4 + varint.size(u64(key))
 }
 
 
+@(private)
 interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
 	_, n, ok := varint.decode(data, offset + 4)
 	if !ok { return 0 }
@@ -70,6 +75,7 @@ interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
 }
 
 
+@(private)
 insert_interior_cell :: proc(
 	data: []u8,
 	page_id: u32,

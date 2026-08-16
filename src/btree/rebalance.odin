@@ -78,6 +78,7 @@ rebalance :: proc(t: ^Tree) -> Error {
 	return .None
 }
 
+@(private="file")
 merge_leaf_pages :: proc(t: ^Tree, left_id: u32, right_id: u32) -> bool {
 	left_node, l_err := load_node(t, left_id)
 	if l_err != .None { return false }

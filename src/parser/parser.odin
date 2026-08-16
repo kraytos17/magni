@@ -1,4 +1,9 @@
-// Package parser tokenizes SQL and produces an AST for all supported DDL/DML/transaction commands.
+// Package parser is a self-contained SQL front end. Layer 1 — depends only on
+// types.
+//
+// Public API: parse, and the lexer entry point tokenize. The AST types in
+// types.odin and free helpers in free.odin are public for consumers that need
+// to inspect or free parsed statements.
 package parser
 
 import "core:strings"
@@ -8,6 +13,7 @@ err :: proc(p: ^Parser, msg: string) -> (Statement_Variant, bool) {
 	return nil, false
 }
 
+@(private)
 expect_match :: proc(p: ^Parser, tt: Token_Type, msg: string) -> bool {
 	if match(p, tt) { return true }
 	if p.err_msg == "" { p.err_msg = msg }

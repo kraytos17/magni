@@ -6,6 +6,7 @@ import "core:log"
 import "src:parser"
 import "src:types"
 
+@(private)
 find_existing_group :: proc(
 	group_map: map[u64][dynamic]int,
 	groups: []Group,
@@ -30,6 +31,7 @@ find_existing_group :: proc(
 	return -1, false
 }
 
+@(private)
 exec_select_aggregate_combined :: proc(
 	stmt: parser.Select_Stmt,
 	rows: []Row_Entry,
@@ -129,6 +131,7 @@ exec_select_aggregate_combined :: proc(
 // exec_select_aggregate_data evaluates a SELECT with aggregates/GROUP BY and returns
 // the result rows as data (group key values followed by aggregate values), without
 // printing. `cols` are synthesized from stmt.columns.
+@(private)
 exec_select_aggregate_data :: proc(
 	stmt: parser.Select_Stmt,
 	rows: []Row_Entry,

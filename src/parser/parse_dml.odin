@@ -2,6 +2,7 @@ package parser
 
 import "src:types"
 
+@(private)
 parse_insert :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -71,6 +72,7 @@ parse_insert :: proc(
 	return Insert_Stmt{table_name = table_name, columns = columns[:], values = rows[:]}, true
 }
 
+@(private)
 parse_update :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -113,6 +115,7 @@ parse_update :: proc(
 		true
 }
 
+@(private)
 parse_delete :: proc(
 	p: ^Parser,
 	allocator := context.allocator,

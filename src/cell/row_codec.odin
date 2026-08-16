@@ -188,6 +188,7 @@ deserialize :: proc(
 	return cell, pos - offset, true
 }
 
+@(private="file")
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
 	if offset + size > len(data) { return 0, false }
 	switch size {
@@ -213,6 +214,7 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 	return 0, false
 }
 
+@(private="file")
 write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> bool {
 	if offset + size > len(dest) { return false }
 	switch size {
@@ -236,6 +238,7 @@ write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> boo
 	return false
 }
 
+@(private="file")
 serial_type_for_value :: proc(v: types.Value) -> u64 {
 	switch val in v {
 	case types.Null:
@@ -274,5 +277,7 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 	}
 }
 
+@(private="file")
 is_text_serial :: proc(serial: u64) -> bool { return serial >= 13 && (serial % 2 != 0) }
+@(private="file")
 is_blob_serial :: proc(serial: u64) -> bool { return serial >= 12 && (serial % 2 == 0) }

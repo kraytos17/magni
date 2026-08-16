@@ -3,6 +3,7 @@ package main
 import "core:os"
 import "core:path/filepath"
 
+@(private)
 filepath_join_home :: proc(path: string) -> string {
 	buf: [1024]u8
 	home := os.get_env_buf(buf[:], "HOME")

@@ -8,6 +8,7 @@ import "src:util/bitmap"
 
 // Allocates a page from the free-page linked list. Caller MUST hold p.mutex (write-locked).
 // Reads the first 4 bytes of the free page as the next-free pointer.
+@(private)
 alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	free_page_num := p.first_free_page
 	slot := find_empty_slot(p)

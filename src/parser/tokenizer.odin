@@ -44,6 +44,7 @@ keyword_table := []Keyword_Entry{
 // keyword_table[offsets[N-2]:offsets[N-1]].
 keyword_bucket_offsets := [10]int{0, 6, 13, 25, 39, 48, 53, 56, 58, 58}
 
+@(private="file")
 match_keyword :: proc(ident: string) -> Token_Type {
 	if len(ident) < 2 || len(ident) > 11 {
 		return .IDENTIFIER
@@ -72,6 +73,7 @@ match_keyword :: proc(ident: string) -> Token_Type {
 	return .IDENTIFIER
 }
 
+@(private="file")
 is_hex_digit :: proc(c: rune) -> bool {
 	return unicode.is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
@@ -203,6 +205,7 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 	return tokens[:], true
 }
 
+@(private)
 peek :: proc(p: ^Parser) -> Token {
 	if p.current >= len(p.tokens) { return Token{.EOF, "", 0} }
 	return p.tokens[p.current]
@@ -229,6 +232,7 @@ expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 	return token, true
 }
 
+@(private)
 is_keyword_token :: proc(t: Token_Type) -> bool {
 	#partial switch t {
 	case .EOF,

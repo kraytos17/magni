@@ -9,21 +9,25 @@ package btree
 FREEBLOCK_HDR_SIZE :: 4
 
 
+@(private="file")
 freeblock_read_next :: proc(data: []u8, off: u16) -> u16le {
 	return (^u16le)(raw_data(data[int(off):]))^
 }
 
 
+@(private="file")
 freeblock_read_size :: proc(data: []u8, off: u16) -> u16le {
 	return (^u16le)(raw_data(data[int(off) + 2:]))^
 }
 
 
+@(private="file")
 freeblock_write_next :: proc(data: []u8, off: u16, next: u16le) {
 	(^u16le)(raw_data(data[int(off):]))^ = next
 }
 
 
+@(private="file")
 freeblock_write_size :: proc(data: []u8, off: u16, sz: u16le) {
 	(^u16le)(raw_data(data[int(off) + 2:]))^ = sz
 }
@@ -31,6 +35,7 @@ freeblock_write_size :: proc(data: []u8, off: u16, sz: u16le) {
 // Inserts a cell-sized freeblock into the chain. cell_off/cell_sz are native u16.
 
 // Inserts a cell-sized freeblock into the chain. cell_off/cell_sz are native u16.
+@(private)
 freeblock_insert :: proc(data: []u8, cell_off: u16, cell_sz: u16, first: ^u16le) {
 	if cell_sz < FREEBLOCK_HDR_SIZE { return }
 
@@ -111,6 +116,7 @@ freeblock_insert :: proc(data: []u8, cell_off: u16, cell_sz: u16, first: ^u16le)
 // Allocates space from a freeblock. Returns offset (native u16), or 0.
 
 // Allocates space from a freeblock. Returns offset (native u16), or 0.
+@(private)
 freeblock_alloc :: proc(data: []u8, first_hdr: u16le, need: u16, first: ^u16le) -> u16 {
 	f := u16(first_hdr)
 	if f == 0 { return 0 }

@@ -44,7 +44,8 @@ expire_snapshots :: proc(
 	return expired_ids
 }
 
-_expire_snapshots_impl :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
+@(private)
+expire_snapshots_impl :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 	total := 0
 	walk_chain(p, latest_page, &total, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
 		total := cast(^int)data
@@ -82,13 +83,13 @@ _expire_snapshots_impl :: proc(p: ^pager.Pager, latest_page: u32, keep_count: in
 }
 
 expire_and_collect :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
-	_expire_snapshots_impl(p, latest_page, keep_count)
+	expire_snapshots_impl(p, latest_page, keep_count)
 	max_page := pager.page_count(p)
 	if max_page < GC_MIN_PAGES { return }
 
 	live := make(map[u32]bool, context.temp_allocator)
 	defer delete(live)
 
-	_build_live_set(p, latest_page, keep_count, &live)
-	_sweep_dead_pages(p, &live)
+	build_live_set(p, latest_page, keep_count, &live)
+	sweep_dead_pages(p, &live)
 }

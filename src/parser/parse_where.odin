@@ -6,6 +6,7 @@ import "core:strconv"
 import "core:strings"
 import "src:types"
 
+@(private="file")
 unescape_sql_string :: proc(s: string, allocator: mem.Allocator) -> string {
 	if !strings.contains(s, "''") { return strings.clone(s, allocator) }
 
@@ -23,6 +24,7 @@ unescape_sql_string :: proc(s: string, allocator: mem.Allocator) -> string {
 	return strings.to_string(b)
 }
 
+@(private)
 parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.Value, ok: bool) {
 	token := peek(p)
 	#partial switch token.type {
@@ -57,6 +59,7 @@ parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.V
 	return {}, false
 }
 
+@(private)
 parse_where_clause :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -73,6 +76,7 @@ parse_where_clause :: proc(
 //   or_expr   := and_expr (OR and_expr)*
 //   and_expr  := primary (AND primary)*
 //   primary   := '(' or_expr ')' | condition
+@(private="file")
 parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	left, ok := parse_and_expr(p, allocator)
 	if !ok { return nil, false }
@@ -95,6 +99,7 @@ parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 	return node, true
 }
 
+@(private="file")
 parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	left, ok := parse_primary(p, allocator)
 	if !ok { return nil, false }
@@ -117,6 +122,7 @@ parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bo
 	return node, true
 }
 
+@(private="file")
 parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	if match(p, .NOT) {
 		child, child_ok := parse_primary(p, allocator)
@@ -148,11 +154,13 @@ parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 
 // condition_cleanup frees the owned string fields of a partially-parsed
 // Condition on error paths (column + aggregate argument).
+@(private="file")
 condition_cleanup :: proc(cond: ^Condition, allocator: mem.Allocator) {
 	delete(cond.column, allocator)
 	delete(cond.agg_column, allocator)
 }
 
+@(private="file")
 parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Condition, ok: bool) {
 	cond.column = parse_qualified_identifier(p, allocator) or_return
 	// Aggregate reference in a condition: COUNT(*), COUNT(v), SUM(v), ...

@@ -6,11 +6,13 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+@(private)
 hash_join_key :: proc(v: types.Value) -> string {
 	if s, ok := v.(string); ok { return s }
 	return types.value_to_string(v)
 }
 
+@(private="file")
 join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[dynamic]Row_Entry) {
 	combined := make([]types.Value, len(outer.values) + len(inner), context.temp_allocator)
 	copy(combined[:len(outer.values)], outer.values)
@@ -18,6 +20,7 @@ join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[d
 	append(new_rows, Row_Entry{0, combined})
 }
 
+@(private="file")
 join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[dynamic]Row_Entry) {
 	null_row := make([]types.Value, len(outer.values) + right_col_count, context.temp_allocator)
 	copy(null_row[:len(outer.values)], outer.values)
@@ -27,6 +30,7 @@ join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[d
 	append(new_rows, Row_Entry{0, null_row})
 }
 
+@(private="file")
 join_hash_i64 :: proc(
 	rows: []Row_Entry,
 	right_rows: []Row_Entry,
@@ -95,6 +99,7 @@ join_hash_i64 :: proc(
 	delete(matched_left)
 }
 
+@(private="file")
 join_hash_string :: proc(
 	rows: []Row_Entry,
 	right_rows: []Row_Entry,
@@ -157,6 +162,7 @@ join_hash_string :: proc(
 	delete(matched_left)
 }
 
+@(private)
 build_join_result :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -391,6 +397,7 @@ build_join_result :: proc(
 
 // exec_select_join_data evaluates a SELECT with JOINs and returns projected
 // rows/columns without printing.
+@(private)
 exec_select_join_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -452,6 +459,7 @@ exec_select_join_data :: proc(
 
 
 
+@(private="file")
 try_join_match :: proc(
 	outer_row: Row_Entry,
 	inner_values: []types.Value,

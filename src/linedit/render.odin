@@ -40,6 +40,7 @@ rune_width :: proc(r: rune) -> int {
 	return 1
 }
 
+@(private)
 redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	t := &ed.term
 	if t.window_resized {
@@ -107,6 +108,7 @@ redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	ed.prev_render_rows = total_rows
 }
 
+@(private)
 render_search_overlay :: proc(ed: ^Editor, search_prompt: string, matched: string) {
 	t := &ed.term
 	if t.window_resized {

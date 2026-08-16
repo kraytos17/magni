@@ -1,4 +1,9 @@
-// Package types defines core data types: Value, Column, Table, SerialType, and utilities.
+// Package types defines the shared domain model: Value, Column, Table, Row_ID,
+// serial types, and storage constants. Layer 0 — every other package imports it.
+//
+// Public API: Value + value_* constructors/helpers, Column, Column_Type, Table,
+// Foreign_Key, Row_ID, Serial_Type, serial_type_content_size, hash_string,
+// value_compare, value_to_string, Storage_Config.
 package types
 
 import "core:fmt"

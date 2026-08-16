@@ -96,6 +96,7 @@ find_in_manifest :: proc(
 	return 0, false
 }
 
+@(private="file")
 load_manifest :: proc(
 	p: ^pager.Pager,
 	manifest_page: u32,
@@ -120,6 +121,7 @@ load_manifest :: proc(
 	return entries
 }
 
+@(private)
 load_manifest_tables :: proc(
 	p: ^pager.Pager,
 	manifest_page: u32,

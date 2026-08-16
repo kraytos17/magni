@@ -3,6 +3,7 @@ package parser
 import "core:strings"
 import "src:types"
 
+@(private)
 parse_create_table :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -107,6 +108,7 @@ parse_create_table :: proc(
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }
 
+@(private)
 parse_drop_table :: proc(
 	p: ^Parser,
 	allocator := context.allocator,

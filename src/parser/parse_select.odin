@@ -5,6 +5,7 @@ import "core:strconv"
 import "core:strings"
 import "src:types"
 
+@(private)
 parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: string, ok: bool) {
 	tok := peek(p)
 	if tok.type != .IDENTIFIER && !is_keyword_token(tok.type) { return {}, false }
@@ -12,6 +13,7 @@ parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: st
 	return strings.clone(tok.lexeme, allocator), true
 }
 
+@(private)
 parse_qualified_identifier :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -29,6 +31,7 @@ parse_qualified_identifier :: proc(
 	return first, true
 }
 
+@(private="file")
 parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_Source_Result {
 	if is_subquery_start(p) {
 		advance(p); advance(p)
@@ -67,6 +70,7 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 	return {source = tbl, alias = tbl, success = true}
 }
 
+@(private="file")
 is_subquery_start :: proc(p: ^Parser) -> bool {
 	return(
 		peek(p).type == .LPAREN &&
@@ -75,10 +79,12 @@ is_subquery_start :: proc(p: ^Parser) -> bool {
 	)
 }
 
+@(private="file")
 is_alias :: proc(p: ^Parser) -> bool {
 	return peek(p).type == .IDENTIFIER && peek(p).lexeme != "("
 }
 
+@(private="file")
 parse_single_join :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -110,6 +116,7 @@ parse_single_join :: proc(
 		true
 }
 
+@(private="file")
 parse_select_columns :: proc(
 	p: ^Parser,
 	columns: ^[dynamic]string,
@@ -171,6 +178,7 @@ parse_select_columns :: proc(
 
 // resolve_aggregate_name maps a function name (case-insensitive) to its
 // aggregate func, or false if it is not a supported aggregate.
+@(private="file")
 resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
 	switch strings.to_upper(name, context.temp_allocator) {
 	case "COUNT":
@@ -192,6 +200,7 @@ resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
 // executor computes them. `out` holds select-list aggregates first; HAVING
 // references are appended (deduped) and their column arg is cloned because
 // both statement_free and condition_free own their strings.
+@(private="file")
 collect_having_aggregates :: proc(
 	node: ^Where_Node,
 	out: ^[dynamic]Aggregate_Expr,
@@ -224,6 +233,7 @@ collect_having_aggregates :: proc(
 // words tokenize as keywords (not IDENTIFIER), so FROM/WHERE/GROUP/ORDER/COMMA
 // can never be mistaken for a bare alias. `AS` in a SELECT column list is always
 // an alias marker (AS OF appears only after the FROM clause).
+@(private="file")
 consume_column_alias :: proc(
 	p: ^Parser,
 	aliases: ^[dynamic]string,
@@ -243,6 +253,7 @@ consume_column_alias :: proc(
 	}
 }
 
+@(private="file")
 parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynamic]Join_Clause {
 	joins := make([dynamic]Join_Clause, allocator)
 	for {
@@ -277,6 +288,7 @@ parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynam
 	return joins
 }
 
+@(private)
 parse_select :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -378,6 +390,7 @@ parse_select :: proc(
 
 // parse_order_limit parses a trailing `ORDER BY ... LIMIT n OFFSET m` clause.
 // Used by both single SELECTs and compound (set-operation) statements.
+@(private="file")
 parse_order_limit :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -430,6 +443,7 @@ parse_order_limit :: proc(
 }
 
 // parse_set_op reads a single set-operation keyword, consuming `ALL` when present.
+@(private="file")
 parse_set_op :: proc(p: ^Parser) -> (op: Set_Op, ok: bool) {
 	if match(p, .UNION) {
 		return .UNION_ALL if match(p, .ALL) else .UNION, true
@@ -446,6 +460,7 @@ parse_set_op :: proc(p: ^Parser) -> (op: Set_Op, ok: bool) {
 // parse_compound_select parses `SELECT ... [UNION|INTERSECT|EXCEPT [ALL] SELECT ...]...`
 // followed by an optional compound-level ORDER BY / LIMIT. Returns a Compound_Stmt
 // when a set-operation follows the first SELECT, otherwise the plain Select_Stmt.
+@(private)
 parse_compound_select :: proc(
 	p: ^Parser,
 	allocator := context.allocator,

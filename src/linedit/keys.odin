@@ -39,6 +39,7 @@ Key_Event :: struct {
 	char: rune,
 }
 
+@(private)
 read_byte :: proc(fd: posix.FD) -> (b: u8, ok: bool) {
 	buf: [1]u8
 	n := posix.read(fd, &buf[0], 1)
@@ -90,6 +91,7 @@ read_key :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	}
 }
 
+@(private="file")
 read_escape_sequence :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	pfd := posix.pollfd {
 		fd     = fd,
@@ -154,6 +156,7 @@ read_escape_sequence :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	return Key_Event{key = .Escape}, true
 }
 
+@(private="file")
 utf8_continuation_count :: proc(first: u8) -> int {
 	if first < 0xC0 {
 		return 0
@@ -167,6 +170,7 @@ utf8_continuation_count :: proc(first: u8) -> int {
 	return 0
 }
 
+@(private="file")
 decode_utf8 :: proc(fd: posix.FD, first: u8) -> (ev: Key_Event, ok: bool) {
 	n := utf8_continuation_count(first)
 	bytes := [4]u8{first, 0, 0, 0}

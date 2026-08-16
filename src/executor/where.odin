@@ -6,6 +6,7 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+@(private)
 filter_rows :: proc(
 	rows: []Row_Entry,
 	where_clause: ^parser.Where_Clause,
@@ -24,6 +25,7 @@ filter_rows :: proc(
 	return filtered[:]
 }
 
+@(private)
 init_where_ctx :: proc(
 	clause: ^parser.Where_Clause,
 	cols: []types.Column,
@@ -41,6 +43,7 @@ init_where_ctx :: proc(
 	return Where_Eval_Ctx{root = root, schema_tree = schema_tree}
 }
 
+@(private="file")
 build_resolved_node :: proc(
 	node: ^parser.Where_Node,
 	cols: []types.Column,
@@ -77,6 +80,7 @@ build_resolved_node :: proc(
 	return rn, true
 }
 
+@(private="file")
 free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	if n == nil { return }
 	switch n.kind {
@@ -89,6 +93,7 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	free(n, allocator)
 }
 
+@(private="file")
 resolve_condition :: proc(
 	cond: parser.Condition,
 	cols: []types.Column,
@@ -139,11 +144,13 @@ resolve_condition :: proc(
 	return rc, true
 }
 
+@(private)
 evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 	if ctx.root == nil { return true }
 	return evaluate_node(ctx, ctx.root, row)
 }
 
+@(private="file")
 evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Value) -> bool {
 	switch node.kind {
 	case .COND:
@@ -167,6 +174,7 @@ evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Va
 	return false
 }
 
+@(private="file")
 evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition, row: []types.Value) -> bool {
 	left_val := row[rc.col_idx]
 	cond_result: bool
@@ -202,6 +210,7 @@ evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition,
 	return cond_result
 }
 
+@(private)
 evaluate_where :: proc(
 	clause: ^parser.Where_Clause,
 	row: []types.Value,
@@ -213,6 +222,7 @@ evaluate_where :: proc(
 	return evaluate_where_ctx(ctx, row)
 }
 
+@(private)
 compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types.Value) -> bool {
 	if op == .LIKE {
 		text, text_ok := val.(string)
@@ -239,6 +249,7 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 	return false
 }
 
+@(private="file")
 like_match :: proc(pattern: string, text: string) -> bool {
 	// Fast path: pattern ending with %, no underscore = plain prefix match
 	if len(pattern) > 1 && pattern[len(pattern) - 1] == '%' {

@@ -9,6 +9,7 @@ import "src:types"
 // exec_select_data evaluates a SELECT and returns its result rows and columns
 // WITHOUT printing, covering FROM-less literals, single-table selects, subqueries,
 // joins, and aggregates. This is the operand evaluator for set operations.
+@(private="file")
 exec_select_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -36,6 +37,7 @@ exec_select_data :: proc(
 }
 
 // row_equal compares two rows for value equality (column count must match).
+@(private="file")
 row_equal :: proc(a, b: Row_Entry) -> bool {
 	if len(a.values) != len(b.values) { return false }
 	for i in 0 ..< len(a.values) {
@@ -45,11 +47,13 @@ row_equal :: proc(a, b: Row_Entry) -> bool {
 }
 
 // union_all_op appends b to a without dedup.
+@(private="file")
 union_all_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 	append(a, ..b)
 }
 
 // union_op appends b to a, deduplicating the combined result (distinct rows kept once).
+@(private="file")
 union_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 	seen := make(map[u64]bool, len(a^) + len(b), context.temp_allocator)
 	for r in a^ {
@@ -101,6 +105,7 @@ intersect :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 
 // intersect_all keeps the multiset intersection: each distinct row repeated
 // min(count_a, count_b) times.
+@(private="file")
 intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	count_b := make(map[u64]int, len(b), context.temp_allocator)
 	seen_b := make(map[u64][dynamic]int, len(b), context.temp_allocator)
@@ -170,6 +175,7 @@ except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 
 // except_all keeps the multiset difference: each distinct row repeated
 // max(count_a - count_b, 0) times.
+@(private="file")
 except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	count_b := make(map[u64]int, len(b), context.temp_allocator)
 	for rb in b {
@@ -190,6 +196,7 @@ except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 }
 
 // apply_set_op reduces the accumulator with one operand per its operator.
+@(private="file")
 apply_set_op :: proc(
 	acc: ^[dynamic]Row_Entry,
 	op: parser.Set_Op,
@@ -303,6 +310,7 @@ exec_compound_data :: proc(
 }
 
 // exec_compound evaluates a compound SELECT and prints the result.
+@(private="file")
 exec_compound :: proc(t: ^btree.Tree, compound: parser.Compound_Stmt) -> bool {
 	rows, acc_cols, ok := exec_compound_data(t, compound)
 	if !ok { return false }

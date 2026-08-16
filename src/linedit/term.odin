@@ -50,6 +50,7 @@ terminal_query_size :: proc(t: ^Term) {
 	}
 }
 
+@(private)
 term_init :: proc(fd: posix.FD) -> (t: Term, ok: bool) {
 	t.fd = fd
 	if posix.tcgetattr(fd, &t.orig) != .OK {
@@ -58,6 +59,7 @@ term_init :: proc(fd: posix.FD) -> (t: Term, ok: bool) {
 	return t, true
 }
 
+@(private)
 term_enable_raw :: proc(t: ^Term) -> bool {
 	raw := t.orig
 	raw.c_iflag &= ~posix.CInput_Flags{.BRKINT, .ICRNL, .INPCK, .ISTRIP, .IXON}
@@ -78,6 +80,7 @@ term_enable_raw :: proc(t: ^Term) -> bool {
 	return true
 }
 
+@(private)
 term_restore :: proc(t: ^Term) {
 	if t.is_raw {
 		fmt.fprint(os.stdout, "\x1b[?2004l")
@@ -86,6 +89,7 @@ term_restore :: proc(t: ^Term) {
 	}
 }
 
+@(private="file")
 install_restore_handler :: proc(t: ^Term) {
 	global_term_ptr = t
 	action: posix.sigaction_t
@@ -98,6 +102,7 @@ install_restore_handler :: proc(t: ^Term) {
 	posix.sigaction(posix.Signal(posix.SIGWINCH), &winch_action, nil)
 }
 
+@(private="file")
 restore_and_reraise :: proc "c" (sig: posix.Signal) {
 	if global_term_ptr != nil && global_term_ptr.is_raw {
 		posix.tcsetattr(global_term_ptr.fd, .TCSAFLUSH, &global_term_ptr.orig)
@@ -108,6 +113,7 @@ restore_and_reraise :: proc "c" (sig: posix.Signal) {
 	posix.raise(sig)
 }
 
+@(private="file")
 sigwinch_handler :: proc "c" (sig: posix.Signal) {
 	global_term_ptr.window_resized = true
 }

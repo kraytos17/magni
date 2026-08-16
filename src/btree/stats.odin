@@ -16,12 +16,14 @@ Stats :: struct {
 
 // tree_stats returns the pager-attached Stats (must be non-nil: btree.init
 // attaches it lazily).
+@(private)
 tree_stats :: proc(t: ^Tree) -> ^Stats {
 	return cast(^Stats)t.pager.stats
 }
 
 // attach_stats lazily creates and attaches a Stats instance to the pager, the
 // first time any btree.Tree is created against it.
+@(private)
 attach_stats :: proc(t: ^Tree) {
 	p := t.pager
 	if p.stats != nil { return }
@@ -34,6 +36,7 @@ attach_stats :: proc(t: ^Tree) {
 	p.free_stats = free_stats_proc
 }
 
+@(private="file")
 on_evict_stats :: proc(data: rawptr, page_num: u32) {
 	if data == nil { return }
 	s := cast(^Stats)data
@@ -41,6 +44,7 @@ on_evict_stats :: proc(data: rawptr, page_num: u32) {
 	delete_key(&s.page_int_ranges, page_num)
 }
 
+@(private="file")
 free_stats_proc :: proc(data: rawptr) {
 	if data == nil { return }
 	s := cast(^Stats)data
@@ -51,6 +55,7 @@ free_stats_proc :: proc(data: rawptr) {
 
 // invalidate_page_int_range drops the cached integer range for a page, e.g.
 // after a mutation changes its contents.
+@(private)
 invalidate_page_int_range :: proc(t: ^Tree, page_id: u32) {
 	delete_key(&tree_stats(t).page_int_ranges, page_id)
 }

@@ -58,6 +58,7 @@ get_page_header_offset :: proc(page_num: u32) -> int {
 }
 
 
+@(private)
 page_header_size :: proc(page_type: Page_Type) -> int {
 	return int(page_type == .INTERIOR_TABLE ? size_of(Interior_Header) : size_of(Leaf_Header))
 }
@@ -70,6 +71,7 @@ get_header :: proc(data: []u8, page_id: u32) -> ^Page_Header {
 }
 
 
+@(private)
 get_interior_header :: proc(data: []u8, page_id: u32) -> ^Interior_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Interior_Header) { return nil }
@@ -84,12 +86,14 @@ get_leaf_header :: proc(data: []u8, page_id: u32) -> ^Leaf_Header {
 }
 
 
+@(private)
 is_columnar :: proc(data: []u8, page_id: u32) -> bool {
 	h := get_header(data, page_id)
 	return h != nil && h.page_type == .LEAF_TABLE_COLUMNAR
 }
 
 
+@(private)
 init_interior_page :: proc(data: []u8, page_id: u32) {
 	off := get_page_header_offset(page_id)
 	mem.zero_slice(data[off:])
@@ -170,6 +174,7 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 }
 
 
+@(private)
 ensure_row_major :: proc(data: []u8, page_id: u32) {
 	if !is_columnar(data, page_id) { return }
 	num_cols, found := detect_columnar_col_count(data, page_id)
@@ -178,6 +183,7 @@ ensure_row_major :: proc(data: []u8, page_id: u32) {
 }
 
 
+@(private)
 detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
 	if !is_columnar(data, page_id) { return 0, false }
 	hdr := get_header(data, page_id)
@@ -210,6 +216,7 @@ get_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 }
 
 
+@(private="file")
 get_raw_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 	header := get_header(data, page_id)
 	if header == nil { return nil }
@@ -225,6 +232,7 @@ get_raw_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 }
 
 
+@(private="file")
 get_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 	header := get_header(data, page_id)
 	if header == nil { return nil }
@@ -241,6 +249,7 @@ get_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 }
 
 
+@(private)
 get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 	header := get_header(data, page_id)
 	if header == nil { return nil }
@@ -379,6 +388,7 @@ move_cells_to :: proc(
 }
 
 
+@(private)
 get_right_ptr :: proc(data: []u8, page_id: u32) -> u32 {
 	h := get_interior_header(data, page_id)
 	if h == nil { return 0 }
@@ -386,6 +396,7 @@ get_right_ptr :: proc(data: []u8, page_id: u32) -> u32 {
 }
 
 
+@(private)
 set_right_ptr :: proc(data: []u8, page_id: u32, ptr: u32) {
 	h := get_interior_header(data, page_id)
 	if h != nil {

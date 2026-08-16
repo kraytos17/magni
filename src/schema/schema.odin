@@ -1,4 +1,10 @@
-// Package schema manages database metadata (tables, columns) stored in the schema b-tree.
+// Package schema manages table metadata stored as rows in a system B-tree.
+// Layer 3 — depends on btree, cell, types.
+//
+// Public API: add_table(_cow), find_table, find_table_cached, get_table,
+// list_tables, drop_table(_cow), table_exists, update_root_page_cow,
+// update_skip_root_cow, Table_Cache, validate_columns, print_ddl,
+// debug_print_all.
 package schema
 
 import "core:fmt"
@@ -184,6 +190,7 @@ Table_Cache :: struct {
 }
 
 // clear_table_cache frees every cached table entry; caller must hold cache.mu.
+@(private="file")
 clear_table_cache :: proc(cache: ^Table_Cache) {
 	for _, tbl in cache.tables {
 		table_free(tbl^, cache.allocator)
@@ -304,6 +311,7 @@ table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
 	return false
 }
 
+@(private="file")
 table_from_values :: proc(
 	values: []types.Value,
 	allocator := context.allocator,
@@ -463,6 +471,7 @@ get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
 	return -1, false
 }
 
+@(private="file")
 debug_print_entry :: proc(table: types.Table) {
 	fmt.printf("Table: %s (Root: %d)\n", table.name, table.root_page)
 	fmt.printf("SQL:   %s\n", table.sql)

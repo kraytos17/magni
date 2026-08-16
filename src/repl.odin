@@ -13,6 +13,7 @@ import "src:db"
 import "src:linedit"
 import "src:schema"
 
+@(private)
 repl :: proc(database: ^db.Database) {
 	history_path := filepath_join_home(".magnidb_history")
 	ed, ok := linedit.init(posix.STDIN_FILENO, history_path)
@@ -92,6 +93,7 @@ repl :: proc(database: ^db.Database) {
 	}
 }
 
+@(private="file")
 repl_fallback :: proc(database: ^db.Database) {
 	reader: bufio.Reader
 	bufio.reader_init(&reader, os.to_stream(os.stdin))
@@ -135,6 +137,7 @@ repl_fallback :: proc(database: ^db.Database) {
 	}
 }
 
+@(private="file")
 handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	switch trimmed {
 	case ".exit", ".quit":

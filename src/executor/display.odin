@@ -7,6 +7,7 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+@(private)
 value_string :: proc(v: types.Value) -> string {
 	return types.value_to_string(v)
 }
@@ -56,6 +57,7 @@ display_results :: proc(
 	fmt.printf("(%d rows)\n", row_count)
 }
 
+@(private)
 build_display_indices :: proc(
 	columns: []string,
 	cols: []types.Column,
@@ -92,6 +94,7 @@ build_display_indices :: proc(
 	.Allow_Contract,
 	.Approx_Func,
 })
+@(private)
 compute_aggregates :: proc(
 	rows: [][]types.Value,
 	aggregates: []parser.Aggregate_Expr,
@@ -177,6 +180,7 @@ compute_aggregates :: proc(
 	return results
 }
 
+@(private)
 evaluate_where_having :: proc(
 	clause: parser.Where_Clause,
 	group_keys: []types.Value,
@@ -188,6 +192,7 @@ evaluate_where_having :: proc(
 	return evaluate_having_node(clause.root, group_keys, agg_values, group_cols, aggregates)
 }
 
+@(private="file")
 evaluate_having_node :: proc(
 	node: ^parser.Where_Node,
 	group_keys: []types.Value,
@@ -221,6 +226,7 @@ evaluate_having_node :: proc(
 	return false
 }
 
+@(private="file")
 evaluate_having_condition :: proc(
 	cond: parser.Condition,
 	group_keys: []types.Value,

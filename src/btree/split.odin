@@ -12,6 +12,7 @@ Split_Result :: struct #all_or_none {
 	split_key:  types.Row_ID,
 }
 
+@(private)
 node_move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
 	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
 
@@ -38,6 +39,7 @@ node_move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int)
 	return true
 }
 
+@(private)
 node_move_leaf_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
 	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
 
@@ -65,6 +67,7 @@ node_move_leaf_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: i
 	return true
 }
 
+@(private)
 node_move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
 	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
 
@@ -89,6 +92,7 @@ node_move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: 
 	return true
 }
 
+@(private)
 node_move_interior_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
 	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
 
@@ -116,6 +120,7 @@ node_move_interior_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, coun
 	return true
 }
 
+@(private)
 split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if node_leaf(curr^).cell_count == 0 { return {}, .Page_Full }
 	// If the page is columnar, convert to row-major before splitting
@@ -246,6 +251,7 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
 }
 
+@(private)
 split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	new_page, err := pager.allocate_page(t.pager)
 	if err != nil { return {}, .Page_Full }
@@ -333,6 +339,7 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
 }
 
+@(private)
 split_leaf_root :: proc(
 	t: ^Tree,
 	root_page: u32,
@@ -406,6 +413,7 @@ split_leaf_root :: proc(
 	return root_page, .None
 }
 
+@(private)
 split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 	left_page, err := pager.allocate_page(t.pager)
 	if err != nil { return .Page_Full }

@@ -44,7 +44,8 @@ prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 
 GC_MIN_PAGES :: 512
 
-_build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live: ^map[u32]bool) {
+@(private)
+build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live: ^map[u32]bool) {
 	live[1] = true
 	count := 0
 	page := latest_page
@@ -76,7 +77,8 @@ _build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live
 	}
 }
 
-_sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
+@(private)
+sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
 	max_page := pager.page_count(p)
 	bm := p.page_bitmap
 	if len(bm) > 0 {
@@ -115,6 +117,6 @@ gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
 	live := make(map[u32]bool, context.temp_allocator)
 	defer delete(live)
 
-	_build_live_set(p, latest_page, keep_count, &live)
-	_sweep_dead_pages(p, &live)
+	build_live_set(p, latest_page, keep_count, &live)
+	sweep_dead_pages(p, &live)
 }

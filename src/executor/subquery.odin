@@ -7,6 +7,7 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+@(private)
 exec_subquery :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -70,6 +71,7 @@ exec_subquery :: proc(
 
 // exec_select_literals materializes a FROM-less SELECT (e.g. `SELECT 1, 'a'`)
 // as a single row of literal values. Returns the row and synthesized columns.
+@(private)
 exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	subq, subq_ok := stmt.from.(^parser.Select_Stmt)
 	if !subq_ok { return false }
@@ -113,6 +115,7 @@ exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 
 // exec_subquery_data evaluates a SELECT whose FROM is a subquery and returns
 // the projected rows/columns without printing. Mirror of exec_select_subquery.
+@(private)
 exec_subquery_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,

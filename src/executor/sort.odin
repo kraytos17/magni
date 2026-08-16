@@ -10,6 +10,7 @@ import "src:types"
 // row_fingerprint computes an FNV-1a hash over a row's values. Used for DISTINCT
 // dedup and set-operation membership. Null and value bytes are encoded so that
 // value-equal rows always share a fingerprint.
+@(private)
 row_fingerprint :: proc(values: []types.Value) -> u64 {
 	h := u64(0)
 	for v, i in values {
@@ -75,6 +76,7 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	return result[:]
 }
 
+@(private)
 sort_rows :: proc(
 	rows: []Row_Entry,
 	order_clause: []parser.Order_By_Column,

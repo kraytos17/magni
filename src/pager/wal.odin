@@ -44,6 +44,7 @@ Wal_State :: struct {
 	txn_active:     bool,
 }
 
+@(private="file")
 wal_frame_hash :: proc(h: ^WAL_Frame_Header, page_data: []u8) -> u64 {
 	local := h^
 	local.checksum1 = 0
@@ -54,6 +55,7 @@ wal_frame_hash :: proc(h: ^WAL_Frame_Header, page_data: []u8) -> u64 {
 	return hv
 }
 
+@(private)
 wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	ws := &p.wal_state
 	wal_path := fmt.aprintf("%s-wal", db_path, allocator = context.temp_allocator)
@@ -104,6 +106,7 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	return .None
 }
 
+@(private)
 wal_close :: proc(p: ^Pager) {
 	ws := &p.wal_state
 	if ws.file != nil {
@@ -161,6 +164,7 @@ wal_abort_txn :: proc(p: ^Pager) {
 	ws.txn_active = false
 }
 
+@(private)
 wal_append_frame :: proc(
 	p: ^Pager,
 	page_num: u32,

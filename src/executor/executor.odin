@@ -1,8 +1,10 @@
-// Package executor dispatches parsed SQL statements to the appropriate execution engine.
+// Package executor plans and runs statements. Layer 4 — depends on btree, cell,
+// pager, parser, schema, types.
 //
-// execute is the core executor: it is pure (no printing, no direct I/O) and
-// returns a data-only Result plus an Exec_Error. Rendering is the caller's
-// responsibility via render_result (used by the CLI's db.execute).
+// Public API: execute, exec_query, exec_compound_data, render_result,
+// render_table, Query-side helpers (exec_select_data, exec_subquery_data), and
+// the executor types in types.odin (Row_Entry, Table_Col_Range, Result). The
+// rest is @(private) to this package.
 package executor
 
 import "core:fmt"

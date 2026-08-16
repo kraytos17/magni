@@ -25,6 +25,7 @@ Cursor :: struct {
 	col_rowid_pos:     int, // byte position in the rowid region for the current row
 }
 
+@(private="file")
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	curr := start_page
 	for {
@@ -87,6 +88,7 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, er
 // cursor_start_at_page positions a cursor at the first cell of the leaf page
 // `page_id`, building the full root→leaf path so traversal can continue past
 // the leaf. Used to start a scan at a skip-index lower bound.
+@(private="file")
 cursor_start_at_page :: proc(
 	t: ^Tree,
 	page_id: u32,
@@ -153,6 +155,7 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 
 // Loads a node, caching the page in the cursor to avoid repeated loads.
 // The page stays pinned until the cursor moves to a different page or is destroyed.
+@(private="file")
 load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	if page_id == c.cached_page_id {
 		return node_from_bytes(

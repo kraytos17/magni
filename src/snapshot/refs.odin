@@ -124,6 +124,7 @@ get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: 
 	return 0, false
 }
 
+@(private="file")
 list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocator) -> []Ref_Entry {
 	if refs_page == 0 { return nil }
 
@@ -194,6 +195,7 @@ log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool)
 	return entry.snapshot_id, true
 }
 
+@(private="file")
 log_read_range :: proc(
 	p: ^pager.Pager,
 	refs_page: u32,

@@ -12,6 +12,7 @@ import "src:types"
 // For string values, returns the original string directly (no allocation).
 // For other types, converts via value_to_string.
 
+@(private)
 exec_select_literals :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -77,6 +78,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 
 // single_range_for returns a single flat table-range covering all columns —
 // used when a result has no per-table column ranges (compound results, joins).
+@(private="file")
 single_range_for :: proc(col_count: int) -> []Table_Col_Range {
 	range0 := []Table_Col_Range {
 		{table_name = "", start_col = 0, col_count = col_count},
@@ -86,6 +88,7 @@ single_range_for :: proc(col_count: int) -> []Table_Col_Range {
 
 // select_header_names returns the display names for a SELECT's columns,
 // substituting AS aliases where present.
+@(private)
 select_header_names :: proc(stmt: parser.Select_Stmt) -> []string {
 	names := make([dynamic]string, 0, len(stmt.columns), context.temp_allocator)
 	for col, i in stmt.columns {
@@ -101,6 +104,7 @@ select_header_names :: proc(stmt: parser.Select_Stmt) -> []string {
 // build_join_result resolves a SELECT's table sources, executes its joins, and
 // applies the WHERE filter, returning the combined rows and columns WITHOUT
 // printing. Shared by the printing path and the set-operation data path.
+@(private="file")
 exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return false }
@@ -291,6 +295,7 @@ exec_query :: proc(
 // group_map chains candidate group indices per hash (different keys can collide
 // on the same hash), so every candidate is verified before deciding a new group
 // is needed. Returns (-1, false) when no matching group exists.
+@(private)
 skip_op_from_token :: proc(op: parser.Token_Type) -> (btree.Skip_Op, bool) {
 	#partial switch op {
 	case .EQUALS:
@@ -307,6 +312,7 @@ skip_op_from_token :: proc(op: parser.Token_Type) -> (btree.Skip_Op, bool) {
 	return .EQ, false
 }
 
+@(private)
 scan_table :: proc(
 	tree: ^btree.Tree,
 	table: ^types.Table,
@@ -427,12 +433,14 @@ scan_table :: proc(
 // skip_chain_conditions collects the leaf conditions of a top-level AND chain.
 // Skipping is only safe when the predicate is a flat conjunction of comparisons;
 // OR subtrees or nested boolean groups disable the optimization (empty result).
+@(private="file")
 skip_chain_conditions :: proc(root: ^Resolved_Node) -> []Resolved_Condition {
 	chain := make([dynamic]Resolved_Condition, context.temp_allocator)
 	collect_skip_chain(root, &chain)
 	return chain[:]
 }
 
+@(private="file")
 collect_skip_chain :: proc(node: ^Resolved_Node, out: ^[dynamic]Resolved_Condition) {
 	if node == nil { return }
 	switch node.kind {
