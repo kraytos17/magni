@@ -108,15 +108,10 @@ sort_rows :: proc(
 				}, &keys)
 
 			sorted := make([]Row_Entry, len(rows), context.temp_allocator)
-			if desc || nulls_first {
-				for pi, i in idx {
-					sorted[len(rows) - 1 - i] = rows[pi]
-				}
-			} else {
-				for pi, i in idx {
-					sorted[i] = rows[pi]
-				}
+			for pi, i in idx {
+				sorted[i] = rows[pi]
 			}
+			if desc || nulls_first { slice.reverse(sorted) }
 			copy(rows, sorted)
 			return true
 		}

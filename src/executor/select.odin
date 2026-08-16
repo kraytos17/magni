@@ -17,6 +17,152 @@ hash_join_key :: proc(v: types.Value) -> string {
 	return types.value_to_string(v)
 }
 
+join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[dynamic]Row_Entry) {
+	combined := make([]types.Value, len(outer.values) + len(inner), context.temp_allocator)
+	copy(combined[:len(outer.values)], outer.values)
+	copy(combined[len(outer.values):], inner)
+	append(new_rows, Row_Entry{0, combined})
+}
+
+join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[dynamic]Row_Entry) {
+	null_row := make([]types.Value, len(outer.values) + right_col_count, context.temp_allocator)
+	copy(null_row[:len(outer.values)], outer.values)
+	for k in len(outer.values) ..< len(null_row) {
+		null_row[k] = types.value_null()
+	}
+	append(new_rows, Row_Entry{0, null_row})
+}
+
+join_hash_i64 :: proc(
+	rows: []Row_Entry,
+	right_rows: []Row_Entry,
+	left_col: int,
+	right_col: int,
+	right_col_count: int,
+	is_left: bool,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	build_left := len(rows) <= len(right_rows)
+	build_cap := len(rows) if build_left else len(right_rows)
+	ht := make(map[i64][dynamic]int, build_cap, context.temp_allocator)
+	if build_left {
+		for row, ri in rows {
+			key, key_ok := row.values[left_col].(i64)
+			if !key_ok { continue }
+
+			bucket := ht[key]
+			append(&bucket, ri)
+			ht[key] = bucket
+		}
+	} else {
+		for r_row, ri in right_rows {
+			key, key_ok := r_row.values[right_col].(i64)
+			if !key_ok { continue }
+
+			bucket := ht[key]
+			append(&bucket, ri)
+			ht[key] = bucket
+		}
+	}
+
+	matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+	if build_left {
+		for r_row in right_rows {
+			key, key_ok := r_row.values[right_col].(i64)
+			if !key_ok { continue }
+			if matches, has := ht[key]; has {
+				for ri in matches {
+					matched_left[ri] = true
+					join_emit_combined(rows[ri], r_row.values, new_rows)
+				}
+			}
+		}
+	} else {
+		for l_row, li in rows {
+			key, key_ok := l_row.values[left_col].(i64)
+			if !key_ok { continue }
+			if matches, has := ht[key]; has {
+				for ri in matches {
+					matched_left[li] = true
+					join_emit_combined(l_row, right_rows[ri].values, new_rows)
+				}
+			}
+		}
+	}
+
+	for _, bucket in ht do delete(bucket)
+	delete(ht)
+	if is_left {
+		for li in 0 ..< len(rows) {
+			if li in matched_left { continue }
+			join_emit_null_row(rows[li], right_col_count, new_rows)
+		}
+	}
+	delete(matched_left)
+}
+
+join_hash_string :: proc(
+	rows: []Row_Entry,
+	right_rows: []Row_Entry,
+	left_col: int,
+	right_col: int,
+	right_col_count: int,
+	is_left: bool,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	build_left := len(rows) <= len(right_rows)
+	build_cap := len(rows) if build_left else len(right_rows)
+	ht := make(map[string][dynamic]int, build_cap, context.temp_allocator)
+	if build_left {
+		for row, ri in rows {
+			key := hash_join_key(row.values[left_col])
+			bucket := ht[key]
+			append(&bucket, ri)
+			ht[key] = bucket
+		}
+	} else {
+		for r_row, ri in right_rows {
+			key := hash_join_key(r_row.values[right_col])
+			bucket := ht[key]
+			append(&bucket, ri)
+			ht[key] = bucket
+		}
+	}
+
+	matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+	if build_left {
+		for r_row in right_rows {
+			key := hash_join_key(r_row.values[right_col])
+			if matches, has := ht[key]; has {
+				for ri in matches {
+					matched_left[ri] = true
+					join_emit_combined(rows[ri], r_row.values, new_rows)
+				}
+			}
+		}
+	} else {
+		for l_row, li in rows {
+			key := hash_join_key(l_row.values[left_col])
+			if matches, has := ht[key]; has {
+				for ri in matches {
+					matched_left[li] = true
+					join_emit_combined(l_row, right_rows[ri].values, new_rows)
+				}
+			}
+		}
+	}
+
+	for _, bucket in ht do delete(bucket)
+	delete(ht)
+	if is_left {
+		for li in 0 ..< len(rows) {
+			if li in matched_left { continue }
+			join_emit_null_row(rows[li], right_col_count, new_rows)
+		}
+	}
+	delete(matched_left)
+}
+
 exec_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> ([]Row_Entry, []types.Column) {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return nil, nil }
@@ -80,7 +226,6 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	if is_subq { return exec_select_subquery(t, stmt) }
 	if len(stmt.joins) == 0 { return exec_select_single(t, stmt) }
 
-	// Phase 1: Resolve all table sources and build column ranges
 	table_count := 1 + len(stmt.joins)
 	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
 	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
@@ -173,7 +318,6 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		}
 	}
 
-	// Phase 2: Scan first table (or materialize subquery)
 	rows: []Row_Entry
 	if col_count_0 > 0 {
 		r, scan_err := scan_table(
@@ -190,7 +334,6 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		rows = vt.rows
 	}
 
-	// Phase 3: Process JOINs
 	for j_idx in 0 ..< len(stmt.joins) {
 		jc := stmt.joins[j_idx]
 		info_idx := j_idx + 1
@@ -212,7 +355,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 			)
 		}
 
-		// Phase 4: Hash join (single equi-condition) or nested-loop fallback
+
 		hash_used := false
 		if on_cl, has_on := jc.on_clause.?; has_on && len(on_cl.conditions) == 1 {
 			cond := on_cl.conditions[0]
@@ -230,248 +373,32 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 					)
 					if left_ok && right_ok {
 						hash_used = true
-						left_adjust := 0
 						right_adjust := table_ctxs[info_idx].range.start_col
 						key_is_int := false
 						if len(rows) > 0 && len(right_rows) > 0 {
-							if _, ok := rows[0].values[left_idx - left_adjust].(i64);
+							if _, ok := rows[0].values[left_idx].(i64);
 							   ok { key_is_int = true }
 						}
 						if key_is_int {
-							if len(rows) <= len(right_rows) {
-								ht := make(map[i64][dynamic]int, len(rows), context.temp_allocator)
-								for row, ri in rows {
-									key, key_ok := row.values[left_idx - left_adjust].(i64)
-									if !key_ok { continue }
-
-									bucket := ht[key]
-									append(&bucket, ri)
-									ht[key] = bucket
-								}
-
-								matched_left := make(
-									map[int]bool,
-									len(rows),
-									context.temp_allocator,
-								)
-								for r_row in right_rows {
-									key, key_ok := r_row.values[right_idx - right_adjust].(i64)
-									if !key_ok { continue }
-									if matches, has := ht[key]; has {
-										for ri in matches {
-											matched_left[ri] = true
-											combined := make(
-												[]types.Value,
-												len(rows[ri].values) + len(r_row.values),
-												context.temp_allocator,
-											)
-
-											copy(combined[:len(rows[ri].values)], rows[ri].values)
-											copy(combined[len(rows[ri].values):], r_row.values)
-											append(&new_rows, Row_Entry{0, combined})
-										}
-									}
-								}
-
-								for _, bucket in ht { delete(bucket) }
-								delete(ht)
-								if is_left {
-									for li in 0 ..< len(rows) {
-										if li in matched_left { continue }
-										null_row := make(
-											[]types.Value,
-											len(rows[li].values) + right_col_count,
-											context.temp_allocator,
-										)
-
-										copy(null_row[:len(rows[li].values)], rows[li].values)
-										for k := len(rows[li].values); k < len(null_row); k += 1 {
-											null_row[k] = types.value_null()
-										}
-										append(&new_rows, Row_Entry{0, null_row})
-									}
-								}
-								delete(matched_left)
-							} else {
-								ht := make(
-									map[i64][dynamic]int,
-									len(right_rows),
-									context.temp_allocator,
-								)
-								for r_row, ri in right_rows {
-									key, key_ok := r_row.values[right_idx - right_adjust].(i64)
-									if !key_ok { continue }
-
-									bucket := ht[key]
-									append(&bucket, ri)
-									ht[key] = bucket
-								}
-
-								matched_left := make(
-									map[int]bool,
-									len(rows),
-									context.temp_allocator,
-								)
-								for l_row, li in rows {
-									key, key_ok := l_row.values[left_idx - left_adjust].(i64)
-									if !key_ok { continue }
-									if matches, has := ht[key]; has {
-										for ri in matches {
-											matched_left[li] = true
-											combined := make(
-												[]types.Value,
-												len(l_row.values) + len(right_rows[ri].values),
-												context.temp_allocator,
-											)
-
-											copy(combined[:len(l_row.values)], l_row.values)
-											copy(
-												combined[len(l_row.values):],
-												right_rows[ri].values,
-											)
-											append(&new_rows, Row_Entry{0, combined})
-										}
-									}
-								}
-
-								for _, bucket in ht { delete(bucket) }
-								delete(ht)
-								if is_left {
-									for li in 0 ..< len(rows) {
-										if li in matched_left { continue }
-										null_row := make(
-											[]types.Value,
-											len(rows[li].values) + right_col_count,
-											context.temp_allocator,
-										)
-
-										copy(null_row[:len(rows[li].values)], rows[li].values)
-										for k := len(rows[li].values); k < len(null_row); k += 1 {
-											null_row[k] = types.value_null()
-										}
-										append(&new_rows, Row_Entry{0, null_row})
-									}
-								}
-								delete(matched_left)
-							}
+							join_hash_i64(
+								rows,
+								right_rows,
+								left_idx,
+								right_idx - right_adjust,
+								right_col_count,
+								is_left,
+								&new_rows,
+							)
 						} else {
-							if len(rows) <= len(right_rows) {
-								ht := make(
-									map[string][dynamic]int,
-									len(rows),
-									context.temp_allocator,
-								)
-								for row, ri in rows {
-									key := hash_join_key(row.values[left_idx - left_adjust])
-									bucket := ht[key]
-									append(&bucket, ri)
-									ht[key] = bucket
-								}
-
-								matched_left := make(
-									map[int]bool,
-									len(rows),
-									context.temp_allocator,
-								)
-								for r_row in right_rows {
-									key := hash_join_key(r_row.values[right_idx - right_adjust])
-									if matches, has := ht[key]; has {
-										for ri in matches {
-											matched_left[ri] = true
-											combined := make(
-												[]types.Value,
-												len(rows[ri].values) + len(r_row.values),
-												context.temp_allocator,
-											)
-
-											copy(combined[:len(rows[ri].values)], rows[ri].values)
-											copy(combined[len(rows[ri].values):], r_row.values)
-											append(&new_rows, Row_Entry{0, combined})
-										}
-									}
-								}
-
-								for _, bucket in ht { delete(bucket) }
-								delete(ht)
-								if is_left {
-									for li in 0 ..< len(rows) {
-										if li in matched_left { continue }
-										null_row := make(
-											[]types.Value,
-											len(rows[li].values) + right_col_count,
-											context.temp_allocator,
-										)
-
-										copy(null_row[:len(rows[li].values)], rows[li].values)
-										for k := len(rows[li].values);
-										    k < len(null_row);
-										    k += 1 { null_row[k] = types.value_null() }
-										append(&new_rows, Row_Entry{0, null_row})
-									}
-								}
-								delete(matched_left)
-							} else {
-								ht := make(
-									map[string][dynamic]int,
-									len(right_rows),
-									context.temp_allocator,
-								)
-								for r_row, ri in right_rows {
-									key := hash_join_key(r_row.values[right_idx - right_adjust])
-									bucket := ht[key]
-									append(&bucket, ri)
-									ht[key] = bucket
-								}
-
-								matched_left := make(
-									map[int]bool,
-									len(rows),
-									context.temp_allocator,
-								)
-								for l_row, li in rows {
-									key := hash_join_key(l_row.values[left_idx - left_adjust])
-									if matches, has := ht[key]; has {
-										for ri in matches {
-											matched_left[li] = true
-											combined := make(
-												[]types.Value,
-												len(l_row.values) + len(right_rows[ri].values),
-												context.temp_allocator,
-											)
-
-											copy(combined[:len(l_row.values)], l_row.values)
-											copy(
-												combined[len(l_row.values):],
-												right_rows[ri].values,
-											)
-											append(&new_rows, Row_Entry{0, combined})
-										}
-									}
-								}
-
-								for _, bucket in ht { delete(bucket) }
-								delete(ht)
-								if is_left {
-									for li in 0 ..< len(rows) {
-										if li in matched_left {
-											continue
-										}
-
-										null_row := make(
-											[]types.Value,
-											len(rows[li].values) + right_col_count,
-											context.temp_allocator,
-										)
-
-										copy(null_row[:len(rows[li].values)], rows[li].values)
-										for k := len(rows[li].values); k < len(null_row); k += 1 {
-											null_row[k] = types.value_null()
-										}
-										append(&new_rows, Row_Entry{0, null_row})
-									}
-								}
-								delete(matched_left)
-							}
+							join_hash_string(
+								rows,
+								right_rows,
+								left_idx,
+								right_idx - right_adjust,
+								right_col_count,
+								is_left,
+								&new_rows,
+							)
 						}
 					}
 				}
@@ -493,17 +420,7 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 						)
 					}
 					if is_left && !matched {
-						null_row := make(
-							[]types.Value,
-							len(outer_row.values) + right_col_count,
-							context.temp_allocator,
-						)
-
-						copy(null_row[:len(outer_row.values)], outer_row.values)
-						for k in len(outer_row.values) ..< len(null_row) {
-							null_row[k] = types.value_null()
-						}
-						append(&new_rows, Row_Entry{0, null_row})
+						join_emit_null_row(outer_row, right_col_count, &new_rows)
 					}
 				}
 			} else {
@@ -613,13 +530,14 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 			return false
 		}
 
-		print_agg_header(stmt.columns)
-		for _, i in stmt.columns {
-			if i > 0 do fmt.print(" | ")
-			fmt.print(i64(count))
+		rows_mat := make([][]string, 1, context.temp_allocator)
+		row_strs := make([]string, len(stmt.columns), context.temp_allocator)
+		for i in 0 ..< len(stmt.columns) {
+			row_strs[i] = fmt.aprintf("%d", i64(count), allocator = context.temp_allocator)
 		}
 
-		fmt.println()
+		rows_mat[0] = row_strs
+		render_table(stmt.columns, rows_mat)
 		fmt.printf("(%d rows)\n", 1)
 		return true
 	}
@@ -780,8 +698,8 @@ exec_select_aggregate_combined :: proc(
 				append(&groups[gi].rows, row_entry)
 			} else {
 				key_vals := make([]types.Value, len(group_by_indices), context.temp_allocator)
-				for i, col_idx in group_by_indices {
-					key_vals[i] = row_entry.values[col_idx]
+				for col_idx, pos in group_by_indices {
+					key_vals[pos] = row_entry.values[col_idx]
 				}
 
 				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
@@ -792,7 +710,7 @@ exec_select_aggregate_combined :: proc(
 		}
 	}
 
-	print_agg_header(stmt.columns)
+	rows_mat := make([dynamic][]string, context.temp_allocator)
 	for gi in 0 ..< len(groups) {
 		group_rows := make([][]types.Value, len(groups[gi].rows), context.temp_allocator)
 		for row_entry, ri in groups[gi].rows { group_rows[ri] = row_entry.values }
@@ -813,21 +731,23 @@ exec_select_aggregate_combined :: proc(
 			) { continue }
 		}
 
+		row_strs := make([]string, len(stmt.columns), context.temp_allocator)
 		val_idx := 0
 		for _, i in stmt.columns {
-			if i > 0 do fmt.print(" | ")
 			if val_idx < len(group_by_indices) {
-				fmt.print(types.value_to_string(groups[gi].key_values[val_idx]))
+				row_strs[i] = value_string(groups[gi].key_values[val_idx])
 				val_idx += 1
 			} else {
 				agg_idx := val_idx - len(group_by_indices)
-				fmt.print(types.value_to_string(agg_vals[agg_idx]))
+				row_strs[i] = value_string(agg_vals[agg_idx])
 				val_idx += 1
 			}
 		}
-		fmt.println()
+		append(&rows_mat, row_strs)
 	}
-	fmt.printf("(%d rows)\n", len(groups))
+
+	render_table(stmt.columns, rows_mat[:])
+	fmt.printf("(%d rows)\n", len(rows_mat))
 	return true
 }
 

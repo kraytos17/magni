@@ -85,7 +85,7 @@ create :: proc(
 				copy(h.magic[:], SNAPSHOT_MAGIC)
 				h.snapshot_id = snapshot_id
 				h.timestamp =
-					timestamp if timestamp != 0 else u64(time.now()._nsec / types.NANOS_PER_MICRO)
+					timestamp if timestamp != 0 else u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO)
 
 				h.schema_root = schema_root
 				h.manifest_page = manifest_page
@@ -117,7 +117,8 @@ create :: proc(
 
 	h.snapshot_id = snapshot_id
 	h.prev_snapshot = prev_snapshot
-	h.timestamp = timestamp if timestamp != 0 else u64(time.now()._nsec / types.NANOS_PER_MICRO)
+	h.timestamp = timestamp if timestamp != 0 else u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO)
+
 	h.schema_root = schema_root
 	h.manifest_page = manifest_page
 	h.state = u8(Snapshot_State.COMMITTED)

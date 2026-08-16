@@ -157,7 +157,7 @@ log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
 	log_next := (^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^
 	entry := Ref_Log_Entry {
 		snapshot_id = snapshot_id,
-		timestamp   = u64(time.now()._nsec / types.NANOS_PER_MICRO),
+		timestamp   = u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO),
 	}
 
 	log_offset := REFS_LOG_OFFSET + int(log_next) * size_of(Ref_Log_Entry)

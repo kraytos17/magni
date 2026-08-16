@@ -288,6 +288,82 @@ test_integration_join :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_integration_group_by_non_first_column :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
+	d := setup_db(t, "group_by")
+	defer teardown_db(d, "group_by")
+
+	db.execute(d, "CREATE TABLE t (a INT, b TEXT, c INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'x', 10);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'x', 20);")
+	db.execute(d, "INSERT INTO t VALUES (2, 'y', 30);")
+
+	// Regression: GROUP BY on a non-first column used to crash
+	q := db.query(d, "SELECT b, COUNT(*) FROM t GROUP BY b;")
+	testing.expect(t, q.ok, "GROUP BY on non-first column should succeed")
+	testing.expect(t, len(q.rows) == 2, "expected 2 groups (x, y)")
+	if len(q.rows) == 2 {
+		testing.expect_value(t, q.rows[0][1].(i64), i64(2))
+		testing.expect_value(t, q.rows[1][1].(i64), i64(1))
+	}
+
+	// First-column GROUP BY still works.
+	q2 := db.query(d, "SELECT a, COUNT(*) FROM t GROUP BY a;")
+	testing.expect(t, q2.ok, "GROUP BY on first column should succeed")
+	testing.expect(t, len(q2.rows) == 2, "expected 2 groups (1, 2)")
+	if len(q2.rows) == 2 {
+		testing.expect_value(t, q2.rows[0][1].(i64), i64(2))
+		testing.expect_value(t, q2.rows[1][1].(i64), i64(1))
+	}
+
+	// Multi-column GROUP BY exercises values_equal_by_indices.
+	q3 := db.query(d, "SELECT a, b, COUNT(*) FROM t GROUP BY a, b;")
+	testing.expect(t, q3.ok, "multi-column GROUP BY should succeed")
+	testing.expect(t, len(q3.rows) == 2, "expected 2 groups (1,x) and (2,y)")
+	if len(q3.rows) == 2 {
+		testing.expect_value(t, q3.rows[0][2].(i64), i64(2))
+		testing.expect_value(t, q3.rows[1][2].(i64), i64(1))
+	}
+}
+
+@(test)
+test_integration_group_by_having :: proc(t: ^testing.T) {
+	context.logger = log.nil_logger()
+	d := setup_db(t, "having")
+	defer teardown_db(d, "having")
+
+	db.execute(d, "CREATE TABLE t (a INT, b INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	db.execute(d, "INSERT INTO t VALUES (2, 20);")
+	db.execute(d, "INSERT INTO t VALUES (1, 30);")
+
+	// Regression: HAVING on an aggregate (count) used to be case-sensitive,
+	// filtering out every group. Verify lowercase, uppercase, and group-column forms.
+	q := db.query(d, "SELECT a, COUNT(*) FROM t GROUP BY a HAVING count > 1;")
+	testing.expect(t, q.ok, "HAVING count > 1 should succeed")
+	testing.expect(t, len(q.rows) == 1, "expected 1 group filtered to a=1")
+	if len(q.rows) == 1 {
+		testing.expect_value(t, q.rows[0][0].(i64), i64(1))
+		testing.expect_value(t, q.rows[0][1].(i64), i64(2))
+	}
+
+	q2 := db.query(d, "SELECT a, COUNT(*) FROM t GROUP BY a HAVING COUNT > 1;")
+	testing.expect(t, q2.ok, "HAVING COUNT (uppercase) should succeed")
+	testing.expect(t, len(q2.rows) == 1, "uppercase HAVING should filter to 1 group")
+
+	q3 := db.query(d, "SELECT a, COUNT(*) FROM t GROUP BY a HAVING count >= 1;")
+	testing.expect(t, q3.ok, "HAVING count >= 1 should succeed")
+	testing.expect(t, len(q3.rows) == 2, "HAVING count >= 1 keeps all 2 groups")
+
+	q4 := db.query(d, "SELECT a, COUNT(*) FROM t GROUP BY a HAVING a > 1;")
+	testing.expect(t, q4.ok, "HAVING on group column should succeed")
+	testing.expect(t, len(q4.rows) == 1, "HAVING a > 1 filters to a=2")
+	if len(q4.rows) == 1 {
+		testing.expect_value(t, q4.rows[0][0].(i64), i64(2))
+	}
+}
+
+@(test)
 test_integration_as_of_timestamp :: proc(t: ^testing.T) {
 	context.logger = log.nil_logger()
 	d := setup_db(t, "tt_ts")

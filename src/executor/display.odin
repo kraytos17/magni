@@ -7,19 +7,25 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-print_agg_header :: proc(cols: []string) {
+value_string :: proc(v: types.Value) -> string {
 	b := strings.builder_make(context.temp_allocator)
-	for col, i in cols {
-		if i > 0 do strings.write_string(&b, " | ")
-		strings.write_string(&b, col)
+	switch val in v {
+	case types.Null:
+		strings.write_string(&b, "NULL")
+	case i64:
+		strings.write_i64(&b, val)
+	case f64:
+		strings.write_f64(&b, val, 'f')
+	case string:
+		strings.write_string(&b, val)
+	case []u8:
+		strings.write_string(&b, "<BLOB ")
+		strings.write_int(&b, len(val))
+		strings.write_string(&b, " bytes>")
+	case:
+		strings.write_string(&b, "<?>")
 	}
-
-	strings.write_byte(&b, '\n')
-	for col, i in cols {
-		if i > 0 do strings.write_string(&b, "-+-")
-		for _ in 0 ..< len(col) do strings.write_byte(&b, '-')
-	}
-	fmt.println(strings.to_string(b))
+	return strings.to_string(b)
 }
 
 display_results :: proc(
@@ -38,7 +44,10 @@ display_results :: proc(
 		has_limit = true
 	}
 
-	print_header(cols, display_indices)
+	header := make([]string, len(display_indices), context.temp_allocator)
+	for idx, i in display_indices { header[i] = cols[idx].name }
+
+	table_rows := make([dynamic][]string, context.temp_allocator)
 	row_count := 0
 	for entry in rows {
 		if skip_count > 0 {
@@ -46,10 +55,14 @@ display_results :: proc(
 			continue
 		}
 
-		print_row(entry.values, display_indices)
+		row_strs := make([]string, len(display_indices), context.temp_allocator)
+		for idx, i in display_indices { row_strs[i] = value_string(entry.values[idx]) }
+		
+		append(&table_rows, row_strs)
 		row_count += 1
 		if has_limit && u64(row_count) >= limit_count { break }
 	}
+	render_table(header, table_rows[:])
 	fmt.printf("(%d rows)\n", row_count)
 }
 
@@ -199,17 +212,19 @@ evaluate_where_having :: proc(
 				name := ""
 				switch agg.func {
 				case .COUNT:
-					name = "COUNT"
+					name = "count"
 				case .SUM:
-					name = "SUM"
+					name = "sum"
 				case .AVG:
-					name = "AVG"
+					name = "avg"
 				case .MIN:
-					name = "MIN"
+					name = "min"
 				case .MAX:
-					name = "MAX"
+					name = "max"
 				}
-				if cond.column == name && rhs_is_val {
+				// Compare case-insensitively: HAVING count > 1 and HAVING COUNT > 1
+				// both reference the COUNT aggregate (cond.column is stored as written).
+				if strings.to_lower(cond.column, context.temp_allocator) == name && rhs_is_val {
 					cond_result = compare_condition(agg_values[i], cond.operator, rhs_val)
 					break
 				}
@@ -224,49 +239,4 @@ evaluate_where_having :: proc(
 		}
 	}
 	return match
-}
-
-print_header :: proc(cols: []types.Column, indices: []int) {
-	b := strings.builder_make(context.temp_allocator)
-	for idx, i in indices {
-		if i > 0 do strings.write_string(&b, " | ")
-		strings.write_string(&b, cols[idx].name)
-	}
-
-	strings.write_byte(&b, '\n')
-	for _, i in indices {
-		if i > 0 do strings.write_string(&b, "-+-")
-		for _ in 0 ..< len(cols[indices[i]].name) {
-			strings.write_byte(&b, '-')
-		}
-	}
-	fmt.println(strings.to_string(b))
-}
-
-write_value_to_builder :: proc(b: ^strings.Builder, v: types.Value) {
-	switch val in v {
-	case types.Null:
-		strings.write_string(b, "NULL")
-	case i64:
-		strings.write_i64(b, val)
-	case f64:
-		strings.write_f64(b, val, 'f')
-	case string:
-		strings.write_string(b, val)
-	case []u8:
-		strings.write_string(b, "<BLOB ")
-		strings.write_int(b, len(val))
-		strings.write_string(b, " bytes>")
-	case:
-		strings.write_string(b, "<?>")
-	}
-}
-
-print_row :: proc(values: []types.Value, indices: []int) {
-	b := strings.builder_make(context.temp_allocator)
-	for idx, i in indices {
-		if i > 0 do strings.write_string(&b, " | ")
-		write_value_to_builder(&b, values[idx])
-	}
-	fmt.println(strings.to_string(b))
 }

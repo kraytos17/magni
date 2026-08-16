@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
+import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
@@ -27,6 +28,7 @@ CLI :: struct {
 	version:       bool   `args:"name=version,usage=Print version and exit"`,
 	log_level:     string `args:"name=log-level,usage=Log level: debug, info, warn, error (default: info)"`,
 	verbose:       bool   `args:"name=verbose,usage=Enable debug-level logging"`,
+	v:             bool   `args:"name=v,usage=Enable debug-level logging (alias for --verbose)"`,
 }
 
 main :: proc() {
@@ -48,10 +50,11 @@ main :: proc() {
 		return
 	}
 
-	log_level := resolve_log_level(cli.verbose, cli.log_level)
-	Logger_Opts :: log.Options{.Level, .Terminal_Color}
-	context.logger = log.create_console_logger(log_level, Logger_Opts)
-	defer log.destroy_console_logger(context.logger)
+	log_level := resolve_log_level(cli.verbose, cli.v, cli.log_level)
+	Logger_Opts :: log.Options{.Level}
+	// File logger on stderr: keeps ALL log levels off stdout so query results stay clean.
+	context.logger = log.create_file_logger(os.stderr, log_level, Logger_Opts)
+	defer log.destroy_file_logger(context.logger)
 
 	database, open_err := db.open(cli.database)
 	if open_err != .None {
@@ -74,8 +77,8 @@ main :: proc() {
 	}
 }
 
-resolve_log_level :: proc(verbose: bool, level_str: string) -> log.Level {
-	if verbose {
+resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Level {
+	if verbose || v {
 		return .Debug
 	}
 	if len(level_str) > 0 {
@@ -416,11 +419,8 @@ filepath_join_home :: proc(path: string) -> string {
 		return path
 	}
 
-	sb := strings.builder_make(context.temp_allocator)
-	strings.write_string(&sb, home)
-	strings.write_byte(&sb, '/')
-	strings.write_string(&sb, path)
-	return strings.to_string(sb)
+	joined, _ := filepath.join({home, path}, context.temp_allocator)
+	return joined
 }
 
 print_help :: proc() {

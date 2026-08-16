@@ -434,13 +434,5 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 	}
 }
 
-content_length_from_serial :: proc(serial: u64) -> int {
-	if serial >= 12 {
-		sub := u64(12) if serial % 2 == 0 else u64(13)
-		return int((serial - sub) / 2)
-	}
-	return 0
-}
-
 is_text_serial :: proc(serial: u64) -> bool { return serial >= 13 && (serial % 2 != 0) }
 is_blob_serial :: proc(serial: u64) -> bool { return serial >= 12 && (serial % 2 == 0) }

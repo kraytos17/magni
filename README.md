@@ -2,7 +2,10 @@
 
 Embedded SQL database engine written in [Odin](https://odin-lang.org). Features a
 copy-on-write B+tree storage engine, SQLite-compatible row format, append-only
-snapshot chain with time-travel queries, and ACID-ish transactions.
+snapshot chain with time-travel queries, and transactional writes backed by a
+write-ahead log. The concurrency model is single-writer: writes take an exclusive
+lock, reads take a shared lock, and each committed write is durable via one
+`fsync` of the WAL.
 
 ---
 
@@ -126,6 +129,7 @@ ROLLBACK;
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
 | **Concurrency** | `db.mu` uses `RW_Mutex` — SELECT and read-only admin commands take shared lock (multiple can run); INSERT/UPDATE/DELETE/DDL take exclusive lock. Pager internally uses `RW_Mutex` with shared locks for read-only page operations. COW snapshots enable time-travel reads without blocking. |
 | **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Page bitmap for O(1) 64-page GC range skips. |
+| **Logging** | `core:log` with configurable levels (debug/info/warn/error). `--log-level`, `--verbose`/`-v`, `MAGNI_LOG_LEVEL` env var. Logs go to stderr; query output stays clean on stdout. REPL runs at error level. |
 
 See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, and all optimization internals.
 
@@ -186,6 +190,8 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `--help` | Print usage |
 | `--version` | Print version and exit |
 | `--stop-on-error` | Exit on first SQL error in script/pipe mode |
+| `--log-level <level>` | Set log level: `debug`, `info`, `warn`, `error` (default: `info`) 
+| `--verbose` / `-v` | Enable debug-level logging (alias for `--log-level debug`) |
 
 ### CLI Modes
 
@@ -203,6 +209,47 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 echo "SELECT * FROM t;" | ./build/magni mydb.db
 ```
 
+### Output Format
+
+Query results and the table-valued dot-commands `.desc` and `.dump` are rendered as bordered
+tables via Odin's `core:text/table` package, using `-`/`+` separators and ` | ` column padding.
+Column widths are computed with `unicode_width_proc`, so multi-byte CJK characters align
+correctly. A footer line `(N rows)` reports the number of rows printed. `.tables` lists table
+names as plain indented lines; `.schema` prints the stored `CREATE TABLE` statements verbatim.
+
+```
+--+---+--
+ | a | b |
+--+---+--
+ | 1 | x |
+--+---+--
+(1 rows)
+```
+
+### Logging
+
+Magni logs through Odin's built-in [`core:log`](https://pkg.odin-lang.org/core/log/) package.
+Log messages go to **stderr**; query results and dot-command output stay on **stdout** — so
+`--eval`, `--file`, and pipe mode stay clean and scriptable.
+
+| Level | Enable via |
+|---|---|
+| `debug` | `--verbose` / `-v`, `--log-level debug`, or `MAGNI_LOG_LEVEL=DEBUG` |
+| `info` | `--log-level info` (default) |
+| `warn` | `--log-level warn` |
+| `error` | `--log-level error` |
+
+Level resolution order: `--verbose` > `--log-level <level>` > `MAGNI_LOG_LEVEL` env var >
+default `info`. The interactive REPL always runs at `error` level to keep the prompt clean.
+
+```bash
+# Query results on stdout, log messages on stderr
+./build/magni mydb.db --eval "SELECT * FROM t;" 2>magni.log
+
+# Debug diagnostics
+./build/magni --verbose mydb.db --eval "CREATE TABLE t (x INT);"
+```
+
 ---
 
 ## Project Layout
@@ -217,7 +264,7 @@ src/
 ├── db/                    Database handle: open/close, execute, admin, snapshots,
 │                          transactions, programmatic Query_Result API
 ├── executor/              Statement dispatch, SELECT/JOIN/aggregates, WHERE/DML,
-│                          sort, display formatting, utility types
+│                          sort, result rendering (core:text/table), utility types
 ├── linedit/               Raw-mode line editor (main + term/keys/buffer/render/
 │                          history/stub_windows)
 ├── parser/                Lexer, recursive-descent parser, AST, free helpers
@@ -226,7 +273,7 @@ src/
 ├── snapshot/              Snapshot chain, manifests, GC, refs, expire, rollforward
 └── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
-└── * _test.odin           292 tests across all packages
+└── * _test.odin           311 test functions across all packages
 ```
 
 ---

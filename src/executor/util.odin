@@ -66,14 +66,15 @@ values_equal :: proc(a, b: []types.Value) -> bool {
 	return true
 }
 
+// values_equal_by_indices compares the key values (extracted at `indices`) of two rows.
 values_equal_by_indices :: proc(
 	values: []types.Value,
 	key: []types.Value,
 	indices: []int,
 ) -> bool {
 	if len(key) != len(indices) { return false }
-	for i, col_idx in indices {
-		if !types.value_compare(key[i], values[col_idx]) { return false }
+	for col_idx, pos in indices {
+		if !types.value_compare(key[pos], values[col_idx]) { return false }
 	}
 	return true
 }
@@ -135,17 +136,8 @@ try_join_match :: proc(
 		if !evaluate_where(&on_cl, tmp, combined_cols, table_ranges) { return }
 	}
 
-	combined := make(
-		[]types.Value,
-		len(outer_row.values) + len(inner_values),
-		context.temp_allocator,
-	)
-
-	copy(combined[:len(outer_row.values)], outer_row.values)
-	copy(combined[len(outer_row.values):], inner_values)
-
 	matched^ = true
-	append(new_rows, Row_Entry{0, combined})
+	join_emit_combined(outer_row, inner_values, new_rows)
 }
 
 check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {

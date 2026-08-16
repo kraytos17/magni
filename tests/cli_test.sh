@@ -165,7 +165,7 @@ run "CREATE TABLE t (a INT, b INT); INSERT INTO t VALUES (1, 10); INSERT INTO t 
 ok "GROUP BY" has "40"
 
 run "CREATE TABLE t (a INT, b INT); INSERT INTO t VALUES (1, 10); INSERT INTO t VALUES (2, 20); INSERT INTO t VALUES (1, 30); SELECT a, COUNT(*) FROM t GROUP BY a HAVING count > 1;"
-ok "GROUP BY HAVING" has "2"
+ok "GROUP BY HAVING filters (count > 1)" has "1 rows"
 
 echo ""
 echo "--- JOINs ---"

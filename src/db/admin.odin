@@ -5,6 +5,7 @@ import "core:log"
 import "core:sync"
 import "src:btree"
 import "src:cell"
+import "src:executor"
 import "src:pager"
 import "src:schema"
 import "src:types"
@@ -85,9 +86,10 @@ describe_table :: proc(db: ^Database, table_name: string) -> DB_Error {
 		return .Table_Not_Found
 	}
 
-	fmt.printf("%-20s %-8s %-3s %-4s %s\n", "name", "type", "pk", "null", "default")
-	fmt.println("-------------------- -------- --- ---- -------")
-	for col in table.columns {
+	cols := []string{"name", "type", "pk", "null", "default"}
+	table_rows := make([][]string, len(table.columns), context.temp_allocator)
+	for i in 0 ..< len(table.columns) {
+		col := table.columns[i]
 		def := "NULL"
 		if d, ok := col.default_value.?; ok {
 			def = types.value_to_string(d, context.temp_allocator)
@@ -95,8 +97,15 @@ describe_table :: proc(db: ^Database, table_name: string) -> DB_Error {
 
 		pk_str := "yes" if col.pk else ""
 		nn_str := "no" if col.not_null else ""
-		fmt.printf("%-20s %-8s %-3s %-4s %s\n", col.name, col.type, pk_str, nn_str, def)
+		row := make([]string, 5, context.temp_allocator)
+		row[0] = col.name
+		row[1] = fmt.aprintf("%s", col.type, allocator = context.temp_allocator)
+		row[2] = pk_str
+		row[3] = nn_str
+		row[4] = def
+		table_rows[i] = row
 	}
+	executor.render_table(cols, table_rows)
 	return .None
 }
 
@@ -138,18 +147,10 @@ dump_table :: proc(db: ^Database, table_name: string) {
 	}
 	defer btree.cursor_destroy(&cursor)
 
-	for i in 0 ..< len(table.columns) {
-		if i > 0 { fmt.print(" | ") }
-		fmt.print(table.columns[i].name)
-	}
+	cols := make([]string, len(table.columns), context.temp_allocator)
+	for i in 0 ..< len(table.columns) { cols[i] = table.columns[i].name }
 
-	fmt.println()
-	for i in 0 ..< len(table.columns) {
-		if i > 0 { fmt.print("-+-") } else { fmt.print("-") }
-		for _ in 0 ..< len(table.columns[i].name) { fmt.print("-") }
-	}
-
-	fmt.println()
+	table_rows := make([dynamic][]string, context.temp_allocator)
 	row_count := 0
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
@@ -158,16 +159,17 @@ dump_table :: proc(db: ^Database, table_name: string) {
 			btree.cursor_advance(&cursor)
 			continue
 		}
+		
+		row_strs := make([]string, len(c.values), context.temp_allocator)
 		for vi in 0 ..< len(c.values) {
-			if vi > 0 { fmt.print(" | ") }
-			val_str := types.value_to_string(c.values[vi], context.temp_allocator)
-			fmt.print(val_str)
+			row_strs[vi] = types.value_to_string(c.values[vi], context.temp_allocator)
 		}
-
-		fmt.println()
+		
+		append(&table_rows, row_strs)
 		btree.cursor_advance(&cursor)
 		row_count += 1
 	}
+	executor.render_table(cols, table_rows[:])
 	fmt.printf("(%d rows)\n", row_count)
 }
 

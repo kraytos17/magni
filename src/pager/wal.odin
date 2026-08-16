@@ -83,15 +83,11 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 		}
 	}
 
-	t := time.now()
-	ws.salt1 = u32(
-		hash.fnv64(transmute([]u8)fmt.aprintf("%d", t._nsec, allocator = context.temp_allocator)),
-	)
-	ws.salt2 = u32(
-		hash.fnv64(
-			transmute([]u8)fmt.aprintf("%d", t._nsec + 1, allocator = context.temp_allocator),
-		),
-	)
+	nsec := u64(time.to_unix_nanoseconds(time.now()))
+	b1 := transmute([8]u8)nsec
+	b2 := transmute([8]u8)(nsec + 1)
+	ws.salt1 = u32(hash.fnv64(b1[:]))
+	ws.salt2 = u32(hash.fnv64(b2[:]))
 
 	buf: [types.WAL_HEADER_SIZE]u8
 	header := (^WAL_Header)(raw_data(buf[:]))
@@ -215,30 +211,6 @@ wal_append_frame :: proc(
 	return .None
 }
 
-wal_read_frame :: proc(
-	p: ^Pager,
-	frame_offset: i64,
-	page_data: []u8,
-) -> (
-	page_num: u32,
-	ok: bool,
-) {
-	if len(page_data) < types.PAGE_SIZE { return 0, false }
-	_, read_err := os.read_at(
-		p.wal_state.file,
-		page_data,
-		frame_offset + types.WAL_FRAME_HEADER_SIZE,
-	)
-	if read_err != nil { return 0, false }
-
-	fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
-	_, fh_err := os.read_at(p.wal_state.file, fh_buf[:], frame_offset)
-	if fh_err != nil { return 0, false }
-
-	fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
-	return u32(fh.page_num), true
-}
-
 wal_checkpoint :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
 	if ws.file == nil { return .None }
@@ -274,13 +246,11 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 	clear(&ws.page_index)
 	ws.frame_count = 0
 
-	t := time.now()
-	ws.salt1 = u32(
-		hash.fnv64(transmute([]u8)fmt.aprint(t._nsec, allocator = context.temp_allocator)),
-	)
-	ws.salt2 = u32(
-		hash.fnv64(transmute([]u8)fmt.aprint(t._nsec + 1, allocator = context.temp_allocator)),
-	)
+	nsec := u64(time.to_unix_nanoseconds(time.now()))
+	b1 := transmute([8]u8)nsec
+	b2 := transmute([8]u8)(nsec + 1)
+	ws.salt1 = u32(hash.fnv64(b1[:]))
+	ws.salt2 = u32(hash.fnv64(b2[:]))
 
 	buf: [types.WAL_HEADER_SIZE]u8
 	header := (^WAL_Header)(raw_data(buf[:]))

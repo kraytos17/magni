@@ -2,373 +2,71 @@ package parser
 
 import "core:unicode"
 
+Keyword_Entry :: struct {
+	word: string,
+	tok:  Token_Type,
+}
+
+// Keyword table for the SQL lexer. Entries are grouped by word length so the
+// lookup can skip mismatched lengths without any per-identifier allocation.
+keyword_table := []Keyword_Entry{
+	// len 2
+	{"in", .IN}, {"of", .OF}, {"on", .ON}, {"as", .AS}, {"by", .BY}, {"or", .OR},
+	// len 3
+	{"int", .INTEGER}, {"not", .NOT}, {"set", .SET}, {"key", .KEY}, {"and", .AND},
+	{"asc", .ASC},
+	// len 4
+	{"from", .FROM}, {"into", .INTO}, {"join", .JOIN}, {"like", .LIKE}, {"null", .NULL},
+	{"text", .TEXT}, {"blob", .BLOB}, {"real", .REAL}, {"drop", .DROP}, {"last", .LAST},
+	{"left", .LEFT}, {"desc", .DESC},
+	// len 5
+	{"table", .TABLE}, {"where", .WHERE}, {"limit", .LIMIT}, {"group", .GROUP},
+	{"order", .ORDER}, {"check", .CHECK}, {"inner", .INNER}, {"cross", .CROSS},
+	{"first", .FIRST}, {"right", .RIGHT}, {"outer", .OUTER}, {"begin", .BEGIN},
+	{"nulls", .NULLS},
+	// len 6
+	{"select", .SELECT}, {"delete", .DELETE}, {"update", .UPDATE}, {"create", .CREATE},
+	{"insert", .INSERT}, {"offset", .OFFSET}, {"having", .HAVING}, {"values", .VALUES},
+	// len 7
+	{"default", .DEFAULT}, {"primary", .PRIMARY}, {"integer", .INTEGER},
+	{"explain", .EXPLAIN}, {"foreign", .FOREIGN},
+	// len 8
+	{"distinct", .DISTINCT}, {"rollback", .ROLLBACK}, {"snapshot", .SNAPSHOT},
+	// len 9
+	{"timestamp", .TIMESTAMP},
+	// len 11
+	{"references", .REFERENCES},
+}
+
+// keyword_bucket_offsets[i] = start index into keyword_table for words of length i+2.
+// The final value equals len(keyword_table); the bucket for length N spans
+// keyword_table[offsets[N-2]:offsets[N-1]].
+keyword_bucket_offsets := [10]int{0, 6, 12, 24, 37, 45, 50, 53, 54, 55}
+
 match_keyword :: proc(ident: string) -> Token_Type {
-	if len(ident) == 2 {
-		if (ident[0] | 0x20) == 'i' && (ident[1] | 0x20) == 'n' { return .IN }
-		if (ident[0] | 0x20) == 'o' && (ident[1] | 0x20) == 'f' { return .OF }
-		if (ident[0] | 0x20) == 'o' && (ident[1] | 0x20) == 'n' { return .ON }
-		if (ident[0] | 0x20) == 'a' && (ident[1] | 0x20) == 's' { return .AS }
-		if (ident[0] | 0x20) == 'b' && (ident[1] | 0x20) == 'y' { return .BY }
-		if (ident[0] | 0x20) == 'o' && (ident[1] | 0x20) == 'r' { return .OR }
+	if len(ident) < 2 || len(ident) > 11 {
+		return .IDENTIFIER
 	}
-	if len(ident) == 3 {
-		if (ident[0] | 0x20) == 'i' && (ident[1] | 0x20) == 'n' && (ident[2] | 0x20) == 't' {
-			return .INTEGER
-		}
-		if (ident[0] | 0x20) == 'n' && (ident[1] | 0x20) == 'o' && (ident[2] | 0x20) == 't' {
-			return .NOT
-		}
-		if (ident[0] | 0x20) == 's' && (ident[1] | 0x20) == 'e' && (ident[2] | 0x20) == 't' {
-			return .SET
-		}
-		if (ident[0] | 0x20) == 'k' && (ident[1] | 0x20) == 'e' && (ident[2] | 0x20) == 'y' {
-			return .KEY
-		}
-		if (ident[0] | 0x20) == 'a' && (ident[1] | 0x20) == 'n' && (ident[2] | 0x20) == 'd' {
-			return .AND
-		}
-		if (ident[0] | 0x20) == 'a' && (ident[1] | 0x20) == 's' && (ident[2] | 0x20) == 'c' {
-			return .ASC
-		}
+
+	// Fold identifier to lowercase in a stack buffer (max keyword len is 11).
+	folded: [12]u8
+	for i in 0 ..< len(ident) {
+		folded[i] = ident[i] | 0x20
 	}
-	if len(ident) == 4 {
-		if (ident[0] | 0x20) == 'f' &&
-		   (ident[1] | 0x20) == 'r' &&
-		   (ident[2] | 0x20) == 'o' &&
-		   (ident[3] | 0x20) == 'm' {
-			return .FROM
+
+	// Linear scan within the matching-length bucket only.
+	bi := len(ident) - 2
+	start := keyword_bucket_offsets[bi]
+	end := len(keyword_table) if bi == len(keyword_bucket_offsets) - 1 else keyword_bucket_offsets[bi + 1]
+	for kw in keyword_table[start:end] {
+		match := true
+		for i in 0 ..< len(ident) {
+			if folded[i] != kw.word[i] {
+				match = false
+				break
+			}
 		}
-		if (ident[0] | 0x20) == 'i' &&
-		   (ident[1] | 0x20) == 'n' &&
-		   (ident[2] | 0x20) == 't' &&
-		   (ident[3] | 0x20) == 'o' {
-			return .INTO
-		}
-		if (ident[0] | 0x20) == 'j' &&
-		   (ident[1] | 0x20) == 'o' &&
-		   (ident[2] | 0x20) == 'i' &&
-		   (ident[3] | 0x20) == 'n' {
-			return .JOIN
-		}
-		if (ident[0] | 0x20) == 'l' &&
-		   (ident[1] | 0x20) == 'i' &&
-		   (ident[2] | 0x20) == 'k' &&
-		   (ident[3] | 0x20) == 'e' {
-			return .LIKE
-		}
-		if (ident[0] | 0x20) == 'n' &&
-		   (ident[1] | 0x20) == 'u' &&
-		   (ident[2] | 0x20) == 'l' &&
-		   (ident[3] | 0x20) == 'l' {
-			return .NULL
-		}
-		if (ident[0] | 0x20) == 't' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'x' &&
-		   (ident[3] | 0x20) == 't' {
-			return .TEXT
-		}
-		if (ident[0] | 0x20) == 'b' &&
-		   (ident[1] | 0x20) == 'l' &&
-		   (ident[2] | 0x20) == 'o' &&
-		   (ident[3] | 0x20) == 'b' {
-			return .BLOB
-		}
-		if (ident[0] | 0x20) == 'r' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'a' &&
-		   (ident[3] | 0x20) == 'l' {
-			return .REAL
-		}
-		if (ident[0] | 0x20) == 'd' &&
-		   (ident[1] | 0x20) == 'r' &&
-		   (ident[2] | 0x20) == 'o' &&
-		   (ident[3] | 0x20) == 'p' {
-			return .DROP
-		}
-		if (ident[0] | 0x20) == 'l' &&
-		   (ident[1] | 0x20) == 'a' &&
-		   (ident[2] | 0x20) == 's' &&
-		   (ident[3] | 0x20) == 't' {
-			return .LAST
-		}
-		if (ident[0] | 0x20) == 'l' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'f' &&
-		   (ident[3] | 0x20) == 't' {
-			return .LEFT
-		}
-		if (ident[0] | 0x20) == 'd' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 's' &&
-		   (ident[3] | 0x20) == 'c' {
-			return .DESC
-		}
-	}
-	if len(ident) == 5 {
-		if (ident[0] | 0x20) == 't' &&
-		   (ident[1] | 0x20) == 'a' &&
-		   (ident[2] | 0x20) == 'b' &&
-		   (ident[3] | 0x20) == 'l' &&
-		   (ident[4] | 0x20) == 'e' {
-			return .TABLE
-		}
-		if (ident[0] | 0x20) == 'w' &&
-		   (ident[1] | 0x20) == 'h' &&
-		   (ident[2] | 0x20) == 'e' &&
-		   (ident[3] | 0x20) == 'r' &&
-		   (ident[4] | 0x20) == 'e' {
-			return .WHERE
-		}
-		if (ident[0] | 0x20) == 'l' &&
-		   (ident[1] | 0x20) == 'i' &&
-		   (ident[2] | 0x20) == 'm' &&
-		   (ident[3] | 0x20) == 'i' &&
-		   (ident[4] | 0x20) == 't' {
-			return .LIMIT
-		}
-		if (ident[0] | 0x20) == 'g' &&
-		   (ident[1] | 0x20) == 'r' &&
-		   (ident[2] | 0x20) == 'o' &&
-		   (ident[3] | 0x20) == 'u' &&
-		   (ident[4] | 0x20) == 'p' {
-			return .GROUP
-		}
-		if (ident[0] | 0x20) == 'o' &&
-		   (ident[1] | 0x20) == 'r' &&
-		   (ident[2] | 0x20) == 'd' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'r' {
-			return .ORDER
-		}
-		if (ident[0] | 0x20) == 'c' &&
-		   (ident[1] | 0x20) == 'h' &&
-		   (ident[2] | 0x20) == 'e' &&
-		   (ident[3] | 0x20) == 'c' &&
-		   (ident[4] | 0x20) == 'k' {
-			return .CHECK
-		}
-		if (ident[0] | 0x20) == 'i' &&
-		   (ident[1] | 0x20) == 'n' &&
-		   (ident[2] | 0x20) == 'n' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'r' {
-			return .INNER
-		}
-		if (ident[0] | 0x20) == 'c' &&
-		   (ident[1] | 0x20) == 'r' &&
-		   (ident[2] | 0x20) == 'o' &&
-		   (ident[3] | 0x20) == 's' &&
-		   (ident[4] | 0x20) == 's' {
-			return .CROSS
-		}
-		if (ident[0] | 0x20) == 'f' &&
-		   (ident[1] | 0x20) == 'i' &&
-		   (ident[2] | 0x20) == 'r' &&
-		   (ident[3] | 0x20) == 's' &&
-		   (ident[4] | 0x20) == 't' {
-			return .FIRST
-		}
-		if (ident[0] | 0x20) == 'r' &&
-		   (ident[1] | 0x20) == 'i' &&
-		   (ident[2] | 0x20) == 'g' &&
-		   (ident[3] | 0x20) == 'h' &&
-		   (ident[4] | 0x20) == 't' {
-			return .RIGHT
-		}
-		if (ident[0] | 0x20) == 'o' &&
-		   (ident[1] | 0x20) == 'u' &&
-		   (ident[2] | 0x20) == 't' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'r' {
-			return .OUTER
-		}
-		if (ident[0] | 0x20) == 'b' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'g' &&
-		   (ident[3] | 0x20) == 'i' &&
-		   (ident[4] | 0x20) == 'n' {
-			return .BEGIN
-		}
-		if (ident[0] | 0x20) == 'n' &&
-		   (ident[1] | 0x20) == 'u' &&
-		   (ident[2] | 0x20) == 'l' &&
-		   (ident[3] | 0x20) == 'l' &&
-		   (ident[4] | 0x20) == 's' {
-			return .NULLS
-		}
-	}
-	if len(ident) == 6 {
-		if (ident[0] | 0x20) == 's' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'l' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'c' &&
-		   (ident[5] | 0x20) == 't' {
-			return .SELECT
-		}
-		if (ident[0] | 0x20) == 'd' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'l' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 't' &&
-		   (ident[5] | 0x20) == 'e' {
-			return .DELETE
-		}
-		if (ident[0] | 0x20) == 'u' &&
-		   (ident[1] | 0x20) == 'p' &&
-		   (ident[2] | 0x20) == 'd' &&
-		   (ident[3] | 0x20) == 'a' &&
-		   (ident[4] | 0x20) == 't' &&
-		   (ident[5] | 0x20) == 'e' {
-			return .UPDATE
-		}
-		if (ident[0] | 0x20) == 'c' &&
-		   (ident[1] | 0x20) == 'r' &&
-		   (ident[2] | 0x20) == 'e' &&
-		   (ident[3] | 0x20) == 'a' &&
-		   (ident[4] | 0x20) == 't' &&
-		   (ident[5] | 0x20) == 'e' {
-			return .CREATE
-		}
-		if (ident[0] | 0x20) == 'i' &&
-		   (ident[1] | 0x20) == 'n' &&
-		   (ident[2] | 0x20) == 's' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'r' &&
-		   (ident[5] | 0x20) == 't' {
-			return .INSERT
-		}
-		if (ident[0] | 0x20) == 'o' &&
-		   (ident[1] | 0x20) == 'f' &&
-		   (ident[2] | 0x20) == 'f' &&
-		   (ident[3] | 0x20) == 's' &&
-		   (ident[4] | 0x20) == 'e' &&
-		   (ident[5] | 0x20) == 't' {
-			return .OFFSET
-		}
-		if (ident[0] | 0x20) == 'h' &&
-		   (ident[1] | 0x20) == 'a' &&
-		   (ident[2] | 0x20) == 'v' &&
-		   (ident[3] | 0x20) == 'i' &&
-		   (ident[4] | 0x20) == 'n' &&
-		   (ident[5] | 0x20) == 'g' {
-			return .HAVING
-		}
-		if (ident[0] | 0x20) == 'v' &&
-		   (ident[1] | 0x20) == 'a' &&
-		   (ident[2] | 0x20) == 'l' &&
-		   (ident[3] | 0x20) == 'u' &&
-		   (ident[4] | 0x20) == 'e' &&
-		   (ident[5] | 0x20) == 's' {
-			return .VALUES
-		}
-	}
-	if len(ident) == 7 {
-		if (ident[0] | 0x20) == 'd' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'f' &&
-		   (ident[3] | 0x20) == 'a' &&
-		   (ident[4] | 0x20) == 'u' &&
-		   (ident[5] | 0x20) == 'l' &&
-		   (ident[6] | 0x20) == 't' {
-			return .DEFAULT
-		}
-		if (ident[0] | 0x20) == 'p' &&
-		   (ident[1] | 0x20) == 'r' &&
-		   (ident[2] | 0x20) == 'i' &&
-		   (ident[3] | 0x20) == 'm' &&
-		   (ident[4] | 0x20) == 'a' &&
-		   (ident[5] | 0x20) == 'r' &&
-		   (ident[6] | 0x20) == 'y' {
-			return .PRIMARY
-		}
-		if (ident[0] | 0x20) == 'i' &&
-		   (ident[1] | 0x20) == 'n' &&
-		   (ident[2] | 0x20) == 't' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'g' &&
-		   (ident[5] | 0x20) == 'e' &&
-		   (ident[6] | 0x20) == 'r' {
-			return .INTEGER
-		}
-		if (ident[0] | 0x20) == 'e' &&
-		   (ident[1] | 0x20) == 'x' &&
-		   (ident[2] | 0x20) == 'p' &&
-		   (ident[3] | 0x20) == 'l' &&
-		   (ident[4] | 0x20) == 'a' &&
-		   (ident[5] | 0x20) == 'i' &&
-		   (ident[6] | 0x20) == 'n' {
-			return .EXPLAIN
-		}
-		if (ident[0] | 0x20) == 'f' &&
-		   (ident[1] | 0x20) == 'o' &&
-		   (ident[2] | 0x20) == 'r' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'i' &&
-		   (ident[5] | 0x20) == 'g' &&
-		   (ident[6] | 0x20) == 'n' {
-			return .FOREIGN
-		}
-	}
-	if len(ident) == 8 {
-		if (ident[0] | 0x20) == 'd' &&
-		   (ident[1] | 0x20) == 'i' &&
-		   (ident[2] | 0x20) == 's' &&
-		   (ident[3] | 0x20) == 't' &&
-		   (ident[4] | 0x20) == 'i' &&
-		   (ident[5] | 0x20) == 'n' &&
-		   (ident[6] | 0x20) == 'c' &&
-		   (ident[7] | 0x20) == 't' {
-			return .DISTINCT
-		}
-		if (ident[0] | 0x20) == 'r' &&
-		   (ident[1] | 0x20) == 'o' &&
-		   (ident[2] | 0x20) == 'l' &&
-		   (ident[3] | 0x20) == 'l' &&
-		   (ident[4] | 0x20) == 'b' &&
-		   (ident[5] | 0x20) == 'a' &&
-		   (ident[6] | 0x20) == 'c' &&
-		   (ident[7] | 0x20) == 'k' {
-			return .ROLLBACK
-		}
-		if (ident[0] | 0x20) == 's' &&
-		   (ident[1] | 0x20) == 'n' &&
-		   (ident[2] | 0x20) == 'a' &&
-		   (ident[3] | 0x20) == 'p' &&
-		   (ident[4] | 0x20) == 's' &&
-		   (ident[5] | 0x20) == 'h' &&
-		   (ident[6] | 0x20) == 'o' &&
-		   (ident[7] | 0x20) == 't' {
-			return .SNAPSHOT
-		}
-	}
-	if len(ident) == 9 {
-		if (ident[0] | 0x20) == 't' &&
-		   (ident[1] | 0x20) == 'i' &&
-		   (ident[2] | 0x20) == 'm' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 's' &&
-		   (ident[5] | 0x20) == 't' &&
-		   (ident[6] | 0x20) == 'a' &&
-		   (ident[7] | 0x20) == 'm' &&
-		   (ident[8] | 0x20) == 'p' {
-			return .TIMESTAMP
-		}
-	}
-	if len(ident) == 11 {
-		if (ident[0] | 0x20) == 'r' &&
-		   (ident[1] | 0x20) == 'e' &&
-		   (ident[2] | 0x20) == 'f' &&
-		   (ident[3] | 0x20) == 'e' &&
-		   (ident[4] | 0x20) == 'r' &&
-		   (ident[5] | 0x20) == 'e' &&
-		   (ident[6] | 0x20) == 'n' &&
-		   (ident[7] | 0x20) == 'c' &&
-		   (ident[8] | 0x20) == 'e' &&
-		   (ident[9] | 0x20) == 's' {
-			return .REFERENCES
-		}
+		if match { return kw.tok }
 	}
 	return .IDENTIFIER
 }
@@ -378,7 +76,7 @@ is_hex_digit :: proc(c: rune) -> bool {
 }
 
 tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
-	tokens := make([dynamic]Token, allocator)
+	tokens := make([dynamic]Token, 0, len(sql) / 4, allocator)
 	i := 0
 	line := u32(1)
 	for i < len(sql) {

@@ -41,17 +41,6 @@ Error :: enum {
 	Serialization_Failed,
 }
 
-pager_err_to_btree_err :: proc(e: pager.Error) -> Error {
-	#partial switch e {
-	case .None:
-		return .None
-	case .Cache_Full, .Out_Of_Memory:
-		return .Page_Full
-	case:
-		return .Page_Read_Failed
-	}
-}
-
 Node :: struct {
 	id:     u32,
 	data:   []u8,

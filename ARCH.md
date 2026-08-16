@@ -14,6 +14,7 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
   - [SQL Layer](#1-sql-layer--parser-and-executor)
   - [Line Editor](#2-line-editor--linedit)
   - [Storage Engine](#3-storage-engine)
+  - [Logging](#4-logging--corelog)
 - [Snapshot System](#snapshot-system)
 - [Transaction & Concurrency Model](#transaction--concurrency-model)
 - [Memory Management](#memory-management)
@@ -117,6 +118,10 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
     and cached in the pager. `COUNT(*)` without WHERE/GROUP BY/DISTINCT/ORDER BY/LIMIT is
     served directly from the cache without scanning.
 
+12. **Logging as a side channel** — Library code propagates errors via `DB_Error`/`or_return`;
+    `core:log` messages are a side channel, not control flow. Logs go to stderr so stdout
+    carries only query results. Tests run with a nil logger.
+
 ---
 
 ## Layer Architecture
@@ -124,7 +129,8 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 ### 1. SQL Layer — `parser/` and `executor/`
 
 **Parser** (`parser.odin`):
-- Lexer: character-by-character scanner producing `[]Token` (~78 token types as `enum u8`).
+- Lexer: character-by-character scanner producing `[]Token` (73 token types as `enum u8`,
+  including `.EOF`).
 - Recursive-descent parser: one function per grammar rule (`parse_create_table`,
   `parse_insert`, `parse_select`, `parse_update`, `parse_delete`, `parse_drop_table`).
 - `Select_Stmt` supports `AS OF SNAPSHOT <id>` and `AS OF TIMESTAMP <micros>`.
@@ -149,6 +155,7 @@ Key subroutines:
 | `sort_rows` | ORDER BY with integer fast path | Single-column int: `[]i64` + index sort |
 | `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | `@(fast_math)` on f64 reduction for auto-vectorization |
 | `check_constraints` | CHECK enforcement on INSERT/UPDATE | Fail-closed: rejects non-integer, unknown col |
+| `render_table` | Query/command result rendering | `core:text/table` decorated output; `unicode_width_proc` for CJK-aligned columns |
 
 **GROUP BY** uses direct FNV-1a hashing of `Value` union data (raw bit pattern for `f64`,
 `u64` for `i64`, FNV of bytes for strings/blobs) keyed on `map[u64]int` with a collision
@@ -157,6 +164,9 @@ loss. Groups are printed using the original `key_values` `[]types.Value` stored 
 
 **HAVING** evaluates against both group-key values and computed aggregate values. Supports
 aggregate function references (e.g., `HAVING count > 1`) as well as group-by column comparisons.
+Aggregate names are compared case-insensitively, so `HAVING COUNT > 1` and `HAVING count > 1`
+are equivalent. The `(N rows)` footer reports the number of rows after HAVING filtering, not the
+total number of groups.
 
 ### 2. Line Editor — `linedit/`
 
@@ -479,6 +489,50 @@ tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
 Manual `if err != .None` is used where error type mismatches, cleanup actions,
 or remapping prevents `or_return` composition (e.g., `pager.Error` → `DB_Error`).
 
+### 4. Logging — `core:log`
+
+Logging uses Odin's built-in [`core:log`](https://pkg.odin-lang.org/core/log/) package,
+assigned to `context.logger` in `main()`. A **file logger on stderr** is used with minimal
+options `{.Level}` — messages carry a level header but no timestamp/location noise, and every
+level stays on stderr so stdout carries only query results.
+
+**Level resolution** (first match wins):
+
+| Source | Value |
+|---|---|
+| `--verbose` / `-v` | `debug` |
+| `--log-level <level>` | `debug`, `info`, `warn`, `error` |
+| `MAGNI_LOG_LEVEL` env var | `DEBUG`, `INFO`, `WARN`, `ERROR` (uppercase) |
+| default | `info` |
+
+**Stream separation:**
+
+| Destination | Content |
+|---|---|
+| stdout | Query results, dot-command output, help text — unchanged `fmt.println` |
+| stderr | All `log.*` messages (debug/info/warn/error) |
+
+**Behavior by mode:**
+
+- REPL (interactive TTY): logger level forced to `.Error` so the prompt stays clean.
+- `--eval` / `--file` / pipe mode: logger runs at the configured level.
+
+**Categorization** across modules:
+
+| Level | Examples |
+|---|---|
+| `error` | DML/schema/select failures ("Table not found", "Data type validation failed"), WAL open/fsync failures |
+| `warn` | "Transaction already in progress", WAL checksum mismatch, "No active transaction" |
+| `info` | "WAL: checkpoint complete", "WAL: recovery complete", "BEGIN/COMMIT/ROLLBACK transaction", "Inserted row N", "Created table" |
+| `debug` | B-tree verify walk, tree page dumps (`tree_debug_print_node`, `verify_recursive`) |
+
+**Tests:** each test function sets `context.logger = log.nil_logger()` so library `log.*`
+calls are silent. Without this, the Odin test runner routes `log.error` output into test
+failure reporting, failing tests that exercise expected-error paths.
+
+**Error propagation is unchanged:** logging is a side channel. Functions still return
+`DB_Error`/`Error` values composed via `or_return`; logging never alters control flow.
+
 ---
 
 ## Snapshot System
@@ -618,6 +672,14 @@ for per-query results. The allocator is used for deserialized string/blob values
 on zero-copy paths points directly into page buffers. `cell.destroy` must use the same
 allocator that was passed at creation time — mismatch causes bad-free on string/blob values.
 
+**Borrowed strings and the `temp_allocator`**: `schema.find_table`/`list_tables` and the
+`combined_cols` slice in `exec_select` return `Column.name` strings that borrow from the
+allocator passed to the lookup. `context.temp_allocator` is a bump arena: allocations never
+free or overwrite earlier blocks within one statement, so borrowed strings remain valid across
+subsequent `make` calls. When a borrowed string must outlive further allocations on the same
+arena (e.g. building a render matrix), copy it explicitly with `make([]string, N)` and index
+assignment rather than relying on composite-literal aliasing.
+
 ### Heap Allocation Profile
 
 | Allocation | Count per INSERT | Previous count | Change |
@@ -651,7 +713,7 @@ allocator that was passed at creation time — mismatch causes bad-free on strin
 | Metric | Value |
 |---|---|
 | Slots | 256 |
-| Slot size | 4120 bytes (24 Page + 4096 data) |
+| Slot size | 4136 bytes (32 Page + 4096 data + referenced flag) |
 | Total memory | ~1 MB |
 | Lookup (hit, avg probes) | ~1.5 (hash from `page_num % 256`) |
 | Slot allocation | O(1) — pop from `free_slots` |
