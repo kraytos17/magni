@@ -60,7 +60,9 @@ cursor_destroy :: proc(c: ^Cursor) {
 }
 
 // Initialize a cursor for in-order traversal starting at the leftmost leaf.
-// Returns an invalid cursor if the tree is empty.
+// Returns an invalid cursor if the tree is empty. Empty leaves (possible after
+// COW deletes empty a leading leaf) are skipped so the cursor always lands on
+// the first cell-bearing leaf.
 cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, err: Error) {
 	c = Cursor {
 		tree     = t,
@@ -69,14 +71,19 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, er
 
 	drill_down_leftmost(&c, t.root) or_return
 	if c.depth > 0 {
-		top := c.path[c.depth - 1]
-		node, e := load_node(t, top.page_id)
-		if e != .None {
-			c.is_valid = false
-		} else {
-			defer pager.unpin_page(t.pager, node.id)
-			if node.header.cell_count == 0 {
+		for c.is_valid {
+			top := c.path[c.depth - 1]
+			node, e := load_node(t, top.page_id)
+			if e != .None {
 				c.is_valid = false
+				break
+			}
+			non_empty := is_leaf(node) && node.header.cell_count > 0
+			pager.unpin_page(t.pager, node.id)
+			if non_empty { break }
+			if a_err := cursor_advance(&c); a_err != .None {
+				c.is_valid = false
+				break
 			}
 		}
 	} else {
