@@ -1137,6 +1137,25 @@ exec_select_aggregate_data :: proc(
 	return result[:], cols, true
 }
 
+// skip_op_from_token maps a comparison token to the skip-index operator used to
+// derive a conservative page window from a zone map. Returns false for operators
+// that cannot be answered from min/max ranges (e.g. NOT_EQUALS, IN, LIKE).
+skip_op_from_token :: proc(op: parser.Token_Type) -> (btree.Skip_Op, bool) {
+	#partial switch op {
+	case .EQUALS:
+		return .EQ, true
+	case .LESS_THAN:
+		return .LT, true
+	case .LESS_EQUAL:
+		return .LTE, true
+	case .GREATER_THAN:
+		return .GT, true
+	case .GREATER_EQUAL:
+		return .GTE, true
+	}
+	return .EQ, false
+}
+
 scan_table :: proc(
 	tree: ^btree.Tree,
 	table: ^types.Table,
@@ -1150,31 +1169,9 @@ scan_table :: proc(
 	err: bool,
 ) {
 	r := make([dynamic]Row_Entry, allocator)
-	cursor, c_err := btree.cursor_start(tree, allocator)
-	if c_err != .None { return nil, true }
-	defer btree.cursor_destroy(&cursor)
-
 	where_ctx: Maybe(Where_Eval_Ctx)
 	if wc, has_wc := where_clause.?; has_wc {
 		where_ctx = init_where_ctx(&wc, table.columns, nil, schema_tree, allocator, cache)
-	}
-	// Skip-index bounds are only safe for a top-level AND chain of single-column
-	// integer comparisons. OR subtrees (or nested boolean groups) disable skipping.
-	skip_conds: []Resolved_Condition
-	if ctx, ctx_ok := where_ctx.?; ctx_ok {
-		skip_conds = skip_chain_conditions(ctx.root)
-	}
-	if table.skip_root > 0 {
-		for i in 0 ..< len(skip_conds) {
-			rc := &skip_conds[i]
-			if rc.has_right_col || rc.has_in { continue }
-			if val, is_int := rc.rhs.(i64); is_int {
-				pmin, pmax, found := btree.query_skip_index(tree.pager, table.skip_root, val)
-				if found {
-					rc.skip_page_min = pmin; rc.skip_page_max = pmax
-				}
-			}
-		}
 	}
 
 	use_where := false
@@ -1184,21 +1181,54 @@ scan_table :: proc(
 		where_ctx_val = ctx
 	}
 
-	skip_min, skip_max: u32
-	if use_where && len(skip_conds) > 0 {
+	// Skip-index bounds are only safe for a top-level AND chain of single-column
+	// integer comparisons on the indexed column. OR subtrees (or nested boolean
+	// groups) disable skipping; the operator decides which side of the page
+	// window a condition can bound (e.g. `>` only gives a lower bound, `<` only
+	// an upper bound).
+	skip_conds: []Resolved_Condition
+	if use_where {
+		skip_conds = skip_chain_conditions(where_ctx_val.root)
+	}
+
+	skip_start, skip_end: u32
+	if use_where && table.skip_root > 0 {
 		for rc in skip_conds {
-			if rc.skip_page_min > 0 {
-				if skip_min == 0 || rc.skip_page_min < skip_min { skip_min = rc.skip_page_min }
-			}
-			if rc.skip_page_max > 0 {
-				if rc.skip_page_max > skip_max { skip_max = rc.skip_page_max }
+			if rc.has_right_col || rc.has_in { continue }
+			if val, is_int := rc.rhs.(i64); is_int {
+				op, op_ok := skip_op_from_token(rc.operator)
+				if !op_ok { continue }
+				start, end, found := btree.query_skip_index_range(
+					tree.pager,
+					table.skip_root,
+					rc.col_idx,
+					op,
+					val,
+				)
+				if found {
+					if start > skip_start { skip_start = start }
+					if end > 0 && (skip_end == 0 || end < skip_end) { skip_end = end }
+				}
 			}
 		}
 	}
+
+	cursor, c_err := btree.cursor_start(tree, allocator)
+	if c_err != .None { return nil, true }
+	if skip_start > 0 {
+		if seek_err := btree.cursor_seek_to_page(&cursor, skip_start); seek_err != .None {
+			// Stale/unreachable lower bound: fall back to a full scan (results stay correct).
+			btree.cursor_destroy(&cursor)
+			cursor, c_err = btree.cursor_start(tree, allocator)
+			if c_err != .None { return nil, true }
+		}
+	}
+	defer btree.cursor_destroy(&cursor)
+
 	for cursor.is_valid {
-		if skip_max > 0 {
+		if skip_end > 0 {
 			cp := cursor.path[cursor.depth - 1].page_id
-			if cp > skip_max { break }
+			if cp > skip_end { break }
 		}
 
 		c, get_err := btree.cursor_get_cell(&cursor, allocator)
@@ -1222,6 +1252,9 @@ scan_table :: proc(
 	if use_where && table.skip_root == 0 && schema_tree != nil {
 		for rc in skip_conds {
 			if rc.has_right_col || rc.has_in { continue }
+			if _, is_int := rc.rhs.(i64); !is_int { continue }
+			if _, op_ok := skip_op_from_token(rc.operator); !op_ok { continue }
+
 			col_idx := rc.col_idx
 			skip_idx, build_err := btree.build_skip_index(tree, col_idx)
 			if build_err == .None {

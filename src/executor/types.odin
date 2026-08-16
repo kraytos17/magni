@@ -73,8 +73,6 @@ Resolved_Condition :: struct {
 	in_values:           []types.Value, // literal IN list
 	in_subquery:         ^parser.Select_Stmt, // subquery IN (SELECT ...)
 	in_subquery_results: []types.Value, // materialized subquery (filled once, not per row)
-	skip_page_min:       u32, // skip index: only scan pages ≥ this (0 = no skip)
-	skip_page_max:       u32, // skip index: only scan pages ≤ this (0 = no skip)
 }
 
 Where_Eval_Ctx :: struct {

@@ -83,6 +83,73 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, er
 	return
 }
 
+// cursor_start_at_page positions a cursor at the first cell of the leaf page
+// `page_id`, building the full root→leaf path so traversal can continue past
+// the leaf. Used to start a scan at a skip-index lower bound.
+cursor_start_at_page :: proc(
+	t: ^Tree,
+	page_id: u32,
+	allocator := context.allocator,
+) -> (
+	c: Cursor,
+	err: Error,
+) {
+	c.tree = t
+	cursor_seek_to_page(&c, page_id) or_return
+	return c, .None
+}
+
+// cursor_seek_to_page descends from the root to the leaf `page_id`, pushing
+// the ancestor chain onto the path stack (interior cell indices included) so
+// cursor_advance can leave the leaf correctly. Returns .Page_Not_Found when
+// page_id is not reachable as a leaf (e.g. a stale skip-index page); callers
+// should fall back to a full scan in that case.
+cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
+	c.depth = 0
+	c.is_valid = false
+	c.cached_page_id = 0
+	c.cached_page_data = nil
+	c.cached_cell_count = 0
+	c.cached_is_leaf = false
+	c.col_num_cols = 0
+	c.col_rowid = 0
+	c.col_rowid_pos = 0
+
+	curr := c.tree.root
+	for {
+		if int(c.depth) >= MAX_TREE_DEPTH { return .Invalid_Page_Header }
+
+		node := load_node(c.tree, curr) or_return
+		defer pager.unpin_page(c.tree.pager, node.id)
+		if is_leaf(node) {
+			if curr != page_id { return .Cell_Not_Found }
+			c.path[c.depth] = Cursor_Stack_Item {page_id = curr, cell_index = 0}
+			c.depth += 1
+			c.is_valid = true
+			return .None
+		}
+
+		cell_count := get_cell_count(node.data, curr)
+		idx := find_interior_cell_for_child(node.data, curr, page_id, node.layout)
+		if idx >= 0 {
+			c.path[c.depth] = Cursor_Stack_Item {page_id = curr, cell_index = u16(idx)}
+			c.depth += 1
+			ptr := get_cell_ptr(node.data, curr, idx, node.layout.stride)
+			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
+			if !ok { return .Invalid_Cell_Pointer }
+			curr = child
+		} else if get_right_ptr(node.data, curr) == page_id {
+			// Target lies in the rightmost subtree: mark this level as fully
+			// visited (cell_index == cell_count) so advance pops past it.
+			c.path[c.depth] = Cursor_Stack_Item {page_id = curr, cell_index = u16(cell_count)}
+			c.depth += 1
+			curr = page_id
+		} else {
+			return .Cell_Not_Found
+		}
+	}
+}
+
 // Loads a node, caching the page in the cursor to avoid repeated loads.
 // The page stays pinned until the cursor moves to a different page or is destroyed.
 load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {

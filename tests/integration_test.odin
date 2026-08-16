@@ -778,6 +778,92 @@ test_integration_skip_index :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_integration_skip_index_range :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "skiprange")
+	defer teardown_db(d, "skiprange")
+
+	db.execute(d, "CREATE TABLE t (id INT, score INT);")
+	// Gapped score distribution over two value bands: ids 1..1500 carry scores
+	// 1..1500; ids 1501..2000 carry scores 100000..100500. The gap forces two
+	// separate skip-index entries, so `>` queries must not be truncated at the
+	// first band's upper page bound.
+	sb: strings.Builder
+	for chunk in 0 ..< 20 {
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "INSERT INTO t VALUES ")
+		for i in 0 ..< 100 {
+			if i > 0 { strings.write_string(&sb, ",") }
+			id := chunk * 100 + i + 1
+			score := id if id <= 1500 else 100000 + (id - 1500)
+			fmt.sbprintf(&sb, "(%d,%d)", id, score)
+		}
+		strings.write_string(&sb, ";")
+		ok := db.execute(d, strings.to_string(sb)) == .None
+		testing.expect(t, ok, "chunk insert")
+	}
+
+	// First qualifying query scans without an index and must be correct.
+	r := db.query(d, "SELECT id FROM t WHERE score > 1400;")
+	testing.expect(t, r.ok, "first score > 1400")
+	testing.expect_value(t, len(r.rows), 600)
+
+	// Persist a skip index on `score` so follow-up queries exercise the range path.
+	st := db.Schema_Tree(d)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	testing.expect(t, len(tables) >= 1, "table listed")
+	if len(tables) == 0 { return }
+	tree := btree.init(d.pager, tables[0].root_page)
+	skip_idx, build_err := btree.build_skip_index(&tree, 1)
+	testing.expect(t, build_err == .None, "build skip index on score")
+	if new_root, up_ok := schema.update_skip_root_cow(&st, "t", skip_idx.root); up_ok {
+		d.schema_root_page = new_root
+	} else {
+		testing.expect(t, false, "persist skip index root")
+		return
+	}
+
+	// `>` must span both value bands (the old code stopped at the first band).
+	r2 := db.query(d, "SELECT id FROM t WHERE score > 1400;")
+	testing.expect(t, r2.ok, "indexed score > 1400")
+	testing.expect_value(t, len(r2.rows), 600)
+
+	// `>` past the first band's max must seek to the second band's first page.
+	r3 := db.query(d, "SELECT id FROM t WHERE score > 1500;")
+	testing.expect(t, r3.ok, "indexed score > 1500")
+	testing.expect_value(t, len(r3.rows), 500)
+	if len(r3.rows) > 0 {
+		id0, _ := r3.rows[0][0].(i64)
+		testing.expect_value(t, id0, i64(1501))
+	}
+
+	// `<` stops at the first band's upper page bound.
+	r4 := db.query(d, "SELECT id FROM t WHERE score < 1600;")
+	testing.expect(t, r4.ok, "indexed score < 1600")
+	testing.expect_value(t, len(r4.rows), 1500)
+
+	// Point equality inside the second band.
+	r5 := db.query(d, "SELECT id FROM t WHERE score = 100500;")
+	testing.expect(t, r5.ok, "indexed score = 100500")
+	testing.expect_value(t, len(r5.rows), 1)
+	if len(r5.rows) > 0 {
+		id0, _ := r5.rows[0][0].(i64)
+		testing.expect_value(t, id0, i64(2000))
+	}
+
+	// Two-sided range via combined AND bounds over the second band
+	// (scores 100001..100100 inclusive; id 1600 carries score 100100).
+	r6 := db.query(d, "SELECT id FROM t WHERE score >= 2000 AND score <= 100100;")
+	testing.expect(t, r6.ok, "indexed two-sided range")
+	testing.expect_value(t, len(r6.rows), 100)
+
+	// A condition on a non-indexed column must not use the score index.
+	r7 := db.query(d, "SELECT id FROM t WHERE id > 1500;")
+	testing.expect(t, r7.ok, "non-indexed column")
+	testing.expect_value(t, len(r7.rows), 500)
+}
+
+@(test)
 test_columnar_integration :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	columns := []types.Column{{type = .INTEGER, name = "id"}, {type = .INTEGER, name = "score"}}

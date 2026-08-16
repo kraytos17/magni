@@ -525,13 +525,18 @@ row 2: [a2, b2, c2]        col C: [c0, c1, c2, ...]
 
 #### 3h. Skip Index — `btree/skip_index.odin`
 
-Auto-built integer column index that accelerates `WHERE int_col = <value>` queries:
+Auto-built integer column index that accelerates `WHERE int_col <op> <value>` queries for the
+comparison operators `=`, `<`, `<=`, `>`, `>=`:
 
-- Built on demand during `scan_table` when a WHERE clause matches `col = <integer>` and
-  no skip index exists for that column yet.
+- Built on demand during `scan_table` when a WHERE clause matches a single-column integer
+  comparison on a column without a skip index yet.
 - Maps integer value ranges to page ranges: `Skip_Entry{page_min, page_max, min_int, max_int}`.
-- During subsequent queries, `build_skip_index` narrows the scan to pages whose range
-  could contain the target value, skipping irrelevant pages.
+  The index page records which column it indexes (`col_index` in the header), and a bound is
+  only applied to conditions on that column.
+- Bounds are **operator-aware**: `>`/`>=` yield a lower bound (the scan **seeks** to the first
+  page whose max could match), `<`/`<=` yield an upper bound (the scan stops past it), and `=`
+  yields both. Combined AND conditions intersect their windows (`max` lower bound, `min` upper
+  bound). `<>`, `IN`, `LIKE`, and column-to-column conditions disable skipping entirely.
 - Only applied to a flat top-level **AND chain** of single-column integer comparisons in the
   WHERE boolean tree; OR subtrees or nested parenthesized groups disable the optimization
   (a union of page ranges is not a safe scan bound), falling back to a full scan.
@@ -812,7 +817,8 @@ assignment rather than relying on composite-literal aliasing.
 |---|---|
 | Build cost | O(scanned_pages) — first scan that triggers it |
 | Lookup | O(log entries) — binary search on sorted entries |
-| Storage | Entries stored in schema B-tree root row |
+| Range window | Operator-aware: `>`/`>=` seek lower bound, `<`/`<=` upper-bound stop, `=` both |
+| Storage | Entries stored in schema B-tree root row; header records the indexed column |
 | Invalidation | On any page mutation affecting the indexed column |
 
 ### B-tree Rebalancing

@@ -4,9 +4,19 @@ import "core:encoding/endian"
 import "core:sort"
 import "src:cell"
 import "src:pager"
-import "src:types"
 
-SKIP_FORMAT_MAGIC :: u32(0x4B495053)
+SKIP_FORMAT_MAGIC :: u32(0x4B495054)
+
+// Skip_Op selects how a skip-index range bound is derived from a comparison
+// operator. Only these operators can be safely answered from the zone-map
+// min/max ranges; anything else disables skipping entirely.
+Skip_Op :: enum u8 {
+	EQ,
+	LT,
+	LTE,
+	GT,
+	GTE,
+}
 
 Skip_Entry :: struct #packed {
 	page_min: u32,
@@ -112,10 +122,12 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 	if a_err != .None { return {}, .Page_Full }
 
 	n := len(entries)
-	data := page.data[:8 + n * size_of(Skip_Entry)]
+	// Header: [magic u32][count u32][col_index u32] then packed Skip_Entry rows.
+	data := page.data[:12 + n * size_of(Skip_Entry)]
 	endian.unchecked_put_u32le(data[0:4], SKIP_FORMAT_MAGIC)
 	endian.unchecked_put_u32le(data[4:8], u32(n))
-	dst := data[8:]
+	endian.unchecked_put_u32le(data[8:12], u32(col_index))
+	dst := data[12:]
 	src := transmute([]byte)entries[:]
 	copy(dst, src)
 
@@ -124,13 +136,22 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 	return Skip_Index{root = page.page_num}, .None
 }
 
-query_skip_index :: proc(
+// query_skip_index_range returns a conservative page window [start, end] for
+// `col_index <op> val` (start = first leaf to scan, end = last leaf to scan;
+// 0 = unbounded). The window is a superset of every matching row, so applying
+// it is always safe: rows inside the window are still filtered by the WHERE
+// predicate, and rows outside it cannot match. Returns ok=false (no skipping)
+// when the index is missing, unreadable, legacy-format, built for a different
+// column, or the operator is not skip-safe.
+query_skip_index_range :: proc(
 	p: ^pager.Pager,
 	skip_root: u32,
+	col_index: int,
+	op: Skip_Op,
 	val: i64,
 ) -> (
-	page_min: u32,
-	page_max: u32,
+	start: u32,
+	end: u32,
 	ok: bool,
 ) {
 	pg, err := pager.get_page(p, skip_root)
@@ -138,68 +159,53 @@ query_skip_index :: proc(
 	defer pager.unpin_page(p, skip_root)
 
 	data := pg.data
-	if len(data) < 8 { return 0, 0, false }
-
+	if len(data) < 12 { return 0, 0, false }
 	magic := endian.unchecked_get_u32le(data[0:4])
-	if magic == SKIP_FORMAT_MAGIC {
-		count := int(endian.unchecked_get_u32le(data[4:8]))
-		need := 8 + count * size_of(Skip_Entry)
-		if len(data) < need { return 0, 0, false }
+	if magic != SKIP_FORMAT_MAGIC { return 0, 0, false }
 
-		entries := transmute([]Skip_Entry)data[8:need]
-		lo, hi := 0, count - 1
-		for lo <= hi {
-			mid := (lo + hi) / 2
-			if entries[mid].min_int <= val { lo = mid + 1 } else { hi = mid - 1 }
+	count := int(endian.unchecked_get_u32le(data[4:8]))
+	if int(endian.unchecked_get_u32le(data[8:12])) != col_index { return 0, 0, false }
+	need := 12 + count * size_of(Skip_Entry)
+	if len(data) < need { return 0, 0, false }
+
+	entries := transmute([]Skip_Entry)data[12:need]
+	// hi = last entry with min_int <= val (entries are sorted by min_int).
+	lo, hi := 0, count - 1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		if entries[mid].min_int <= val {
+			lo = mid + 1
+		} else {
+			hi = mid - 1
 		}
-		if hi >= 0 && hi < count && entries[hi].min_int <= val {
-			return entries[hi].page_min, entries[hi].page_max, true
+	}
+
+	#partial switch op {
+	case .EQ:
+		if hi < 0 || entries[hi].max_int < val { return 0, 0, false }
+		return entries[hi].page_min, entries[hi].page_max, true
+	case .LT:
+		h := hi
+		for h >= 0 && entries[h].min_int >= val { h -= 1 }
+		if h < 0 { return 0, 0, false }
+		return 0, entries[h].page_max, true
+	case .LTE:
+		if hi < 0 { return 0, 0, false }
+		return 0, entries[hi].page_max, true
+	case .GT:
+		for i in 0 ..< count {
+			if entries[i].max_int > val {
+				return entries[i].page_min, 0, true
+			}
 		}
 		return 0, 0, false
-	}
-
-	skip_tree := Tree {
-		pager = p,
-		root  = skip_root,
-	}
-
-	dk := Descend_Key_Ctx {
-		key    = types.Row_ID(val),
-		layout = get_layout(p.page_format_version),
-	}
-
-	leaf, err2 := descend_to_leaf(&skip_tree, descend_by_key, &dk)
-	if err2 != .None { return 0, 0, false }
-	defer unpin_node(&skip_tree, leaf)
-
-	cell_count := get_cell_count(leaf.data, leaf.id)
-	idx, lb_ok := leaf_lower_bound(leaf.data, leaf.id, types.Row_ID(val), leaf.layout)
-	if !lb_ok || cell_count == 0 { return 0, 0, false }
-
-	rid: types.Row_ID
-	rid_ok := false
-	if idx < cell_count {
-		ptr := get_cell_ptr(leaf.data, leaf.id, idx, leaf.layout.stride)
-		rid, rid_ok = cell.get_rowid(leaf.data, int(ptr))
-	}
-
-	read_idx := idx if rid_ok && rid == types.Row_ID(val) else idx - 1
-	if read_idx < 0 || read_idx >= cell_count { return 0, 0, false }
-
-	ptr := get_cell_ptr(leaf.data, leaf.id, read_idx, leaf.layout.stride)
-	c, _, des_ok := cell.deserialize(
-		leaf.data,
-		int(ptr),
-		cell.Config{allocator = context.temp_allocator, zero_copy = skip_tree.config.zero_copy},
-	)
-
-	defer cell.destroy(&c, context.temp_allocator)
-	if !des_ok || len(c.values) < 2 { return 0, 0, false }
-
-	pmin, pmin_ok := c.values[0].(i64)
-	pmax, pmax_ok := c.values[1].(i64)
-	if pmin_ok && pmax_ok {
-		return u32(pmin), u32(pmax), true
+	case .GTE:
+		for i in 0 ..< count {
+			if entries[i].max_int >= val {
+				return entries[i].page_min, 0, true
+			}
+		}
+		return 0, 0, false
 	}
 	return 0, 0, false
 }

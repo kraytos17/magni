@@ -106,7 +106,7 @@ leaf_lower_bound :: proc(
 	return left, true
 }
 
-node_find_child :: proc(n: ^Node, key: types.Row_ID, layout: ^Cell_Layout) -> u32 {
+node_find_child :: proc(n: ^Node, key: types.Row_ID, layout: ^Cell_Layout) -> (u32, int) {
 	return node_find_child_data(n.data, n.id, key, layout)
 }
 
@@ -251,8 +251,8 @@ insert_recursive :: proc(
 			e
 	}
 
-	child_id := node_find_child(&curr, rowid, curr.layout)
-	was_rightmost := child_id == get_right_ptr(curr.data, curr.id)
+	child_id, child_idx := node_find_child(&curr, rowid, curr.layout)
+	was_rightmost := child_idx == -1
 	child_result, c_err := insert_recursive(t, child_id, rowid, values, cow)
 	if c_err != .None { return {}, c_err }
 	// The recursion pinned the child's COW copy; release it now that this node
@@ -290,8 +290,9 @@ insert_recursive :: proc(
 	} else {
 		// Old non-rightmost child (a regular cell): repoint that cell to the
 		// left half with the new upper bound, then add the right half as a new
-		// cell carrying the old upper bound.
-		idx := find_interior_cell_for_child(curr.data, curr.id, child_id, curr.layout)
+		// cell carrying the old upper bound. child_idx comes from the same binary
+		// search that resolved child_id, so no re-scan is needed.
+		idx := child_idx
 		if idx == -1 {
 			return {}, .Invalid_Page_Header
 		}
@@ -435,13 +436,19 @@ node_find_child_data :: proc(
 	page_id: u32,
 	key: types.Row_ID,
 	layout: ^Cell_Layout,
-) -> u32 {
+) -> (
+	u32,
+	int,
+) {
 	cell_count := get_cell_count(data, page_id)
-	if cell_count == 0 { return get_right_ptr(data, page_id) }
+	if cell_count == 0 { return get_right_ptr(data, page_id), -1 }
+
 	idx, ok := interior_lower_bound(data, page_id, key, layout)
-	if !ok || idx >= cell_count { return get_right_ptr(data, page_id) }
+	if !ok || idx >= cell_count { return get_right_ptr(data, page_id), -1 }
+
 	ptr := get_cell_ptr(data, page_id, idx, layout.stride)
-	child, _ := endian.get_u32(data[int(ptr):], .Big); return child
+	child, _ := endian.get_u32(data[int(ptr):], .Big)
+	return child, idx
 }
 
 descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
@@ -455,7 +462,8 @@ Descend_Key_Ctx :: struct {
 
 descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	dk := (^Descend_Key_Ctx)(ctx)
-	return node_find_child_data(data, page_id, dk.key, dk.layout)
+	child, _ := node_find_child_data(data, page_id, dk.key, dk.layout)
+	return child
 }
 
 // Find a row by Row_ID. Returns a Cell (with deep-copied or zero-copy values per Config).
@@ -584,7 +592,7 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 		return true, .None
 	}
 
-	child_id := node_find_child(&node, key, node.layout)
+	child_id, _ := node_find_child(&node, key, node.layout)
 	deleted, d_err := delete_recursive(t, child_id, key)
 	if d_err != .None { return false, d_err }
 	if deleted {

@@ -140,7 +140,7 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 			return Update_COW_Result{new_page = node.id}, delete_from_leaf(t, &node, key)
 		}
 
-		child_id := node_find_child(&node, key, node.layout)
+		child_id, _ := node_find_child(&node, key, node.layout)
 		child_result, c_err := delete_cow_recursive(t, child_id, key, true)
 		if c_err != .None { return {}, c_err }
 		// Release the child's COW copy pin now that only its page number is used.
@@ -203,7 +203,7 @@ tree_update_cow :: proc(
 			return Update_Result{new_page = node.id}, .None
 		}
 
-		child_id := node_find_child(&node, rowid, node.layout)
+		child_id, _ := node_find_child(&node, rowid, node.layout)
 		child_result, c_err := update_recursive(t, child_id, rowid, values, true)
 		if c_err != .None { return {}, c_err }
 		// Release the child's COW copy pin now that only its page number is used.
