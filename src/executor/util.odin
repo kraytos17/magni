@@ -1,6 +1,5 @@
 package executor
 
-import "core:hash"
 import "core:log"
 import "core:strconv"
 import "core:strings"
@@ -38,11 +37,13 @@ resolve_qualified_column :: proc(
 
 // where_single_condition returns the lone leaf condition when the clause tree is
 // exactly one comparison (used by the PK fast-path and hash-join optimization).
+
 where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition, bool) {
 	root := clause.root
 	if root == nil || root.kind != .COND { return {}, false }
 	return root.cond, true
 }
+
 
 try_pk_lookup :: proc(
 	table: types.Table,
@@ -64,6 +65,7 @@ try_pk_lookup :: proc(
 	return types.Row_ID(val), true
 }
 
+
 values_equal :: proc(a, b: []types.Value) -> bool {
 	if len(a) != len(b) { return false }
 	for v, i in a {
@@ -73,6 +75,7 @@ values_equal :: proc(a, b: []types.Value) -> bool {
 }
 
 // values_equal_by_indices compares the key values (extracted at `indices`) of two rows.
+
 values_equal_by_indices :: proc(
 	values: []types.Value,
 	key: []types.Value,
@@ -85,33 +88,6 @@ values_equal_by_indices :: proc(
 	return true
 }
 
-group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
-	h: u64 = 0xcbf29ce484222325
-	FNV_PRIME :: 0x100000001b3
-	for col_idx in indices {
-		v := values[col_idx]
-		switch val in v {
-		case types.Null:
-			h = h ~ 0
-			h *= FNV_PRIME
-		case i64:
-			h = h ~ u64(val)
-			h *= FNV_PRIME
-		case f64:
-			h = h ~ transmute(u64)val
-			h *= FNV_PRIME
-		case string:
-			hv := hash.fnv64a(transmute([]u8)val)
-			h = h ~ hv
-			h *= FNV_PRIME
-		case []u8:
-			hv := hash.fnv64a(val)
-			h = h ~ hv
-			h *= FNV_PRIME
-		}
-	}
-	return h
-}
 
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	new_values := make([]types.Value, len(values), context.temp_allocator)
@@ -121,30 +97,6 @@ deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	return new_values
 }
 
-try_join_match :: proc(
-	outer_row: Row_Entry,
-	inner_values: []types.Value,
-	jc: parser.Join_Clause,
-	combined_cols: []types.Column,
-	table_ranges: []Table_Col_Range,
-	new_rows: ^[dynamic]Row_Entry,
-	matched: ^bool,
-) {
-	if on_cl, has_on := jc.on_clause.?; has_on {
-		tmp := make(
-			[]types.Value,
-			len(outer_row.values) + len(inner_values),
-			context.temp_allocator,
-		)
-
-		copy(tmp[:len(outer_row.values)], outer_row.values)
-		copy(tmp[len(outer_row.values):], inner_values)
-		if !evaluate_where(&on_cl, tmp, combined_cols, table_ranges) { return }
-	}
-
-	matched^ = true
-	join_emit_combined(outer_row, inner_values, new_rows)
-}
 
 check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 	for col in table.columns {
@@ -202,6 +154,7 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 }
 
 @(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
+
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	if types.is_null(a) && types.is_null(b) do return 0
 	if types.is_null(a) do return -1
@@ -236,3 +189,4 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	}
 	return 0
 }
+

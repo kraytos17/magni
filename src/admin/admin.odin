@@ -206,6 +206,7 @@ print_tree_page :: proc(database: ^db.Database, page_num: u32) {
 
 print_snapshots :: proc(database: ^db.Database) {
 	if db.db_check(database) != .None { return }
+
 	sync.rw_mutex_shared_lock(&database.mu)
 	defer sync.rw_mutex_unlock(&database.mu)
 	if database.latest_snapshot == 0 {
@@ -217,7 +218,7 @@ print_snapshots :: proc(database: ^db.Database) {
 
 print_snapshot_debug :: proc(database: ^db.Database) {
 	if db.db_check(database) != .None { return }
-	
+
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 	if database.latest_snapshot == 0 {
