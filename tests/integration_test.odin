@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:testing"
+import "src:admin"
 import "src:btree"
 import "src:cell"
 import "src:db"
@@ -697,7 +698,7 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d);", i))
 	}
 
-	db.checkpoint(d)
+	admin.checkpoint(d)
 	db.close(d)
 	d2, open_err := db.open(fmt.tprintf("test_int_ckpt.db"))
 	testing.expect(t, open_err == .None, "reopen after checkpoint")
@@ -1377,10 +1378,10 @@ test_readonly_admin_commands :: proc(t: ^testing.T) {
 	db.execute(d, "CREATE TABLE t1 (id INT);")
 	db.execute(d, "CREATE TABLE t2 (val TEXT);")
 
-	db.list_tables(d)
-	db.describe_table(d, "t1")
-	db.describe_table(d, "t2")
-	db.stats(d)
+	admin.list_tables(d)
+	admin.describe_table(d, "t1")
+	admin.describe_table(d, "t2")
+	admin.stats(d)
 
 	q := db.query(d, "SELECT id FROM t1;")
 	testing.expect(t, q.ok, "query after admin commands")

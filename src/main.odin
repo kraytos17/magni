@@ -10,6 +10,7 @@ import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:sys/posix"
+import "src:admin"
 import "src:db"
 import "src:linedit"
 import "src:schema"
@@ -235,23 +236,23 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	case ".version":
 		fmt.printf("MagniDB v%s\n", APP_VERSION)
 	case ".tables":
-		db.list_tables(database)
+		admin.list_tables(database)
 	case ".schema":
-		db.print_schema(database)
+		admin.print_schema(database)
 	case ".debug_schema":
-		db.print_schema_debug(database)
+		admin.print_schema_debug(database)
 	case ".tree_page":
 		parts := strings.split(trimmed, " ", context.temp_allocator)
 		if len(parts) == 2 {
 			page_num, num_ok := strconv.parse_u64(parts[1])
-			if num_ok { db.print_tree_page(database, u32(page_num)) }
+			if num_ok { admin.print_tree_page(database, u32(page_num)) }
 		} else {
 			fmt.println("Usage: .tree_page <page_num>")
 		}
 	case ".snapshot_debug":
-		db.print_snapshot_debug(database)
+		admin.print_snapshot_debug(database)
 	case ".stats":
-		db.stats(database)
+		admin.stats(database)
 	case ".begin":
 		if db.begin(database) == .None {
 			fmt.println("Transaction started.")
@@ -265,7 +266,7 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			fmt.println("Transaction rolled back.")
 		}
 	case ".snapshots":
-		db.print_snapshots(database)
+		admin.print_snapshots(database)
 	case ".snapdiff":
 		parts := strings.split(trimmed, " ", context.temp_allocator)
 		if len(parts) == 3 {
@@ -282,13 +283,13 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			fmt.println("Usage: .snapdiff <older_id> <newer_id>")
 		}
 	case ".checkpoint":
-		if err := db.checkpoint(database); err != .None {
+		if err := admin.checkpoint(database); err != .None {
 			log.errorf("%s", db.db_error_string(err))
 		} else {
 			fmt.println("Database flushed to disk.")
 		}
 	case ".integrity":
-		if err := db.integrity_check(database); err != .None {
+		if err := admin.integrity_check(database); err != .None {
 			log.errorf("%s", db.db_error_string(err))
 		} else {
 			fmt.println("OK")
@@ -339,14 +340,14 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 		} else if strings.has_prefix(trimmed, ".dump ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
-				db.dump_table(database, parts[1])
+				admin.dump_table(database, parts[1])
 			} else {
 				fmt.println("Usage: .dump <table_name>")
 			}
 		} else if strings.has_prefix(trimmed, ".desc ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
-				if err := db.describe_table(database, parts[1]); err != .None {
+				if err := admin.describe_table(database, parts[1]); err != .None {
 					log.errorf("%s", db.db_error_string(err))
 				}
 			} else {

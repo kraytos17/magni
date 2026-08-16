@@ -5,17 +5,6 @@ import "core:sync"
 import "src:pager"
 import "src:snapshot"
 
-print_snapshots :: proc(db: ^Database) {
-	if db_check(db) != .None { return }
-	sync.rw_mutex_shared_lock(&db.mu)
-	defer sync.rw_mutex_unlock(&db.mu)
-	if db.latest_snapshot == 0 {
-		fmt.println("No snapshots.")
-		return
-	}
-	snapshot.print_chain(db.pager, db.latest_snapshot)
-}
-
 snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_shared_lock(&db.mu)
@@ -155,14 +144,4 @@ expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
 	pager.wal_commit_txn(db.pager)
 	fmt.printf("Expired snapshots older than last %d, garbage collected\n", keep_count)
 	return .None
-}
-
-print_snapshot_debug :: proc(db: ^Database) {
-	if db_check(db) != .None { return }
-	sync.lock(&db.mu); defer sync.unlock(&db.mu)
-	if db.latest_snapshot == 0 {
-		fmt.println("No snapshots.")
-		return
-	}
-	snapshot.debug_print_chain(db.pager, db.latest_snapshot)
 }
