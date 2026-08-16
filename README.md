@@ -135,12 +135,12 @@ ROLLBACK;
 | Area | Capabilities |
 |---|---|
 | **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE), column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/CROSS), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
-| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **B-tree rebalancing** — auto-merges sparse adjacent leaves. **Row count tracking** with fast `COUNT(*)` via incremental cache. |
+| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **B-tree rebalancing** (`btree.rebalance`) is available but not yet wired into production delete paths. **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
-| **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
+| **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Commit/abort iterate only the dirtied-page list instead of scanning the whole page cache. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
 | **Concurrency** | `db.mu` uses `RW_Mutex` — SELECT and read-only admin commands take shared lock (multiple can run); INSERT/UPDATE/DELETE/DDL take exclusive lock. Pager internally uses `RW_Mutex` with shared locks for read-only page operations. COW snapshots enable time-travel reads without blocking. |
-| **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Page bitmap for O(1) 64-page GC range skips. |
+| **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Page bitmap grows geometrically (amortized O(1)) and enables O(1) 64-page GC range skips. WAL commit is O(pages dirtied), not O(cache size). GROUP BY/DISTINCT/set-ops use collision-safe chained hashing. |
 | **Logging** | `core:log` with configurable levels (debug/info/warn/error). `--log-level`, `--verbose`/`-v`, `MAGNI_LOG_LEVEL` env var. Logs go to stderr; query output stays clean on stdout. REPL runs at error level. |
 
 See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, and all optimization internals.
@@ -285,7 +285,7 @@ src/
 ├── snapshot/              Snapshot chain, manifests, GC, refs, expire, rollforward
 └── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
-└── * _test.odin           318 test functions across all packages
+└── * _test.odin           343 test functions across all packages
 ```
 
 ---

@@ -112,8 +112,11 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
    existing skip index, one is automatically built mapping integer value ranges to page ranges.
    Subsequent queries skip irrelevant pages without scanning.
 
-10. **B-tree rebalancing** — Adjacent leaf pages with combined occupancy below 70% are
-    automatically merged during operations, maintaining dense packing and reducing tree depth.
+10. **B-tree rebalancing** — `btree.rebalance` merges adjacent leaf pages with combined
+    occupancy below 70%, reducing tree depth and improving cache density. It is currently a
+    library entry point exercised by tests only: the production delete paths
+    (`tree_delete`/`tree_delete_cow`) remove cells without merging, so delete-heavy workloads
+    do not yet self-heal the tree shape.
 
 11. **Row count tracking** — Per-page row counts are maintained incrementally on insert/delete
     and cached in the pager. `COUNT(*)` without WHERE/GROUP BY/DISTINCT/ORDER BY/LIMIT is
@@ -121,7 +124,9 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 
 12. **Logging as a side channel** — Library code propagates errors via `DB_Error`/`or_return`;
     `core:log` messages are a side channel, not control flow. Logs go to stderr so stdout
-    carries only query results. Tests run with a nil logger.
+    carries only query results. Tests quiet expected-error paths with
+    `context.logger.lowest_level = .Error` (not a nil logger) so `log.error` events still reach
+    the test runner's failure counting.
 
 ---
 
@@ -198,9 +203,12 @@ short-circuiting (AND fails fast, OR succeeds fast, NOT inverts). The skip-index
 or nested groups disable skipping (full scan).
 
 **GROUP BY** uses direct FNV-1a hashing of `Value` union data (raw bit pattern for `f64`,
-`u64` for `i64`, FNV of bytes for strings/blobs) keyed on `map[u64]int` with a collision
-fallback equality check — no stringification, no allocation per row, and no float-precision
-loss. Groups are printed using the original `key_values` `[]types.Value` stored in each `Group` struct.
+`u64` for `i64`, FNV of bytes for strings/blobs) keyed on `map[u64][dynamic]int` — a chain of
+candidate group indices per hash, so hash collisions between distinct keys are resolved by
+verifying every candidate with the full equality check before a new group is created (the same
+chained-bucket pattern used by set operations). No stringification, no allocation per row, and
+no float-precision loss. Groups are printed using the original `key_values` `[]types.Value`
+stored in each `Group` struct.
 
 **HAVING** evaluates the same boolean-expression tree (`evaluate_where_having` in `display.odin`,
 recursive over `parser.Where_Node`) against both group-key values and computed aggregate values.
@@ -351,7 +359,7 @@ Page_Header.first_freeblock → [next: u16le] [size: u16le] [...] → 0
 | `tree_delete` | `tree_delete_cow` | Remove cell by rowid via binary search. COW variant COWs the full path. | 1 |
 | `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
-| `rebalance` | — | Merge adjacent sparse leaves (<70% combined occupancy). Called after mutations. | 1 pass per level |
+| `rebalance` | — | Merge adjacent sparse leaves (<70% combined occupancy). Library entry point; not invoked automatically by delete paths (test-only today). | 1 pass per level |
 
 **Cursor** — fixed-size path stack `[MAX_TREE_DEPTH]Cursor_Stack_Item` (12 entries, ~96 bytes).
 `MAX_TREE_DEPTH :: 12` is the single source of truth for both the cursor stack size and
@@ -405,8 +413,10 @@ Pager:
   checksums — a mismatched frame stops collection at that point; earlier frames are still
   replayed. `wal_abort_txn` discards uncommitted frames. `wal_checkpoint` writes WAL frames
   back to the main file and truncates the WAL. Checksums computed incrementally (no temp buffer).
-- **Page bitmap**: `[]u64` tracks ever-allocated pages. GC sweep skips zero 64-bit words
-  (all 64 pages free) in O(1).
+- **Page bitmap**: `[]u64` tracks ever-allocated pages and grows geometrically (amortized O(1)
+  reallocation). GC sweep skips zero 64-bit words (all 64 pages free) in O(1).
+- **WAL commit is O(pages dirtied)**: `mark_dirty` records page numbers in a `dirty_pages`
+  list; `wal_commit_txn`/`wal_abort_txn` iterate that list instead of scanning all cache slots.
 
 #### 3d. Table Metadata (`schema/`)
 
@@ -450,6 +460,7 @@ Database :: struct {
     refs_page:                u32,
     snapshot_batch_count:     int,
     snapshot_batch_threshold: int,
+    table_cache:              schema.Table_Cache, // schema catalog cache, invalidated on schema-root change
     mu:                       sync.RW_Mutex,
 }
 ```
@@ -467,13 +478,13 @@ execute(db, sql):
   stmt = parse(sql, temp_allocator)    // no lock yet
   if is_select: lock_shared(mu)        // SELECT: shared lock
   else:         lock_exclusive(mu)      // writes: exclusive lock
-  ok, new_root = executor.execute(schema_tree, stmt)
+  ok, new_root = executor.execute(schema_tree, stmt, &result, &db.table_cache)
   db.schema_root_page = new_root
   if ok && !readonly && !as_of:
     wal_begin_txn()
     create_snapshot()
     set_ref("main" → snap_id)
-    wal_commit_txn()          // single fsync of WAL, not full cache
+    wal_commit_txn()          // single fsync of WAL; iterates only the dirty-page list
   unlock(mu)
 ```
 
@@ -588,9 +599,10 @@ level stays on stderr so stdout carries only query results.
 | `info` | "WAL: checkpoint complete", "WAL: recovery complete", "BEGIN/COMMIT/ROLLBACK transaction", "Inserted row N", "Created table" |
 | `debug` | B-tree verify walk, tree page dumps (`tree_debug_print_node`, `verify_recursive`) |
 
-**Tests:** each test function sets `context.logger = log.nil_logger()` so library `log.*`
-calls are silent. Without this, the Odin test runner routes `log.error` output into test
-failure reporting, failing tests that exercise expected-error paths.
+**Tests:** each test function sets `context.logger.lowest_level = .Error` so expected-error
+paths stay quiet while `log.error` events still reach the test runner's failure counting. Using
+a nil logger would swallow those events and hide real failures (the runner attributes
+`log.error` output to the currently-running test).
 
 **Error propagation is unchanged:** logging is a side channel. Functions still return
 `DB_Error`/`Error` values composed via `or_return`; logging never alters control flow.
@@ -696,6 +708,8 @@ Database.mu (sync.RW_Mutex)         ← SELECT = shared; writes = exclusive
                           BEGIN/COMMIT/ROLLBACK, checkpoint, expire,
                           snapshot_restore, rollforward, close
     │
+    └── Table_Cache.mu (sync.RW_Mutex)  ← schema catalog cache lookups/population
+    │
     └── Pager.mutex (sync.RW_Mutex)  ← per-operation page cache access
         ├── Read shared:  page_count, page_in_cache
         └── Write exclusive: get_page, allocate_page, unpin_page,
@@ -777,7 +791,7 @@ assignment rather than relying on composite-literal aliasing.
 | Slots | 256 |
 | Slot size | 4136 bytes (32 Page + 4096 data + referenced flag) |
 | Total memory | ~1 MB |
-| Lookup (hit, avg probes) | ~1.5 (hash from `page_num % 256`) |
+| Lookup (hit, avg probes) | ~1.5 (Odin Robin Hood `map[u32]^Page_Slot`) |
 | Slot allocation | O(1) — pop from `free_slots` |
 | Eviction | O(n) — rotating-hand scan, 256 slots max |
 | Eviction cost | 1 `os.write_at` + 1 `os.read_at` |
@@ -808,12 +822,13 @@ assignment rather than relying on composite-literal aliasing.
 | Merge threshold | ≤70% combined occupancy in adjacent leaves |
 | Traversal | 1 pass per level |
 | Impact | Reduces tree depth, improves cache density |
+| Wiring | Library entry point only (`btree.rebalance`); not invoked automatically by delete paths yet |
 
 ### Row Count Tracking (Fast COUNT(*))
 
 | Metric | Value |
 |---|---|
-| Cache location | `pager.row_counts: map[u32]int` |
+| Cache location | `btree.Stats.row_counts: map[u32]int` (stored pager-scoped via the opaque `stats` handle so it survives transient `btree.Tree` instances) |
 | Update cost | O(1) per insert/delete (incremental) |
 | COUNT(*) fast path | O(1) if cached, O(pages) on first access |
 | Bypass conditions | Queries with WHERE, GROUP BY, DISTINCT, ORDER BY, or LIMIT use full scan |

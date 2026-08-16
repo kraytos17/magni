@@ -20,21 +20,28 @@ Acquired in `db.execute`, `db.query`, and the admin/snapshot command handlers.
 ### `pager.Pager.mutex` (`sync.RW_Mutex`)
 Protects **storage-layer state**:
 
-- the page cache (`cache_index`, `slots`, `free_slots`, `slot_count`, `evict_hand`)
+- the page cache (`cache_index`, `slots`, `free_slots`, `slot_count`, `evict_hand`,
+  `dirty_pages`)
 - the WAL state and the page bitmap / free-page list
 - file length and the file handle
 
 Acquired inside every pager operation (`get_page`, `allocate_page`, `unpin_page`,
 `mark_dirty`, eviction, free-page reuse, WAL ops).
 
+### `schema.Table_Cache.mu` (`sync.RW_Mutex`)
+Protects the **schema catalog cache**: the `tables` map and the schema-root version used to
+invalidate it. Taken inside `schema.find_table_cached` (both the lookup and the populate-on-miss
+path, since concurrent readers can populate it under a shared `db.mu`).
+
 ## Acquisition order
 
-**Always acquire `db.mu` before `pager.mutex`; never the reverse.**
+**Always acquire `db.mu` before `table_cache.mu` before `pager.mutex`; never the reverse.**
 
 Rationale: a DB operation (`db.execute`) takes `db.mu`, then descends through
 `btree`/`executor`, which call pager operations that take `pager.mutex` while
-`db.mu` is held. No code path acquires `pager.mutex` and then reaches for
-`db.mu`, so there is no lock-ordering cycle.
+`db.mu` is held. Executor schema lookups go through `find_table_cached`, which takes
+`table_cache.mu` in between. No code path acquires `pager.mutex` or `table_cache.mu` and then
+reaches for a higher lock, so there is no lock-ordering cycle.
 
 ## Lock preconditions
 
