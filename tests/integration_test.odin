@@ -1870,3 +1870,145 @@ test_integration_random_order_splits :: proc(t: ^testing.T) {
 	testing.expect(t, q4.ok, "count after delete")
 	testing.expect_value(t, q4.rows[0][0].(i64), i64(499))
 }
+
+@(test)
+test_integration_delete_multipage :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "delmp")
+	defer teardown_db(d, "delmp")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
+	sb: strings.Builder
+	for chunk in 0 ..< 10 {
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "INSERT INTO t VALUES ")
+		for i in 0 ..< 100 {
+			if i > 0 { strings.write_string(&sb, ",") }
+			id := chunk * 100 + i + 1
+			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
+		}
+		strings.write_string(&sb, ";")
+		testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "chunk insert")
+	}
+
+	// Delete the leading 700 rows: this empties entire leading leaves, which
+	// previously made cursor_start treat the tree as empty (data loss).
+	ids: strings.Builder
+	strings.builder_init(&ids, context.temp_allocator)
+	for id in 1 ..= 700 {
+		if id > 1 { strings.write_string(&ids, ",") }
+		fmt.sbprintf(&ids, "%d", id)
+	}
+	ok := db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) == .None
+	testing.expect(t, ok, "multi-page delete")
+
+	r := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, r.ok, "count after delete")
+	testing.expect_value(t, r.rows[0][0].(i64), i64(300))
+
+	r2 := db.query(d, "SELECT MIN(id) AS mn, MAX(id) AS mx FROM t;")
+	testing.expect(t, r2.ok, "min/max after delete")
+	testing.expect_value(t, r2.rows[0][0].(i64), i64(701))
+	testing.expect_value(t, r2.rows[0][1].(i64), i64(1000))
+
+	// Spot-check a surviving and a deleted row.
+	r3 := db.query(d, "SELECT v FROM t WHERE id = 1000;")
+	testing.expect(t, r3.ok, "survivor readable")
+	testing.expect_value(t, r3.rows[0][0].(i64), i64(2000))
+	r4 := db.query(d, "SELECT COUNT(*) AS n FROM t WHERE id = 5;")
+	testing.expect(t, r4.ok, "deleted row gone")
+	testing.expect_value(t, r4.rows[0][0].(i64), i64(0))
+}
+
+@(test)
+test_integration_vacuum :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "vacuum")
+	defer teardown_db(d, "vacuum")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
+	sb: strings.Builder
+	for chunk in 0 ..< 20 {
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "INSERT INTO t VALUES ")
+		for i in 0 ..< 100 {
+			if i > 0 { strings.write_string(&sb, ",") }
+			id := chunk * 100 + i + 1
+			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
+		}
+		strings.write_string(&sb, ";")
+		testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "chunk insert")
+	}
+
+	// Delete most rows to create sparse pages, then vacuum.
+	ids: strings.Builder
+	strings.builder_init(&ids, context.temp_allocator)
+	for id in 1 ..= 1800 {
+		if id > 1 { strings.write_string(&ids, ",") }
+		fmt.sbprintf(&ids, "%d", id)
+	}
+	testing.expect(t, db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) == .None, "bulk delete")
+
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
+
+	// All surviving rows must be present and correct.
+	r := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, r.ok, "count after vacuum")
+	testing.expect_value(t, r.rows[0][0].(i64), i64(200))
+
+	r2 := db.query(d, "SELECT MIN(id) AS mn, MAX(id) AS mx FROM t;")
+	testing.expect(t, r2.ok, "min/max after vacuum")
+	testing.expect_value(t, r2.rows[0][0].(i64), i64(1801))
+	testing.expect_value(t, r2.rows[0][1].(i64), i64(2000))
+
+	r3 := db.query(d, "SELECT v FROM t WHERE id = 2000;")
+	testing.expect(t, r3.ok, "row value after vacuum")
+	testing.expect_value(t, r3.rows[0][0].(i64), i64(4000))
+
+	// The vacuumed state must survive a close/reopen.
+	db.close(d)
+	d2, open_err := db.open(fmt.tprintf("test_int_vacuum.db"))
+	testing.expect(t, open_err == .None, "reopen after vacuum")
+	if open_err == .None {
+		defer db.close(d2)
+		r4 := db.query(d2, "SELECT COUNT(*) AS n FROM t;")
+		testing.expect(t, r4.ok, "count after reopen")
+		testing.expect_value(t, r4.rows[0][0].(i64), i64(200))
+	}
+}
+
+@(test)
+test_integration_join_pushdown :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "pushdown")
+	defer teardown_db(d, "pushdown")
+
+	db.execute(d, "CREATE TABLE a (id INT PRIMARY KEY, grp INT, name TEXT);")
+	db.execute(d, "CREATE TABLE b (id INT PRIMARY KEY, score INT);")
+	for i in 1 ..= 300 {
+		ok := db.execute(d, fmt.tprintf("INSERT INTO a VALUES (%d, %d, 'n%d');", i, i % 10, i)) == .None
+		testing.expect(t, ok, "insert a")
+		ok2 := db.execute(d, fmt.tprintf("INSERT INTO b VALUES (%d, %d);", i, i * 3)) == .None
+		testing.expect(t, ok2, "insert b")
+	}
+
+	// Single-table bare-column conjunct pushed to the base scan.
+	r := db.query(d, "SELECT COUNT(*) AS n FROM a INNER JOIN b ON a.id = b.id WHERE grp = 5;")
+	testing.expect(t, r.ok, "pushdown grp=5")
+	testing.expect_value(t, r.rows[0][0].(i64), i64(30))
+
+	// Both sides pushed: grp on a, score on b.
+	r2 := db.query(d, "SELECT COUNT(*) AS n FROM a INNER JOIN b ON a.id = b.id WHERE grp = 5 AND score > 600;")
+	testing.expect(t, r2.ok, "pushdown both sides")
+	testing.expect_value(t, r2.rows[0][0].(i64), i64(10))
+
+	// Qualified column stays in the post-join filter (correct, not pushed).
+	r3 := db.query(d, "SELECT COUNT(*) AS n FROM a INNER JOIN b ON a.id = b.id WHERE a.id > 280;")
+	testing.expect(t, r3.ok, "qualified where")
+	testing.expect_value(t, r3.rows[0][0].(i64), i64(20))
+
+	// Ambiguous bare column (id exists in both) must not be pushed but still correct.
+	r4 := db.query(d, "SELECT COUNT(*) AS n FROM a INNER JOIN b ON a.id = b.id WHERE id > 280;")
+	testing.expect(t, r4.ok, "ambiguous where")
+	testing.expect_value(t, r4.rows[0][0].(i64), i64(20))
+}

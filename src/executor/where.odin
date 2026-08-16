@@ -37,22 +37,26 @@ split_where_for_join :: proc(
 		return filters // OR / NOT / nested boolean: no pushdown
 	}
 
-	per_table := make([dynamic][dynamic]^parser.Where_Node, len(table_ranges), allocator)
-	for c in conjuncts {
-		if ti, ok := conjunct_table_index(c, combined_cols, table_ranges); ok {
-			append(&per_table[ti], c)
-		}
+	// Decide each conjunct's table in one pass, then assemble per-table clauses.
+	ti_of := make([]int, len(conjuncts), allocator)
+	for c, i in conjuncts {
+		ti, ok := conjunct_table_index(c, combined_cols, table_ranges)
+		ti_of[i] = ti if ok else -1
 	}
 
 	for ti in 0 ..< len(table_ranges) {
-		if len(per_table[ti]) == 0 { continue }
-		if len(per_table[ti]) == 1 {
-			filters[ti] = parser.Where_Clause {root = per_table[ti][0]}
+		assigned := make([dynamic]^parser.Where_Node, 0, 4, allocator)
+		for c, i in conjuncts {
+			if ti_of[i] == ti { append(&assigned, c) }
+		}
+		if len(assigned) == 0 { continue }
+		if len(assigned) == 1 {
+			filters[ti] = parser.Where_Clause {root = assigned[0]}
 		} else {
 			and_node := new(parser.Where_Node, allocator)
 			and_node.kind = .AND
-			and_node.children = make([dynamic]^parser.Where_Node, 0, len(per_table[ti]), allocator)
-			append(&and_node.children, ..per_table[ti][:])
+			and_node.children = make([dynamic]^parser.Where_Node, 0, len(assigned), allocator)
+			append(&and_node.children, ..assigned[:])
 			filters[ti] = parser.Where_Clause {root = and_node}
 		}
 	}

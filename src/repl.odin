@@ -200,6 +200,12 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 		} else {
 			fmt.println("Database flushed to disk.")
 		}
+	case ".vacuum":
+		if err := admin.vacuum(database); err != .None {
+			log.errorf("%s", db.db_error_string(err))
+		} else {
+			fmt.println("Database rebuilt into packed pages.")
+		}
 	case ".integrity":
 		if err := admin.integrity_check(database); err != .None {
 			log.errorf("%s", db.db_error_string(err))

@@ -31,6 +31,39 @@ checkpoint :: proc(database: ^db.Database) -> db.DB_Error {
 	return .None
 }
 
+// vacuum rebuilds every table's B-tree into fresh, densely packed pages
+// (COW-safe: old pages stay readable by snapshots and are reclaimed by the next
+// GC pass). This reclaims space lost to deletes that do not merge leaves.
+vacuum :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
+	sync.lock(&database.mu)
+	defer sync.unlock(&database.mu)
+
+	st := db.Schema_Tree(database)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	new_root := st.root
+	for table in tables {
+		table_tree := btree.init(database.pager, table.root_page)
+		vac_root, v_err := btree.tree_vacuum(&table_tree)
+		if v_err != .None {
+			return .Corrupted
+		}
+		updated_root, up_ok := schema.update_root_page_cow(&st, table.name, vac_root)
+		if !up_ok {
+			return .Corrupted
+		}
+		st.root = updated_root
+		new_root = updated_root
+	}
+	database.schema_root_page = new_root
+
+	pager.wal_begin_txn(database.pager)
+	db.update_header(database)
+	pager.wal_commit_txn(database.pager)
+	fmt.println("Vacuum complete: tables rebuilt into packed pages")
+	return .None
+}
+
 integrity_check :: proc(database: ^db.Database) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)

@@ -165,6 +165,7 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `.stats` | Database statistics |
 | `.integrity` | Verify all B-trees |
 | `.checkpoint` | Flush pages + garbage collect |
+| `.vacuum` | Rebuild all tables into densely packed pages (reclaims space from deletes) |
 | `.expire [keep]` | Expire old snapshots (default 20) and garbage collect |
 | `.snapshots` | Show snapshot chain |
 | `.snapdiff <a> <b>` | Diff two snapshots |

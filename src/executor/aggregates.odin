@@ -87,6 +87,10 @@ exec_select_aggregate_combined :: proc(
 		}
 	}
 
+	if len(groups) == 0 && len(group_by_indices) == 0 {
+		append(&groups, Group{rows = make([dynamic]Row_Entry, context.temp_allocator)})
+	}
+
 	rows_mat := make([dynamic][]string, context.temp_allocator)
 	for gi in 0 ..< len(groups) {
 		group_rows := make([][]types.Value, len(groups[gi].rows), context.temp_allocator)
@@ -189,6 +193,10 @@ exec_select_aggregate_data :: proc(
 				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
 			}
 		}
+	}
+
+	if len(groups) == 0 && len(group_by_indices) == 0 {
+		append(&groups, Group{rows = make([dynamic]Row_Entry, context.temp_allocator)})
 	}
 
 	result := make([dynamic]Row_Entry, context.temp_allocator)
