@@ -237,8 +237,8 @@ insert_recursive :: proc(
 			if s_err != .None { return {}, s_err }
 
 			mid := original_count / 2
-			tree_stats(t).row_counts[curr.id] = mid
-			tree_stats(t).row_counts[split.right_page] = original_count - mid
+			stats_row_count_set(tree_stats(t), curr.id, mid)
+			stats_row_count_set(tree_stats(t), split.right_page, original_count - mid)
 			target_id := curr.id
 			if rowid >= split.split_key { target_id = split.right_page }
 
@@ -249,7 +249,7 @@ insert_recursive :: proc(
 			retry_err := node_insert_leaf_cell(t, &target_node, rowid, values)
 			if retry_err != .None { return {}, retry_err }
 
-			tree_stats(t).row_counts[target_id] = int(target_node.header.cell_count)
+			stats_row_count_set(tree_stats(t), target_id, int(target_node.header.cell_count))
 			return Insert_COW_Result {
 					new_page = curr.id,
 					did_split = true,
@@ -259,7 +259,7 @@ insert_recursive :: proc(
 				.None
 		}
 		if e == .None {
-			tree_stats(t).row_counts[curr.id] = int(curr.header.cell_count)
+			stats_row_count_set(tree_stats(t), curr.id, int(curr.header.cell_count))
 		}
 		return Insert_COW_Result {
 				new_page = new_page_num,
@@ -400,7 +400,7 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 		e := node_insert_leaf_cell(t, &root_node, rowid, values)
 		if e != .Page_Full {
 			if e == .None {
-				tree_stats(t).row_counts[t.root] = int(root_node.header.cell_count)
+				stats_row_count_set(tree_stats(t), t.root, int(root_node.header.cell_count))
 			}
 			return e
 		}
@@ -566,20 +566,20 @@ tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
 }
 
 tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
-	if c, ok := tree_stats(t).row_counts[t.root]; ok { count = c; return }
+	if c, ok := stats_row_count_get(tree_stats(t), t.root); ok { count = c; return }
 	count = count_recursive(t, t.root) or_return
 	return
 }
 
 @(private="file")
 count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
-	if count, ok := tree_stats(t).row_counts[page_id]; ok { result = count; return }
+	if count, ok := stats_row_count_get(tree_stats(t), page_id); ok { result = count; return }
 
 	node := load_node(t, page_id) or_return
 	defer unpin_node(t, node)
 	if is_leaf(node) {
 		result = int(node.header.cell_count)
-		tree_stats(t).row_counts[page_id] = result
+		stats_row_count_set(tree_stats(t), page_id, result)
 		return
 	}
 
@@ -594,15 +594,16 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	}
 
 	total += count_recursive(t, get_right_ptr(node.data, page_id)) or_return
-	tree_stats(t).row_counts[page_id] = total
+	stats_row_count_set(tree_stats(t), page_id, total)
 	result = total
 	return
 }
 
 @(private="file")
 update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
-	if _, ok := tree_stats(t).row_counts[page_id]; ok {
-		tree_stats(t).row_counts[page_id] += delta
+	s := tree_stats(t)
+	if count, ok := stats_row_count_get(s, page_id); ok {
+		stats_row_count_set(s, page_id, count + delta)
 	}
 }
 
@@ -615,7 +616,7 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 	if is_leaf(node) {
 		e := delete_from_leaf(t, &node, key)
 		if e != .None { return false, e }
-		tree_stats(t).row_counts[page_id] = int(node.header.cell_count)
+		stats_row_count_set(tree_stats(t), page_id, int(node.header.cell_count))
 		return true, .None
 	}
 
@@ -692,7 +693,7 @@ tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 	if i_err := node_insert_leaf_cell(t, &leaf_node, rowid, values); i_err != .None {
 		return i_err
 	}
-	tree_stats(t).row_counts[leaf_node.id] = int(leaf_node.header.cell_count)
+	stats_row_count_set(tree_stats(t), leaf_node.id, int(leaf_node.header.cell_count))
 	return .None
 }
 
