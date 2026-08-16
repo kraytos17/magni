@@ -1,10 +1,153 @@
 package executor
 
 import "core:mem"
+import "core:strings"
 import "src:btree"
 import "src:parser"
 import "src:schema"
 import "src:types"
+
+// split_where_for_join partitions a WHERE clause's top-level AND conjuncts into
+// per-table filters (index-aligned with table_ranges) so each join-side scan can
+// filter early and use skip-index pruning. A conjunct is pushed to a table only
+// when every column it references (LHS and any column-column RHS) is unqualified
+// and resolves to exactly one table. Qualified, ambiguous, or cross-table
+// conjuncts are left unpushed (nil filter), so the post-join filter must remain
+// in place. The returned clauses reference the original AST subtrees (no new
+// ownership); synthetic AND nodes are allocated on the supplied allocator.
+@(private)
+split_where_for_join :: proc(
+	clause: parser.Where_Clause,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+	allocator := context.temp_allocator,
+) -> [dynamic]Maybe(parser.Where_Clause) {
+	filters := make([dynamic]Maybe(parser.Where_Clause), len(table_ranges), allocator)
+	if clause.root == nil || len(table_ranges) == 0 {
+		return filters
+	}
+
+	conjuncts := make([dynamic]^parser.Where_Node, 0, 4, allocator)
+	#partial switch clause.root.kind {
+	case .AND:
+		for child in clause.root.children { append(&conjuncts, child) }
+	case .COND:
+		append(&conjuncts, clause.root)
+	case:
+		return filters // OR / NOT / nested boolean: no pushdown
+	}
+
+	per_table := make([dynamic][dynamic]^parser.Where_Node, len(table_ranges), allocator)
+	for c in conjuncts {
+		if ti, ok := conjunct_table_index(c, combined_cols, table_ranges); ok {
+			append(&per_table[ti], c)
+		}
+	}
+
+	for ti in 0 ..< len(table_ranges) {
+		if len(per_table[ti]) == 0 { continue }
+		if len(per_table[ti]) == 1 {
+			filters[ti] = parser.Where_Clause {root = per_table[ti][0]}
+		} else {
+			and_node := new(parser.Where_Node, allocator)
+			and_node.kind = .AND
+			and_node.children = make([dynamic]^parser.Where_Node, 0, len(per_table[ti]), allocator)
+			append(&and_node.children, ..per_table[ti][:])
+			filters[ti] = parser.Where_Clause {root = and_node}
+		}
+	}
+	return filters
+}
+
+// conjunct_table_index returns the single table whose columns a WHERE conjunct
+// references, or ok=false when it is qualified, ambiguous, unresolvable, or
+// spans multiple tables.
+@(private)
+conjunct_table_index :: proc(
+	node: ^parser.Where_Node,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+) -> (
+	int,
+	bool,
+) {
+	ti: int
+	ti_set := false
+	ok := true
+	conjunct_collect(node, combined_cols, table_ranges, &ti, &ti_set, &ok)
+	if !ok || !ti_set { return -1, false }
+	return ti, true
+}
+
+@(private)
+conjunct_collect :: proc(
+	n: ^parser.Where_Node,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+	ti: ^int,
+	ti_set: ^bool,
+	ok: ^bool,
+) {
+	if n == nil || !ok^ { return }
+	switch n.kind {
+	case .COND:
+		if !col_in_table(n.cond.column, combined_cols, table_ranges, ti, ti_set, ok) { return }
+		if rhs_str, is_col := n.cond.rhs.(string); is_col {
+			if !col_in_table(rhs_str, combined_cols, table_ranges, ti, ti_set, ok) { return }
+		}
+	case .AND, .OR, .NOT:
+		for child in n.children {
+			conjunct_collect(child, combined_cols, table_ranges, ti, ti_set, ok)
+		}
+	}
+}
+
+@(private)
+col_in_table :: proc(
+	name: string,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+	ti: ^int,
+	ti_set: ^bool,
+	ok: ^bool,
+) -> bool {
+	t2, col_ok := column_table_index(name, combined_cols, table_ranges)
+	if !col_ok { ok^ = false; return false }
+	if !ti_set^ {
+		ti^ = t2
+		ti_set^ = true
+		return true
+	}
+	if ti^ != t2 { ok^ = false; return false }
+	return true
+}
+
+// column_table_index returns the table whose range contains the named column,
+// or ok=false when the name is qualified, missing, or ambiguous.
+@(private)
+column_table_index :: proc(
+	name: string,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+) -> (
+	int,
+	bool,
+) {
+	if strings.contains(name, ".") { return -1, false }
+	matches := 0
+	found := -1
+	for tr, ti in table_ranges {
+		for ci in tr.start_col ..< tr.start_col + tr.col_count {
+			if ci < len(combined_cols) && combined_cols[ci].name == name {
+				matches += 1
+				found = ti
+				break
+			}
+		}
+	}
+	if matches != 1 { return -1, false }
+	return found, true
+}
 
 @(private)
 filter_rows :: proc(

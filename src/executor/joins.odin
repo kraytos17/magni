@@ -265,12 +265,20 @@ build_join_result :: proc(
 		}
 	}
 
+	// Predicate pushdown: partition the WHERE conjuncts per table so each table
+	// scan filters early (and can use skip-index pruning). Conjuncts that are
+	// qualified/ambiguous/cross-table stay for the post-join filter_rows below.
+	join_filters := make([dynamic]Maybe(parser.Where_Clause), 0, context.temp_allocator)
+	if wc, has_wc := stmt.where_clause.?; has_wc {
+		join_filters = split_where_for_join(wc, combined_cols, table_ranges)
+	}
+
 	rows: []Row_Entry
 	if col_count_0 > 0 {
 		r, scan_err := scan_table(
 			&table_ctxs[0].info.tree,
 			&table_ctxs[0].info.table,
-			nil,
+			join_filters[0] if 0 < len(join_filters) else nil,
 			nil,
 			t,
 			context.temp_allocator,
@@ -296,7 +304,7 @@ build_join_result :: proc(
 			right_rows, _ = scan_table(
 				&table_ctxs[info_idx].info.tree,
 				&table_ctxs[info_idx].info.table,
-				nil,
+				join_filters[info_idx] if info_idx < len(join_filters) else nil,
 				nil,
 				t,
 				context.temp_allocator,
