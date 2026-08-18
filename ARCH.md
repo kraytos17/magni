@@ -2,7 +2,9 @@
 
 Magni is an embedded SQL database engine built in [Odin](https://odin-lang.org/). It implements a
 subset of SQL with a copy-on-write (COW) B+tree storage engine, SQLite-compatible row format, and an
-append-only snapshot chain supporting time-travel queries and point-in-time restore.
+append-only snapshot chain supporting time-travel queries and point-in-time restore. This document
+is the single reference for the design, the package layering and `@(private)` visibility rules, and
+the conventions contributors must uphold.
 
 ---
 
@@ -10,6 +12,7 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 
 - [System Overview](#system-overview)
 - [Architecture Principles](#architecture-principles)
+- [Package Layering & Contribution Rules](#package-layering--contribution-rules)
 - [Layer Architecture](#layer-architecture)
   - [SQL Layer](#1-sql-layer--parser-and-executor)
   - [Line Editor](#2-line-editor--linedit)
@@ -20,8 +23,9 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
 - [Memory Management](#memory-management)
 - [Performance Characteristics](#performance-characteristics)
 - [Trade-offs & Alternatives](#trade-offs--alternatives)
+- [Conventions](#conventions)
 - [Limitations](#limitations)
-- [Appendix: API Surfaces](#appendix-api-surfaces)
+- [CLI Dot-commands](#cli-dot-commands)
 
 ---
 
@@ -127,6 +131,82 @@ append-only snapshot chain supporting time-travel queries and point-in-time rest
     carries only query results. Tests quiet expected-error paths with
     `context.logger.lowest_level = .Error` (not a nil logger) so `log.error` events still reach
     the test runner's failure counting.
+
+---
+
+## Package Layering & Contribution Rules
+
+### Package layers
+
+```
+Layer 0  types            util/varint
+Layer 1  cell             pager            parser           linedit
+Layer 2  btree
+Layer 3  schema           snapshot
+Layer 4  executor
+Layer 5  db
+Layer 6  admin
+Layer 7  main
+```
+
+| Package | Depends on | Notes |
+|---|---|---|
+| `types` | — | Shared domain model (`Value`, `Column`, `Table`, ...). Leaf. |
+| `util/varint` | — | Generic primitives, no database knowledge. Leaf. |
+| `cell` | types, util/varint | Row/columnar cell codec. |
+| `pager` | types | Page cache, WAL, freelist, page bitmap (`core:container/bit_array`). |
+| `parser` | types | Self-contained SQL front end — **must stay storage-independent**. |
+| `linedit` | — | Standalone line editor. **Must stay dependency-free.** |
+| `btree` | cell, pager, types | COW B+tree. |
+| `schema` | btree, cell, types | Table catalog. |
+| `snapshot` | btree, pager, types | Snapshot chain, manifests, GC. |
+| `executor` | btree, cell, pager, parser, schema, types | Query engine. |
+| `db` | btree, cell, executor, pager, parser, schema, snapshot, types | Top-level facade. |
+| `admin` | db, btree, cell, executor, pager, schema, snapshot, types | CLI introspection/presentation. |
+| `main` | db, admin, linedit, schema | CLI entry point. |
+
+### Rules
+
+1. **No package may import a package from a strictly higher layer.** `types`
+   cannot import `cell`; `pager` cannot import `btree`; `executor` cannot import
+   `db`. This is enforced naturally by Odin (an import that creates a cycle is a
+   compile error), but check new imports: `grep -rn '^import "src:'` before
+   merging if unsure.
+2. **Only `admin` and `main` may import "everything".** Nothing under
+   `btree/`, `cell/`, `pager/`, `parser/`, `schema/`, `snapshot/`, `executor/`,
+   or `db/` should ever import `db` or `admin`. If you find yourself wanting
+   that, the code belongs in `db` or `admin`, not where you were about to put it.
+3. **`parser` and `linedit` must stay dependency-free of the storage/execution
+   stack.** If a future change makes `parser` need to know about `btree`, that is
+   a sign the change belongs in `executor` instead.
+4. **An embedder needs only `db`.** `db.open/execute/query/close` and
+   `Query_Result` are the engine's API. Presentation code lives in `admin` and
+   `main` so a host program can link the engine without `core:text/table` or
+   terminal tooling.
+
+### Visibility convention
+
+Odin exposes every declaration by default, so the compiler only enforces a reuse
+boundary when you annotate it:
+
+- `@(private="file")` — helper used by exactly one file (e.g.
+  `freeblock_read_next`/`freeblock_write_next`).
+- `@(private)` — helper shared across files in a package but not meant for other
+  packages (e.g. the btree layout accessors, pager cache internals, snapshot GC
+  helpers).
+- No attribute — the package's genuine public API, listed in the package doc
+  comment at the top of each package's primary file.
+
+To mark something private, confirm its only callers are inside the package; the
+compiler will reject cross-package uses, which is the point. If another package
+later needs it, removing the attribute is a deliberate, visible decision.
+
+### Test layout
+
+Tests currently live in the single `tests` package (per-package colocation is a
+planned follow-up). Because `tests` reaches into package internals, a symbol used
+by `tests` **cannot** be `@(private)`. When moving tests into package
+directories, re-run the private-marking pass to tighten further.
 
 ---
 
@@ -413,8 +493,9 @@ Pager:
   checksums — a mismatched frame stops collection at that point; earlier frames are still
   replayed. `wal_abort_txn` discards uncommitted frames. `wal_checkpoint` writes WAL frames
   back to the main file and truncates the WAL. Checksums computed incrementally (no temp buffer).
-- **Page bitmap**: `[]u64` tracks ever-allocated pages and grows geometrically (amortized O(1)
-  reallocation). GC sweep skips zero 64-bit words (all 64 pages free) in O(1).
+- **Page bitmap**: `core:container/bit_array.Bit_Array` tracks ever-allocated pages and
+  grows on demand (amortized O(1)). GC sweep skips zero 64-bit words (all 64 pages free)
+  in O(1).
 - **WAL commit is O(pages dirtied)**: `mark_dirty` records page numbers in a `dirty_pages`
   list; `wal_commit_txn`/`wal_abort_txn` iterate that list instead of scanning all cache slots.
 
@@ -516,7 +597,8 @@ row 1: [a1, b1, c1]  →     col B: [b0, b1, b2, ...]
 row 2: [a2, b2, c2]        col C: [c0, c1, c2, ...]
 ```
 
-- Integers use delta encoding (store difference from previous value) for compression.
+- Integers use delta encoding (the column minimum is stored once, then each value as a
+  delta from that minimum) for compression.
 - Columnar pages are **read-only** — any mutation (insert, update, delete) or page split
   triggers `ensure_row_major()`, converting the page back to row format.
 - The cursor (`cursor.odin`) reads columnar pages transparently, assembling rows on demand.
@@ -909,7 +991,7 @@ context.allocator)`).
 
 ---
 
-### CLI Dot-commands
+## CLI Dot-commands
 
 | Command | Action | Implementation |
 |---|---|---|

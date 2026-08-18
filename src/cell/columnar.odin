@@ -51,7 +51,6 @@ serialize_columnar :: proc(
 		h := (^Col_Header)(raw_data(dest[off:]))
 		h.byte_offset = u32(data_pos)
 		col_start := data_pos
-
 		if h.encoding == ENCODING_DELTA {
 			min := i64(max(i64))
 			for ri := 0; ri < len(rows); ri += 1 {

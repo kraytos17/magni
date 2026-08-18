@@ -43,7 +43,6 @@ split_where_for_join :: proc(
 		ti, ok := conjunct_table_index(c, combined_cols, table_ranges)
 		ti_of[i] = ti if ok else -1
 	}
-
 	for ti in 0 ..< len(table_ranges) {
 		assigned := make([dynamic]^parser.Where_Node, 0, 4, allocator)
 		for c, i in conjuncts {

@@ -132,7 +132,7 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 			slot.page.dirty = false
 		}
 	}
-	
+
 	clear(&p.dirty_pages)
 	commit_buf: [types.PAGE_SIZE]u8
 	wal_append_frame(p, 0, commit_buf[:], true, 0) or_return

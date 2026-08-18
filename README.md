@@ -140,10 +140,10 @@ ROLLBACK;
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Commit/abort iterate only the dirtied-page list instead of scanning the whole page cache. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file. |
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
 | **Concurrency** | `db.mu` uses `RW_Mutex` — SELECT and read-only admin commands take shared lock (multiple can run); INSERT/UPDATE/DELETE/DDL take exclusive lock. Pager internally uses `RW_Mutex` with shared locks for read-only page operations. COW snapshots enable time-travel reads without blocking. |
-| **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Auto-built skip indexes with operator-aware range pruning (`>`/`>=` seek the lower bound, `<`/`<=` stop at the upper). Page bitmap grows geometrically (amortized O(1)) and enables O(1) 64-page GC range skips. WAL commit is O(pages dirtied), not O(cache size). GROUP BY/DISTINCT/set-ops use collision-safe chained hashing. |
+| **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown. Auto-built skip indexes with operator-aware range pruning (`>`/`>=` seek the lower bound, `<`/`<=` stop at the upper). Page bitmap (`core:container/bit_array`) grows on demand (amortized O(1)) and enables O(1) 64-page GC range skips. WAL commit is O(pages dirtied), not O(cache size). GROUP BY/DISTINCT/set-ops use collision-safe chained hashing. |
 | **Logging** | `core:log` with configurable levels (debug/info/warn/error). `--log-level`, `--verbose`/`-v`, `MAGNI_LOG_LEVEL` env var. Logs go to stderr; query output stays clean on stdout. REPL runs at error level. |
 
-See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, and all optimization internals. See [ARCHITECTURE.md](ARCHITECTURE.md) for the package layering and `@(private)` visibility rules contributors must uphold.
+See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, all optimization internals, and the package layering and `@(private)` visibility rules contributors must uphold.
 
 ---
 
@@ -269,8 +269,8 @@ default `info`. The interactive REPL always runs at `error` level to keep the pr
 ```
 src/
 ├── main.odin              CLI entry, REPL, dot-commands
-├── btree/                 COW B+tree: tree ops, cursor, split, vacuum,
-│                          skip index, vacuum (space reclamation), page format registry (v1/v2), columnar
+├── btree/                 COW B+tree: tree ops, cursor, split, skip index,
+│                          vacuum (space reclamation), page format registry (v1/v2), columnar
 │                          conversion, COW helpers
 ├── cell/                  Row/cell serialization: SQLite varint, columnar encoding
 ├── db/                    Database handle: open/close, execute, admin, snapshots,
@@ -286,7 +286,7 @@ src/
 ├── snapshot/              Snapshot chain, manifests, GC, refs, expire, rollforward
 └── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
-└── * _test.odin           343 test functions across all packages
+└── * _test.odin           348 test functions across all packages
 ```
 
 ---

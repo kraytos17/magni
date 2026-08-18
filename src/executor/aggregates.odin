@@ -194,7 +194,6 @@ exec_select_aggregate_data :: proc(
 			}
 		}
 	}
-
 	if len(groups) == 0 && len(group_by_indices) == 0 {
 		append(&groups, Group{rows = make([dynamic]Row_Entry, context.temp_allocator)})
 	}
@@ -244,11 +243,6 @@ exec_select_aggregate_data :: proc(
 	return result[:], cols, true
 }
 
-// skip_op_from_token maps a comparison token to the skip-index operator used to
-// derive a conservative page window from a zone map. Returns false for operators
-// that cannot be answered from min/max ranges (e.g. NOT_EQUALS, IN, LIKE).
-
-
 group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
 	h: u64 = 0xcbf29ce484222325
 	FNV_PRIME :: 0x100000001b3
@@ -276,4 +270,3 @@ group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
 	}
 	return h
 }
-

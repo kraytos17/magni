@@ -121,7 +121,6 @@ exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 		if !check_constraints(values, table) { return false }
 
 		table_tree := btree.init(t.pager, table.root_page)
-		// RowID: use PK value if provided, otherwise auto-increment from max rowid.
 		next_rowid: types.Row_ID
 		pk_idx, has_pk := schema.get_pk_column(table.columns)
 		if has_pk {

@@ -80,7 +80,7 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 @(private)
 sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
 	max_page := pager.page_count(p)
-	bm := p.page_bitmap
+	bm := p.page_bitmap.bits
 	if len(bm) > 0 {
 		for i := 0; i < len(bm); i += 1 {
 			word := bm[i]

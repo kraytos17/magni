@@ -1,9 +1,3 @@
-// Package parser is a self-contained SQL front end. Layer 1 — depends only on
-// types.
-//
-// Public API: parse, and the lexer entry point tokenize. The AST types in
-// types.odin and free helpers in free.odin are public for consumers that need
-// to inspect or free parsed statements.
 package parser
 
 import "core:strings"

@@ -1,10 +1,3 @@
-// Package executor plans and runs statements. Layer 4 — depends on btree, cell,
-// pager, parser, schema, types.
-//
-// Public API: execute, exec_query, exec_compound_data, render_result,
-// render_table, Query-side helpers (exec_select_data, exec_subquery_data), and
-// the executor types in types.odin (Row_Entry, Table_Col_Range, Result). The
-// rest is @(private) to this package.
 package executor
 
 import "core:fmt"
@@ -86,7 +79,7 @@ execute :: proc(
 }
 
 // render_result prints a SELECT/Compound result (or EXPLAIN description) as a
-// markdown table. The core executor never calls this; the CLI layer does.
+// markdown table.
 render_result :: proc(out: Result) {
 	if !out.is_select { return }
 	cols := out.cols

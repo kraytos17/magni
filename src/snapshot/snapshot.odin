@@ -1,10 +1,5 @@
 // Package snapshot implements the append-only COW snapshot chain, manifests,
-// refs, GC, and diff. Layer 3 — depends on btree, pager, types.
-//
-// Public API: create, load, expire_snapshots, expire_and_collect,
-// diff_snapshots, create_manifest, load_manifest(_tables), find_in_manifest,
-// set_ref/get_ref/list_refs, log_push/log_pop, set_tag/get_tag, print_chain,
-// debug_print_chain.
+// refs, GC, and diff
 package snapshot
 
 import "core:encoding/endian"

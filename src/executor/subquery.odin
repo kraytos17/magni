@@ -69,8 +69,6 @@ exec_subquery :: proc(
 	return rows, table.columns
 }
 
-// exec_select_literals materializes a FROM-less SELECT (e.g. `SELECT 1, 'a'`)
-// as a single row of literal values. Returns the row and synthesized columns.
 @(private)
 exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	subq, subq_ok := stmt.from.(^parser.Select_Stmt)
@@ -184,4 +182,3 @@ exec_subquery_data :: proc(
 	}
 	return out, proj_cols, true
 }
-

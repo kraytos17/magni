@@ -1895,7 +1895,6 @@ test_integration_delete_multipage :: proc(t: ^testing.T) {
 test_integration_vacuum :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "vacuum")
-	defer teardown_db(d, "vacuum")
 
 	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
 	sb: strings.Builder
@@ -1941,7 +1940,7 @@ test_integration_vacuum :: proc(t: ^testing.T) {
 	d2, open_err := db.open(fmt.tprintf("test_int_vacuum.db"))
 	testing.expect(t, open_err == .None, "reopen after vacuum")
 	if open_err == .None {
-		defer db.close(d2)
+		defer teardown_db(d2, "vacuum")
 		r4 := db.query(d2, "SELECT COUNT(*) AS n FROM t;")
 		testing.expect(t, r4.ok, "count after reopen")
 		testing.expect_value(t, r4.rows[0][0].(i64), i64(200))
@@ -1985,10 +1984,9 @@ test_integration_join_pushdown :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
+	test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "delround")
-	defer teardown_db(d, "delround")
 
 	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
 	sb: strings.Builder
@@ -2031,7 +2029,7 @@ test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
 	d2, open_err := db.open(fmt.tprintf("test_int_delround.db"))
 	testing.expect(t, open_err == .None, "reopen after deletes")
 	if open_err == .None {
-		defer db.close(d2)
+		defer teardown_db(d2, "delround")
 		r5 := db.query(d2, "SELECT COUNT(*) AS n FROM t;")
 		testing.expect(t, r5.ok, "count after reopen")
 		testing.expect_value(t, r5.rows[0][0].(i64), i64(expected))
@@ -2062,10 +2060,9 @@ test_integration_empty_aggregates :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
+	test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "delvac")
-	defer teardown_db(d, "delvac")
 
 	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
 	sb: strings.Builder
@@ -2104,9 +2101,76 @@ test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
 	d2, open_err := db.open(fmt.tprintf("test_int_delvac.db"))
 	testing.expect(t, open_err == .None, "reopen after vacuum")
 	if open_err == .None {
-		defer db.close(d2)
+		defer teardown_db(d2, "delvac")
 		r3 := db.query(d2, "SELECT v FROM t WHERE id = 1000;")
 		testing.expect(t, r3.ok, "survivor after reopen")
 		testing.expect_value(t, r3.rows[0][0].(i64), i64(2000))
 	}
+}
+
+@(test)
+test_columnar_cursor_large :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	ctx := setup_tree(t, "colcurlarge")
+	defer teardown_tree(&ctx)
+
+	// Build 300 rows with an INTEGER (DELTA-encoded) and a REAL (RAW) column.
+	rowids := make([]types.Row_ID, 300, context.temp_allocator)
+	rows := make([][]types.Value, 300, context.temp_allocator)
+	for i in 0 ..< 300 {
+		rowids[i] = types.Row_ID(i + 1)
+		// Note: build each row with make + index assignment — a []types.Value
+		// composite literal inside a loop reuses the same backing array, so
+		// every row would alias the last one.
+		row := make([]types.Value, 2, context.temp_allocator)
+		row[0] = types.value_int(i64(i * 10))
+		row[1] = types.value_real(f64(i) * 0.5)
+		rows[i] = row
+	}
+	cols := []types.Column {{name = "iv", type = .INTEGER}, {name = "rv", type = .REAL}}
+
+	// Mount the columnar data as the tree's single leaf (page 1).
+	pg, pg_err := pager.get_page(ctx.pager, 1)
+	testing.expect(t, pg_err == .None, "get page 1")
+	defer pager.unpin_page(ctx.pager, 1)
+	off := btree.get_page_header_offset(1)
+	ok := cell.serialize_columnar(pg.data[off:], rowids, rows, cols)
+	testing.expect(t, ok, "serialize columnar")
+	hdr := btree.get_leaf_header(pg.data, 1)
+	hdr.page_type = .LEAF_TABLE_COLUMNAR
+	hdr.cell_count = u16le(300)
+	hdr.cell_content_offset = u16le(8 + len(cols) * 12)
+	pager.mark_dirty(ctx.pager, 1)
+
+
+	// Scan via the cursor (exercises the incremental per-column decode) and
+	// verify every row decodes to its exact rowid + values.
+	seen := make(map[types.Row_ID]bool, 300, context.temp_allocator)
+	c, c_err := btree.cursor_start(&ctx.tree)
+	testing.expect(t, c_err == .None, "cursor start")
+	defer btree.cursor_destroy(&c)
+	count := 0
+	all_ok := true
+	for c.is_valid {
+		cc, g_err := btree.cursor_get_cell(&c, context.temp_allocator)
+		if g_err != .None {
+			all_ok = false
+			btree.cursor_advance(&c)
+			continue
+		}
+		if len(cc.values) != 2 {
+			all_ok = false
+		} else if int(cc.rowid) >= 1 && int(cc.rowid) <= 300 {
+			idx := int(cc.rowid) - 1
+			if !types.value_compare(cc.values[0], types.value_int(i64(idx * 10))) { all_ok = false }
+			if !types.value_compare(cc.values[1], types.value_real(f64(idx) * 0.5)) { all_ok = false }
+		} else {
+			all_ok = false
+		}
+		if !seen[cc.rowid] { count += 1; seen[cc.rowid] = true }
+		cell.destroy(&cc, context.temp_allocator)
+		btree.cursor_advance(&c)
+	}
+	testing.expect(t, all_ok, "all columnar rows decode correctly")
+	testing.expect_value(t, count, 300)
 }

@@ -8,10 +8,6 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-// hash_join_key returns a string suitable for use as a hash map key.
-// For string values, returns the original string directly (no allocation).
-// For other types, converts via value_to_string.
-
 @(private)
 exec_select_literals :: proc(
 	t: ^btree.Tree,
@@ -101,9 +97,6 @@ select_header_names :: proc(stmt: parser.Select_Stmt) -> []string {
 	return names[:]
 }
 
-// build_join_result resolves a SELECT's table sources, executes its joins, and
-// applies the WHERE filter, returning the combined rows and columns WITHOUT
-// printing. Shared by the printing path and the set-operation data path.
 @(private="file")
 exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	tbl_name, name_ok := stmt.from.(string)
@@ -115,7 +108,9 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 
 	table_tree := btree.init(t.pager, table.root_page)
 	has_order := false
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 { has_order = true }
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		has_order = true
+	}
 	// Fast path: SELECT COUNT(*) FROM table (no WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT)
 	if len(stmt.aggregates) == 1 &&
 	   stmt.aggregates[0].func == .COUNT &&
@@ -201,7 +196,9 @@ exec_select_single_data :: proc(
 
 	table_tree := btree.init(t.pager, table.root_page)
 	has_order := false
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 { has_order = true }
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		has_order = true
+	}
 
 	_, has_lim := stmt.limit.?
 	max_rows := stmt.limit if has_lim && !has_order else nil
@@ -237,7 +234,6 @@ exec_select_single_data :: proc(
 		end := int(min(off + limit, u64(len(rows))))
 		rows = rows[start:end]
 	}
-
 	// Project to the requested columns (e.g. `SELECT c FROM u` on a multi-column
 	// table returns only column c). Full projection matches exec_select_single.
 	if len(stmt.columns) > 0 {
@@ -291,10 +287,6 @@ exec_query :: proc(
 	return exec_select_join_data(t, stmt, cache)
 }
 
-// find_existing_group locates the group whose GROUP BY key equals row_entry's.
-// group_map chains candidate group indices per hash (different keys can collide
-// on the same hash), so every candidate is verified before deciding a new group
-// is needed. Returns (-1, false) when no matching group exists.
 @(private)
 skip_op_from_token :: proc(op: parser.Token_Type) -> (btree.Skip_Op, bool) {
 	#partial switch op {
@@ -374,7 +366,6 @@ scan_table :: proc(
 	if c_err != .None { return nil, true }
 	if skip_start > 0 {
 		if seek_err := btree.cursor_seek_to_page(&cursor, skip_start); seek_err != .None {
-			// Stale/unreachable lower bound: fall back to a full scan (results stay correct).
 			btree.cursor_destroy(&cursor)
 			cursor, c_err = btree.cursor_start(tree, allocator)
 			if c_err != .None { return nil, true }
@@ -460,4 +451,3 @@ collect_skip_chain :: proc(node: ^Resolved_Node, out: ^[dynamic]Resolved_Conditi
 		clear(out)
 	}
 }
-

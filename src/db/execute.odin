@@ -10,7 +10,6 @@ import "src:types"
 
 execute :: proc(db: ^Database, sql: string) -> DB_Error {
 	db_check(db) or_return
-
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	if !ok {
 		return .Parse_Error

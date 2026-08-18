@@ -30,7 +30,9 @@ parse_create_table :: proc(
 	for {
 		if match(p, .FOREIGN) {
 			if !expect_match(p, .KEY, "Expected KEY after FOREIGN") { return nil, false }
-			if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") { return nil, false }
+			if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") {
+				return nil, false
+			}
 
 			fk_col := parse_identifier(p, allocator) or_return
 			if !expect_match(
@@ -45,7 +47,9 @@ parse_create_table :: proc(
 			) { return nil, false }
 
 			fk_table := parse_identifier(p, allocator) or_return
-			if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") { return nil, false }
+			if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") {
+				return nil, false
+			}
 
 			fk_ref_col := parse_identifier(p, allocator) or_return
 			if !expect_match(
@@ -75,17 +79,24 @@ parse_create_table :: proc(
 
 			for {
 				if match(p, .PRIMARY) {
-					if !expect_match(p, .KEY, "Expected KEY after PRIMARY") { return nil, false }
+					if !expect_match(p, .KEY, "Expected KEY after PRIMARY") {
+						return nil, false
+					}
 					col.pk = true
 				} else if match(p, .NOT) {
-					if !expect_match(p, .NULL, "Expected NULL after NOT") { return nil, false }
+					if !expect_match(p, .NULL, "Expected NULL after NOT") {
+						return nil, false
+					}
 					col.not_null = true
 				} else if match(p, .DEFAULT) {
 					val, val_ok := parse_value(p, allocator)
 					if !val_ok { return err(p, "Invalid DEFAULT value") }
 					col.default_value = val
 				} else if match(p, .CHECK) {
-					if !expect_match(p, .LPAREN, "Expected ( after CHECK") { return nil, false }
+					if !expect_match(p, .LPAREN, "Expected ( after CHECK") {
+						return nil, false
+					}
+
 					b := strings.builder_make(allocator)
 					depth := 1
 					for depth > 0 {

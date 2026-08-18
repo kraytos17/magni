@@ -48,6 +48,7 @@ serialize :: proc(
 	offset += varint.encode(dest[offset:], u64(total_payload))
 	offset += varint.encode(dest[offset:], u64(rowid))
 	offset += varint.encode(dest[offset:], u64(info.serial_types_size))
+
 	serial_types: [types.MAX_COLS]u64
 	i := 0
 	for val in values {
@@ -118,7 +119,6 @@ deserialize :: proc(
 	header_start := pos
 	serial_types: [types.MAX_COLS]u64
 	serial_count := 0
-
 	for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
 		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st { return {}, 0, false }
@@ -128,7 +128,6 @@ deserialize :: proc(
 	}
 
 	result_values := make([]types.Value, serial_count, alloc)
-
 	success := false
 	defer if !success && !config.zero_copy {
 		types.values_delete(result_values, alloc)

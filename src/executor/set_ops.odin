@@ -245,6 +245,7 @@ exec_compound_data :: proc(
 	segments := make([dynamic][dynamic]Row_Entry, context.temp_allocator)
 	segment_ops := make([dynamic]parser.Set_Op, context.temp_allocator) // op joining segment[i] to segment[i-1]
 	// Initialize segment 0 from the first SELECT.
+
 	seg0 := make([dynamic]Row_Entry, 0, len(acc_rows), context.temp_allocator)
 	append(&seg0, ..acc_rows)
 	append(&segments, seg0)

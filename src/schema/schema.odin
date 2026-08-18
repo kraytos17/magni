@@ -1,10 +1,4 @@
 // Package schema manages table metadata stored as rows in a system B-tree.
-// Layer 3 — depends on btree, cell, types.
-//
-// Public API: add_table(_cow), find_table, find_table_cached, get_table,
-// list_tables, drop_table(_cow), table_exists, update_root_page_cow,
-// update_skip_root_cow, Table_Cache, validate_columns, print_ddl,
-// debug_print_all.
 package schema
 
 import "core:fmt"

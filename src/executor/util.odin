@@ -38,14 +38,12 @@ resolve_qualified_column :: proc(
 
 // where_single_condition returns the lone leaf condition when the clause tree is
 // exactly one comparison (used by the PK fast-path and hash-join optimization).
-
 @(private)
 where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition, bool) {
 	root := clause.root
 	if root == nil || root.kind != .COND { return {}, false }
 	return root.cond, true
 }
-
 
 @(private)
 try_pk_lookup :: proc(
@@ -68,7 +66,6 @@ try_pk_lookup :: proc(
 	return types.Row_ID(val), true
 }
 
-
 @(private)
 values_equal :: proc(a, b: []types.Value) -> bool {
 	if len(a) != len(b) { return false }
@@ -79,7 +76,6 @@ values_equal :: proc(a, b: []types.Value) -> bool {
 }
 
 // values_equal_by_indices compares the key values (extracted at `indices`) of two rows.
-
 values_equal_by_indices :: proc(
 	values: []types.Value,
 	key: []types.Value,
@@ -92,7 +88,6 @@ values_equal_by_indices :: proc(
 	return true
 }
 
-
 @(private)
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	new_values := make([]types.Value, len(values), context.temp_allocator)
@@ -101,7 +96,6 @@ deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	}
 	return new_values
 }
-
 
 @(private)
 check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
@@ -160,7 +154,6 @@ check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 }
 
 @(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
-
 @(private)
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	if types.is_null(a) && types.is_null(b) do return 0
@@ -196,4 +189,3 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	}
 	return 0
 }
-

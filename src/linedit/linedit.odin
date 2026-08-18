@@ -143,7 +143,7 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 		} else if search_wrapped {
 			prompt_prefix = "(wrapped reverse-i-search)"
 		}
-		
+
 		search_prompt := fmt.tprintf("%s`%s': ", prompt_prefix, strings.to_string(query))
 		render_search_overlay(ed, search_prompt, matched_entry)
 		ev, ok := read_key(ed.term.fd)

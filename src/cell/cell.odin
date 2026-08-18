@@ -1,9 +1,4 @@
 // Package cell serializes/deserializes rows (cells) to/from the on-disk format.
-// Layer 1 — depends only on types and util/varint.
-//
-// Public API: Cell, create, destroy, serialize, deserialize, get_rowid,
-// get_size, debug_print, validate, compute_info, and the columnar codec in
-// columnar.odin (serialize_columnar, decode_column, read_columnar_cell).
 package cell
 
 import "core:fmt"

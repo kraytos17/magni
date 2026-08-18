@@ -106,7 +106,6 @@ node_move_interior_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, coun
 		dst_off -= cell_sz
 
 		copy(dst.data[dst_off:dst_off + cell_sz], src.data[int(ptr):int(ptr) + cell_sz])
-
 		raw_dst := get_raw_entries(dst.data, dst.id)
 		raw_src := get_raw_entries(src.data, src.id)
 		raw_dst[dst_cell_count + i] = Cell_Entry {
@@ -240,7 +239,6 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 				get_cell_key(curr.data, curr.id, i, curr.layout),
 			)
 		}
-
 		curr.header.cell_content_offset = u16le(dst_off)
 		curr.header.cell_count = u16le(mid)
 	}

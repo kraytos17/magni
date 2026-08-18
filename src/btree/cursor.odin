@@ -4,6 +4,7 @@ import "core:encoding/endian"
 import "core:mem"
 import "src:cell"
 import "src:pager"
+import "src:types"
 import "src:util/varint"
 
 Cursor_Stack_Item :: struct {
@@ -23,6 +24,13 @@ Cursor :: struct {
 	col_num_cols:      u8, // >0 when on a columnar page; caches the column count
 	col_rowid:         u64, // accumulated rowid at the current cell_index on a columnar page
 	col_rowid_pos:     int, // byte position in the rowid region for the current row
+	// Incremental per-column decode state for columnar pages (mirrors the rowid
+	// cache so a sequential scan decodes in O(R·C) instead of O(R²·C)).
+	col_encodings: [types.MAX_COLS]u8,  // cell.ENCODING_RAW / cell.ENCODING_DELTA
+	col_offsets:   [types.MAX_COLS]u32, // byte offset of each column's data (relative to page data)
+	col_val_pos:   [types.MAX_COLS]int, // byte position after the current DELTA value
+	col_mins:      [types.MAX_COLS]i64, // per-column min (added to each delta to recover the value)
+	col_running:   [types.MAX_COLS]i64, // current value at cell_index (DELTA columns = min + delta)
 }
 
 @(private="file")
@@ -78,6 +86,7 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, er
 				c.is_valid = false
 				break
 			}
+
 			non_empty := is_leaf(node) && node.header.cell_count > 0
 			pager.unpin_page(t.pager, node.id)
 			if non_empty { break }
@@ -124,7 +133,6 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 	c.col_num_cols = 0
 	c.col_rowid = 0
 	c.col_rowid_pos = 0
-
 	curr := c.tree.root
 	for {
 		if int(c.depth) >= MAX_TREE_DEPTH { return .Invalid_Page_Header }
@@ -133,6 +141,7 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 		defer pager.unpin_page(c.tree.pager, node.id)
 		if is_leaf(node) {
 			if curr != page_id { return .Cell_Not_Found }
+
 			c.path[c.depth] = Cursor_Stack_Item {page_id = curr, cell_index = 0}
 			c.depth += 1
 			c.is_valid = true
@@ -151,7 +160,9 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 		} else if get_right_ptr(node.data, curr) == page_id {
 			// Target lies in the rightmost subtree: mark this level as fully
 			// visited (cell_index == cell_count) so advance pops past it.
-			c.path[c.depth] = Cursor_Stack_Item {page_id = curr, cell_index = u16(cell_count)}
+			c.path[c.depth] = Cursor_Stack_Item {
+				page_id = curr, cell_index = u16(cell_count),
+			}
 			c.depth += 1
 			curr = page_id
 		} else {
@@ -208,6 +219,17 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 				if ok {
 					c.col_rowid += delta
 					c.col_rowid_pos += n
+				}
+				// Advance each DELTA value column by one varint (RAW columns are
+				// directly indexed by cell_index, so they need no state).
+				for col_i in 0 ..< int(c.col_num_cols) {
+					if c.col_encodings[col_i] == cell.ENCODING_DELTA {
+						d, dn, d_ok := varint.decode(c.cached_page_data, c.col_val_pos[col_i])
+						if d_ok {
+							c.col_running[col_i] = c.col_mins[col_i] + i64(d)
+							c.col_val_pos[col_i] += dn
+						}
+					}
 				}
 			}
 			return .None
@@ -271,35 +293,82 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 	if actual_alloc.procedure == nil {
 		actual_alloc = context.allocator
 	}
-	// Columnar page: read individual row by index
+	// Columnar page: decode the current row incrementally
 	if is_columnar(node.data, item.page_id) {
 		num_cols, found := detect_columnar_col_count(node.data, item.page_id)
 		if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
 
+		boff := get_page_header_offset(item.page_id)
 		c.col_num_cols = u8(num_cols)
 		if c.col_rowid_pos == 0 {
-			boff := get_page_header_offset(item.page_id)
+			// First access to this page: walk the rowid stream and every DELTA
+			// value column to the current cell_index (RAW columns are indexed).
 			c.col_rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
 			c.col_rowid = 0
-			for _ in 0 ..< int(item.cell_index) {
+			for _ in 0 ..= int(item.cell_index) {
 				delta, n, ok := varint.decode(node.data, c.col_rowid_pos)
 				if !ok { break }
 
 				c.col_rowid += delta
 				c.col_rowid_pos += n
 			}
+			for col_i in 0 ..< num_cols {
+				h, h_ok := cell.read_col_header(node.data, col_i, boff)
+				if !h_ok { return {}, .Cell_Deserialize_Failed }
+
+				c.col_encodings[col_i] = h.encoding
+				c.col_offsets[col_i] = u32(boff + int(h.byte_offset))
+				if h.encoding == cell.ENCODING_DELTA {
+					pos := boff + int(h.byte_offset)
+					min, n1, ok1 := varint.decode(node.data, pos)
+					if !ok1 { return {}, .Cell_Deserialize_Failed }
+
+					pos += n1
+					c.col_mins[col_i] = i64(min)
+					// Each stream value is (value - min); the running value at the
+					// current row is min + that delta (not a running sum).
+					running := i64(min)
+					for _ in 0 ..= int(item.cell_index) {
+						d, n2, ok2 := varint.decode(node.data, pos)
+						if !ok2 { return {}, .Cell_Deserialize_Failed }
+
+						running = i64(min) + i64(d)
+						pos += n2
+					}
+
+					c.col_running[col_i] = running
+					c.col_val_pos[col_i] = pos
+				}
+			}
 		}
 
-		boff := get_page_header_offset(item.page_id)
-		cc, cc_ok := cell.read_columnar_cell(
-			node.data,
-			num_cols,
-			int(item.cell_index),
-			cell.Config{allocator = actual_alloc, zero_copy = c.tree.config.zero_copy},
-			boff,
-		)
-		if !cc_ok { return {}, .Cell_Deserialize_Failed }
-		return cc, .None
+		// Assemble the cell from the cached per-column state (O(1) per row).
+		scratch: [dynamic; types.MAX_COLS]types.Value
+		for col_i in 0 ..< num_cols {
+			if c.col_encodings[col_i] == cell.ENCODING_DELTA {
+				append(&scratch, types.value_int(c.col_running[col_i]))
+			} else {
+				pos := int(c.col_offsets[col_i]) + int(item.cell_index) * 8
+				if pos + 8 <= len(node.data) {
+					if fv, fv_ok := endian.get_f64(node.data[pos:], .Big); fv_ok {
+						append(&scratch, types.value_real(fv))
+					} else {
+						append(&scratch, types.Null{})
+					}
+				} else {
+					append(&scratch, types.Null{})
+				}
+			}
+		}
+
+		result_values := make([]types.Value, len(scratch), actual_alloc)
+		copy(result_values, scratch[:])
+		return cell.Cell {
+				rowid      = types.Row_ID(c.col_rowid),
+				values     = result_values,
+				owns_data  = !c.tree.config.zero_copy,
+			},
+			.None
 	}
 
 	stride := node.layout.stride

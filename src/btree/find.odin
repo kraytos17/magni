@@ -4,7 +4,6 @@ import "core:encoding/endian"
 import "src:types"
 import "src:util/varint"
 
-
 @(private)
 find_interior_cell_for_child :: proc(
 	data: []u8,
@@ -22,7 +21,6 @@ find_interior_cell_for_child :: proc(
 	}
 	return -1
 }
-
 
 @(private)
 interior_lower_bound :: proc(

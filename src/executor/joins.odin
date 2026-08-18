@@ -465,8 +465,6 @@ exec_select_join_data :: proc(
 	return out, proj_cols, true
 }
 
-
-
 @(private="file")
 try_join_match :: proc(
 	outer_row: Row_Entry,
@@ -492,4 +490,3 @@ try_join_match :: proc(
 	matched^ = true
 	join_emit_combined(outer_row, inner_values, new_rows)
 }
-

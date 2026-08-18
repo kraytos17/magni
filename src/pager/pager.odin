@@ -1,19 +1,14 @@
 // Package pager provides page-level I/O, the slab page cache, WAL, freelist,
-// and page bitmap. Layer 1 — depends only on types and util/bitmap.
-//
-// Public API: open, close, get_page, allocate_page, get_or_allocate_page,
-// unpin_page, mark_dirty, page_count, page_in_cache, copy_page, and the WAL
-// entry points in wal.odin (wal_open/close/begin_txn/commit_txn/abort_txn/
-// checkpoint).
+// and page bitmap.
 package pager
 
+import "core:container/bit_array"
 import "core:log"
 import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:sync"
 import "src:types"
-import "src:util/bitmap"
 
 PAGE_CACHE_SIZE :: 256
 
@@ -52,7 +47,7 @@ Pager :: struct {
 	dirty_pages:         [dynamic]u32, // pages dirtied in the current WAL txn; iterated by wal_commit/abort
 	file:                ^os.File,
 	file_len:            i64,
-	page_bitmap:         []u64,
+	page_bitmap:         bit_array.Bit_Array,
 	wal_state:           Wal_State,
 	slots:               []Page_Slot,
 	file_name:           string,
@@ -175,13 +170,9 @@ open :: proc(
 	}
 
 	p.file_len = file_size if file_size != 0 else 0
-	// Initialize page bitmap: mark all existing pages as allocated
 	page_count := u32(p.file_len / i64(p.page_size))
-	bitmap_len := (int(page_count) + 63) / 64
-	if bitmap_len > 0 {
-		p.page_bitmap = make([]u64, bitmap_len, p.allocator)
-		for i := 0; i < bitmap_len; i += 1 { p.page_bitmap[i] = ~u64(0) }
-	}
+	bit_array.init(&p.page_bitmap, int(page_count), 0, p.allocator)
+	for i := 0; i < len(p.page_bitmap.bits); i += 1 { p.page_bitmap.bits[i] = ~u64(0) }
 	if err := wal_open(p, path); err != .None {
 		log.errorf("Pager: WAL open failed: %v", err)
 		os.close(file)
@@ -203,7 +194,7 @@ close :: proc(p: ^Pager) -> Error {
 
 	delete(p.file_name)
 	delete(p.cache_index)
-	delete(p.page_bitmap)
+	bit_array.destroy(&p.page_bitmap)
 	delete(p.free_slots)
 	delete(p.dirty_pages)
 	if p.free_stats != nil { p.free_stats(p.stats) }
@@ -282,8 +273,7 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 	mark_slot_dirty(p, slot)
 
 	p.cache_index[new_page_num] = slot; p.file_len += i64(p.page_size)
-	bitmap_grow(p, new_page_num)
-	bitmap.set(p.page_bitmap, new_page_num)
+	bit_array.set(&p.page_bitmap, new_page_num, true, p.allocator)
 	return &slot.page, .None
 }
 
@@ -305,8 +295,7 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 		mark_slot_dirty(p, slot)
 
 		p.cache_index[page_num] = slot; p.file_len += i64(p.page_size)
-		bitmap_grow(p, page_num)
-		bitmap.set(p.page_bitmap, page_num)
+		bit_array.set(&p.page_bitmap, page_num, true, p.allocator)
 		return &slot.page, .None
 	}
 	return nil, .Page_Not_Found
@@ -359,9 +348,4 @@ mark_slot_dirty :: proc(p: ^Pager, slot: ^Page_Slot) {
 mark_dirty :: proc(p: ^Pager, page_num: u32) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	mark_slot_dirty(p, find_slot(p, page_num))
-}
-
-@(private)
-bitmap_grow :: proc(p: ^Pager, max_pn: u32) {
-	p.page_bitmap = bitmap.grow(p.page_bitmap, max_pn, p.allocator)
 }

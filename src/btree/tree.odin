@@ -1,11 +1,5 @@
 // Package btree implements the copy-on-write B+tree. Layer 2 — depends on
 // cell, pager, types.
-//
-// Public API: Tree, Config, Error, init, tree_insert(_cow), tree_find,
-// tree_update(_cow), tree_delete(_cow), tree_next_rowid, tree_count_rows,
-// tree_foreach, tree_verify_if_enabled, cursor_start/advance/get_cell/destroy,
-// cursor_start_at_page, build_skip_index, query_skip_index_range,
-// attach_stats. Everything else is @(private) to this package.
 package btree
 
 import "core:encoding/endian"
@@ -168,7 +162,9 @@ node_insert_leaf_cell :: proc(
 	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * entry_sz
 
 	if ptr_area_end >= int(n.header.cell_content_offset) { return .Page_Full }
-	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end { return .Page_Full }
+	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end {
+		return .Page_Full
+	}
 
 	new_offset := int(n.header.cell_content_offset) - cinfo.total_size
 	bytes_written, ok := cell.serialize(n.data[new_offset:], rowid, values, cinfo)
@@ -323,8 +319,6 @@ insert_recursive :: proc(
 
 		endian.put_u32(curr.data[cell_offset:], .Big, child_result.new_page)
 		varint.encode(curr.data[cell_offset + 4:], u64(child_result.split_key))
-		// For v2 the authoritative separator lives in the Cell_Entry, so update
-		// it too (v1 reads the body key updated above; v2 reads entry.key).
 		curr.layout.set_entry(curr.data, curr.id, idx, u16(cell_offset), child_result.split_key)
 		insert_key = types.Row_ID(old_sep_u64)
 	}
@@ -573,7 +567,10 @@ tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
 
 @(private="file")
 count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
-	if count, ok := stats_row_count_get(tree_stats(t), page_id); ok { result = count; return }
+	if count, ok := stats_row_count_get(tree_stats(t), page_id); ok {
+		result = count
+		return
+	}
 
 	node := load_node(t, page_id) or_return
 	defer unpin_node(t, node)

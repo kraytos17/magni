@@ -1,10 +1,10 @@
 package pager
 
+import "core:container/bit_array"
 import "core:mem"
 import "core:os"
 import "core:sync"
 import "src:types"
-import "src:util/bitmap"
 
 // Allocates a page from the free-page linked list. Caller MUST hold p.mutex (write-locked).
 // Reads the first 4 bytes of the free page as the next-free pointer.
@@ -29,8 +29,7 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	slot.page.page_num = free_page_num; slot.page.pin_count = 1
 	mark_slot_dirty(p, slot)
 	p.cache_index[free_page_num] = slot
-	bitmap_grow(p, free_page_num)
-	bitmap.set(p.page_bitmap, free_page_num)
+	bit_array.set(&p.page_bitmap, free_page_num, true, p.allocator)
 	return &slot.page, .None
 }
 
@@ -49,5 +48,5 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 		slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
 	}
 	p.first_free_page = page_num
-	bitmap.clear(p.page_bitmap, page_num)
+	bit_array.unset(&p.page_bitmap, page_num, p.allocator)
 }

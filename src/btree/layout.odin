@@ -3,11 +3,10 @@ package btree
 import "core:encoding/endian"
 import "core:mem"
 import "src:cell"
+import "src:util/varint"
 import "src:types"
 
-
 PAGE_SIZE :: types.PAGE_SIZE
-
 
 Page_Type :: enum u8 {
 	INTERIOR_TABLE      = 5, // Internal node: pointers to pages
@@ -15,16 +14,13 @@ Page_Type :: enum u8 {
 	LEAF_TABLE_COLUMNAR = 14, // Leaf node: columnar-encoded data
 }
 
-
 Cell_Pointer :: distinct u16le
-
 
 Cell_Entry :: struct #packed {
 	ptr: Cell_Pointer,
 	key: types.Row_ID,
 }
 #assert(size_of(Cell_Entry) == 10)
-
 
 Page_Header :: struct #packed #simple {
 	page_type:           Page_Type, // Byte 0
@@ -35,13 +31,11 @@ Page_Header :: struct #packed #simple {
 }
 #assert(size_of(Page_Header) == 8)
 
-
 Interior_Header :: struct #packed #simple {
 	using common:  Page_Header,
 	rightmost_ptr: u32be,
 }
 #assert(size_of(Interior_Header) == 12)
-
 
 Leaf_Header :: struct #packed #simple {
 	using common: Page_Header,
@@ -50,26 +44,20 @@ Leaf_Header :: struct #packed #simple {
 
 // Page 1 has a 100-byte database header prefix (types.DATABASE_HEADER_SIZE);
 // all other pages start at offset 0.
-
-// Page 1 has a 100-byte database header prefix (types.DATABASE_HEADER_SIZE);
-// all other pages start at offset 0.
 get_page_header_offset :: proc(page_num: u32) -> int {
 	return int(page_num == 1 ? types.DATABASE_HEADER_SIZE : 0)
 }
-
 
 @(private)
 page_header_size :: proc(page_type: Page_Type) -> int {
 	return int(page_type == .INTERIOR_TABLE ? size_of(Interior_Header) : size_of(Leaf_Header))
 }
 
-
 get_header :: proc(data: []u8, page_id: u32) -> ^Page_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Page_Header) { return nil }
 	return (^Page_Header)(raw_data(data[off:]))
 }
-
 
 @(private)
 get_interior_header :: proc(data: []u8, page_id: u32) -> ^Interior_Header {
@@ -78,20 +66,17 @@ get_interior_header :: proc(data: []u8, page_id: u32) -> ^Interior_Header {
 	return (^Interior_Header)(raw_data(data[off:]))
 }
 
-
 get_leaf_header :: proc(data: []u8, page_id: u32) -> ^Leaf_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Leaf_Header) { return nil }
 	return (^Leaf_Header)(raw_data(data[off:]))
 }
 
-
 @(private)
 is_columnar :: proc(data: []u8, page_id: u32) -> bool {
 	h := get_header(data, page_id)
 	return h != nil && h.page_type == .LEAF_TABLE_COLUMNAR
 }
-
 
 @(private)
 init_interior_page :: proc(data: []u8, page_id: u32) {
@@ -107,7 +92,6 @@ init_interior_page :: proc(data: []u8, page_id: u32) {
 	header.rightmost_ptr = 0
 }
 
-
 init_leaf_page :: proc(data: []u8, page_id: u32) {
 	off := get_page_header_offset(page_id)
 	mem.zero_slice(data[off:])
@@ -120,7 +104,6 @@ init_leaf_page :: proc(data: []u8, page_id: u32) {
 	header.fragmented_bytes = 0
 }
 
-
 convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 	off := get_page_header_offset(page_id)
 	hdr := (^Page_Header)(raw_data(data[off:]))
@@ -128,10 +111,15 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 	if row_count == 0 { return }
 
 	rowids := make([]types.Row_ID, row_count, context.temp_allocator)
+	rid_pos := off + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
+	total: types.Row_ID = 0
 	for i in 0 ..< row_count {
-		rid, ok := cell.read_columnar_rowid(data, num_cols, i, off)
+		delta, n, ok := varint.decode(data, rid_pos)
 		if !ok { return }
-		rowids[i] = rid
+
+		total += types.Row_ID(delta)
+		rowids[i] = total
+		rid_pos += n
 	}
 
 	values := make([][]types.Value, row_count, context.temp_allocator)
@@ -159,6 +147,7 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 
 	for ri in 0 ..< row_count {
 		if values[ri] == nil { continue }
+
 		info := cell.compute_info(rowids[ri], values[ri])
 		dest_off := int(header.cell_content_offset) - info.total_size
 		if dest_off < off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * 2 {
@@ -173,7 +162,6 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 	}
 }
 
-
 @(private)
 ensure_row_major :: proc(data: []u8, page_id: u32) {
 	if !is_columnar(data, page_id) { return }
@@ -181,7 +169,6 @@ ensure_row_major :: proc(data: []u8, page_id: u32) {
 	if !found { return }
 	convert_columnar_to_row_major(data, page_id, num_cols)
 }
-
 
 @(private)
 detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
@@ -199,7 +186,6 @@ detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
 	return n, true
 }
 
-
 get_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 	header := get_header(data, page_id)
 	if header == nil { return nil }
@@ -214,7 +200,6 @@ get_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 	ptr_start := raw_data(data[start:])
 	return ([^]Cell_Pointer)(ptr_start)[:n]
 }
-
 
 @(private="file")
 get_raw_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
@@ -231,7 +216,6 @@ get_raw_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
 	return ([^]Cell_Pointer)(ptr_start)[:max_ptrs]
 }
 
-
 @(private="file")
 get_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 	header := get_header(data, page_id)
@@ -247,7 +231,6 @@ get_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 	entry_start := raw_data(data[start:])
 	return ([^]Cell_Entry)(entry_start)[:n]
 }
-
 
 @(private)
 get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
@@ -269,21 +252,13 @@ get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 // entry-array layout. Callers pass stride = size_of(Cell_Entry) for v2, size_of(Cell_Pointer) for v1.
 // All asserts on bounds; indices are page-internal (never user-supplied).
 
-
-// --- Page Accessor API ---
-// These 7 functions encapsulate the v1 (Cell_Pointer, stride=2) vs v2 (Cell_Entry, stride=10)
-// entry-array layout. Callers pass stride = size_of(Cell_Entry) for v2, size_of(Cell_Pointer) for v1.
-// All asserts on bounds; indices are page-internal (never user-supplied).
-
 CELL_POINTER_STRIDE :: size_of(Cell_Pointer) // 2
 CELL_ENTRY_STRIDE :: size_of(Cell_Entry) // 10
-
 
 get_cell_count :: proc(data: []u8, page_id: u32) -> int {
 	hdr := get_header(data, page_id)
 	return hdr != nil ? int(hdr.cell_count) : 0
 }
-
 
 get_cell_ptr :: proc(data: []u8, page_id: u32, i: int, stride: int) -> u16 {
 	off := get_page_header_offset(page_id)
@@ -293,11 +268,9 @@ get_cell_ptr :: proc(data: []u8, page_id: u32, i: int, stride: int) -> u16 {
 	return u16((^u16le)(raw_data(data[start + i * stride:]))^)
 }
 
-
 get_cell_key :: proc(data: []u8, page_id: u32, i: int, layout: ^Cell_Layout) -> types.Row_ID {
 	return layout.get_key(data, page_id, i)
 }
-
 
 insert_cell_at :: proc(
 	data: []u8,
@@ -319,7 +292,6 @@ insert_cell_at :: proc(
 		dst := data[start + (i + 1) * stride:]
 		copy(dst, src)
 	}
-
 	// Write new entry
 	if stride == CELL_ENTRY_STRIDE {
 		entry := (^Cell_Entry)(raw_data(data[start + i * stride:]))
@@ -333,21 +305,18 @@ insert_cell_at :: proc(
 	}
 }
 
-
 delete_cell_at :: proc(data: []u8, page_id: u32, i: int, stride: int) {
 	off := get_page_header_offset(page_id)
 	hdr := get_header(data, page_id)
 	hdr_sz := page_header_size(hdr.page_type)
 	start := off + hdr_sz
 	cell_count := int(hdr.cell_count)
-
 	if i < cell_count - 1 {
 		src := data[start + (i + 1) * stride:start + cell_count * stride]
 		dst := data[start + i * stride:]
 		copy(dst, src)
 	}
 }
-
 
 entry_area_end :: proc(data: []u8, page_id: u32, stride: int) -> int {
 	off := get_page_header_offset(page_id)
@@ -356,7 +325,6 @@ entry_area_end :: proc(data: []u8, page_id: u32, stride: int) -> int {
 	cell_count := int(hdr.cell_count)
 	return off + hdr_sz + cell_count * stride
 }
-
 
 move_cells_to :: proc(
 	dst: []u8,
@@ -387,14 +355,12 @@ move_cells_to :: proc(
 	)
 }
 
-
 @(private)
 get_right_ptr :: proc(data: []u8, page_id: u32) -> u32 {
 	h := get_interior_header(data, page_id)
 	if h == nil { return 0 }
 	return u32(h.rightmost_ptr)
 }
-
 
 @(private)
 set_right_ptr :: proc(data: []u8, page_id: u32, ptr: u32) {
@@ -403,4 +369,3 @@ set_right_ptr :: proc(data: []u8, page_id: u32, ptr: u32) {
 		h.rightmost_ptr = u32be(ptr)
 	}
 }
-

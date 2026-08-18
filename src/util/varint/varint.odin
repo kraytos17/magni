@@ -1,6 +1,5 @@
 // Package varint provides LEB128-style variable-length integer encoding.
-// It operates purely on []u8 <-> u64 and has no dependency on the database
-// engine; it can be reused anywhere compact integer encoding is needed.
+// It operates purely on []u8 <-> u64
 package varint
 
 // encode writes value as a LEB128 varint into dest, returning the number of

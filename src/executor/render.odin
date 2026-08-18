@@ -29,7 +29,7 @@ render_table :: proc(cols: []string, rows: [][]string) {
 			table.set_cell_value(tbl, 1 + ri, ci, c)
 		}
 	}
-	
+
 	table.build(tbl, table.unicode_width_proc)
 	table.write_markdown_table(
 		os.to_stream(os.stdout),

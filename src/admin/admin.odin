@@ -1,8 +1,6 @@
 // Package admin holds the human-facing introspection and debug commands of the
 // CLI: table listing, schema/DDL printing, stats, integrity checks, and
-// snapshot presentation. It is an optional, presentation-oriented layer on top
-// of the db API — an embedder that only wants
-// db.open/execute/query/close does not need to link this package.
+// snapshot presentation.
 package admin
 
 import "core:fmt"
@@ -48,6 +46,7 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 		if v_err != .None {
 			return .Corrupted
 		}
+
 		updated_root, up_ok := schema.update_root_page_cow(&st, table.name, vac_root)
 		if !up_ok {
 			return .Corrupted
@@ -55,8 +54,8 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 		st.root = updated_root
 		new_root = updated_root
 	}
-	database.schema_root_page = new_root
 
+	database.schema_root_page = new_root
 	pager.wal_begin_txn(database.pager)
 	db.update_header(database)
 	pager.wal_commit_txn(database.pager)
@@ -102,6 +101,7 @@ list_tables :: proc(database: ^db.Database) {
 	if db.db_check(database) != .None { return }
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
+
 	st := db.Schema_Tree(database)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	if len(tables) == 0 {
@@ -153,6 +153,7 @@ stats :: proc(database: ^db.Database) {
 	if db.db_check(database) != .None { return }
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
+
 	page_count := pager.page_count(database.pager)
 	fmt.printf("Path: %s\n", database.path)
 	fmt.printf("Page size: %d bytes\n", types.PAGE_SIZE)

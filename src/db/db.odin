@@ -1,11 +1,3 @@
-// Package db is the top-level facade. Layer 5 — depends on btree, cell,
-// executor, pager, parser, schema, snapshot, types.
-//
-// Public API: Database, Open_Config, DB_Error, open, close, execute, query,
-// Query_Result, Schema_Tree, begin/commit/rollback, expire_snapshots,
-// rollforward, snapshot_diff/tag/restore. Presentation/introspection commands
-// live in src/admin. Internal helpers (db_check, update_header, verify_header,
-// header layout) are @(private).
 package db
 
 import "core:encoding/endian"
@@ -116,7 +108,6 @@ Header :: struct #packed {
 	refs_page:            u32le,
 	reserved:             [47]u8,
 }
-
 #assert(size_of(Header) == types.DATABASE_HEADER_SIZE)
 
 Schema_Tree :: proc(db: ^Database) -> btree.Tree {
