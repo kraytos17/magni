@@ -550,9 +550,12 @@ Database :: struct {
 snapshots are only created when `count >= threshold`, reducing write amplification
 for bulk operations.
 
-**`Open_Config`** provides optional configuration at open time: `wal_size_threshold`
-(auto-checkpoint when WAL exceeds a page count) and `snapshot_batch_threshold`
-(overrides the default batch threshold).
+**`Open_Config`** provides optional configuration at open time (passed to `db.open`):
+`wal_size_threshold` (auto-checkpoint the WAL once it accumulates N frames; 0 =
+disabled — runs after each WAL commit via `maybe_auto_checkpoint`, which
+checkpoints and re-flushes the header) and `snapshot_batch_threshold` (override
+the default batch threshold). Both are exposed on the CLI as `--snapshot-batch`
+and `--wal-size-threshold`.
 
 ```
 execute(db, sql):

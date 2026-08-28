@@ -135,6 +135,7 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 			}
 		}
 		pager.wal_commit_txn(db.pager)
+		maybe_auto_checkpoint(db)
 	}
 	if exec_ok {
 		if result.is_select { executor.render_result(result) }

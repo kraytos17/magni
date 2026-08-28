@@ -61,6 +61,7 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 
 	db.txn_state = .None
 	log.infof("COMMIT transaction (snapshot %d)", db.txn_snapshot_id)
+	maybe_auto_checkpoint(db)
 	return .None
 }
 

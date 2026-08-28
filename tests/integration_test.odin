@@ -709,6 +709,71 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_integration_wal_auto_checkpoint :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	filename := fmt.tprintf("test_int_walauto.db")
+	wal_path := fmt.tprintf("%s-wal", filename)
+	if os.exists(filename) { os.remove(filename) }
+	if os.exists(wal_path) { os.remove(wal_path) }
+	defer os.remove(filename)
+	defer os.remove(wal_path)
+
+	d, open_err := db.open(filename, db.Open_Config{wal_size_threshold = 2})
+	testing.expect(t, open_err == .None, "open with wal_size_threshold")
+	if open_err != .None { return }
+
+	db.execute(d, "CREATE TABLE t (id INT);")
+	for i in 1 ..= 20 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d);", i))
+	}
+
+	// With threshold 2 the WAL is auto-checkpointed every couple of commits, so
+	// it must never accumulate 20+ frames (frame_count stays below the threshold).
+	testing.expect(t, d.pager.wal_state.frame_count < 2, "WAL auto-checkpointed (frame_count below threshold)")
+	db.close(d)
+	d2, open2 := db.open(filename)
+	testing.expect(t, open2 == .None, "reopen after auto-checkpoint")
+	if open2 == .None {
+		defer db.close(d2)
+		q := db.query(d2, "SELECT COUNT(*) AS n FROM t;")
+		testing.expect(t, q.ok, "count after auto-checkpoint")
+		if q.ok {
+			testing.expect_value(t, q.rows[0][0].(i64), i64(20))
+		}
+	}
+}
+
+@(test)
+test_integration_snapshot_batch_config :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	filename := fmt.tprintf("test_int_snapcfg.db")
+	if os.exists(filename) { os.remove(filename) }
+	defer os.remove(filename)
+
+	d, open_err := db.open(filename, db.Open_Config{snapshot_batch_threshold = 3})
+	testing.expect(t, open_err == .None, "open with snapshot_batch_threshold")
+	if open_err != .None { return }
+	defer db.close(d)
+
+	testing.expect_value(t, d.snapshot_batch_threshold, 3)
+
+	db.execute(d, "CREATE TABLE t (id INT);")
+	for i in 1 ..= 4 {
+		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d);", i))
+	}
+	// With threshold 3: create(1), insert1(2), insert2(3 -> snapshot, reset),
+	// insert3(1), insert4(2). Ends mid-batch at count 2; with the default
+	// threshold (1) the count would be 0 after every statement.
+	testing.expect_value(t, d.snapshot_batch_count, 2)
+
+	q := db.query(d, "SELECT COUNT(*) AS n FROM t;")
+	testing.expect(t, q.ok, "count after batched snapshots")
+	if q.ok {
+		testing.expect_value(t, q.rows[0][0].(i64), i64(4))
+	}
+}
+
+@(test)
 test_integration_batch_snapshot :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "batch_snap")

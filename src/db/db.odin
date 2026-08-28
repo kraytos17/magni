@@ -94,6 +94,7 @@ Database :: struct {
 	refs_page:                u32,
 	snapshot_batch_count:     int,
 	snapshot_batch_threshold: int,
+	wal_size_threshold:       int, // 0 = disabled; auto-checkpoint when the WAL reaches this many frames
 	table_cache:              schema.Table_Cache, // in-memory catalog cache; invalidated on schema-root change
 	mu:                       sync.RW_Mutex, // guards database state; see docs/concurrency.md (acquire before pager.mutex)
 }
@@ -117,7 +118,7 @@ Schema_Tree :: proc(db: ^Database) -> btree.Tree {
 	return btree.init(db.pager, db.schema_root_page)
 }
 
-open :: proc(path: string) -> (^Database, DB_Error) {
+open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 	db := new(Database)
 	if db == nil {
 		return nil, .Alloc_Failed
@@ -132,6 +133,9 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 	}
 
 	db.pager = p
+	if cfg.snapshot_batch_threshold > 0 { db.snapshot_batch_threshold = cfg.snapshot_batch_threshold }
+	if cfg.wal_size_threshold > 0 { db.wal_size_threshold = cfg.wal_size_threshold }
+
 	db.is_new = (db.pager.file_len == 0)
 	db.txn_state = .None
 	db.txn_snapshot_id = 0
@@ -196,6 +200,18 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 		}
 	}
 	return db, .None
+}
+
+// maybe_auto_checkpoint checkpoints the WAL once it grows past
+// db.wal_size_threshold frames (0 = disabled). Runs after a WAL commit so a
+// heavy write or a large explicit transaction can reclaim the WAL proactively.
+@(private)
+maybe_auto_checkpoint :: proc(db: ^Database) {
+	if db.wal_size_threshold > 0 && db.pager.wal_state.frame_count >= u32(db.wal_size_threshold) {
+		if pager.wal_checkpoint(db.pager) == .None {
+			update_header(db)
+		}
+	}
 }
 
 close :: proc(db: ^Database) {

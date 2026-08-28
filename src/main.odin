@@ -19,6 +19,8 @@ CLI :: struct {
 	log_level:     string `args:"name=log-level,usage=Log level: debug, info, warn, error (default: info)"`,
 	verbose:       bool   `args:"name=verbose,usage=Enable debug-level logging"`,
 	v:             bool   `args:"name=v,usage=Enable debug-level logging (alias for --verbose)"`,
+	snapshot_batch: int    `args:"name=snapshot-batch,usage=Create a snapshot every N write statements (default: 1)"`,
+	wal_size_threshold: int `args:"name=wal-size-threshold,usage=Auto-checkpoint the WAL after N frames (0 = disabled)"`,
 }
 
 main :: proc() {
@@ -46,7 +48,12 @@ main :: proc() {
 	context.logger = log.create_file_logger(os.stderr, log_level, Logger_Opts)
 	defer log.destroy_file_logger(context.logger)
 
-	database, open_err := db.open(cli.database)
+	cfg := db.Open_Config {
+		snapshot_batch_threshold = cli.snapshot_batch,
+		wal_size_threshold       = cli.wal_size_threshold,
+	}
+
+	database, open_err := db.open(cli.database, cfg)
 	if open_err != .None {
 		log.fatalf("Could not open database '%s': %s", cli.database, db.db_error_string(open_err))
 		os.exit(1)
