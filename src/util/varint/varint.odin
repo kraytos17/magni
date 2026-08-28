@@ -11,7 +11,14 @@ encode :: proc(dest: []u8, value: u64) -> int {
 		if i >= len(dest) { return 0 }
 		b := u8(v & 0x7F)
 		v >>= 7
-		if v != 0 { dest[i] = b | 0x80; i += 1 } else { dest[i] = b; i += 1; break }
+		if v != 0 {
+			#no_bounds_check { dest[i] = b | 0x80 }
+			i += 1
+		} else {
+			#no_bounds_check { dest[i] = b }
+			i += 1
+			break
+		}
 	}
 	return i
 }
@@ -24,7 +31,9 @@ decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: int, ok: 
 	for shift < 64 {
 		if pos >= len(src) { return 0, 0, false }
 
-		b := u64(src[pos]); pos += 1; bytes_read += 1
+		b: u64
+		#no_bounds_check { b = u64(src[pos]) }
+		pos += 1; bytes_read += 1
 		value |= (b & 0x7F) << shift
 		if (b & 0x80) == 0 { return value, bytes_read, true }
 

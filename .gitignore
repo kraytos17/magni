@@ -3,3 +3,9 @@ build
 *.bin
 *.wal
 *.db-wal
+
+# AFL++ fuzzing outputs (generated)
+fuzz/corpus
+!fuzz/gen_corpus.py
+fuzz/afl-output/
+fuzz/fuzz_target

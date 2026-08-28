@@ -20,7 +20,7 @@ Acquired in `db.execute`, `db.query`, and the admin/snapshot command handlers.
 ### `pager.Pager.mutex` (`sync.RW_Mutex`)
 Protects **storage-layer state**:
 
-- the page cache (`cache_index`, `slots`, `free_slots`, `slot_count`, `evict_hand`,
+- the page cache (`cache_table`, `slots`, `free_slots`, `slot_count`, `evict_hand`,
   `dirty_pages`)
 - the WAL state and the page bitmap / free-page list
 - file length and the file handle
@@ -54,7 +54,10 @@ it, so keep the invariant in mind when adding new pager internals.
 
 - COW means reads never block writes: `SELECT` takes `db.mu` shared and touches
   only COW snapshots/old pages, which are immutable.
-- A single lock (owned by `db`) would remove the ordering class entirely, but
-  two locks allow read concurrency inside the pager (shared pager access under a
-  shared DB lock). Consolidating is a possible future simplification if the
-  parallelism is not worth the complexity.
+- The pager's `RW_Mutex` is used asymmetrically: page-fetch (`get_page`,
+  `allocate_page`, `unpin_page`, `mark_dirty`) takes the exclusive lock even for
+  reads, because loading a page mutates the cache; only cheap probes
+  (`page_count`, `page_in_cache`) take the shared lock. Two locks still allow
+  reads to hold `db.mu` shared and serialize only on cache-mutating pager ops.
+  Consolidating to a single lock (owned by `db`) is a possible future
+  simplification if the parallelism is not worth the complexity.

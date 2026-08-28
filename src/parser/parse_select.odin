@@ -289,6 +289,11 @@ parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynam
 }
 
 @(private)
+// MAX_PARSE_NESTING bounds recursive SELECT/subquery/set-op parsing. Each
+// nesting level adds a parse_select frame; beyond ~1000 levels the native stack
+// overflows, so cap well below that and reject the query with an error.
+MAX_PARSE_NESTING :: 512
+
 parse_select :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -297,6 +302,13 @@ parse_select :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
+	p.nest_depth += 1
+	defer p.nest_depth -= 1
+	if p.nest_depth > MAX_PARSE_NESTING {
+		if p.err_msg == "" { p.err_msg = "Query nesting too deep" }
+		return {}, false
+	}
+
 	columns := make([dynamic]string, allocator)
 	defer if !ok do delete(columns)
 

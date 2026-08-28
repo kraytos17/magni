@@ -115,13 +115,25 @@ list_tables :: proc(database: ^db.Database) -> db.DB_Error {
 	return .None
 }
 
+// resolve_table builds the schema tree and looks up a single table by name.
+// Shared by describe_table and dump_table. The returned table borrows from
+// `allocator` (callers pass context.temp_allocator), matching schema.find_table.
+@(private)
+resolve_table :: proc(
+	database: ^db.Database,
+	table_name: string,
+	allocator := context.allocator,
+) -> (types.Table, bool) {
+	st := db.Schema_Tree(database)
+	return schema.get_table(&st, table_name, allocator)
+}
+
 describe_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 
-	st := db.Schema_Tree(database)
-	table, found := schema.find_table(&st, table_name, context.temp_allocator)
+	table, found := resolve_table(database, table_name, context.temp_allocator)
 	if !found {
 		return .Table_Not_Found
 	}
@@ -174,8 +186,8 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
-	st := db.Schema_Tree(database)
-	table, found := schema.find_table(&st, table_name, context.temp_allocator)
+
+	table, found := resolve_table(database, table_name, context.temp_allocator)
 	if !found {
 		return .Table_Not_Found
 	}

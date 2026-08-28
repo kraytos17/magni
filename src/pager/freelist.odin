@@ -28,7 +28,7 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
 	slot.page.page_num = free_page_num; slot.page.pin_count = 1
 	mark_slot_dirty(p, slot)
-	p.cache_index[free_page_num] = slot
+	cache_insert(p, free_page_num, slot)
 	bit_array.set(&p.page_bitmap, free_page_num, true, p.allocator)
 	return &slot.page, .None
 }
@@ -43,7 +43,7 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 		(^u32)(raw_data(slot._data_buf[:]))^ = p.first_free_page
 		slot.page.dirty = true
 		wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
-		delete_key(&p.cache_index, page_num)
+		cache_delete(p, page_num)
 		if p.on_evict != nil { p.on_evict(p.stats, page_num) }
 		slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
 	}

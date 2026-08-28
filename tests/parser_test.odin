@@ -1092,3 +1092,30 @@ test_parse_literal_union :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(comp.operands), 1)
 	testing.expect(t, comp.operands[0].op == .UNION, "Expected UNION op")
 }
+
+@(test)
+test_parse_deep_nesting_guard :: proc(t: ^testing.T) {
+	// Regression (fuzzing): deeply nested subqueries must return a parse error
+	// rather than exhaust the native stack. MAX_PARSE_NESTING is 512; 600 nested
+	// levels exceed it.
+	build := proc(t: ^testing.T, levels: int) -> string {
+		// Wrap inward: "SELECT * FROM (" * levels + body + ") AS s0 .. ) AS s{levels-1}".
+		sb: strings.Builder
+		strings.builder_init(&sb, context.temp_allocator)
+		for _ in 0 ..< levels {
+			strings.write_string(&sb, "SELECT * FROM (")
+		}
+		
+		strings.write_string(&sb, "SELECT * FROM t")
+		for i in 0 ..< levels {
+			strings.write_string(&sb, fmt.tprintf(") AS s%d", i))
+		}
+		return strings.to_string(sb)
+	}
+
+	_, ok, _ := parser.parse(build(t, 600), context.temp_allocator)
+	testing.expect(t, !ok, "over-limit nesting returns an error, not a crash")
+
+	_, ok2, _ := parser.parse(build(t, 8), context.temp_allocator)
+	testing.expect(t, ok2, "moderate nesting parses")
+}

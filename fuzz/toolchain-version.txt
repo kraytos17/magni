@@ -1,0 +1,4 @@
+Odin:        dev-2026-08-nightly:902106f
+AFL++:        5.00c (afl-fuzz, afl-clang-fast, afl-tmin)
+Clang:       22.1.8
+LLVM:        22.1.8

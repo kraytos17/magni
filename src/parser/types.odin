@@ -199,7 +199,8 @@ Explain_Stmt :: struct {
 }
 
 Parser :: struct {
-	tokens:  []Token,
-	current: int,
-	err_msg: string,
+	tokens:     []Token,
+	current:    int,
+	err_msg:    string,
+	nest_depth: int, // guards recursive SELECT/subquery parsing against stack exhaustion
 }

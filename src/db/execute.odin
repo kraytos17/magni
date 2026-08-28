@@ -71,11 +71,11 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 
 	result: executor.Result
 	exec_ok, new_root, _ := executor.execute(&st, stmt, &result, &db.table_cache)
-	if !as_of_override {
+	if !as_of_override && !is_read {
 		db.schema_root_page = new_root
 		update_header(db)
 	}
-	if exec_ok && db.txn_state == .None && !as_of_override {
+	if exec_ok && !is_read && db.txn_state == .None && !as_of_override {
 		db.snapshot_batch_count += 1
 		threshold := db.snapshot_batch_threshold
 		if threshold <= 0 { threshold = 1 }

@@ -483,7 +483,8 @@ Pager:
 ```
 
 - **Zero per-page heap allocations**: All 256 page buffers are inline in the slab.
-- **Lookup**: `map[u32]^Page_Slot` — O(1) average via Odin's Robin Hood map.
+- **Lookup**: open-addressed `cache_table` (`[]Cache_Entry`, `page_num & 511`
+  home bucket, linear probing, backward-shift delete) — O(1) average, no hashing.
 - **Eviction**: Rotating-hand scan for first unpinned slot.
 - **Free-list**: `free_slots: [dynamic]^Page_Slot` provides O(1) slot allocation.
 - **Freelist**: Linked list stored in-page. `first_free_page` persisted in database header.
@@ -535,12 +536,13 @@ Database :: struct {
     schema_root_page:         u32,
     latest_snapshot:          u32,
     txn_snapshot_id:          u64,
-    txn_state:                enum { NONE, ACTIVE },
+    txn_state:                Txn_State, // { None, Active }
     txn_start_file_len:       u64,
     snapshot_index:           map[u64]u32,
     refs_page:                u32,
     snapshot_batch_count:     int,
     snapshot_batch_threshold: int,
+    wal_size_threshold:       int, // 0 = disabled; auto-checkpoint the WAL at this many frames
     table_cache:              schema.Table_Cache, // schema catalog cache, invalidated on schema-root change
     mu:                       sync.RW_Mutex,
 }
@@ -559,16 +561,19 @@ and `--wal-size-threshold`.
 
 ```
 execute(db, sql):
-  stmt = parse(sql, temp_allocator)    // no lock yet
-  if is_select: lock_shared(mu)        // SELECT: shared lock
-  else:         lock_exclusive(mu)      // writes: exclusive lock
+  stmt = parse(sql, temp_allocator)      // no lock yet
+  is_read = SELECT | Compound
+  if is_read: lock_shared(mu) else lock_exclusive(mu)
   ok, new_root = executor.execute(schema_tree, stmt, &result, &db.table_cache)
-  db.schema_root_page = new_root
-  if ok && !readonly && !as_of:
+  if ok && !is_read && txn_state == .None && !as_of_override:   // writes only
+    db.schema_root_page = new_root
+    update_header(db)
     wal_begin_txn()
-    create_snapshot()
-    set_ref("main" → snap_id)
+    if snapshot_batch_count >= threshold:   // batched snapshot creation
+      create_snapshot()
+      set_ref("main" → snap_id)
     wal_commit_txn()          // single fsync of WAL; iterates only the dirty-page list
+    maybe_auto_checkpoint(db) // only if wal_size_threshold is set
   unlock(mu)
 ```
 
@@ -607,6 +612,10 @@ row 2: [a2, b2, c2]        col C: [c0, c1, c2, ...]
 - The cursor (`cursor.odin`) reads columnar pages transparently, assembling rows on demand.
 - Column count is detected via `detect_columnar_col_count()` from the page header.
 - Benefits: better compression for integer-heavy data, cache-friendly column scans.
+- **Write path is currently unused**: `serialize_columnar` has no production
+  callers — normal DML writes row-major pages, so columnar pages appear only in
+  tests and in data written by older builds. The read/convert paths are kept for
+  compatibility and are exercised by the test suite.
 
 #### 3h. Skip Index — `btree/skip_index.odin`
 
@@ -881,7 +890,7 @@ assignment rather than relying on composite-literal aliasing.
 | Slots | 256 |
 | Slot size | 4136 bytes (32 Page + 4096 data + referenced flag) |
 | Total memory | ~1 MB |
-| Lookup (hit, avg probes) | ~1.5 (Odin Robin Hood `map[u32]^Page_Slot`) |
+| Lookup (hit, avg probes) | ~1.5 (open-addressed `cache_table`, linear probing at load ≤ 0.5) |
 | Slot allocation | O(1) — pop from `free_slots` |
 | Eviction | O(n) — rotating-hand scan, 256 slots max |
 | Eviction cost | 1 `os.write_at` + 1 `os.read_at` |

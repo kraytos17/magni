@@ -12,6 +12,18 @@ import "src:types"
 
 PAGE_CACHE_SIZE :: 256
 
+// CACHE_TABLE_SIZE is the capacity of the page-cache lookup table: a power of
+// two >= 2 * PAGE_CACHE_SIZE so the open-addressed index stays at load factor
+// <= 0.5 (probe chains stay short) and the modulus is a single AND.
+CACHE_TABLE_SIZE :: 512
+
+// Cache_Entry is one bucket of the open-addressed page-cache index.
+// page_num == 0 marks an empty bucket (page numbers are 1-indexed).
+Cache_Entry :: struct {
+	page_num: u32,
+	slot:     ^Page_Slot,
+}
+
 Page :: struct {
 	data:      []u8,
 	page_num:  u32,
@@ -40,7 +52,7 @@ is_special_page :: proc(page_num: u32) -> bool {
 
 Pager :: struct {
 	mutex:               sync.RW_Mutex, // guards storage state; see docs/concurrency.md (acquire after db.mu)
-	cache_index:         map[u32]^Page_Slot,
+	cache_table:         []Cache_Entry, // open-addressed index, page_num -> cache slot
 	free_slots:          [dynamic]^Page_Slot,
 	slot_count:          u32,
 	evict_hand:          u32,
@@ -75,7 +87,62 @@ Error :: enum {
 }
 
 @(private)
-find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return p.cache_index[page_num] }
+cache_bucket :: proc(page_num: u32) -> u32 { return page_num & (CACHE_TABLE_SIZE - 1) }
+
+// cache_lookup finds the cached slot for page_num, or nil. Linear-probes from
+// the home bucket; page_num == 0 terminates the probe chain (empty bucket).
+@(private)
+cache_lookup :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot {
+	i := cache_bucket(page_num)
+	for p.cache_table[i].page_num != 0 {
+		if p.cache_table[i].page_num == page_num { return p.cache_table[i].slot }
+		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
+	}
+	return nil
+}
+
+// cache_insert adds or refreshes the entry for page_num. The table is sized for
+// at most PAGE_CACHE_SIZE live entries, so an empty bucket always exists.
+@(private)
+cache_insert :: proc(p: ^Pager, page_num: u32, slot: ^Page_Slot) {
+	i := cache_bucket(page_num)
+	for p.cache_table[i].page_num != 0 {
+		if p.cache_table[i].page_num == page_num {
+			p.cache_table[i].slot = slot
+			return
+		}
+		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
+	}
+	p.cache_table[i] = Cache_Entry{page_num = page_num, slot = slot}
+}
+
+// cache_delete removes the entry for page_num using backward-shift deletion so
+// probe chains for entries placed after the removed bucket stay intact.
+@(private)
+cache_delete :: proc(p: ^Pager, page_num: u32) {
+	i := cache_bucket(page_num)
+	for p.cache_table[i].page_num != 0 && p.cache_table[i].page_num != page_num {
+		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
+	}
+	if p.cache_table[i].page_num == 0 { return }
+
+	p.cache_table[i] = {}
+	j := i
+	for {
+		j = (j + 1) & (CACHE_TABLE_SIZE - 1)
+		if p.cache_table[j].page_num == 0 { break }
+		k := cache_bucket(p.cache_table[j].page_num)
+		in_range := k > i && k <= j if i <= j else (k > i || k <= j)
+		if !in_range {
+			p.cache_table[i] = p.cache_table[j]
+			p.cache_table[j] = {}
+			i = j
+		}
+	}
+}
+
+@(private)
+find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return cache_lookup(p, page_num) }
 
 @(private)
 find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
@@ -114,7 +181,7 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 				wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
 			}
 
-			delete_key(&p.cache_index, slot.page.page_num)
+			cache_delete(p, slot.page.page_num)
 			if p.on_evict != nil { p.on_evict(p.stats, slot.page.page_num) }
 
 			slot.page = {}
@@ -143,7 +210,7 @@ open :: proc(
 	p.allocator = allocator; p.page_size = types.PAGE_SIZE
 	p.max_cache_pages = clamp(max(max_pages, 1), 1, PAGE_CACHE_SIZE)
 	p.slots = make([]Page_Slot, p.max_cache_pages, allocator)
-	p.cache_index = make(map[u32]^Page_Slot, p.max_cache_pages, allocator)
+	p.cache_table = make([]Cache_Entry, CACHE_TABLE_SIZE, allocator)
 	p.wal_state.page_index = make(map[u32]i64, allocator)
 	p.wal_state.txn_index = make(map[u32]i64, allocator)
 	p.free_slots = make([dynamic]^Page_Slot, 0, p.max_cache_pages, allocator)
@@ -193,8 +260,9 @@ close :: proc(p: ^Pager) -> Error {
 	if p.file != nil { os.close(p.file) }
 
 	delete(p.file_name)
-	delete(p.cache_index)
+	delete(p.cache_table)
 	bit_array.destroy(&p.page_bitmap)
+
 	delete(p.free_slots)
 	delete(p.dirty_pages)
 	if p.free_stats != nil { p.free_stats(p.stats) }
@@ -237,7 +305,7 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 		_, read_err := os.read_at(ws.file, slot._data_buf[:], fo + types.WAL_FRAME_HEADER_SIZE)
 		if read_err == nil {
 			slot.page.page_num = page_num; slot.page.pin_count = 1; slot.page.dirty = false
-			p.cache_index[page_num] = slot
+			cache_insert(p, page_num, slot)
 			return &slot.page, .None
 		}
 	}
@@ -254,7 +322,7 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	slot.page.page_num = page_num
 	slot.page.pin_count = 1
 	slot.page.dirty = false
-	p.cache_index[page_num] = slot
+	cache_insert(p, page_num, slot)
 	return &slot.page, .None
 }
 
@@ -271,8 +339,8 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
 	slot.page.page_num = new_page_num; slot.page.pin_count = 1
 	mark_slot_dirty(p, slot)
-
-	p.cache_index[new_page_num] = slot; p.file_len += i64(p.page_size)
+	cache_insert(p, new_page_num, slot)
+	p.file_len += i64(p.page_size)
 	bit_array.set(&p.page_bitmap, new_page_num, true, p.allocator)
 	return &slot.page, .None
 }
@@ -293,8 +361,8 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 		mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
 		slot.page.page_num = page_num; slot.page.pin_count = 1
 		mark_slot_dirty(p, slot)
-
-		p.cache_index[page_num] = slot; p.file_len += i64(p.page_size)
+		cache_insert(p, page_num, slot)
+		p.file_len += i64(p.page_size)
 		bit_array.set(&p.page_bitmap, page_num, true, p.allocator)
 		return &slot.page, .None
 	}
