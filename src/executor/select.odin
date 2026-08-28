@@ -8,6 +8,39 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// Select_Plan describes which stages a given SELECT execution needs, decided
+// once by the top-level dispatch instead of being re-derived inside every
+// exec_select_* variant.
+Select_Plan :: struct {
+	has_join:       bool,
+	has_aggregate:  bool,
+	has_group_by:   bool,
+	has_subquery:   bool,
+	is_literal_only: bool,
+	single_table:   bool,
+}
+
+plan_select :: proc(stmt: parser.Select_Stmt) -> Select_Plan {
+	if _, is_nf := stmt.from.(parser.No_From); is_nf {
+		return Select_Plan{is_literal_only = true}
+	}
+	if _, is_subq := stmt.from.(^parser.Select_Stmt); is_subq {
+		return Select_Plan{has_subquery = true}
+	}
+
+	has_join := len(stmt.joins) > 0
+	has_agg := len(stmt.aggregates) > 0
+	has_group := len(stmt.group_by) > 0
+	return Select_Plan{
+		has_join       = has_join,
+		has_aggregate  = has_agg,
+		has_group_by   = has_group,
+		has_subquery   = false,
+		is_literal_only = false,
+		single_table   = !has_join,
+	}
+}
+
 @(private)
 exec_select_literals :: proc(
 	t: ^btree.Tree,
@@ -32,7 +65,8 @@ exec_select_literals :: proc(
 }
 
 exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
-	if _, is_nf := stmt.from.(parser.No_From); is_nf {
+	plan := plan_select(stmt)
+	if plan.is_literal_only {
 		rows, cols, ok := exec_select_literals(t, stmt)
 		if !ok { return false }
 
@@ -43,9 +77,8 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		return true
 	}
 
-	_, is_subq := stmt.from.(^parser.Select_Stmt)
-	if is_subq { return exec_select_subquery(t, stmt) }
-	if len(stmt.joins) == 0 { return exec_select_single(t, stmt) }
+	if plan.has_subquery { return exec_select_subquery(t, stmt) }
+	if plan.single_table { return exec_select_single(t, stmt) }
 
 	rows, combined_cols, table_ranges, total_cols, ok := build_join_result(t, stmt)
 	if !ok { return false }
@@ -97,6 +130,69 @@ select_header_names :: proc(stmt: parser.Select_Stmt) -> []string {
 	return names[:]
 }
 
+@(private)
+// fetch_single_rows scans a single-table SELECT (no joins), applying the WHERE
+// filter with LIMIT pushdown, and returns the rows, the table's columns, and
+// the single table-range descriptor. Aggregate routing, sort/dedup, projection,
+// and display are left to the caller (printing vs data variants differ there).
+fetch_single_rows :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	tbl_name: string,
+	stmt: parser.Select_Stmt,
+	allocator := context.allocator,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	[]Table_Col_Range,
+	bool,
+) {
+	tbl := table
+	table_tree := btree.init(t.pager, tbl.root_page)
+	has_order := false
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		has_order = true
+	}
+
+	_, has_lim := stmt.limit.?
+	max_rows := stmt.limit if has_lim && !has_order else nil
+	rows, scan_err := scan_table(
+		&table_tree,
+		&tbl,
+		stmt.where_clause,
+		max_rows,
+		t,
+		allocator,
+		cache,
+	)
+	if scan_err { return nil, nil, nil, false }
+
+	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
+	single_range := []Table_Col_Range {
+		{table_name = from_name, start_col = 0, col_count = len(tbl.columns)},
+	}
+	return rows, tbl.columns, single_range, true
+}
+
+@(private)
+// apply_sort_dedup applies ORDER BY and DISTINCT to a result set, in that
+// order (matching the standard pipeline). Returns false on sort failure.
+apply_sort_dedup :: proc(
+	rows: []Row_Entry,
+	stmt: parser.Select_Stmt,
+	cols: []types.Column,
+	single_range: []Table_Col_Range,
+	allocator := context.allocator,
+) -> (out: []Row_Entry, ok: bool) {
+	out = rows
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		if !sort_rows(out, order_clause, cols, single_range) { return nil, false }
+	}
+	if stmt.is_distinct { out = dedup_rows(out) }
+	return out, true
+}
+
 @(private="file")
 exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	tbl_name, name_ok := stmt.from.(string)
@@ -140,39 +236,29 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		return true
 	}
 
-	_, has_lim := stmt.limit.?
-	max_rows := stmt.limit if has_lim && !has_order else nil
-	rows, scan_err := scan_table(
-		&table_tree,
-		&table,
-		stmt.where_clause,
-		max_rows,
+	rows, cols, single_range, f_ok := fetch_single_rows(
 		t,
+		table,
+		tbl_name,
+		stmt,
 		context.temp_allocator,
 	)
-	if scan_err { return false }
-
-	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
-	single_range := []Table_Col_Range {
-		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
-	}
+	if !f_ok { return false }
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
-		return exec_select_aggregate_combined(stmt, rows, table.columns, single_range)
+		return exec_select_aggregate_combined(stmt, rows, cols, single_range)
 	}
 
 	display_indices, ok := build_display_indices(
 		stmt.columns,
-		table.columns,
+		cols,
 		single_range,
-		len(table.columns),
+		len(cols),
 	)
-
 	if !ok { return false }
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		if !sort_rows(rows, order_clause, table.columns, single_range) { return false }
-	}
-	if stmt.is_distinct { rows = dedup_rows(rows) }
-	display_results(rows, table.columns, display_indices, stmt.limit, stmt.offset, stmt.aliases)
+
+	rows, ok = apply_sort_dedup(rows, stmt, cols, single_range)
+	if !ok { return false }
+	display_results(rows, cols, display_indices, stmt.limit, stmt.offset, stmt.aliases)
 	return true
 }
 
@@ -194,38 +280,23 @@ exec_select_single_data :: proc(
 		return nil, nil, false
 	}
 
-	table_tree := btree.init(t.pager, table.root_page)
-	has_order := false
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		has_order = true
-	}
-
-	_, has_lim := stmt.limit.?
-	max_rows := stmt.limit if has_lim && !has_order else nil
-	rows, scan_err := scan_table(
-		&table_tree,
-		table,
-		stmt.where_clause,
-		max_rows,
+	rows, cols, single_range, f_ok := fetch_single_rows(
 		t,
+		table^,
+		tbl_name,
+		stmt,
 		context.temp_allocator,
 		cache,
 	)
-	if scan_err { return nil, nil, false }
-
-	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
-	single_range := []Table_Col_Range {
-		{table_name = from_name, start_col = 0, col_count = len(table.columns)},
-	}
+	if !f_ok { return nil, nil, false }
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
-		return exec_select_aggregate_data(stmt, rows, table.columns, single_range)
+		return exec_select_aggregate_data(stmt, rows, cols, single_range)
 	}
-	if order_clause, has_o2 := stmt.order_by.?; has_o2 && len(order_clause) > 0 {
-		if !sort_rows(rows, order_clause, table.columns, single_range) {
-			return nil, nil, false
-		}
-	}
-	if stmt.is_distinct { rows = dedup_rows(rows) }
+
+	sorted_rows, ok := apply_sort_dedup(rows, stmt, cols, single_range)
+	if !ok { return nil, nil, false }
+
+	rows = sorted_rows
 	if limit, has_limit := stmt.limit.?; has_limit {
 		off := u64(0)
 		if o, has_off := stmt.offset.?; has_off { off = o }
@@ -239,9 +310,9 @@ exec_select_single_data :: proc(
 	if len(stmt.columns) > 0 {
 		indices, i_ok := build_display_indices(
 			stmt.columns,
-			table.columns,
+			cols,
 			single_range,
-			len(table.columns),
+			len(cols),
 		)
 		if !i_ok { return nil, nil, false }
 
@@ -254,14 +325,14 @@ exec_select_single_data :: proc(
 
 		proj_cols := make([]types.Column, len(indices), context.temp_allocator)
 		for idx, i in indices {
-			proj_cols[i] = table.columns[idx]
+			proj_cols[i] = cols[idx]
 			if i < len(stmt.aliases) && stmt.aliases[i] != "" {
 				proj_cols[i].name = stmt.aliases[i]
 			}
 		}
 		return proj[:], proj_cols, true
 	}
-	return rows, table.columns, true
+	return rows, cols, true
 }
 
 exec_query :: proc(
@@ -273,15 +344,14 @@ exec_query :: proc(
 	[]types.Column,
 	bool,
 ) {
-	if _, is_nf := stmt.from.(parser.No_From); is_nf {
+	plan := plan_select(stmt)
+	if plan.is_literal_only {
 		return exec_select_literals(t, stmt)
 	}
-
-	_, is_subq := stmt.from.(^parser.Select_Stmt)
-	if is_subq {
+	if plan.has_subquery {
 		return exec_subquery_data(t, stmt, cache)
 	}
-	if len(stmt.joins) == 0 {
+	if plan.single_table {
 		return exec_select_single_data(t, stmt, cache)
 	}
 	return exec_select_join_data(t, stmt, cache)

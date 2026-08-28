@@ -75,7 +75,7 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		db.schema_root_page = new_root
 		update_header(db)
 	}
-	if exec_ok && db.txn_state == .NONE && !as_of_override {
+	if exec_ok && db.txn_state == .None && !as_of_override {
 		db.snapshot_batch_count += 1
 		threshold := db.snapshot_batch_threshold
 		if threshold <= 0 { threshold = 1 }

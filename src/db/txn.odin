@@ -9,12 +9,12 @@ import "src:types"
 
 @(private)
 begin_impl :: proc(db: ^Database) -> DB_Error {
-	if db.txn_state == .ACTIVE {
+	if db.txn_state == .Active {
 		log.warn("Transaction already in progress")
 		return .Transaction_Error
 	}
 
-	db.txn_state = .ACTIVE
+	db.txn_state = .Active
 	db.txn_start_file_len = u64(db.pager.file_len)
 	pager.wal_begin_txn(db.pager)
 	log.info("BEGIN transaction")
@@ -23,7 +23,7 @@ begin_impl :: proc(db: ^Database) -> DB_Error {
 
 @(private)
 commit_impl :: proc(db: ^Database) -> DB_Error {
-	if db.txn_state != .ACTIVE {
+	if db.txn_state != .Active {
 		log.warn("No active transaction to commit")
 		return .Transaction_Error
 	}
@@ -59,14 +59,14 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 		return .IO_Error
 	}
 
-	db.txn_state = .NONE
+	db.txn_state = .None
 	log.infof("COMMIT transaction (snapshot %d)", db.txn_snapshot_id)
 	return .None
 }
 
 @(private)
 rollback_impl :: proc(db: ^Database) -> DB_Error {
-	if db.txn_state != .ACTIVE {
+	if db.txn_state != .Active {
 		log.warn("No active transaction to roll back")
 		return .Transaction_Error
 	}
@@ -80,7 +80,7 @@ rollback_impl :: proc(db: ^Database) -> DB_Error {
 		if snap_ok { db.schema_root_page = snap_h.schema_root }
 	}
 
-	db.txn_state = .NONE
+	db.txn_state = .None
 	log.info("ROLLBACK transaction")
 	return .None
 }

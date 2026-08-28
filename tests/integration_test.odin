@@ -698,7 +698,7 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 		db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d);", i))
 	}
 
-	admin.checkpoint(d)
+	testing.expect(t, admin.checkpoint(d) == .None, "checkpoint succeeds")
 	db.close(d)
 	d2, open_err := db.open(fmt.tprintf("test_int_ckpt.db"))
 	testing.expect(t, open_err == .None, "reopen after checkpoint")
@@ -1349,10 +1349,10 @@ test_readonly_admin_commands :: proc(t: ^testing.T) {
 	db.execute(d, "CREATE TABLE t1 (id INT);")
 	db.execute(d, "CREATE TABLE t2 (val TEXT);")
 
-	admin.list_tables(d)
-	admin.describe_table(d, "t1")
-	admin.describe_table(d, "t2")
-	admin.stats(d)
+	testing.expect(t, admin.list_tables(d) == .None, "list_tables succeeds")
+	testing.expect(t, admin.describe_table(d, "t1") == .None, "describe_table t1 succeeds")
+	testing.expect(t, admin.describe_table(d, "t2") == .None, "describe_table t2 succeeds")
+	testing.expect(t, admin.stats(d) == .None, "stats succeeds")
 
 	q := db.query(d, "SELECT id FROM t1;")
 	testing.expect(t, q.ok, "query after admin commands")

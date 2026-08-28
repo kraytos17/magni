@@ -75,6 +75,12 @@ db_error_string :: proc(err: DB_Error) -> string {
 	}
 }
 
+// Txn_State tracks whether a transaction is currently in progress.
+Txn_State :: enum {
+	None,
+	Active,
+}
+
 Database :: struct {
 	pager:                    ^pager.Pager,
 	path:                     string,
@@ -82,10 +88,7 @@ Database :: struct {
 	schema_root_page:         u32,
 	latest_snapshot:          u32,
 	txn_snapshot_id:          u64,
-	txn_state:                enum {
-		NONE,
-		ACTIVE,
-	},
+	txn_state:                Txn_State,
 	txn_start_file_len:       u64,
 	snapshot_index:           map[u64]u32,
 	refs_page:                u32,
@@ -130,7 +133,7 @@ open :: proc(path: string) -> (^Database, DB_Error) {
 
 	db.pager = p
 	db.is_new = (db.pager.file_len == 0)
-	db.txn_state = .NONE
+	db.txn_state = .None
 	db.txn_snapshot_id = 0
 	db.snapshot_index = make(map[u64]u32, 128)
 	db.table_cache.allocator = context.allocator

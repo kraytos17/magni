@@ -4,7 +4,6 @@
 package admin
 
 import "core:fmt"
-import "core:log"
 import "core:sync"
 import "src:btree"
 import "src:cell"
@@ -97,8 +96,8 @@ integrity_check :: proc(database: ^db.Database) -> db.DB_Error {
 	return .None
 }
 
-list_tables :: proc(database: ^db.Database) {
-	if db.db_check(database) != .None { return }
+list_tables :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 
@@ -106,13 +105,14 @@ list_tables :: proc(database: ^db.Database) {
 	tables := schema.list_tables(&st, context.temp_allocator)
 	if len(tables) == 0 {
 		fmt.println("No tables found.")
-		return
+		return .None
 	}
 
 	fmt.println("Tables:")
 	for table in tables {
 		fmt.printf("  %s\n", table.name)
 	}
+	return .None
 }
 
 describe_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
@@ -149,8 +149,8 @@ describe_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Erro
 	return .None
 }
 
-stats :: proc(database: ^db.Database) {
-	if db.db_check(database) != .None { return }
+stats :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 
@@ -167,24 +167,23 @@ stats :: proc(database: ^db.Database) {
 	st := db.Schema_Tree(database)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	fmt.printf("Total tables: %d\n", len(tables))
+	return .None
 }
 
-dump_table :: proc(database: ^db.Database, table_name: string) {
-	if db.db_check(database) != .None { return }
+dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
+	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 	st := db.Schema_Tree(database)
 	table, found := schema.find_table(&st, table_name, context.temp_allocator)
 	if !found {
-		log.errorf("Error: Table '%s' not found.", table_name)
-		return
+		return .Table_Not_Found
 	}
 
 	table_tree := btree.init(database.pager, table.root_page)
 	cursor, err := btree.cursor_start(&table_tree, context.temp_allocator)
 	if err != .None {
-		log.errorf("Error: Could not start cursor: %v", err)
-		return
+		return .IO_Error
 	}
 	defer btree.cursor_destroy(&cursor)
 
@@ -210,54 +209,59 @@ dump_table :: proc(database: ^db.Database, table_name: string) {
 		btree.cursor_advance(&cursor)
 		row_count += 1
 	}
+
 	executor.render_table(cols, table_rows[:])
 	fmt.printf("(%d rows)\n", row_count)
+	return .None
 }
 
-print_schema :: proc(database: ^db.Database) {
-	if db.db_check(database) != .None { return }
+print_schema :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 	st := db.Schema_Tree(database)
 	schema.print_ddl(&st)
+	return .None
 }
 
-print_schema_debug :: proc(database: ^db.Database) {
-	if db.db_check(database) != .None { return }
+print_schema_debug :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 	st := db.Schema_Tree(database)
 	schema.debug_print_all(&st)
+	return .None
 }
 
-print_tree_page :: proc(database: ^db.Database, page_num: u32) {
-	if db.db_check(database) != .None { return }
+print_tree_page :: proc(database: ^db.Database, page_num: u32) -> db.DB_Error {
+	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 	st := db.Schema_Tree(database)
 	btree.tree_debug_print_node(&st, page_num)
+	return .None
 }
 
-print_snapshots :: proc(database: ^db.Database) {
-	if db.db_check(database) != .None { return }
-
+print_snapshots :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
 	sync.rw_mutex_shared_lock(&database.mu)
 	defer sync.rw_mutex_unlock(&database.mu)
 	if database.latest_snapshot == 0 {
 		fmt.println("No snapshots.")
-		return
+		return .None
 	}
 	snapshot.print_chain(database.pager, database.latest_snapshot)
+	return .None
 }
 
-print_snapshot_debug :: proc(database: ^db.Database) {
-	if db.db_check(database) != .None { return }
-
-	sync.lock(&database.mu)
-	defer sync.unlock(&database.mu)
+print_snapshot_debug :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
+	sync.rw_mutex_shared_lock(&database.mu)
+	defer sync.rw_mutex_unlock(&database.mu)
 	if database.latest_snapshot == 0 {
 		fmt.println("No snapshots.")
-		return
+		return .None
 	}
 	snapshot.debug_print_chain(database.pager, database.latest_snapshot)
+	return .None
 }

@@ -148,23 +148,37 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	case ".version":
 		fmt.printf("MagniDB v%s\n", APP_VERSION)
 	case ".tables":
-		admin.list_tables(database)
+		if err := admin.list_tables(database); err != .None {
+			log.errorf("%s", db.db_error_string(err))
+		}
 	case ".schema":
-		admin.print_schema(database)
+		if err := admin.print_schema(database); err != .None {
+			log.errorf("%s", db.db_error_string(err))
+		}
 	case ".debug_schema":
-		admin.print_schema_debug(database)
+		if err := admin.print_schema_debug(database); err != .None {
+			log.errorf("%s", db.db_error_string(err))
+		}
 	case ".tree_page":
 		parts := strings.split(trimmed, " ", context.temp_allocator)
 		if len(parts) == 2 {
 			page_num, num_ok := strconv.parse_u64(parts[1])
-			if num_ok { admin.print_tree_page(database, u32(page_num)) }
+			if num_ok {
+				if err := admin.print_tree_page(database, u32(page_num)); err != .None {
+					log.errorf("%s", db.db_error_string(err))
+				}
+			}
 		} else {
 			fmt.println("Usage: .tree_page <page_num>")
 		}
 	case ".snapshot_debug":
-		admin.print_snapshot_debug(database)
+		if err := admin.print_snapshot_debug(database); err != .None {
+			log.errorf("%s", db.db_error_string(err))
+		}
 	case ".stats":
-		admin.stats(database)
+		if err := admin.stats(database); err != .None {
+			log.errorf("%s", db.db_error_string(err))
+		}
 	case ".begin":
 		if db.begin(database) == .None {
 			fmt.println("Transaction started.")
@@ -178,7 +192,9 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 			fmt.println("Transaction rolled back.")
 		}
 	case ".snapshots":
-		admin.print_snapshots(database)
+		if err := admin.print_snapshots(database); err != .None {
+			log.errorf("%s", db.db_error_string(err))
+		}
 	case ".snapdiff":
 		parts := strings.split(trimmed, " ", context.temp_allocator)
 		if len(parts) == 3 {
@@ -258,7 +274,9 @@ handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 		} else if strings.has_prefix(trimmed, ".dump ") {
 			parts := strings.split(trimmed, " ", context.temp_allocator)
 			if len(parts) == 2 {
-				admin.dump_table(database, parts[1])
+				if err := admin.dump_table(database, parts[1]); err != .None {
+					log.errorf("%s", db.db_error_string(err))
+				}
 			} else {
 				fmt.println("Usage: .dump <table_name>")
 			}

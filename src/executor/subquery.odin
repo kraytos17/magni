@@ -69,6 +69,33 @@ exec_subquery :: proc(
 	return rows, table.columns
 }
 
+// materialize_subquery_rows clones the inner subquery result rows (they borrow
+// from the inner scan) and applies the outer WHERE filter. Returns the rows and
+// the virtual-column table-range descriptor used for resolution/display.
+@(private)
+materialize_subquery_rows :: proc(
+	inner_rows: []Row_Entry,
+	virtual_cols: []types.Column,
+	stmt: parser.Select_Stmt,
+) -> (rows: [dynamic]Row_Entry, single_range: []Table_Col_Range) {
+	rows = make([dynamic]Row_Entry, context.temp_allocator)
+	for entry in inner_rows {
+		cloned := deep_copy_values(entry.values)
+		append(&rows, Row_Entry{entry.rowid, cloned})
+	}
+
+	alias := stmt.from_alias
+	single_range = []Table_Col_Range {
+		{table_name = alias, start_col = 0, col_count = len(virtual_cols)},
+	}
+	if where_clause, has_where := stmt.where_clause.?; has_where {
+		filtered := filter_rows(rows[:], &where_clause, virtual_cols, single_range)
+		clear(&rows)
+		append(&rows, ..filtered)
+	}
+	return rows, single_range
+}
+
 @(private)
 exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	subq, subq_ok := stmt.from.(^parser.Select_Stmt)
@@ -77,22 +104,7 @@ exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	inner_rows, virtual_cols := exec_subquery(t, subq^)
 	if inner_rows == nil { return false }
 
-	alias := stmt.from_alias
-	rows := make([dynamic]Row_Entry, context.temp_allocator)
-	for entry in inner_rows {
-		cloned := deep_copy_values(entry.values)
-		append(&rows, Row_Entry{entry.rowid, cloned})
-	}
-
-	single_range := []Table_Col_Range {
-		{table_name = alias, start_col = 0, col_count = len(virtual_cols)},
-	}
-	if where_clause, has_where := stmt.where_clause.?; has_where {
-		filtered := filter_rows(rows[:], &where_clause, virtual_cols, single_range)
-		clear(&rows)
-		append(&rows, ..filtered)
-	}
-
+	rows, single_range := materialize_subquery_rows(inner_rows, virtual_cols, stmt)
 	display_indices, ok := build_display_indices(
 		stmt.columns,
 		virtual_cols,
@@ -129,22 +141,7 @@ exec_subquery_data :: proc(
 	inner_rows, virtual_cols := exec_subquery(t, subq^, cache)
 	if inner_rows == nil { return nil, nil, false }
 
-	alias := stmt.from_alias
-	rows := make([dynamic]Row_Entry, context.temp_allocator)
-	for entry in inner_rows {
-		cloned := deep_copy_values(entry.values)
-		append(&rows, Row_Entry{entry.rowid, cloned})
-	}
-
-	single_range := []Table_Col_Range {
-		{table_name = alias, start_col = 0, col_count = len(virtual_cols)},
-	}
-	if where_clause, has_where := stmt.where_clause.?; has_where {
-		filtered := filter_rows(rows[:], &where_clause, virtual_cols, single_range)
-		clear(&rows)
-		append(&rows, ..filtered)
-	}
-
+	rows, single_range := materialize_subquery_rows(inner_rows, virtual_cols, stmt)
 	display_indices, ok := build_display_indices(
 		stmt.columns,
 		virtual_cols,

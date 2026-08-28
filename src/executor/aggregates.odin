@@ -31,24 +31,31 @@ find_existing_group :: proc(
 	return -1, false
 }
 
+// build_groups resolves GROUP BY column indices and partitions rows into
+// groups (a single implicit group when there is no GROUP BY). Shared by the
+// printing and data aggregate evaluators.
 @(private)
-exec_select_aggregate_combined :: proc(
+build_groups :: proc(
 	stmt: parser.Select_Stmt,
 	rows: []Row_Entry,
 	combined_cols: []types.Column,
 	table_ranges: []Table_Col_Range,
-) -> bool {
-	group_by_indices := make([]int, len(stmt.group_by), context.temp_allocator)
+) -> (
+	groups: [dynamic]Group,
+	group_by_indices: []int,
+	ok: bool,
+) {
+	group_by_indices = make([]int, len(stmt.group_by), context.temp_allocator)
 	for col, i in stmt.group_by {
 		idx, col_ok := resolve_qualified_column(combined_cols, table_ranges, col)
 		if !col_ok {
 			log.errorf("Error: Unknown column in GROUP BY: %s", col)
-			return false
+			return nil, nil, false
 		}
 		group_by_indices[i] = idx
 	}
 
-	groups := make([dynamic]Group, context.temp_allocator)
+	groups = make([dynamic]Group, context.temp_allocator)
 	group_map := make(map[u64][dynamic]int, context.temp_allocator)
 	defer {
 		for _, bucket in group_map { delete(bucket) }
@@ -86,10 +93,21 @@ exec_select_aggregate_combined :: proc(
 			}
 		}
 	}
-
 	if len(groups) == 0 && len(group_by_indices) == 0 {
 		append(&groups, Group{rows = make([dynamic]Row_Entry, context.temp_allocator)})
 	}
+	return groups, group_by_indices, true
+}
+
+@(private)
+exec_select_aggregate_combined :: proc(
+	stmt: parser.Select_Stmt,
+	rows: []Row_Entry,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+) -> bool {
+	groups, group_by_indices, g_ok := build_groups(stmt, rows, combined_cols, table_ranges)
+	if !g_ok { return false }
 
 	rows_mat := make([dynamic][]string, context.temp_allocator)
 	for gi in 0 ..< len(groups) {
@@ -146,57 +164,8 @@ exec_select_aggregate_data :: proc(
 	[]types.Column,
 	bool,
 ) {
-	group_by_indices := make([]int, len(stmt.group_by), context.temp_allocator)
-	for col, i in stmt.group_by {
-		idx, col_ok := resolve_qualified_column(combined_cols, table_ranges, col)
-		if !col_ok {
-			log.errorf("Error: Unknown column in GROUP BY: %s", col)
-			return nil, nil, false
-		}
-		group_by_indices[i] = idx
-	}
-
-	groups := make([dynamic]Group, context.temp_allocator)
-	group_map := make(map[u64][dynamic]int, context.temp_allocator)
-	defer {
-		for _, bucket in group_map { delete(bucket) }
-		delete(group_map)
-	}
-	for row_entry, _ in rows {
-		if len(group_by_indices) == 0 {
-			if len(groups) == 0 {
-				append(&groups, Group{rows = make([dynamic]Row_Entry, context.temp_allocator)})
-			}
-			append(&groups[0].rows, row_entry)
-		} else {
-			hash := group_key_hash(row_entry.values, group_by_indices)
-			gi, exists := find_existing_group(
-				group_map,
-				groups[:],
-				hash,
-				row_entry,
-				group_by_indices,
-			)
-			if exists {
-				append(&groups[gi].rows, row_entry)
-			} else {
-				key_vals := make([]types.Value, len(group_by_indices), context.temp_allocator)
-				for col_idx, pos in group_by_indices {
-					key_vals[pos] = row_entry.values[col_idx]
-				}
-
-				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
-				append(&new_grp_rows, row_entry)
-				bucket := group_map[hash]
-				append(&bucket, len(groups))
-				group_map[hash] = bucket
-				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
-			}
-		}
-	}
-	if len(groups) == 0 && len(group_by_indices) == 0 {
-		append(&groups, Group{rows = make([dynamic]Row_Entry, context.temp_allocator)})
-	}
+	groups, group_by_indices, g_ok := build_groups(stmt, rows, combined_cols, table_ranges)
+	if !g_ok { return nil, nil, false }
 
 	result := make([dynamic]Row_Entry, context.temp_allocator)
 	for gi in 0 ..< len(groups) {
