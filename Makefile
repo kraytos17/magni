@@ -14,7 +14,7 @@ VET_FLAGS     := -vet -vet-shadowing -warnings-as-errors -strict-style
 .PHONY: build release run clean rebuild
 .PHONY: test test-verbose test-single test-cli test-cli-full
 .PHONY: check check-vet vet vet-all vet-shadowing vet-unused vet-style vet-cast
-.PHONY: perf fuzz-corpus fuzz-build fuzz-test fuzz-run help
+.PHONY: perf fuzz-corpus fuzz-build fuzz-cov-build fuzz-test fuzz-run fuzz-run-parallel help
 
 build:
 	@echo "Building debug version..."
@@ -87,11 +87,17 @@ fuzz-corpus:
 fuzz-build:
 	@bash fuzz/scripts/build.sh
 
+fuzz-cov-build:
+	@bash fuzz/scripts/build-cov.sh
+
 fuzz-test: fuzz-build
 	@bash fuzz/scripts/test-corpus.sh
 
 fuzz-run:
 	@bash fuzz/scripts/run-afl.sh
+
+fuzz-run-parallel:
+	@bash fuzz/scripts/run-afl-parallel.sh 4
 
 help:
 	@bash scripts/help.sh

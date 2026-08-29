@@ -23,8 +23,14 @@ parse_create_table :: proc(
 	columns := make([dynamic]types.Column, allocator)
 	defer if !ok {
 		for col in columns { delete(col.name, allocator) }
-		delete(table_name, allocator); delete(columns)
-		for fk in fks { delete(fk.col); delete(fk.ref_table); delete(fk.ref_col) }
+
+		delete(table_name, allocator)
+		delete(columns)
+		for fk in fks {
+			delete(fk.col, allocator)
+			delete(fk.ref_table, allocator)
+			delete(fk.ref_col, allocator)
+		}
 		delete(fks)
 	}
 	for {

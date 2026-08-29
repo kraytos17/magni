@@ -1119,3 +1119,28 @@ test_parse_deep_nesting_guard :: proc(t: ^testing.T) {
 	_, ok2, _ := parser.parse(build(t, 8), context.temp_allocator)
 	testing.expect(t, ok2, "moderate nesting parses")
 }
+
+@(test)
+test_tokenizer_keyword_length_guard :: proc(t: ^testing.T) {
+	// Regression (fuzzing): an identifier longer than the longest keyword
+	// ("references", 10 chars) used to hit keyword_bucket_offsets[9] = 58, which
+	// exposed "references" to 11-char identifiers and indexed kw.word[10] OOB.
+	_, _, _ = parser.parse("SELECT id FROM t AS REFERENCEST 5;", context.temp_allocator)
+	testing.expect(t, true, "over-long identifier must not crash the tokenizer")
+
+	// "references" must still tokenize as a keyword (FOREIGN KEY REFERENCES).
+	_, ok, _ := parser.parse("CREATE TABLE a (x INT, FOREIGN KEY (x) REFERENCES b(id));", context.temp_allocator)
+	testing.expect(t, ok, "FOREIGN KEY ... REFERENCES still parses")
+}
+
+@(test)
+test_create_table_fk_error_cleanup :: proc(t: ^testing.T) {
+	// Regression (fuzzing): when CREATE TABLE parses a FOREIGN KEY but the
+	// statement then fails, the error cleanup freed the FK strings with
+	// context.allocator instead of the passed allocator -> bad free under ASan.
+	_, ok, _ := parser.parse(
+		"CREATE TABLE products (price INT CHECK (price > 0), FOREIGN KEY (cat) REFERENCES c(idI);",
+		context.temp_allocator,
+	)
+	testing.expect(t, !ok, "malformed FOREIGN KEY must return a parse error, not crash")
+}

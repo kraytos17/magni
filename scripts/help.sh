@@ -30,7 +30,9 @@ MagniDB targets
   PERF / FUZZ
     perf             run timing baseline (release)
     fuzz-corpus      regenerate the fuzz seed corpus
-    fuzz-build       build the ASan fuzz target
+    fuzz-build       build the ASan fuzz target (triage/regression)
+    fuzz-cov-build   build the coverage-instrumented target (campaigns)
     fuzz-test        run every fuzz seed under ASan
-    fuzz-run         launch an AFL++ campaign
+    fuzz-run         launch a coverage-guided AFL++ campaign
+    fuzz-run-parallel launch a 4-worker parallel campaign
 EOF

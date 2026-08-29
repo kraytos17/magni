@@ -42,7 +42,7 @@ keyword_table := []Keyword_Entry{
 // keyword_bucket_offsets[i] = start index into keyword_table for words of length i+2.
 // The final value equals len(keyword_table); the bucket for length N spans
 // keyword_table[offsets[N-2]:offsets[N-1]].
-keyword_bucket_offsets := [10]int{0, 6, 13, 25, 39, 48, 53, 56, 58, 58}
+keyword_bucket_offsets := [10]int{0, 6, 13, 25, 39, 48, 53, 56, 58, 59}
 
 @(private="file")
 match_keyword :: proc(ident: string) -> Token_Type {
@@ -61,6 +61,8 @@ match_keyword :: proc(ident: string) -> Token_Type {
 	start := keyword_bucket_offsets[bi]
 	end := len(keyword_table) if bi == len(keyword_bucket_offsets) - 1 else keyword_bucket_offsets[bi + 1]
 	for kw in keyword_table[start:end] {
+		if len(kw.word) != len(ident) { continue }
+
 		match := true
 		for i in 0 ..< len(ident) {
 			if folded[i] != kw.word[i] {
