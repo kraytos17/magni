@@ -10,18 +10,19 @@ cd "$ROOT"
 N="${1:-4}"
 shift || true
 
-OUT="${AFL_OUT:-fuzz/afl-output}"
+OUT="${MAGNI_FUZZ_OUT:-fuzz/afl-output}"
 rm -rf "$OUT"
+mkdir -p "$OUT"
 
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' INT TERM EXIT
 
 echo "Starting $N AFL++ workers (output: $OUT)..."
-AFL_OUT="$OUT" bash fuzz/scripts/run-afl.sh -M master "$@" &
+MAGNI_FUZZ_OUT="$OUT" bash fuzz/scripts/run-afl.sh -M master "$@" &
 pids+=($!)
 
 for i in $(seq 1 $((N - 1))); do
-  AFL_OUT="$OUT" bash fuzz/scripts/run-afl.sh -S "s$i" "$@" &
+  MAGNI_FUZZ_OUT="$OUT" bash fuzz/scripts/run-afl.sh -S "s$i" "$@" &
   pids+=($!)
 done
 

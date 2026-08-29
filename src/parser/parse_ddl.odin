@@ -107,6 +107,10 @@ parse_create_table :: proc(
 					depth := 1
 					for depth > 0 {
 						tok := peek(p); advance(p)
+						if tok.type == .EOF {
+							strings.builder_destroy(&b)
+							return err(p, "Expected ) in CHECK constraint")
+						}
 						if tok.type == .LPAREN { depth += 1 }
 						if tok.type == .RPAREN { depth -= 1; if depth == 0 { break } }
 						if strings.builder_len(b) > 0 { strings.write_byte(&b, ' ') }

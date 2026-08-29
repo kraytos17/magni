@@ -8,8 +8,8 @@
 # parallel campaigns (see run-afl-parallel.sh).
 #
 # Env overrides:
-#   AFL_OUT=<dir>   output directory (default fuzz/afl-output)
-#   AFL_NO_UI=1     headless (CI)
+#   MAGNI_FUZZ_OUT=<dir>  output directory (default fuzz/afl-output)
+#   AFL_NO_UI=1           headless (CI)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
@@ -18,16 +18,11 @@ if [ ! -x fuzz/fuzz_target_cov ]; then
   bash fuzz/scripts/build-cov.sh
 fi
 
-OUT="${AFL_OUT:-fuzz/afl-output}"
-rm -rf "$OUT"
+OUT="${MAGNI_FUZZ_OUT:-fuzz/afl-output}"
 mkdir -p fuzz/corpus
 
-# A secondary worker (-S) syncs seeds from the master's queue, so it must NOT
-# supply -i. Everyone else seeds from the corpus.
+# All workers (master and secondaries) need -i for initial seeds.
 seed_args=(-i fuzz/corpus)
-if [[ " $* " == *" -S "* ]]; then
-  seed_args=()
-fi
 
 AFL_SKIP_CPUFREQ=1 \
 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \

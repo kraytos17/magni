@@ -1105,7 +1105,7 @@ test_parse_deep_nesting_guard :: proc(t: ^testing.T) {
 		for _ in 0 ..< levels {
 			strings.write_string(&sb, "SELECT * FROM (")
 		}
-		
+
 		strings.write_string(&sb, "SELECT * FROM t")
 		for i in 0 ..< levels {
 			strings.write_string(&sb, fmt.tprintf(") AS s%d", i))
@@ -1118,6 +1118,34 @@ test_parse_deep_nesting_guard :: proc(t: ^testing.T) {
 
 	_, ok2, _ := parser.parse(build(t, 8), context.temp_allocator)
 	testing.expect(t, ok2, "moderate nesting parses")
+}
+
+@(test)
+test_parse_deep_paren_where_guard :: proc(t: ^testing.T) {
+	// Regression (fuzzing): deeply nested parentheses in a WHERE expression
+	// used to recurse parse_primary <-> parse_or_expr <-> parse_and_expr
+	// until the native stack overflowed. MAX_PARSE_NESTING is 512; 600 nested
+	// parens exceed it and must produce a parse error, not a crash.
+	build := proc(t: ^testing.T, levels: int) -> string {
+		sb: strings.Builder
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "SELECT * FROM t WHERE ")
+		for _ in 0 ..< levels {
+			strings.write_string(&sb, "(")
+		}
+		
+		strings.write_string(&sb, "a=1")
+		for _ in 0 ..< levels {
+			strings.write_string(&sb, ")")
+		}
+		return strings.to_string(sb)
+	}
+
+	_, ok, _ := parser.parse(build(t, 600), context.temp_allocator)
+	testing.expect(t, !ok, "over-limit paren nesting returns an error, not a crash")
+
+	_, ok2, _ := parser.parse(build(t, 8), context.temp_allocator)
+	testing.expect(t, ok2, "moderate paren nesting parses")
 }
 
 @(test)
@@ -1143,4 +1171,43 @@ test_create_table_fk_error_cleanup :: proc(t: ^testing.T) {
 		context.temp_allocator,
 	)
 	testing.expect(t, !ok, "malformed FOREIGN KEY must return a parse error, not crash")
+}
+
+@(test)
+test_create_table_unbalanced_check_parens :: proc(t: ^testing.T) {
+	// Regression (fuzzing): an unbalanced `(` inside a CHECK(...) constraint used
+	// to make the CHECK scan loop spin forever on EOF (peek/advance return EOF
+	// without advancing), hanging the parser. It must return a parse error.
+	build := proc(levels: int) -> string {
+		sb: strings.Builder
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "CREATE TABLE t (a INT CHECK (a > 0")
+		for _ in 0 ..< levels {
+			strings.write_string(&sb, "(")
+		}
+		return strings.to_string(sb)
+	}
+
+	_, ok, _ := parser.parse(build(1), context.temp_allocator)
+	testing.expect(t, !ok, "unbalanced CHECK parens return an error, not a hang")
+
+	_, ok2, _ := parser.parse(build(200), context.temp_allocator)
+	testing.expect(t, !ok2, "deep unbalanced CHECK parens return an error, not a hang")
+
+	_, ok3, _ := parser.parse(
+		"CREATE TABLE t (a INT CHECK (a > 0 AND (b < 5)));",
+		context.temp_allocator,
+	)
+	testing.expect(t, ok3, "balanced nested CHECK parens still parse")
+}
+
+@(test)
+test_create_table_check_eof_no_paren :: proc(t: ^testing.T) {
+	// Regression (fuzzing): `CHECK` with no closing paren at all (or no opening
+	// content) must terminate, not spin at EOF.
+	_, ok, _ := parser.parse("CREATE TABLE t (a INT CHECK (a > 0", context.temp_allocator)
+	testing.expect(t, !ok, "CHECK with unterminated paren returns an error, not a hang")
+
+	_, ok2, _ := parser.parse("CREATE TABLE t (a INT CHECK", context.temp_allocator)
+	testing.expect(t, !ok2, "bare CHECK keyword returns an error, not a hang")
 }

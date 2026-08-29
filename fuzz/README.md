@@ -59,7 +59,7 @@ AFL_NO_UI=1 bash fuzz/scripts/run-afl-parallel.sh 4 -V 3600
 fuzz/scripts/run-one.sh fuzz/afl-output/crashes/id:000000,*
 ```
 
-AFL++ output goes to `fuzz/afl-output/` (gitignored; set `AFL_OUT` to override).
+AFL++ output goes to `fuzz/afl-output/` (gitignored; set `MAGNI_FUZZ_OUT` to override).
 Crashes land in `fuzz/afl-output/crashes/` (each is a reproducer), hangs in
 `fuzz/afl-output/hangs/`. Minimize with `afl-tmin` before filing a regression.
 

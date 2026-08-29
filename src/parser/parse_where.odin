@@ -124,6 +124,12 @@ parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bo
 
 @(private="file")
 parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
+	p.nest_depth += 1
+	defer p.nest_depth -= 1
+	if p.nest_depth > MAX_PARSE_NESTING {
+		if p.err_msg == "" { p.err_msg = "Expression nesting too deep" }
+		return nil, false
+	}
 	if match(p, .NOT) {
 		child, child_ok := parse_primary(p, allocator)
 		if !child_ok { return nil, false }
