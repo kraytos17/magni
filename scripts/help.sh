@@ -19,20 +19,14 @@ MagniDB targets
 
   CHECK / VET
     check            parse + type check (no vet)
-    check-vet        parse + type check with comprehensive vet
     vet              vet + shadowing + strict-style (fast check)
+    vet <flag>       single-flag vet: shadowing | unused | style | cast
     vet-all          vet via build+test (LLVM)
-    vet-shadowing    check variable shadowing only
-    vet-unused       check unused variables/imports only
-    vet-style        check style (trailing commas, semicolons)
-    vet-cast         check redundant casts/transmutes only
 
   PERF / FUZZ
     perf             run timing baseline (release)
-    fuzz-corpus      regenerate the fuzz seed corpus
-    fuzz-build       build the ASan fuzz target (triage/regression)
-    fuzz-cov-build   build the coverage-instrumented target (campaigns)
-    fuzz-test        run every fuzz seed under ASan
-    fuzz-run         launch a coverage-guided AFL++ campaign
-    fuzz-run-parallel launch a 4-worker parallel campaign
+    fuzz <cmd>       corpus|build|cov|test|run|campaign|status|stop
+                     e.g. make fuzz campaign  (1h/4 workers; FUZZ_SECONDS, FUZZ_WORKERS)
+                          make fuzz status
+                          make fuzz stop
 EOF
