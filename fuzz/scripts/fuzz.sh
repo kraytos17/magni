@@ -15,7 +15,7 @@ args=()
 for a in "$@"; do [[ "$a" != *"="* ]] && args+=("$a"); done
 
 case "$cmd" in
-  corpus)   python3 fuzz/corpus/gen_corpus.py ;;
+  corpus)   python3 fuzz/corpus/gen_corpus.py; rm -rf fuzz/corpus/__pycache__ ;;
   build)    bash fuzz/scripts/build.sh ;;
   cov)      bash fuzz/scripts/build-cov.sh ;;
   test)     bash fuzz/scripts/test-corpus.sh ;;

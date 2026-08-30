@@ -61,6 +61,7 @@ SEEDS = [
     ("whitespace", "  \n\tSELECT   1  ;  "),
 
     ("unicode", "SELECT 'h\u00e9llo w\u00f6rld';".encode("utf-8")),
+    ("unicode_emoji", "SELECT '😀';".encode()),
     ("long_identifier", b"SELECT " + b"x" * 500 + b";"),
     ("long_string", b"SELECT '" + b"x" * 10000 + b"';"),
     ("where_eq", 'SELECT * FROM t WHERE a = 1;'),

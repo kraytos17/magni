@@ -9,6 +9,8 @@ if [ ! -x fuzz/fuzz_target ]; then
 fi
 
 for f in fuzz/corpus/*; do
+  [ -f "$f" ] || continue
+  [[ "$f" == *gen_corpus.py ]] && continue
   ASAN_OPTIONS=detect_leaks=0 fuzz/fuzz_target "$f" || { echo "FAILED on seed: $f"; exit 1; }
 done
 echo "All fuzz seeds passed under ASan."
