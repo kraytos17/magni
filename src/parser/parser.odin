@@ -91,6 +91,8 @@ Token_Type :: enum u8 {
 	INTERSECT,
 	EXCEPT,
 	ALL,
+	BETWEEN,
+	USING,
 }
 
 parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, string) {

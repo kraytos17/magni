@@ -31,13 +31,25 @@ join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[d
 }
 
 @(private="file")
+join_emit_null_left_row :: proc(right_row: Row_Entry, left_col_count: int, new_rows: ^[dynamic]Row_Entry) {
+	null_row := make([]types.Value, left_col_count + len(right_row.values), context.temp_allocator)
+	for k in 0 ..< left_col_count {
+		null_row[k] = types.value_null()
+	}
+	copy(null_row[left_col_count:], right_row.values)
+	append(new_rows, Row_Entry{0, null_row})
+}
+
+@(private="file")
 join_hash_i64 :: proc(
 	rows: []Row_Entry,
 	right_rows: []Row_Entry,
 	left_col: int,
 	right_col: int,
 	right_col_count: int,
+	left_col_count: int,
 	is_left: bool,
+	is_right: bool,
 	new_rows: ^[dynamic]Row_Entry,
 ) {
 	build_left := len(rows) <= len(right_rows)
@@ -64,14 +76,16 @@ join_hash_i64 :: proc(
 	}
 
 	matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+	matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
 	if build_left {
-		for r_row in right_rows {
+		for r_row, ri in right_rows {
 			key, key_ok := r_row.values[right_col].(i64)
 			if !key_ok { continue }
 			if matches, has := ht[key]; has {
-				for ri in matches {
-					matched_left[ri] = true
-					join_emit_combined(rows[ri], r_row.values, new_rows)
+				for li in matches {
+					matched_left[li] = true
+					matched_right[ri] = true
+					join_emit_combined(rows[li], r_row.values, new_rows)
 				}
 			}
 		}
@@ -82,6 +96,7 @@ join_hash_i64 :: proc(
 			if matches, has := ht[key]; has {
 				for ri in matches {
 					matched_left[li] = true
+					matched_right[ri] = true
 					join_emit_combined(l_row, right_rows[ri].values, new_rows)
 				}
 			}
@@ -96,7 +111,14 @@ join_hash_i64 :: proc(
 			join_emit_null_row(rows[li], right_col_count, new_rows)
 		}
 	}
+	if is_right {
+		for ri in 0 ..< len(right_rows) {
+			if ri in matched_right { continue }
+			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
+		}
+	}
 	delete(matched_left)
+	delete(matched_right)
 }
 
 @(private="file")
@@ -106,7 +128,9 @@ join_hash_string :: proc(
 	left_col: int,
 	right_col: int,
 	right_col_count: int,
+	left_col_count: int,
 	is_left: bool,
+	is_right: bool,
 	new_rows: ^[dynamic]Row_Entry,
 ) {
 	build_left := len(rows) <= len(right_rows)
@@ -129,13 +153,15 @@ join_hash_string :: proc(
 	}
 
 	matched_left := make(map[int]bool, len(rows), context.temp_allocator)
+	matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
 	if build_left {
-		for r_row in right_rows {
+		for r_row, ri in right_rows {
 			key := hash_join_key(r_row.values[right_col])
 			if matches, has := ht[key]; has {
-				for ri in matches {
-					matched_left[ri] = true
-					join_emit_combined(rows[ri], r_row.values, new_rows)
+				for li in matches {
+					matched_left[li] = true
+					matched_right[ri] = true
+					join_emit_combined(rows[li], r_row.values, new_rows)
 				}
 			}
 		}
@@ -145,6 +171,7 @@ join_hash_string :: proc(
 			if matches, has := ht[key]; has {
 				for ri in matches {
 					matched_left[li] = true
+					matched_right[ri] = true
 					join_emit_combined(l_row, right_rows[ri].values, new_rows)
 				}
 			}
@@ -159,7 +186,14 @@ join_hash_string :: proc(
 			join_emit_null_row(rows[li], right_col_count, new_rows)
 		}
 	}
+	if is_right {
+		for ri in 0 ..< len(right_rows) {
+			if ri in matched_right { continue }
+			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
+		}
+	}
 	delete(matched_left)
+	delete(matched_right)
 }
 
 @(private)
@@ -294,6 +328,8 @@ build_join_result :: proc(
 		jc := stmt.joins[j_idx]
 		info_idx := j_idx + 1
 		is_left := jc.join_type == .LEFT
+		is_right := jc.join_type == .RIGHT
+		left_col_count := table_ctxs[info_idx - 1].range.col_count
 		right_col_count := table_ctxs[info_idx].range.col_count
 		new_rows := make([dynamic]Row_Entry, context.temp_allocator)
 		right_rows: []Row_Entry
@@ -341,7 +377,9 @@ build_join_result :: proc(
 								left_idx,
 								right_idx - right_adjust,
 								right_col_count,
+								left_col_count,
 								is_left,
+								is_right,
 								&new_rows,
 							)
 						} else {
@@ -351,7 +389,9 @@ build_join_result :: proc(
 								left_idx,
 								right_idx - right_adjust,
 								right_col_count,
+								left_col_count,
 								is_left,
+								is_right,
 								&new_rows,
 							)
 						}
@@ -360,10 +400,11 @@ build_join_result :: proc(
 			}
 		}
 		if !hash_used {
+			matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
 			if is_left || len(right_rows) >= len(rows) {
 				for outer_row in rows {
 					matched := false
-					for right_row in right_rows {
+					for right_row, ri in right_rows {
 						try_join_match(
 							outer_row,
 							right_row.values,
@@ -373,15 +414,16 @@ build_join_result :: proc(
 							&new_rows,
 							&matched,
 						)
+						if matched { matched_right[ri] = true }
 					}
 					if is_left && !matched {
 						join_emit_null_row(outer_row, right_col_count, &new_rows)
 					}
 				}
 			} else {
-				for r_row in right_rows {
+				for r_row, r_idx in right_rows {
 					for l_row in rows {
-						_dummy := false
+						dummy := false
 						try_join_match(
 							l_row,
 							r_row.values,
@@ -389,11 +431,19 @@ build_join_result :: proc(
 							combined_cols,
 							table_ranges,
 							&new_rows,
-							&_dummy,
+							&dummy,
 						)
+						if dummy { matched_right[r_idx] = true }
 					}
 				}
 			}
+			if is_right {
+				for ri in 0 ..< len(right_rows) {
+					if ri in matched_right { continue }
+					join_emit_null_left_row(right_rows[ri], left_col_count, &new_rows)
+				}
+			}
+			delete(matched_right)
 		}
 		rows = new_rows[:]
 	}

@@ -896,6 +896,80 @@ test_parse_left_outer_join :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_parse_right_join :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM a RIGHT JOIN b ON a.x = b.y;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "RIGHT JOIN should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect_value(t, len(sel.joins), 1)
+	testing.expect(t, sel.joins[0].join_type == .RIGHT, "Expected RIGHT join")
+	tbl_name, _ := sel.joins[0].source.(string)
+	testing.expect_value(t, tbl_name, "b")
+	_, has_on := sel.joins[0].on_clause.?
+	testing.expect(t, has_on, "RIGHT JOIN should have ON clause")
+}
+
+@(test)
+test_parse_right_outer_join :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM a RIGHT OUTER JOIN b ON a.x = b.y;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "RIGHT OUTER JOIN should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect_value(t, len(sel.joins), 1)
+	testing.expect(t, sel.joins[0].join_type == .RIGHT, "Expected RIGHT join")
+}
+
+@(test)
+test_parse_between :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE a BETWEEN 1 AND 10;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "BETWEEN should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, has_clause := sel.where_clause.?
+	testing.expect(t, has_clause, "Missing WHERE clause")
+	// BETWEEN desugars to AND: (a >= 1 AND a <= 10)
+	testing.expect(t, clause.root.kind == .AND, "BETWEEN should desugar to AND")
+	testing.expect_value(t, len(clause.root.children), 2)
+	left := clause.root.children[0]
+	right := clause.root.children[1]
+	testing.expect(t, left.cond.operator == .GREATER_EQUAL, "Left should be >=")
+	testing.expect(t, right.cond.operator == .LESS_EQUAL, "Right should be <=")
+}
+
+@(test)
+test_parse_not_between :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM t WHERE a NOT BETWEEN 1 AND 10;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "NOT BETWEEN should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	clause, has_clause := sel.where_clause.?
+	testing.expect(t, has_clause, "Missing WHERE clause")
+	// NOT BETWEEN desugars to OR: (a < 1 OR a > 10)
+	testing.expect(t, clause.root.kind == .OR, "NOT BETWEEN should desugar to OR")
+	testing.expect_value(t, len(clause.root.children), 2)
+	left := clause.root.children[0]
+	right := clause.root.children[1]
+	testing.expect(t, left.cond.operator == .LESS_THAN, "Left should be <")
+	testing.expect(t, right.cond.operator == .GREATER_THAN, "Right should be >")
+}
+
+@(test)
+test_parse_using_join :: proc(t: ^testing.T) {
+	sql := "SELECT * FROM a JOIN b USING (id);"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "USING should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "Expected Select_Stmt")
+	testing.expect_value(t, len(sel.joins), 1)
+	_, has_on := sel.joins[0].on_clause.?
+	testing.expect(t, has_on, "USING should produce ON clause")
+}
+
+@(test)
 test_parse_table_alias_as :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t AS a;"
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
@@ -1133,7 +1207,7 @@ test_parse_deep_paren_where_guard :: proc(t: ^testing.T) {
 		for _ in 0 ..< levels {
 			strings.write_string(&sb, "(")
 		}
-		
+
 		strings.write_string(&sb, "a=1")
 		for _ in 0 ..< levels {
 			strings.write_string(&sb, ")")
@@ -1210,4 +1284,144 @@ test_create_table_check_eof_no_paren :: proc(t: ^testing.T) {
 
 	_, ok2, _ := parser.parse("CREATE TABLE t (a INT CHECK", context.temp_allocator)
 	testing.expect(t, !ok2, "bare CHECK keyword returns an error, not a hang")
+}
+
+@(test)
+test_tokenize_block_comment_unterminated :: proc(t: ^testing.T) {
+	// Bug #1: `/*x` (3 chars) used to pass `i+1 < len` check at i=2 then
+	// `i += 2` past EOF, returning success. Must reject.
+	_, ok := parser.tokenize("/*x", context.temp_allocator)
+	testing.expect(t, !ok, "unterminated block comment '/*x' must fail")
+
+	_, ok2 := parser.tokenize("/* unterminated", context.temp_allocator)
+	testing.expect(t, !ok2, "unterminated block comment with space must fail")
+
+	_, ok3 := parser.tokenize("SELECT 1 /* comment", context.temp_allocator)
+	testing.expect(t, !ok3, "SELECT with unterminated block comment must fail")
+
+	// Valid block comments still parse.
+	tokens, ok4 := parser.tokenize("SELECT 1 /* ok */ 2", context.temp_allocator)
+	testing.expect(t, ok4, "valid block comment must succeed")
+	testing.expect(t, len(tokens) == 4, fmt.tprintf("Expected 4 tokens (SELECT 1 2 EOF), got %d", len(tokens)))
+}
+
+@(test)
+test_tokenize_hex_no_digits :: proc(t: ^testing.T) {
+	// Bug #2-3: `0x` alone or `0xG` used to tokenize as NUMBER "0x" / "0x",
+	// leaving `G` as a separate identifier. Must reject bare `0x`.
+	_, ok := parser.tokenize("0x", context.temp_allocator)
+	testing.expect(t, !ok, "bare '0x' must fail")
+
+	_, ok2 := parser.tokenize("SELECT 0x", context.temp_allocator)
+	testing.expect(t, !ok2, "SELECT with bare '0x' must fail")
+
+	_, ok3 := parser.tokenize("-0x", context.temp_allocator)
+	testing.expect(t, !ok3, "negative bare '0x' must fail")
+
+	// Valid hex still parses.
+	tokens, ok4 := parser.tokenize("0xFF", context.temp_allocator)
+	testing.expect(t, ok4, "valid hex '0xFF' must succeed")
+	testing.expect(t, tokens[0].type == .NUMBER, "Expected NUMBER")
+	testing.expect(t, tokens[0].lexeme == "0xFF", "Expected '0xFF' lexeme")
+}
+
+@(test)
+test_tokenize_scientific_no_digits :: proc(t: ^testing.T) {
+	// Bug #4-5: `1e`, `1e+` must NOT be tokenized as a single NUMBER.
+	// `1e` → NUMBER "1" + IDENTIFIER "e" (e is not part of the number).
+	// `1e+` / `1e-` fail tokenization because +/- aren't standalone tokens in MagniDB.
+	// `1e` → NUMBER "1" + IDENTIFIER "e" (3 tokens with EOF)
+	tokens, ok := parser.tokenize("1e", context.temp_allocator)
+	testing.expect(t, ok, "'1e' tokenization must succeed")
+	testing.expect(t, len(tokens) == 3, fmt.tprintf("Expected 3 tokens, got %d", len(tokens)))
+	testing.expect(t, tokens[0].type == .NUMBER, "First token must be NUMBER")
+	testing.expect(t, tokens[0].lexeme == "1", "NUMBER lexeme must be '1'")
+	testing.expect(t, tokens[1].type == .IDENTIFIER, "Second token must be IDENTIFIER")
+
+	// `1e+` / `1e-` fail: +/- aren't standalone tokens
+	_, ok2 := parser.tokenize("1e+", context.temp_allocator)
+	testing.expect(t, !ok2, "'1e+' must fail (+ not a token)")
+
+	_, ok3 := parser.tokenize("1e-", context.temp_allocator)
+	testing.expect(t, !ok3, "'1e-' must fail (- not a standalone token)")
+
+	// `1E` → NUMBER "1" + IDENTIFIER "E"
+	tokens4, ok4 := parser.tokenize("1E", context.temp_allocator)
+	testing.expect(t, ok4, "'1E' tokenization must succeed")
+	testing.expect(t, tokens4[0].type == .NUMBER, "First token must be NUMBER")
+	testing.expect(t, tokens4[0].lexeme == "1", "NUMBER lexeme must be '1'")
+
+	// Valid scientific notation still parses as a single NUMBER.
+	tokens5, ok5 := parser.tokenize("1e10", context.temp_allocator)
+	testing.expect(t, ok5, "'1e10' must succeed")
+	testing.expect(t, tokens5[0].type == .NUMBER, "Expected NUMBER")
+	testing.expect(t, tokens5[0].lexeme == "1e10", "Expected '1e10' lexeme")
+
+	tokens6, ok6 := parser.tokenize("1.5E+3", context.temp_allocator)
+	testing.expect(t, ok6, "'1.5E+3' must succeed")
+	testing.expect(t, tokens6[0].lexeme == "1.5E+3", "Expected '1.5E+3' lexeme")
+}
+
+@(test)
+test_tokenize_blob_invalid :: proc(t: ^testing.T) {
+	// Bug #6: blob with non-hex content or odd length must be rejected.
+	_, ok := parser.tokenize("X'ZZ'", context.temp_allocator)
+	testing.expect(t, !ok, "X'ZZ' (non-hex) must fail")
+
+	// X'' (empty) is valid — zero-length blob.
+	tokens_empty, ok_empty := parser.tokenize("X''", context.temp_allocator)
+	testing.expect(t, ok_empty, "X'' (empty) must succeed")
+	testing.expect(t, tokens_empty[0].type == .BLOB_LITERAL, "Expected BLOB_LITERAL")
+	testing.expect(t, tokens_empty[0].lexeme == "", "Expected empty lexeme")
+
+	_, ok3 := parser.tokenize("X'ABC'", context.temp_allocator)
+	testing.expect(t, !ok3, "X'ABC' (odd length) must fail")
+
+	_, ok4 := parser.tokenize("x'GG'", context.temp_allocator)
+	testing.expect(t, !ok4, "x'GG' (lowercase non-hex) must fail")
+
+	// Valid hex blobs still parse.
+	tokens, ok5 := parser.tokenize("X'DEADBEEF'", context.temp_allocator)
+	testing.expect(t, ok5, "X'DEADBEEF' must succeed")
+	testing.expect(t, tokens[0].type == .BLOB_LITERAL, "Expected BLOB_LITERAL")
+	testing.expect(t, tokens[0].lexeme == "DEADBEEF", "Expected 'DEADBEEF' lexeme")
+
+	tokens2, ok6 := parser.tokenize("X'FF'", context.temp_allocator)
+	testing.expect(t, ok6, "X'FF' must succeed")
+	testing.expect(t, tokens2[0].lexeme == "FF", "Expected 'FF' lexeme")
+}
+
+@(test)
+test_tokenize_multiline_comment_line :: proc(t: ^testing.T) {
+	// Bug #7: multiline comments/strings/blobs didn't track line numbers.
+	sql := "SELECT 1\n/* comment\nspanning lines */\nSELECT 2;"
+	tokens, ok := parser.tokenize(sql, context.temp_allocator)
+	testing.expect(t, ok, "multiline comment must succeed")
+	// SELECT(1) on line 1, SELECT(2) on line 4
+	testing.expect(t, tokens[0].line == 1, "First SELECT on line 1")
+	testing.expect(t, tokens[4].line == 4, "Second SELECT on line 4")
+
+	// Multiline string — token line is where it STARTS.
+	sql2 := "SELECT 'hello\nworld';"
+	tokens2, ok2 := parser.tokenize(sql2, context.temp_allocator)
+	testing.expect(t, ok2, "multiline string must succeed")
+	testing.expect(t, tokens2[0].line == 1, "SELECT on line 1")
+	testing.expect(t, tokens2[1].line == 1, "String starts on line 1")
+
+	// Multiline line comment.
+	sql3 := "SELECT 1\n-- comment\nSELECT 2;"
+	tokens3, ok3 := parser.tokenize(sql3, context.temp_allocator)
+	testing.expect(t, ok3, "multiline line comment must succeed")
+	testing.expect(t, tokens3[0].line == 1, "First SELECT on line 1")
+	testing.expect(t, tokens3[4].line == 3, "Second SELECT on line 3")
+}
+
+@(test)
+test_tokenize_negative_hex :: proc(t: ^testing.T) {
+	// Documents behavior: -0xFF is tokenized as a single NUMBER "-0xFF".
+	// This matches SQLite's behavior for negative hex literals.
+	tokens, ok := parser.tokenize("-0xFF", context.temp_allocator)
+	testing.expect(t, ok, "negative hex must succeed")
+	testing.expect(t, tokens[0].type == .NUMBER, "Expected NUMBER")
+	testing.expect(t, tokens[0].lexeme == "-0xFF", "Expected '-0xFF' lexeme")
 }

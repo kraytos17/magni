@@ -494,6 +494,88 @@ test_integration_join_hash :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_integration_right_join :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "right_join")
+	defer teardown_db(d, "right_join")
+
+	db.execute(d, "CREATE TABLE a (id INT, name TEXT);")
+	db.execute(d, "CREATE TABLE b (id INT, val TEXT);")
+	db.execute(d, "INSERT INTO a VALUES (1, 'Alice');")
+	db.execute(d, "INSERT INTO a VALUES (2, 'Bob');")
+	db.execute(d, "INSERT INTO b VALUES (1, 'X');")
+	db.execute(d, "INSERT INTO b VALUES (3, 'Z');")
+
+	// RIGHT JOIN: all rows from b, matched rows from a, NULLs for unmatched
+	q := db.query(d, "SELECT a.id, a.name, b.val FROM a RIGHT JOIN b ON a.id = b.id ORDER BY b.id;")
+	testing.expect(t, q.ok, "RIGHT JOIN should succeed")
+	if q.ok {
+		testing.expect_value(t, len(q.rows), 2)
+		// b.id=1 matches a.id=1 → (1, 'Alice', 'X')
+		testing.expect_value(t, q.rows[0][0].(i64), i64(1))
+		testing.expect_value(t, q.rows[0][1].(string), "Alice")
+		testing.expect_value(t, q.rows[0][2].(string), "X")
+		// b.id=3 has no match → (NULL, NULL, 'Z')
+		testing.expect(t, types.is_null(q.rows[1][0]), "Row 1: a.id = NULL")
+		testing.expect(t, types.is_null(q.rows[1][1]), "Row 1: a.name = NULL")
+		testing.expect_value(t, q.rows[1][2].(string), "Z")
+	}
+}
+
+@(test)
+test_integration_between :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "between")
+	defer teardown_db(d, "between")
+
+	db.execute(d, "CREATE TABLE t (id INT, score INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	db.execute(d, "INSERT INTO t VALUES (2, 20);")
+	db.execute(d, "INSERT INTO t VALUES (3, 30);")
+	db.execute(d, "INSERT INTO t VALUES (4, 40);")
+
+	q := db.query(d, "SELECT id FROM t WHERE score BETWEEN 15 AND 35 ORDER BY id;")
+	testing.expect(t, q.ok, "BETWEEN query should succeed")
+	if q.ok {
+		testing.expect_value(t, len(q.rows), 2)
+		testing.expect_value(t, q.rows[0][0].(i64), i64(2))
+		testing.expect_value(t, q.rows[1][0].(i64), i64(3))
+	}
+
+	// NOT BETWEEN
+	q2 := db.query(d, "SELECT id FROM t WHERE score NOT BETWEEN 15 AND 35 ORDER BY id;")
+	testing.expect(t, q2.ok, "NOT BETWEEN query should succeed")
+	if q2.ok {
+		testing.expect_value(t, len(q2.rows), 2)
+		testing.expect_value(t, q2.rows[0][0].(i64), i64(1))
+		testing.expect_value(t, q2.rows[1][0].(i64), i64(4))
+	}
+}
+
+@(test)
+test_integration_using_join :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "using_join")
+	defer teardown_db(d, "using_join")
+
+	db.execute(d, "CREATE TABLE a (id INT, name TEXT);")
+	db.execute(d, "CREATE TABLE b (id INT, val TEXT);")
+	db.execute(d, "INSERT INTO a VALUES (1, 'Alice');")
+	db.execute(d, "INSERT INTO a VALUES (2, 'Bob');")
+	db.execute(d, "INSERT INTO b VALUES (1, 'X');")
+	db.execute(d, "INSERT INTO b VALUES (3, 'Z');")
+
+	q := db.query(d, "SELECT a.id, a.name, b.val FROM a JOIN b USING (id) ORDER BY a.id;")
+	testing.expect(t, q.ok, "USING join should succeed")
+	if q.ok {
+		testing.expect_value(t, len(q.rows), 1)
+		testing.expect_value(t, q.rows[0][0].(i64), i64(1))
+		testing.expect_value(t, q.rows[0][1].(string), "Alice")
+		testing.expect_value(t, q.rows[0][2].(string), "X")
+	}
+}
+
+@(test)
 test_integration_join_asymmetric :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "join_asym")
@@ -748,7 +830,11 @@ test_integration_snapshot_batch_config :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_int_snapcfg.db")
 	if os.exists(filename) { os.remove(filename) }
+
+	wal_name := fmt.tprintf("%s-wal", filename)
+	if os.exists(wal_name) { os.remove(wal_name) }
 	defer os.remove(filename)
+	defer os.remove(wal_name)
 
 	d, open_err := db.open(filename, db.Open_Config{snapshot_batch_threshold = 3})
 	testing.expect(t, open_err == .None, "open with snapshot_batch_threshold")

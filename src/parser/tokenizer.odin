@@ -23,14 +23,14 @@ keyword_table := []Keyword_Entry{
 	{"table", .TABLE}, {"where", .WHERE}, {"limit", .LIMIT}, {"group", .GROUP},
 	{"order", .ORDER}, {"check", .CHECK}, {"inner", .INNER}, {"cross", .CROSS},
 	{"first", .FIRST}, {"right", .RIGHT}, {"outer", .OUTER}, {"begin", .BEGIN},
-	{"nulls", .NULLS}, {"union", .UNION},
+	{"nulls", .NULLS}, {"union", .UNION}, {"using", .USING},
 	// len 6
 	{"select", .SELECT}, {"delete", .DELETE}, {"update", .UPDATE}, {"create", .CREATE},
 	{"insert", .INSERT}, {"offset", .OFFSET}, {"having", .HAVING}, {"values", .VALUES},
 	{"except", .EXCEPT},
 	// len 7
 	{"default", .DEFAULT}, {"primary", .PRIMARY}, {"integer", .INTEGER},
-	{"explain", .EXPLAIN}, {"foreign", .FOREIGN},
+	{"explain", .EXPLAIN}, {"foreign", .FOREIGN}, {"between", .BETWEEN},
 	// len 8
 	{"distinct", .DISTINCT}, {"rollback", .ROLLBACK}, {"snapshot", .SNAPSHOT},
 	// len 9
@@ -42,7 +42,7 @@ keyword_table := []Keyword_Entry{
 // keyword_bucket_offsets[i] = start index into keyword_table for words of length i+2.
 // The final value equals len(keyword_table); the bucket for length N spans
 // keyword_table[offsets[N-2]:offsets[N-1]].
-keyword_bucket_offsets := [10]int{0, 6, 13, 25, 39, 48, 53, 56, 58, 59}
+keyword_bucket_offsets := [10]int{0, 6, 13, 25, 40, 49, 55, 58, 60, 61}
 
 @(private="file")
 match_keyword :: proc(ident: string) -> Token_Type {
@@ -97,30 +97,46 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 		}
 		if c == '/' && i + 1 < len(sql) && sql[i + 1] == '*' {
 			i += 2
-			for i + 1 < len(sql) && !(sql[i] == '*' && sql[i + 1] == '/') { i += 1 }
-			if i >= len(sql) { delete(tokens); return nil, false }
+			for i + 1 < len(sql) && !(sql[i] == '*' && sql[i + 1] == '/') {
+				if sql[i] == '\n' { line += 1 }
+				i += 1
+			}
+			if i + 1 >= len(sql) {
+				delete(tokens)
+				return nil, false
+			}
 			i += 2; continue
 		}
 		if c == '\'' {
-			start := i + 1; i += 1
+			start := i + 1; i += 1; token_line := line
 			for i < len(sql) {
 				if sql[i] == '\'' {
 					if i + 1 < len(sql) && sql[i + 1] == '\'' { i += 2; continue }
 					break
 				}
+				if sql[i] == '\n' { line += 1 }
 				i += 1
 			}
 			if i >= len(sql) { delete(tokens); return nil, false }
 
-			append(&tokens, Token{.STRING, sql[start:i], line})
+			append(&tokens, Token{.STRING, sql[start:i], token_line})
 			i += 1; continue
 		}
 		if (c == 'X' || c == 'x') && i + 1 < len(sql) && sql[i + 1] == '\'' {
-			start := i + 2; i += 2
-			for i < len(sql) && sql[i] != '\'' { i += 1 }
+			start := i + 2; i += 2; token_line := line
+			for i < len(sql) && sql[i] != '\'' {
+				if sql[i] == '\n' { line += 1 }
+				i += 1
+			}
 			if i >= len(sql) { delete(tokens); return nil, false }
 
-			append(&tokens, Token{.BLOB_LITERAL, sql[start:i], line})
+			hex_len := i - start
+			if hex_len % 2 != 0 { delete(tokens); return nil, false }
+			for j in start ..< i {
+				if !is_hex_digit(rune(sql[j])) { delete(tokens); return nil, false }
+			}
+
+			append(&tokens, Token{.BLOB_LITERAL, sql[start:i], token_line})
 			i += 1; continue
 		}
 		if unicode.is_digit(c) ||
@@ -130,6 +146,10 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			// Hex literal: 0xFF, 0xDEAD
 			if i + 1 < len(sql) && sql[i] == '0' && (sql[i + 1] | 0x20) == 'x' {
 				i += 2
+				if i >= len(sql) || !is_hex_digit(rune(sql[i])) {
+					delete(tokens)
+					return nil, false
+				}
 				for i < len(sql) && is_hex_digit(rune(sql[i])) { i += 1 }
 				append(&tokens, Token{.NUMBER, sql[start:i], line}); continue
 			}
@@ -143,8 +163,19 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 					has_dot = true
 					i += 1
 				} else if (ch == 'e' || ch == 'E') && i + 1 < len(sql) {
-					i += 1
-					if sql[i] == '+' || sql[i] == '-' { i += 1 }
+					// Only consume exponent if followed by [+-]digit or digit.
+					ep := i + 1
+					if sql[ep] == '+' || sql[ep] == '-' {
+						if ep + 1 < len(sql) && unicode.is_digit(rune(sql[ep + 1])) {
+							i = ep + 2
+						} else {
+							break
+						}
+					} else if unicode.is_digit(rune(sql[ep])) {
+						i = ep + 1
+					} else {
+						break
+					}
 					for i < len(sql) && unicode.is_digit(rune(sql[i])) { i += 1 }
 					break
 				} else {

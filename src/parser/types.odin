@@ -80,6 +80,7 @@ Join_Type :: enum {
 	INNER,
 	CROSS,
 	LEFT,
+	RIGHT,
 }
 
 Join_Clause :: struct {

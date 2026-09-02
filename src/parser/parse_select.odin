@@ -90,6 +90,7 @@ parse_single_join :: proc(
 	allocator := context.allocator,
 	join_type: Join_Type,
 	on_required: bool,
+	left_alias: string = "",
 ) -> (
 	jc: Join_Clause,
 	ok: bool,
@@ -97,13 +98,65 @@ parse_single_join :: proc(
 	js := parse_join_source(p, allocator)
 	if !js.success { return {}, false }
 
+	right_alias := js.alias
+	if right_alias == "" {
+		if tbl, is_tbl := js.source.(string); is_tbl { right_alias = tbl }
+	}
+
+	parse_using := proc(p: ^Parser, left: string, right: string, alloc: mem.Allocator) -> (cl: Where_Clause, ok: bool) {
+		if !match(p, .LPAREN) { return {}, false }
+		cols := make([dynamic]string, alloc)
+		for {
+			col, col_ok := parse_identifier(p, alloc)
+			if !col_ok { return {}, false }
+
+			append(&cols, col)
+			if match(p, .RPAREN) { break }
+			if !match(p, .COMMA) { return {}, false }
+		}
+		if len(cols) == 0 { return {}, false }
+
+		root: ^Where_Node = nil
+		for i in 0 ..< len(cols) {
+			c := cols[i]
+			left_col := strings.concatenate({left, ".", c}, alloc)
+			right_col := strings.concatenate({right, ".", c}, alloc)
+			cond := Condition { column = left_col, operator = .EQUALS, rhs = right_col }
+			node := new(Where_Node, alloc)
+			node^ = Where_Node{kind = .COND, cond = cond}
+			if i == 0 {
+				root = node
+			} else {
+				children := make([dynamic]^Where_Node, alloc)
+				append(&children, root)
+				append(&children, node)
+
+				wrapper := new(Where_Node, alloc)
+				wrapper^ = Where_Node{kind = .AND, children = children}
+				root = wrapper
+			}
+		}
+		for c in cols { delete(c, alloc) }
+		delete(cols)
+		return Where_Clause{root = root}, true
+	}
+
 	on_cl: Maybe(Where_Clause)
 	if on_required {
-		if !match(p, .ON) { return {}, false }
-		on_cl, ok = parse_where_clause(p, allocator)
-		if !ok { return {}, false }
+		if match(p, .ON) {
+			on_cl, ok = parse_where_clause(p, allocator)
+			if !ok { return {}, false }
+		} else if match(p, .USING) {
+			on_cl, ok = parse_using(p, left_alias, right_alias, allocator)
+			if !ok { return {}, false }
+		} else {
+			return {}, false
+		}
 	} else if match(p, .ON) {
 		on_cl, ok = parse_where_clause(p, allocator)
+		if !ok { return {}, false }
+	} else if match(p, .USING) {
+		on_cl, ok = parse_using(p, left_alias, right_alias, allocator)
 		if !ok { return {}, false }
 	}
 
@@ -254,32 +307,45 @@ consume_column_alias :: proc(
 }
 
 @(private="file")
-parse_join_clauses :: proc(p: ^Parser, allocator := context.allocator) -> [dynamic]Join_Clause {
+parse_join_clauses :: proc(p: ^Parser, left_alias: string, allocator := context.allocator) -> [dynamic]Join_Clause {
 	joins := make([dynamic]Join_Clause, allocator)
+	cur_left := left_alias
 	for {
 		if match(p, .COMMA) {
-			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false)
+			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false, cur_left)
 			if !jc_ok { break }
+			if jc.alias != "" { cur_left = jc.alias }
 			append(&joins, jc)
 		} else if match(p, .JOIN) {
-			jc, jc_ok := parse_single_join(p, allocator, .INNER, false)
+			jc, jc_ok := parse_single_join(p, allocator, .INNER, false, cur_left)
 			if !jc_ok { break }
+			if jc.alias != "" { cur_left = jc.alias }
 			append(&joins, jc)
 		} else if match(p, .INNER) {
 			if !match(p, .JOIN) { break }
-			jc, jc_ok := parse_single_join(p, allocator, .INNER, true)
+			jc, jc_ok := parse_single_join(p, allocator, .INNER, true, cur_left)
 			if !jc_ok { break }
+			if jc.alias != "" { cur_left = jc.alias }
 			append(&joins, jc)
 		} else if match(p, .CROSS) {
 			if !match(p, .JOIN) { break }
-			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false)
+			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false, cur_left)
 			if !jc_ok { break }
+			if jc.alias != "" { cur_left = jc.alias }
 			append(&joins, jc)
 		} else if match(p, .LEFT) {
 			match(p, .OUTER)
 			if !match(p, .JOIN) { break }
-			jc, jc_ok := parse_single_join(p, allocator, .LEFT, true)
+			jc, jc_ok := parse_single_join(p, allocator, .LEFT, true, cur_left)
 			if !jc_ok { break }
+			if jc.alias != "" { cur_left = jc.alias }
+			append(&joins, jc)
+		} else if match(p, .RIGHT) {
+			match(p, .OUTER)
+			if !match(p, .JOIN) { break }
+			jc, jc_ok := parse_single_join(p, allocator, .RIGHT, true, cur_left)
+			if !jc_ok { break }
+			if jc.alias != "" { cur_left = jc.alias }
 			append(&joins, jc)
 		} else {
 			break
@@ -337,7 +403,7 @@ parse_select :: proc(
 		if !js.success { return nil, false }
 
 		from_val = js.source; from_alias = js.alias
-		joins = parse_join_clauses(p, allocator)
+		joins = parse_join_clauses(p, from_alias, allocator)
 	}
 	defer if !ok do delete(joins)
 

@@ -5,11 +5,16 @@
   "tabs_width": 4,
   "newline_style": "LF",
   "newline_limit": 2,
+  "convert_do": true,
   "brace_style": "_1TBS",
+  "indent_cases": false,
+  "inline_single_stmt_case": false,
   "sort_imports": true,
   "spaces_around_colons": false,
   "space_single_line_blocks": true,
   "exp_multiline_composite_literals": true,
   "align_struct_fields": true,
-  "align_struct_values": true
+  "align_struct_values": true,
+  "align_struct_declarations": true,
+  "align_constant_definitions": true
 }

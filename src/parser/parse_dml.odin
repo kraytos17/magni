@@ -13,7 +13,10 @@ parse_insert :: proc(
 	if !expect_match(p, .INTO, "Expected INTO after INSERT") do return nil, false
 	table_name := parse_identifier(p, allocator) or_return
 	columns := make([dynamic]string, allocator)
-	defer if !ok { for c in columns do delete(c, allocator); delete(columns) }
+	defer if !ok {
+		for c in columns do delete(c, allocator)
+		delete(columns)
+	}
 
 	if peek(p).type == .LPAREN && p.current + 1 < len(p.tokens) {
 		next_type := p.tokens[p.current + 1].type
@@ -93,6 +96,7 @@ parse_update :: proc(
 		delete(columns)
 		delete(values)
 	}
+
 	for {
 		append(&columns, parse_identifier(p, allocator) or_return)
 		if !expect_match(p, .EQUALS, "Expected = after column in SET") { return nil, false }

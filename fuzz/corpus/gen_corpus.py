@@ -52,6 +52,12 @@ SEEDS = [
     ("constraints",
      "CREATE TABLE products (price INT CHECK (price > 0), FOREIGN KEY (cat) REFERENCES c(id));"),
     ("nested_parens", "SELECT * FROM t WHERE (a = 1 AND (b = 2 OR (c = 3 AND (d = 4))));"),
+    ("right_join", "SELECT * FROM a RIGHT JOIN b ON a.id = b.id;"),
+    ("right_outer_join", "SELECT * FROM a RIGHT OUTER JOIN b ON a.id = b.id;"),
+    ("between_simple", "SELECT * FROM t WHERE a BETWEEN 1 AND 10;"),
+    ("not_between", "SELECT * FROM t WHERE a NOT BETWEEN 1 AND 10;"),
+    ("using_join", "SELECT * FROM a JOIN b USING (id);"),
+    ("between_subquery", "SELECT * FROM t WHERE id BETWEEN (SELECT min_id FROM bounds) AND 100;"),
 
     ("unterminated_string", "SELECT 'abc; "),
     ("unterminated_comment", "SELECT 1 /* comment"),
