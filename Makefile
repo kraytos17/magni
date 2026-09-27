@@ -26,7 +26,7 @@ FUZZ_OUT     ?= fuzz/afl-output
 .PHONY: perf bench
 .PHONY: fuzz fuzz-corpus corpus fuzz-build fuzz-cov fuzz-cov-build fuzz-test
 .PHONY: fuzz-run fuzz-campaign fuzz-status fuzz-stop fuzz-clean
-.PHONY: fuzz-showmap fuzz-cmin fuzz-one fuzz-help
+.PHONY: fuzz-showmap fuzz-cmin fuzz-one fuzz-help fuzz-promote
 .PHONY: help
 
 # ── BUILD ───────────────────────────────────────────────────────────
@@ -137,13 +137,22 @@ fuzz-clean: ## remove fuzz artifacts (afl-output, build, pycache)
 
 fuzz-showmap: fuzz-cov ## show coverage tuples for current corpus
 	@rm -rf /tmp/magni.map /tmp/magni_corpus_tmp && mkdir -p /tmp/magni_corpus_tmp && cp fuzz/corpus/* /tmp/magni_corpus_tmp/ 2>/dev/null; rm -f /tmp/magni_corpus_tmp/gen_corpus.py; rm -rf /tmp/magni_corpus_tmp/__pycache__; \
-	  AFL_MAP_SIZE=7181 afl-showmap -C -i /tmp/magni_corpus_tmp -o /tmp/magni.map -- ./fuzz/fuzz_target_cov @@ 2>&1 | grep -E "Captured|coverage"; \
+	  AFL_MAP_SIZE=10000000 afl-showmap -C -i /tmp/magni_corpus_tmp -o /tmp/magni.map -- ./fuzz/fuzz_target_cov @@ 2>&1 | grep -E "Captured|coverage"; \
 	  echo "map: $$(wc -l < /tmp/magni.map 2>/dev/null || echo 0) tuples listed in /tmp/magni.map"
 
 fuzz-cmin: fuzz-cov ## minimize corpus (-i fuzz/corpus -o /tmp/min)
 	@rm -rf /tmp/min /tmp/magni_corpus_tmp && mkdir -p /tmp/magni_corpus_tmp && cp fuzz/corpus/* /tmp/magni_corpus_tmp/ 2>/dev/null; rm -f /tmp/magni_corpus_tmp/gen_corpus.py; rm -rf /tmp/magni_corpus_tmp/__pycache__; \
-	  afl-cmin -i /tmp/magni_corpus_tmp -o /tmp/min -m none -t 1000 -- ./fuzz/fuzz_target_cov @@ 2>&1 | tail -5; \
+	  AFL_MAP_SIZE=10000000 afl-cmin -i /tmp/magni_corpus_tmp -o /tmp/min -m none -t 1000 -- ./fuzz/fuzz_target_cov @@ 2>&1 | tail -5; \
 	  echo "minimized: $$(ls /tmp/min 2>/dev/null | wc -l) files in /tmp/min"
+
+fuzz-promote: fuzz-cov ## merge grown queue → minimal → update gen_corpus.py
+	python3 fuzz/scripts/promote_corpus.py --output fuzz/afl-output --corpus fuzz/corpus
+
+fuzz-promote-min: fuzz-cov ## merge + afl-cmin minimize → update gen_corpus.py
+	python3 fuzz/scripts/promote_corpus.py --output fuzz/afl-output --corpus fuzz/corpus --minimize
+
+fuzz-promote-test: fuzz-cov ## merge → update gen_corpus.py → fuzz-corpus → fuzz-test
+	python3 fuzz/scripts/promote_corpus.py --output fuzz/afl-output --corpus fuzz/corpus --test
 
 fuzz-one: fuzz-build ## repro one crash: make fuzz-one FILE=fuzz/afl-output/.../id:000000
 	@test -n "$(FILE)" || { echo "usage: make fuzz-one FILE=<path>" >&2; exit 2; }

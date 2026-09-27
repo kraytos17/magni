@@ -26,6 +26,7 @@ seed_args=(-i fuzz/corpus)
 
 AFL_SKIP_CPUFREQ=1 \
 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+AFL_MAP_SIZE=10000000 \
 afl-fuzz \
     "${seed_args[@]}" \
     -o "$OUT" \
