@@ -26,20 +26,22 @@ Two targets now exist:
 
 | Binary | Build | Use |
 |---|---|---|
-| `fuzz/fuzz_target` | `fuzz/scripts/build.sh` (ASan) | Regression gate (`fuzz-test`), crash confirmation (`run-one.sh`) |
-| `fuzz/fuzz_target_cov` | `fuzz/scripts/build-cov.sh` (AFL++ instrumented, no ASan) | AFL++ campaigns (`run-afl.sh`) — fast, coverage-guided |
+| `fuzz/fuzz_target` | `magni.py build --asan` | Regression gate (`fuzz-test`), crash confirmation (`fuzz-one`) |
+| `fuzz/fuzz_target_cov` | `magni.py build --cov` (AFL++ instrumented, no ASan) | AFL++ campaigns — fast, coverage-guided |
 
 ## Commands
 
+All flows go through `magni.py` (or `make` wrappers):
+
 ```bash
 # Regenerate the seed corpus (gitignored) — run from repo root
-python3 fuzz/corpus/gen_corpus.py
+python3 magni.py corpus generate
 
 # Build the ASan fuzz target (triage/regression)
-make fuzz-build            # or fuzz/scripts/build.sh
+make fuzz-build            # or: python3 magni.py build --asan
 
 # Build the coverage-instrumented target (campaigns)
-make fuzz-cov-build        # or fuzz/scripts/build-cov.sh
+make fuzz-cov              # or: python3 magni.py build --cov
 
 # Run every seed under ASan (regression gate)
 make fuzz-test
@@ -48,15 +50,15 @@ make fuzz-test
 make fuzz-run
 
 # Headless 5-minute campaign
-AFL_NO_UI=1 bash fuzz/scripts/run-afl.sh -V 300
+python3 magni.py fuzz campaign -w 4 -s 300
 
 # Parallel campaign (1 master + N-1 secondaries; N <= cores-1)
-bash fuzz/scripts/run-afl-parallel.sh 4
+python3 magni.py fuzz campaign -w 4
 # or with a time bound:
-AFL_NO_UI=1 bash fuzz/scripts/run-afl-parallel.sh 4 -V 3600
+python3 magni.py fuzz campaign -w 4 -s 3600
 
 # Reproduce a single testcase under ASan
-fuzz/scripts/run-one.sh fuzz/afl-output/crashes/id:000000,*
+make fuzz-one FILE=fuzz/afl-output/crashes/id:000000,*
 ```
 
 AFL++ output goes to `fuzz/afl-output/` (gitignored; set `MAGNI_FUZZ_OUT` to override).
@@ -64,7 +66,7 @@ Crashes land in `fuzz/afl-output/crashes/` (each is a reproducer), hangs in
 `fuzz/afl-output/hangs/`. Minimize with `afl-tmin` before filing a regression.
 
 Note: in dumb-mode black-box runs, ASan can produce non-reproducible `SIGILL`
-"crashes" (fork artifacts) — always confirm with `run-one.sh` before treating a
+"crashes" (fork artifacts) — always confirm with `make fuzz-one` before treating a
 finding as real. The coverage build avoids this entirely.
 
 ## Findings so far (all fixed + regression-tested)
@@ -84,7 +86,7 @@ See `fuzz/toolchain-version.txt` (recorded at setup). Notably:
 - AFL++ 5.00c (`afl-fuzz`, `afl-clang-fast`, `afl-tmin`).
 - Clang/LLVM 22.1.8.
 
-Dev-workstation env flags used by `run-afl.sh`: `AFL_SKIP_CPUFREQ=1` (CPU
+Dev-workstation env flags used by `magni.py fuzz`: `AFL_SKIP_CPUFREQ=1` (CPU
 governor check) and `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` (system
 `core_pattern` pipes core dumps to an external utility).
 
