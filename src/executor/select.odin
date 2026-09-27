@@ -80,8 +80,10 @@ exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 	if plan.has_subquery { return exec_select_subquery(t, stmt) }
 	if plan.single_table { return exec_select_single(t, stmt) }
 
-	rows, combined_cols, table_ranges, total_cols, ok := build_join_result(t, stmt)
-	if !ok { return false }
+	jb := build_join_result(t, stmt)
+	if !jb.ok { return false }
+
+	rows, combined_cols, table_ranges, total_cols := jb.rows, jb.cols, jb.ranges, jb.total_cols
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_combined(stmt, rows, combined_cols, table_ranges)
 	}
@@ -387,55 +389,13 @@ scan_table :: proc(
 	rows: []Row_Entry,
 	err: bool,
 ) {
+	plan := build_scan_plan(tree, table, where_clause, max_rows, schema_tree, allocator, cache)
 	r := make([dynamic]Row_Entry, allocator)
-	where_ctx: Maybe(Where_Eval_Ctx)
-	if wc, has_wc := where_clause.?; has_wc {
-		where_ctx = init_where_ctx(&wc, table.columns, nil, schema_tree, allocator, cache)
-	}
-
-	use_where := false
-	where_ctx_val: Where_Eval_Ctx
-	if ctx, ok := where_ctx.?; ok && ctx.root != nil {
-		use_where = true
-		where_ctx_val = ctx
-	}
-
-	// Skip-index bounds are only safe for a top-level AND chain of single-column
-	// integer comparisons on the indexed column. OR subtrees (or nested boolean
-	// groups) disable skipping; the operator decides which side of the page
-	// window a condition can bound (e.g. `>` only gives a lower bound, `<` only
-	// an upper bound).
-	skip_conds: []Resolved_Condition
-	if use_where {
-		skip_conds = skip_chain_conditions(where_ctx_val.root)
-	}
-
-	skip_start, skip_end: u32
-	if use_where && table.skip_root > 0 {
-		for rc in skip_conds {
-			if rc.has_right_col || rc.has_in { continue }
-			if val, is_int := rc.rhs.(i64); is_int {
-				op, op_ok := skip_op_from_token(rc.operator)
-				if !op_ok { continue }
-				start, end, found := btree.query_skip_index_range(
-					tree.pager,
-					table.skip_root,
-					rc.col_idx,
-					op,
-					val,
-				)
-				if found {
-					if start > skip_start { skip_start = start }
-					if end > 0 && (skip_end == 0 || end < skip_end) { skip_end = end }
-				}
-			}
-		}
-	}
 
 	cursor, c_err := btree.cursor_start(tree, allocator)
 	if c_err != .None { return nil, true }
-	if skip_start > 0 {
-		if seek_err := btree.cursor_seek_to_page(&cursor, skip_start); seek_err != .None {
+	if plan.skip_start > 0 {
+		if seek_err := btree.cursor_seek_to_page(&cursor, plan.skip_start); seek_err != .None {
 			btree.cursor_destroy(&cursor)
 			cursor, c_err = btree.cursor_start(tree, allocator)
 			if c_err != .None { return nil, true }
@@ -444,9 +404,9 @@ scan_table :: proc(
 	defer btree.cursor_destroy(&cursor)
 
 	for cursor.is_valid {
-		if skip_end > 0 {
+		if plan.skip_end > 0 {
 			cp := cursor.path[cursor.depth - 1].page_id
-			if cp > skip_end { break }
+			if cp > plan.skip_end { break }
 		}
 
 		c, get_err := btree.cursor_get_cell(&cursor, allocator)
@@ -455,8 +415,8 @@ scan_table :: proc(
 			btree.cursor_advance(&cursor)
 			continue
 		}
-		if use_where {
-			if !evaluate_where_ctx(where_ctx_val, c.values) {
+		if f, has_f := plan.filter.?; has_f {
+			if !evaluate_where_ctx(f, c.values) {
 				btree.cursor_advance(&cursor)
 				continue
 			}
@@ -464,31 +424,92 @@ scan_table :: proc(
 
 		append(&r, Row_Entry{c.rowid, c.values})
 		c.values = nil
-		if limit, has_limit := max_rows.?; has_limit && u64(len(r)) >= limit { break }
+		if limit, has_limit := plan.max_rows.?; has_limit && u64(len(r)) >= limit { break }
 		btree.cursor_advance(&cursor)
 	}
-	if use_where && table.skip_root == 0 && schema_tree != nil {
-		for rc in skip_conds {
-			if rc.has_right_col || rc.has_in { continue }
-			if _, is_int := rc.rhs.(i64); !is_int { continue }
-			if _, op_ok := skip_op_from_token(rc.operator); !op_ok { continue }
 
-			col_idx := rc.col_idx
-			skip_idx, build_err := btree.build_skip_index(tree, col_idx)
-			if build_err == .None {
-				new_schema_root, ok := schema.update_skip_root_cow(
-					schema_tree,
-					table.name,
-					skip_idx.root,
-				)
-				if ok {
-					schema_tree.root = new_schema_root
-				}
-			}
-			break // only build for the first qualifying column
+	maybe_build_skip_index(&plan, tree, table, schema_tree)
+	return r[:], false
+}
+
+// build_scan_plan resolves the WHERE clause once and computes skip-index
+// page bounds. A filter with nil root normalizes to nil (no filtering).
+@(private="file")
+build_scan_plan :: proc(
+	tree: ^btree.Tree,
+	table: ^types.Table,
+	where_clause: Maybe(parser.Where_Clause),
+	max_rows: Maybe(u64),
+	schema_tree: ^btree.Tree,
+	allocator := context.allocator,
+	cache: ^schema.Table_Cache = nil,
+) -> Scan_Plan {
+	plan := Scan_Plan{max_rows = max_rows}
+	if wc, has_wc := where_clause.?; has_wc {
+		if ctx, ok := init_where_ctx(&wc, table.columns, nil, schema_tree, allocator, cache).?; ok && ctx.root != nil {
+			plan.filter = ctx
 		}
 	}
-	return r[:], false
+	if _, has_f := plan.filter.?; !has_f { return plan }
+
+	// Skip-index bounds are only safe for a top-level AND chain of single-column
+	// integer comparisons on the indexed column. OR subtrees (or nested boolean
+	// groups) disable skipping; the operator decides which side of the page
+	// window a condition can bound (e.g. `>` only gives a lower bound, `<` only
+	// an upper bound).
+	plan.skip_conds = skip_chain_conditions(plan.filter.?.root)
+	if table.skip_root == 0 { return plan }
+	for rc in plan.skip_conds {
+		if rc.has_right_col || rc.has_in { continue }
+		if val, is_int := rc.rhs.(i64); is_int {
+			op, op_ok := skip_op_from_token(rc.operator)
+			if !op_ok { continue }
+
+			start, end, found := btree.query_skip_index_range(
+				tree.pager,
+				table.skip_root,
+				rc.col_idx,
+				op,
+				val,
+			)
+			if found {
+				if start > plan.skip_start { plan.skip_start = start }
+				if end > 0 && (plan.skip_end == 0 || end < plan.skip_end) { plan.skip_end = end }
+			}
+		}
+	}
+	return plan
+}
+
+// maybe_build_skip_index auto-builds a skip index for the first qualifying
+// integer column when the table has none yet.
+@(private="file")
+maybe_build_skip_index :: proc(
+	plan: ^Scan_Plan,
+	tree: ^btree.Tree,
+	table: ^types.Table,
+	schema_tree: ^btree.Tree,
+) {
+	if _, has_f := plan.filter.?; !has_f { return }
+	if table.skip_root != 0 || schema_tree == nil { return }
+	for rc in plan.skip_conds {
+		if rc.has_right_col || rc.has_in { continue }
+		if _, is_int := rc.rhs.(i64); !is_int { continue }
+		if _, op_ok := skip_op_from_token(rc.operator); !op_ok { continue }
+
+		skip_idx, build_err := btree.build_skip_index(tree, rc.col_idx)
+		if build_err == .None {
+			new_schema_root, ok := schema.update_skip_root_cow(
+				schema_tree,
+				table.name,
+				skip_idx.root,
+			)
+			if ok {
+				schema_tree.root = new_schema_root
+			}
+		}
+		break // only build for the first qualifying column
+	}
 }
 
 // skip_chain_conditions collects the leaf conditions of a top-level AND chain.

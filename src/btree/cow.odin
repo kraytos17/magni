@@ -109,6 +109,7 @@ tree_insert_cow :: proc(
 		pager.unpin_page(t.pager, new_root_page.page_num)
 		new_root = new_root_page.page_num
 	}
+
 	pager.unpin_page(t.pager, new_root)
 	return new_root, .None
 }
@@ -159,6 +160,7 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 
 	result, rec_err := delete_cow_recursive(t, t.root, key, true)
 	if rec_err != .None { return 0, rec_err }
+
 	pager.unpin_page(t.pager, result.new_page)
 	return result.new_page, .None
 }
@@ -222,6 +224,7 @@ tree_update_cow :: proc(
 
 	result, rec_err := update_recursive(t, t.root, rowid, values, true)
 	if rec_err != .None { return 0, rec_err }
+
 	pager.unpin_page(t.pager, result.new_page)
 	return result.new_page, .None
 }

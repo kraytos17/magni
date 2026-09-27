@@ -163,6 +163,7 @@ lb_set :: proc(lb: ^Line_Buffer, s: string) {
 	for r in s {
 		append(&lb.runes, r)
 	}
+
 	lb.cursor = len(lb.runes)
 	// lb_set is a reset, not an edit — clear undo stack too
 	for u in lb.undo_stack {

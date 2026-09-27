@@ -215,6 +215,7 @@ build_resolved_node :: proc(
 			child_rn, ok := build_resolved_node(child, cols, table_ranges, schema_tree, allocator, cache)
 			if !ok {
 				for j in 0 ..< i { free_resolved_node(children[j], allocator) }
+				
 				delete(children, allocator)
 				free(rn, allocator)
 				return nil, false
@@ -265,6 +266,7 @@ resolve_condition :: proc(
 	if rhs_str, is_col := cond.rhs.(string); is_col {
 		right_idx, rc_found := resolve_qualified_column(cols, table_ranges, rhs_str)
 		if !rc_found { return {}, false }
+		
 		rc.has_right_col = true
 		rc.right_idx = right_idx
 	} else if val, is_val := cond.rhs.(types.Value); is_val {
@@ -399,11 +401,7 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 like_match :: proc(pattern: string, text: string) -> bool {
 	// Fast path: pattern ending with %, no underscore = plain prefix match
 	if len(pattern) > 1 && pattern[len(pattern) - 1] == '%' {
-		has_underscore := false
-		for i in 0 ..< len(pattern) - 1 {
-			if pattern[i] == '_' { has_underscore = true; break }
-		}
-		if !has_underscore {
+		if strings.index_byte(pattern[:len(pattern) - 1], '_') < 0 {
 			prefix := pattern[:len(pattern) - 1]
 			return len(text) >= len(prefix) && text[:len(prefix)] == prefix
 		}

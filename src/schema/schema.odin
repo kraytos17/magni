@@ -28,6 +28,7 @@ Schema_Row :: struct {
 schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator) -> []types.Value {
 	n := 5 // kind + name + root + sql + blob
 	if r.skip_root > 0 { n += 1 }
+
 	result := make([]types.Value, n, allocator)
 	result[0] = types.value_int(0) // 0 = table
 	result[1] = types.value_text(r.name)
@@ -51,6 +52,7 @@ schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 		kind = "table",
 		name = name,
 	}
+
 	root, ok2 := values[2].(i64)
 	sql, ok3 := values[3].(string)
 	blob, ok4 := values[4].([]u8)
@@ -200,6 +202,7 @@ table_cache_free :: proc(cache: ^Table_Cache) {
 	if cache.tables != nil {
 		delete(cache.tables)
 	}
+
 	cache.tables = nil
 	cache.root = 0
 }
@@ -218,6 +221,7 @@ find_table_cached :: proc(
 	if cache == nil {
 		table, ok := find_table(t, table_name, context.temp_allocator)
 		if !ok { return nil, false }
+
 		tbl := new(types.Table, context.temp_allocator)
 		tbl^ = table
 		return tbl, true

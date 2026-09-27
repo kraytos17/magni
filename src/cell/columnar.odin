@@ -140,6 +140,7 @@ read_columnar_rowid :: proc(
 	for i := 0; i <= row_index; i += 1 {
 		delta, n, ok := varint.decode(data, pos)
 		if !ok { return 0, false }
+
 		total += delta
 		if i == row_index { return types.Row_ID(total), true }
 		pos += n
@@ -178,6 +179,7 @@ read_columnar_cell :: proc(
 			for i := 0; i <= row_index; i += 1 {
 				delta, n2, ok2 := varint.decode(data, pos)
 				if !ok2 { return {}, false }
+
 				pos += n2
 				if i == row_index {
 					val = types.value_int(i64(i64(min) + i64(delta)))
@@ -195,6 +197,7 @@ read_columnar_cell :: proc(
 					}
 					break
 				}
+
 				_, n, _ := varint.decode(data, pos)
 				if n > 0 {
 					pos += n
@@ -207,6 +210,7 @@ read_columnar_cell :: proc(
 	}
 
 	if len(scratch) != num_cols { return {}, false }
+
 	result_values := make([]types.Value, len(scratch), alloc)
 	copy(result_values, scratch[:])
 	return Cell{rowid = rowid, values = result_values, owns_data = !config.zero_copy}, true

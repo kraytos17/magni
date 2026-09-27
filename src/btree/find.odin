@@ -58,12 +58,10 @@ find_interior_insert_index :: proc(
 	return idx
 }
 
-
 @(private="file")
 interior_cell_size :: proc(key: types.Row_ID) -> int {
 	return 4 + varint.size(u64(key))
 }
-
 
 @(private)
 interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
@@ -71,7 +69,6 @@ interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
 	if !ok { return 0 }
 	return 4 + n
 }
-
 
 @(private)
 insert_interior_cell :: proc(
@@ -115,7 +112,3 @@ insert_interior_cell :: proc(
 	header.cell_count += 1
 	return true
 }
-
-// Freeblock format:
-//   [offset+0]: next freeblock offset (u16le, 0 = end of list)
-//   [offset+2]: block size        (u16le, total bytes including header)

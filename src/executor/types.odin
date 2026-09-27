@@ -21,6 +21,17 @@ Table_Context :: struct {
 	range: Table_Col_Range,
 }
 
+// Join_Build captures the assembled state of a FROM+JOINs query: resolved
+// table contexts, combined column metadata, and (after execution) rows.
+Join_Build :: struct {
+	ctxs:       []Table_Context,
+	ranges:     []Table_Col_Range,
+	cols:       []types.Column,
+	rows:       []Row_Entry,
+	total_cols: int,
+	ok:         bool,
+}
+
 Row_Entry :: struct {
 	rowid:  types.Row_ID,
 	values: []types.Value,
@@ -78,6 +89,17 @@ Resolved_Condition :: struct {
 Where_Eval_Ctx :: struct {
 	root:        ^Resolved_Node, // nil = no filter (always true)
 	schema_tree: ^btree.Tree,
+}
+
+// Scan_Plan captures the resolved state for one table scan: optional filter
+// context (nil = no filter), skip-index bounds, and row limit. Built once by
+// build_scan_plan, consumed by the cursor loop in scan_table.
+Scan_Plan :: struct {
+	filter:     Maybe(Where_Eval_Ctx),
+	skip_conds: []Resolved_Condition,
+	skip_start: u32,
+	skip_end:   u32,
+	max_rows:   Maybe(u64),
 }
 
 Resolved_Node_Kind :: enum u8 {

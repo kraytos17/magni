@@ -50,6 +50,7 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 		if !up_ok {
 			return .Corrupted
 		}
+
 		st.root = updated_root
 		new_root = updated_root
 	}
@@ -157,6 +158,7 @@ describe_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Erro
 		row[4] = def
 		table_rows[i] = row
 	}
+
 	executor.render_table(cols, table_rows)
 	return .None
 }
@@ -262,6 +264,7 @@ print_snapshots :: proc(database: ^db.Database) -> db.DB_Error {
 		fmt.println("No snapshots.")
 		return .None
 	}
+
 	snapshot.print_chain(database.pager, database.latest_snapshot)
 	return .None
 }
@@ -274,6 +277,7 @@ print_snapshot_debug :: proc(database: ^db.Database) -> db.DB_Error {
 		fmt.println("No snapshots.")
 		return .None
 	}
+
 	snapshot.debug_print_chain(database.pager, database.latest_snapshot)
 	return .None
 }

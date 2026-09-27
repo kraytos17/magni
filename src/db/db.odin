@@ -195,6 +195,7 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 				db.snapshot_index[h.snapshot_id] = page
 				next_page = h.prev_snapshot
 			}
+
 			pager.unpin_page(db.pager, page)
 			page = next_page
 		}
@@ -259,6 +260,7 @@ close :: proc(db: ^Database) {
 			log.warnf("error closing database: %v", err)
 		}
 	}
+
 	schema.table_cache_free(&db.table_cache)
 	delete(db.snapshot_index); delete(db.path); free(db)
 }

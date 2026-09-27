@@ -191,6 +191,7 @@ exec_insert_impl :: proc(
 				log.errorf("Error inserting row: %v", ins_err)
 				return false, t.root, {}
 			}
+
 			data_root = new_data_root
 			log.infof("Inserted row %d", info.row_id)
 		}
@@ -280,119 +281,204 @@ exec_update_impl :: proc(
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 ) -> (bool, u32, Mutated_Table_Info) {
-	is_direct := mode == .Direct
 	tbl := table
 	update_map, ok := build_update_map(&tbl, stmt, context.temp_allocator)
 	if !ok { return false, t.root, {} }
 
-	table_tree := btree.init(t.pager, tbl.root_page)
-	if where_clause, has_where := stmt.where_clause.?; has_where {
-		if target_rowid, pk_ok := try_pk_lookup(tbl, where_clause); pk_ok {
-			c, find_err := btree.tree_find(&table_tree, target_rowid, context.temp_allocator)
-			if find_err == .None {
-				defer cell.destroy(&c, context.temp_allocator)
-				new_row, had_err := apply_update(&c, update_map, &tbl, false)
-				if had_err && new_row == nil {
-					return false, t.root, {}
-				}
-				if !had_err && new_row == nil {
-					log.info("Updated 0 rows.")
-					return true, t.root, {}
-				}
-				if is_direct {
-					btree.tree_update(&table_tree, target_rowid, new_row)
-					log.info("Updated 1 row.")
-					return true, t.root, {}
-				} else {
-					nroot, upd_err := btree.tree_update_cow(&table_tree, target_rowid, new_row)
-					if upd_err != .None {
-						log.error("Error: Failed to update row")
-						return false, t.root, {}
-					}
-
-					new_schema_root, ok1 := schema.update_root_page_cow(t, stmt.table_name, nroot)
-					if !ok1 { return false, t.root, {} }
-					log.info("Updated 1 row.")
-					return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = nroot}
-				}
-			}
-			log.info("Updated 0 rows.")
-			return true, t.root, {}
-		}
+	plan := Update_Plan {
+		tbl        = tbl,
+		table_name = stmt.table_name,
+		update_map = update_map,
+		filter     = stmt.where_clause,
+		direct     = mode == .Direct,
 	}
 
-	cursor, cursor_err := btree.cursor_start(&table_tree, context.temp_allocator)
+	table_tree := btree.init(t.pager, tbl.root_page)
+	if done, ok1, root, info := update_by_pk(t, &plan, &table_tree); done {
+		return ok1, root, info
+	}
+	return update_by_scan(t, &plan, &table_tree)
+}
+
+// Update_Plan captures the resolved state for an UPDATE: target table,
+// column→value map, optional filter, and write mode. Built once by
+// exec_update_impl, consumed by the pk/scan procs below.
+Update_Plan :: struct {
+	tbl:        types.Table,
+	table_name: string,
+	update_map: map[int]types.Value,
+	filter:     Maybe(parser.Where_Clause),
+	direct:     bool,
+}
+
+// update_by_pk handles the PK fast path. Returns handled=false to fall
+// through to the full scan when no usable PK lookup exists.
+@(private="file")
+update_by_pk :: proc(
+	t: ^btree.Tree,
+	plan: ^Update_Plan,
+	table_tree: ^btree.Tree,
+) -> (
+	done: bool,
+	ok: bool,
+	root: u32,
+	info: Mutated_Table_Info,
+) {
+	where_clause, has_where := plan.filter.?
+	if !has_where { return false, false, 0, {} }
+
+	target_rowid, pk_ok := try_pk_lookup(plan.tbl, where_clause)
+	if !pk_ok { return false, false, 0, {} }
+
+	c, find_err := btree.tree_find(table_tree, target_rowid, context.temp_allocator)
+	if find_err != .None {
+		log.info("Updated 0 rows.")
+		return true, true, t.root, {}
+	}
+	defer cell.destroy(&c, context.temp_allocator)
+
+	new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, false)
+	if had_err && new_row == nil {
+		return true, false, t.root, {}
+	}
+	if !had_err && new_row == nil {
+		log.info("Updated 0 rows.")
+		return true, true, t.root, {}
+	}
+	if plan.direct {
+		btree.tree_update(table_tree, target_rowid, new_row)
+		log.info("Updated 1 row.")
+		return true, true, t.root, {}
+	}
+
+	nroot, upd_err := btree.tree_update_cow(table_tree, target_rowid, new_row)
+	if upd_err != .None {
+		log.error("Error: Failed to update row")
+		return true, false, t.root, {}
+	}
+
+	new_schema_root, ok1 := schema.update_root_page_cow(t, plan.table_name, nroot)
+	if !ok1 { return true, false, t.root, {} }
+
+	log.info("Updated 1 row.")
+	return true, true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = nroot}
+}
+
+// update_by_scan runs the cursor scan, dispatching on write mode.
+@(private="file")
+update_by_scan :: proc(
+	t: ^btree.Tree,
+	plan: ^Update_Plan,
+	table_tree: ^btree.Tree,
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
+	cursor, cursor_err := btree.cursor_start(table_tree, context.temp_allocator)
 	if cursor_err != .None { return false, t.root, {} }
 	defer btree.cursor_destroy(&cursor)
 
-	if is_direct {
-		ops := make([dynamic]Update_Op, context.temp_allocator)
-		for cursor.is_valid {
-			c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
-			defer cell.destroy(&c, context.temp_allocator)
-			if get_err != .None {
-				btree.cursor_advance(&cursor)
-				continue
-			}
-
-			should_update := true
-			if where_clause, has_where := stmt.where_clause.?; has_where {
-				should_update = evaluate_where(&where_clause, c.values, tbl.columns, nil)
-			}
-			if should_update {
-				new_row, had_err := apply_update(&c, update_map, &tbl, true)
-				if !had_err && new_row != nil {
-					append(&ops, Update_Op{c.rowid, new_row})
-				}
-			}
-			btree.cursor_advance(&cursor)
-		}
-
-		count := 0
-		for op in ops {
-			if upd_err := btree.tree_update(&table_tree, op.rowid, op.new_values); upd_err == .None {
-				count += 1
-			}
-		}
-		log.infof("Updated %d rows.", count)
-		return true, t.root, {}
-	} else {
-		current_root := tbl.root_page
-		count := 0
-		for cursor.is_valid {
-			c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
-			if get_err != .None {
-				btree.cursor_advance(&cursor)
-				continue
-			}
-
-			defer cell.destroy(&c, context.temp_allocator)
-			should_update := true
-			if where_cl, has_where := stmt.where_clause.?; has_where {
-				should_update = evaluate_where(&where_cl, c.values, tbl.columns, nil)
-			}
-			if should_update {
-				new_row, had_err := apply_update(&c, update_map, &tbl, false)
-				if !had_err && new_row != nil {
-					tree_at := btree.init(t.pager, current_root)
-					nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)
-					if upd_err == .None {
-						current_root = nroot
-						count += 1
-					}
-				}
-			}
-			btree.cursor_advance(&cursor)
-		}
-		if count > 0 {
-			new_schema_root, ok1 := schema.update_root_page_cow(t, stmt.table_name, current_root)
-			if !ok1 { return false, t.root, {} }
-			log.infof("Updated %d rows.", count)
-			return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = current_root}
-		}
-		log.info("Updated 0 rows.")
-		return true, t.root, {}
+	if plan.direct {
+		return update_scan_direct(t, plan, table_tree, &cursor)
 	}
+	return update_scan_cow(t, plan, table_tree, &cursor)
+}
+
+// update_scan_direct collects matching ops, then applies them in place.
+@(private="file")
+update_scan_direct :: proc(
+	t: ^btree.Tree,
+	plan: ^Update_Plan,
+	table_tree: ^btree.Tree,
+	cursor: ^btree.Cursor,
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
+	ops := make([dynamic]Update_Op, context.temp_allocator)
+	for cursor.is_valid {
+		c, get_err := btree.cursor_get_cell(cursor, context.temp_allocator)
+		defer cell.destroy(&c, context.temp_allocator)
+		if get_err != .None {
+			btree.cursor_advance(cursor)
+			continue
+		}
+
+		should_update := true
+		if where_clause, has_where := plan.filter.?; has_where {
+			should_update = evaluate_where(&where_clause, c.values, plan.tbl.columns, nil)
+		}
+		if should_update {
+			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, true)
+			if !had_err && new_row != nil {
+				append(&ops, Update_Op{c.rowid, new_row})
+			}
+		}
+		btree.cursor_advance(cursor)
+	}
+
+	count := 0
+	for op in ops {
+		if upd_err := btree.tree_update(table_tree, op.rowid, op.new_values); upd_err == .None {
+			count += 1
+		}
+	}
+
+	log.infof("Updated %d rows.", count)
+	return true, t.root, {}
+}
+
+// update_scan_cow applies COW updates as the cursor advances.
+@(private="file")
+update_scan_cow :: proc(
+	t: ^btree.Tree,
+	plan: ^Update_Plan,
+	table_tree: ^btree.Tree,
+	cursor: ^btree.Cursor,
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
+	current_root := plan.tbl.root_page
+	count := 0
+	for cursor.is_valid {
+		c, get_err := btree.cursor_get_cell(cursor, context.temp_allocator)
+		if get_err != .None {
+			btree.cursor_advance(cursor)
+			continue
+		}
+
+		defer cell.destroy(&c, context.temp_allocator)
+		should_update := true
+		if where_cl, has_where := plan.filter.?; has_where {
+			should_update = evaluate_where(&where_cl, c.values, plan.tbl.columns, nil)
+		}
+		if should_update {
+			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, false)
+			if !had_err && new_row != nil {
+				tree_at := btree.init(t.pager, current_root)
+				nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)
+				if upd_err == .None {
+					current_root = nroot
+					count += 1
+				}
+			}
+		}
+		btree.cursor_advance(cursor)
+	}
+	if count > 0 {
+		new_schema_root, ok1 := schema.update_root_page_cow(t, plan.table_name, current_root)
+		if !ok1 { return false, t.root, {} }
+
+		log.infof("Updated %d rows.", count)
+		return true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = current_root}
+	}
+
+	log.info("Updated 0 rows.")
+	return true, t.root, {}
 }
 
 @(private="file")
@@ -416,36 +502,82 @@ exec_delete_impl :: proc(
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 ) -> (bool, u32, Mutated_Table_Info) {
-	is_direct := mode == .Direct
-	table_tree := btree.init(t.pager, table.root_page)
-	if where_cl, has_where := stmt.where_clause.?; has_where {
-		if target_rowid, pk_ok := try_pk_lookup(table, where_cl); pk_ok {
-			if is_direct {
-				if btree.tree_delete(&table_tree, target_rowid) == .None {
-					log.info("Deleted 1 row.")
-				} else {
-					log.info("Deleted 0 rows.")
-				}
-				return true, t.root, {}
-			} else {
-				nroot, del_err := btree.tree_delete_cow(&table_tree, target_rowid)
-				if del_err == .None {
-					new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, nroot)
-					if !ok { return false, t.root, {} }
-					log.info("Deleted 1 row.")
-					return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = nroot}
-				}
-				log.info("Deleted 0 rows.")
-				return true, t.root, {}
-			}
-		}
+	plan := Delete_Plan {
+		tbl        = table,
+		table_name = stmt.table_name,
+		filter     = stmt.where_clause,
+		direct     = mode == .Direct,
 	}
 
-	cursor, err := btree.cursor_start(&table_tree, context.temp_allocator)
-	if err != .None { return false, t.root, {} }
+	table_tree := btree.init(t.pager, table.root_page)
+	if done, ok, root, info := delete_by_pk(t, &plan, &table_tree); done {
+		return ok, root, info
+	}
+
+	targets := collect_delete_targets(&plan, &table_tree)
+	return apply_deletes(t, &plan, &table_tree, targets[:])
+}
+
+// Delete_Plan captures the resolved state for a DELETE: target table,
+// optional filter, and write mode. Built once by exec_delete_impl.
+Delete_Plan :: struct {
+	tbl:        types.Table,
+	table_name: string,
+	filter:     Maybe(parser.Where_Clause),
+	direct:     bool,
+}
+
+// delete_by_pk handles the PK fast path. Returns handled=false to fall
+// through to the full scan when no usable PK lookup exists.
+@(private="file")
+delete_by_pk :: proc(
+	t: ^btree.Tree,
+	plan: ^Delete_Plan,
+	table_tree: ^btree.Tree,
+) -> (
+	done: bool,
+	ok: bool,
+	root: u32,
+	info: Mutated_Table_Info,
+) {
+	where_cl, has_where := plan.filter.?
+	if !has_where { return false, false, 0, {} }
+
+	target_rowid, pk_ok := try_pk_lookup(plan.tbl, where_cl)
+	if !pk_ok { return false, false, 0, {} }
+	if plan.direct {
+		if btree.tree_delete(table_tree, target_rowid) == .None {
+			log.info("Deleted 1 row.")
+		} else {
+			log.info("Deleted 0 rows.")
+		}
+		return true, true, t.root, {}
+	}
+
+	nroot, del_err := btree.tree_delete_cow(table_tree, target_rowid)
+	if del_err == .None {
+		new_schema_root, ok1 := schema.update_root_page_cow(t, plan.table_name, nroot)
+		if !ok1 { return true, false, t.root, {} }
+
+		log.info("Deleted 1 row.")
+		return true, true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = nroot}
+	}
+
+	log.info("Deleted 0 rows.")
+	return true, true, t.root, {}
+}
+
+// collect_delete_targets scans for rowids matching the filter.
+@(private="file")
+collect_delete_targets :: proc(
+	plan: ^Delete_Plan,
+	table_tree: ^btree.Tree,
+) -> [dynamic]types.Row_ID {
+	targets := make([dynamic]types.Row_ID, context.temp_allocator)
+	cursor, err := btree.cursor_start(table_tree, context.temp_allocator)
+	if err != .None { return targets }
 	defer btree.cursor_destroy(&cursor)
 
-	targets := make([dynamic]types.Row_ID, context.temp_allocator)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
@@ -455,43 +587,61 @@ exec_delete_impl :: proc(
 		defer cell.destroy(&c, context.temp_allocator)
 
 		should_delete := true
-		if where_cl, has_where := stmt.where_clause.?; has_where {
-			should_delete = evaluate_where(&where_cl, c.values, table.columns, nil)
+		if where_cl, has_where := plan.filter.?; has_where {
+			should_delete = evaluate_where(&where_cl, c.values, plan.tbl.columns, nil)
 		}
 		if should_delete {
 			append(&targets, c.rowid)
 		}
 		btree.cursor_advance(&cursor)
 	}
-	if is_direct {
+	return targets
+}
+
+// apply_deletes removes the collected targets, direct or COW.
+@(private="file")
+apply_deletes :: proc(
+	t: ^btree.Tree,
+	plan: ^Delete_Plan,
+	table_tree: ^btree.Tree,
+	targets: []types.Row_ID,
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
+	if plan.direct {
 		count := 0
 		for rowid in targets {
-			if btree.tree_delete(&table_tree, rowid) == .None {
+			if btree.tree_delete(table_tree, rowid) == .None {
 				count += 1
 			}
 		}
+
 		log.infof("Deleted %d rows.", count)
 		return true, t.root, {}
-	} else {
-		current_root := table.root_page
-		count := 0
-		for rowid in targets {
-			tree_at := btree.init(t.pager, current_root)
-			nroot, del_err := btree.tree_delete_cow(&tree_at, rowid)
-			if del_err == .None {
-				current_root = nroot
-				count += 1
-			}
-		}
-		if count > 0 {
-			new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, current_root)
-			if !ok { return false, t.root, {} }
-			log.infof("Deleted %d rows.", count)
-			return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = current_root}
-		}
-		log.info("Deleted 0 rows.")
-		return true, t.root, {}
 	}
+
+	current_root := plan.tbl.root_page
+	count := 0
+	for rowid in targets {
+		tree_at := btree.init(t.pager, current_root)
+		nroot, del_err := btree.tree_delete_cow(&tree_at, rowid)
+		if del_err == .None {
+			current_root = nroot
+			count += 1
+		}
+	}
+	if count > 0 {
+		new_schema_root, ok := schema.update_root_page_cow(t, plan.table_name, current_root)
+		if !ok { return false, t.root, {} }
+
+		log.infof("Deleted %d rows.", count)
+		return true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = current_root}
+	}
+
+	log.info("Deleted 0 rows.")
+	return true, t.root, {}
 }
 
 @(private="file")

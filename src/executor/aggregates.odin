@@ -1,7 +1,6 @@
 package executor
 
 import "core:fmt"
-import "core:hash"
 import "core:log"
 import "src:parser"
 import "src:types"
@@ -212,30 +211,9 @@ exec_select_aggregate_data :: proc(
 	return result[:], cols, true
 }
 
+// group_key_hash computes a hash over GROUP BY key columns. Implemented via
+// hash_values (single FNV-1a with per-type tags); collisions fall back to
+// value_compare at the call site.
 group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
-	h: u64 = 0xcbf29ce484222325
-	FNV_PRIME :: 0x100000001b3
-	for col_idx in indices {
-		v := values[col_idx]
-		switch val in v {
-		case types.Null:
-			h = h ~ 0
-			h *= FNV_PRIME
-		case i64:
-			h = h ~ u64(val)
-			h *= FNV_PRIME
-		case f64:
-			h = h ~ transmute(u64)val
-			h *= FNV_PRIME
-		case string:
-			hv := hash.fnv64a(transmute([]u8)val)
-			h = h ~ hv
-			h *= FNV_PRIME
-		case []u8:
-			hv := hash.fnv64a(val)
-			h = h ~ hv
-			h *= FNV_PRIME
-		}
-	}
-	return h
+	return hash_values(values, indices)
 }

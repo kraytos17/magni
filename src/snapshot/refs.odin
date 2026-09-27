@@ -222,6 +222,7 @@ log_read_range :: proc(
 	for i in 0 ..< available {
 		ring_idx := (log_next - log_count + s_idx + i) % MAX_LOG_ENTRIES
 		if ring_idx < 0 { ring_idx += MAX_LOG_ENTRIES }
+
 		off := REFS_LOG_OFFSET + ring_idx * size_of(Ref_Log_Entry)
 		result[i] = (^Ref_Log_Entry)(raw_data(data[off:]))^
 	}

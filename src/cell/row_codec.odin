@@ -278,5 +278,6 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 
 @(private="file")
 is_text_serial :: proc(serial: u64) -> bool { return serial >= 13 && (serial % 2 != 0) }
+
 @(private="file")
 is_blob_serial :: proc(serial: u64) -> bool { return serial >= 12 && (serial % 2 == 0) }

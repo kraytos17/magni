@@ -51,8 +51,8 @@ serialize_columns_to_blob :: proc(
 		if col.pk { packed |= 0x10 }
 		if _, has := col.check_expr.?; has { packed |= 0x20 }
 		if _, has := col.default_value.?; has { packed |= 0x40 }
-		blob[offset] = packed; offset += 1
 
+		blob[offset] = packed; offset += 1
 		if def, ok := col.default_value.?; ok {
 			serialize_value_to_blob(blob, &offset, def)
 		}
@@ -67,6 +67,7 @@ serialize_columns_to_blob :: proc(
 deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
 	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER { return nil }
 	if blob[1] != COL_BLOB_VERSION { return nil }
+
 	offset := 2
 	count, _, cnt_ok := varint.decode(blob, offset)
 	if !cnt_ok || count == 0 { return nil }
@@ -76,6 +77,7 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 	for _ in 0 ..< count {
 		name_len, _, name_ok := varint.decode(blob, offset)
 		if !name_ok || name_len == 0 { return nil }
+
 		offset += varint.size(name_len)
 		if offset + int(name_len) + 1 > len(blob) { return nil }
 
@@ -101,6 +103,7 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 
 			offset += varint.size(chk_len)
 			if offset + int(chk_len) > len(blob) { return nil }
+
 			col.check_expr = strings.clone(string(blob[offset:offset + int(chk_len)]), allocator)
 			offset += int(chk_len)
 		}

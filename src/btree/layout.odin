@@ -247,11 +247,6 @@ get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 	return ([^]Cell_Entry)(entry_start)[:max_entries]
 }
 
-// --- Page Accessor API ---
-// These 7 functions encapsulate the v1 (Cell_Pointer, stride=2) vs v2 (Cell_Entry, stride=10)
-// entry-array layout. Callers pass stride = size_of(Cell_Entry) for v2, size_of(Cell_Pointer) for v1.
-// All asserts on bounds; indices are page-internal (never user-supplied).
-
 CELL_POINTER_STRIDE :: size_of(Cell_Pointer) // 2
 CELL_ENTRY_STRIDE :: size_of(Cell_Entry) // 10
 

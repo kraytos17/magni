@@ -1,41 +1,16 @@
 package executor
 
-import "core:encoding/endian"
-import "core:hash"
 import "core:log"
 import "core:slice"
 import "src:parser"
 import "src:types"
 
-// row_fingerprint computes an FNV-1a hash over a row's values. Used for DISTINCT
-// dedup and set-operation membership. Null and value bytes are encoded so that
-// value-equal rows always share a fingerprint.
+// row_fingerprint computes a hash over a row's values. Used for DISTINCT
+// dedup and set-operation membership. Implemented via hash_values (single
+// FNV-1a with per-type tags); collisions fall back to value_compare.
 @(private)
 row_fingerprint :: proc(values: []types.Value) -> u64 {
-	h := u64(0)
-	for v, i in values {
-		if i > 0 {
-			h = hash.fnv64a([]byte{0}, h)
-		}
-
-		switch val in v {
-		case types.Null:
-			h = hash.fnv64a(transmute([]byte)string("NULL"), h)
-		case i64:
-			buf: [8]u8
-			endian.put_u64(buf[:], .Little, u64(val))
-			h = hash.fnv64a(buf[:], h)
-		case f64:
-			buf: [8]u8
-			endian.put_u64(buf[:], .Little, transmute(u64)val)
-			h = hash.fnv64a(buf[:], h)
-		case string:
-			h = hash.fnv64a(transmute([]byte)val, h)
-		case []u8:
-			h = hash.fnv64a(val, h)
-		}
-	}
-	return h
+	return hash_values(values)
 }
 
 dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
@@ -123,6 +98,7 @@ sort_rows :: proc(
 				sorted[i] = rows[pi]
 			}
 			if desc || nulls_first { slice.reverse(sorted) }
+
 			copy(rows, sorted)
 			return true
 		}

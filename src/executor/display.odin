@@ -53,6 +53,7 @@ display_results :: proc(
 		row_count += 1
 		if has_limit && u64(row_count) >= limit_count { break }
 	}
+
 	render_table(header, table_rows[:])
 	fmt.printf("(%d rows)\n", row_count)
 }
@@ -109,6 +110,7 @@ compute_aggregates :: proc(
 			col_idx, found = schema.find_column_index(columns, agg.column)
 			if !found { col_idx = -1 }
 		}
+
 		switch agg.func {
 		case .COUNT:
 			if agg.column == "" {

@@ -32,6 +32,7 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 	for stmt in statements {
 		trimmed := strings.trim_space(stmt)
 		if len(trimmed) <= 1 { continue }
+
 		exec_err := db.execute(database, trimmed)
 		if exec_err != .None && stop_on_error {
 			log.errorf("%s", trimmed[:min(len(trimmed), 80)])

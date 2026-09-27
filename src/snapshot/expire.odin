@@ -72,6 +72,7 @@ expire_snapshots_impl :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int
 			keep:       ^int,
 			keep_count: int,
 		})data
+
 		if Snapshot_State(h.state) == .COMMITTED {
 			d.keep^ += 1
 			if d.keep^ > d.keep_count {

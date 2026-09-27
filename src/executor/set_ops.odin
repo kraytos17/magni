@@ -53,24 +53,47 @@ union_all_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 }
 
 // union_op appends b to a, deduplicating the combined result (distinct rows kept once).
+// Uses fingerprint buckets with row_equal verification (same pattern as
+// intersect/except) — a bare map[u64]bool would silently drop distinct rows
+// on hash collision.
 @(private="file")
 union_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
-	seen := make(map[u64]bool, len(a^) + len(b), context.temp_allocator)
-	for r in a^ {
-		seen[row_fingerprint(r.values)] = true
+	// The accumulator may start with duplicates (e.g. UNION of {1,1,2}).
+	// Dedup it first so the incremental logic below only handles b rows.
+	if len(a^) > 1 {
+		out := dedup_rows(a^[:])
+		clear(a)
+		append(a, ..out)
+	}
+
+	index := make(map[u64][dynamic]int, len(a^) + len(b), context.temp_allocator)
+	defer {
+		for _, bucket in index { delete(bucket) }
+		delete(index)
+	}
+	// Index a's existing rows (positions into a^).
+	for i in 0 ..< len(a^) {
+		fp := row_fingerprint(a^[i].values)
+		bucket := index[fp]
+		append(&bucket, i)
+		index[fp] = bucket
 	}
 	for r in b {
 		fp := row_fingerprint(r.values)
-		if fp in seen { continue }
+		is_dup := false
+		if bucket, has := index[fp]; has {
+			// All bucket indices address a^ (original + newly appended rows).
+			for bi in bucket {
+				if row_equal(r, a^[bi]) { is_dup = true; break }
+			}
+		}
+		if is_dup { continue }
 
-		seen[fp] = true
 		append(a, r)
+		bucket := index[fp]
+		append(&bucket, len(a^) - 1)
+		index[fp] = bucket
 	}
-
-	// Dedup a's own starting rows (accumulator may begin with duplicates).
-	out := dedup_rows(a^[:])
-	clear(a)
-	append(a, ..out)
 }
 
 // intersect keeps rows present in both a and b, deduplicated. Builds a
@@ -104,41 +127,36 @@ intersect :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 }
 
 // intersect_all keeps the multiset intersection: each distinct row repeated
-// min(count_a, count_b) times.
+// min(count_a, count_b) times. Matches are verified with row_equal and each
+// b row is consumed at most once — fingerprint-only counting would inflate
+// caps on hash collision.
 @(private="file")
 intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
-	count_b := make(map[u64]int, len(b), context.temp_allocator)
 	seen_b := make(map[u64][dynamic]int, len(b), context.temp_allocator)
 	defer {
 		for _, bucket in seen_b { delete(bucket) }
 		delete(seen_b)
-		delete(count_b)
 	}
 	for i in 0 ..< len(b) {
 		fp := row_fingerprint(b[i].values)
-		count_b[fp] += 1
 		bucket := seen_b[fp]
 		append(&bucket, i)
 		seen_b[fp] = bucket
 	}
 
+	consumed := make([]bool, len(b), context.temp_allocator)
 	out := make([dynamic]Row_Entry, context.temp_allocator)
-	emitted := make(map[u64]int, len(a), context.temp_allocator)
-	defer delete(emitted)
 	for ra in a {
 		fp := row_fingerprint(ra.values)
-		if emitted[fp] >= count_b[fp] { continue }
-
-		// verify value equality with a matching row in b
-		matched := false
-		if bucket, has := seen_b[fp]; has {
-			for bi in bucket {
-				if row_equal(ra, b[bi]) { matched = true; break }
+		bucket, has := seen_b[fp]
+		if !has { continue }
+		for bi in bucket {
+			if consumed[bi] { continue }
+			if row_equal(ra, b[bi]) {
+				consumed[bi] = true
+				append(&out, ra)
+				break
 			}
-		}
-		if matched {
-			emitted[fp] += 1
-			append(&out, ra)
 		}
 	}
 	return out[:]
@@ -174,23 +192,38 @@ except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 }
 
 // except_all keeps the multiset difference: each distinct row repeated
-// max(count_a - count_b, 0) times.
+// max(count_a - count_b, 0) times. Skips are verified with row_equal —
+// fingerprint-only comparison would wrongly drop distinct rows on collision.
 @(private="file")
 except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
-	count_b := make(map[u64]int, len(b), context.temp_allocator)
-	for rb in b {
-		count_b[row_fingerprint(rb.values)] += 1
+	seen_b := make(map[u64][dynamic]int, len(b), context.temp_allocator)
+	defer {
+		for _, bucket in seen_b { delete(bucket) }
+		delete(seen_b)
+	}
+	for i in 0 ..< len(b) {
+		fp := row_fingerprint(b[i].values)
+		bucket := seen_b[fp]
+		append(&bucket, i)
+		seen_b[fp] = bucket
 	}
 
-	emitted := make(map[u64]int, len(a), context.temp_allocator)
+	consumed := make([]bool, len(b), context.temp_allocator)
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
 		fp := row_fingerprint(ra.values)
-		if emitted[fp] < count_b[fp] {
-			emitted[fp] += 1
-			continue
+		skipped := false
+		if bucket, has := seen_b[fp]; has {
+			for bi in bucket {
+				if consumed[bi] { continue }
+				if row_equal(ra, b[bi]) {
+					consumed[bi] = true
+					skipped = true
+					break
+				}
+			}
 		}
-		append(&out, ra)
+		if !skipped { append(&out, ra) }
 	}
 	return out[:]
 }
@@ -254,7 +287,6 @@ exec_compound_data :: proc(
 	for i < len(compound.operands) {
 		op := compound.operands[i].op
 		other_rows, other_cols, other_ok := exec_select_data(t, compound.operands[i].select^, cache)
-
 		if !other_ok { return nil, nil, false }
 		// Set operations require equal column counts across operands.
 		if len(other_cols) != len(acc_cols) {

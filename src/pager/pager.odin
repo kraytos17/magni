@@ -397,7 +397,8 @@ copy_page :: proc(p: ^Pager, src_page_num: u32) -> (dst: ^Page, err: Error) {
 	defer unpin_page(p, src_page_num)
 
 	dst = allocate_page(p) or_return
-	copy(dst.data, src.data); dst.dirty = true
+	mem.copy_non_overlapping(raw_data(dst.data), raw_data(src.data), types.PAGE_SIZE)
+	dst.dirty = true
 	return
 }
 

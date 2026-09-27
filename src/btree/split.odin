@@ -145,6 +145,7 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 				boff,
 				context.temp_allocator,
 			)
+
 			if col_vals == nil { return {}, .Serialization_Failed }
 			for ri in 0 ..< row_count {
 				if values[ri] == nil {
@@ -239,6 +240,7 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 				get_cell_key(curr.data, curr.id, i, curr.layout),
 			)
 		}
+
 		curr.header.cell_content_offset = u16le(dst_off)
 		curr.header.cell_count = u16le(mid)
 	}

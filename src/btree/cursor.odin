@@ -163,6 +163,7 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 			c.path[c.depth] = Cursor_Stack_Item {
 				page_id = curr, cell_index = u16(cell_count),
 			}
+
 			c.depth += 1
 			curr = page_id
 		} else {
@@ -196,6 +197,7 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	n, n_err := node_from_bytes(page_id, page.data, get_layout(c.tree.pager.page_format_version))
 
 	if n_err != .None { return {}, n_err }
+
 	c.cached_cell_count = u16(n.header.cell_count)
 	c.cached_is_leaf = is_leaf(n)
 	return n, .None
@@ -269,6 +271,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 			c.depth -= 1
 		}
 	}
+
 	c.is_valid = false
 	return .None
 }

@@ -100,9 +100,8 @@ value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.All
 		if err != nil { return {}, err }
 		return value_text(str_copy), nil
 	case []u8:
-		blob_copy, err := make([]u8, len(val), allocator)
+		blob_copy, err := slice.clone(val, allocator)
 		if err != nil { return {}, err }
-		copy(blob_copy, val)
 		return value_blob(blob_copy), nil
 	case:
 		return val, nil

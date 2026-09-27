@@ -50,6 +50,7 @@ destroy :: proc(c: ^Cell, allocator := context.allocator) {
 			types.value_delete(val, allocator)
 		}
 	}
+
 	delete(c.values, allocator)
 	c.values = nil
 }

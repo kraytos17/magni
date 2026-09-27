@@ -67,7 +67,10 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 		if !al3_ok { return {} }
 		return {source = tbl, alias = al3, success = true}
 	}
-	return {source = tbl, alias = tbl, success = true}
+	// No explicit alias: alias = "" means "same as source". The executor
+	// falls back to the table name, and statement_free skips empty aliases.
+	// (Sharing the tbl string header here would double-free.)
+	return {source = tbl, alias = "", success = true}
 }
 
 @(private="file")
@@ -137,6 +140,7 @@ parse_single_join :: proc(
 			}
 		}
 		for c in cols { delete(c, alloc) }
+
 		delete(cols)
 		return Where_Clause{root = root}, true
 	}
@@ -229,21 +233,31 @@ parse_select_columns :: proc(
 	return true
 }
 
+// eq_fold compares ASCII case-insensitively without allocation.
+@(private="file")
+eq_fold :: proc(s: string, target: string) -> bool {
+	if len(s) != len(target) { return false }
+	for i in 0 ..< len(s) {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' { c += 32 }
+		if c != target[i] { return false }
+	}
+	return true
+}
+
 // resolve_aggregate_name maps a function name (case-insensitive) to its
 // aggregate func, or false if it is not a supported aggregate.
+// Zero-alloc: ASCII case-fold per byte, no temp_allocator round-trip.
 @(private="file")
 resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
-	switch strings.to_upper(name, context.temp_allocator) {
-	case "COUNT":
-		return .COUNT, true
-	case "SUM":
-		return .SUM, true
-	case "AVG":
-		return .AVG, true
-	case "MIN":
-		return .MIN, true
-	case "MAX":
-		return .MAX, true
+	switch len(name) {
+	case 3:
+		if eq_fold(name, "min") { return .MIN, true }
+		if eq_fold(name, "max") { return .MAX, true }
+		if eq_fold(name, "avg") { return .AVG, true }
+		if eq_fold(name, "sum") { return .SUM, true }
+	case 5:
+		if eq_fold(name, "count") { return .COUNT, true }
 	}
 	return .COUNT, false
 }
@@ -403,7 +417,13 @@ parse_select :: proc(
 		if !js.success { return nil, false }
 
 		from_val = js.source; from_alias = js.alias
-		joins = parse_join_clauses(p, from_alias, allocator)
+		// Resolve "" alias to table name for USING/ON desugar (the AST keeps
+		// "" to mean "same as source"; this local is only for name resolution).
+		left_name := from_alias
+		if left_name == "" {
+			if tbl, is_tbl := js.source.(string); is_tbl { left_name = tbl }
+		}
+		joins = parse_join_clauses(p, left_name, allocator)
 	}
 	defer if !ok do delete(joins)
 

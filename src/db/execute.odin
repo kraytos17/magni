@@ -134,6 +134,7 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 				)
 			}
 		}
+
 		pager.wal_commit_txn(db.pager)
 		maybe_auto_checkpoint(db)
 	}
@@ -155,6 +156,7 @@ Query_Result :: struct {
 query :: proc(db: ^Database, sql: string) -> Query_Result {
 	r := Query_Result{}
 	if err := db_check(db); err != .None { r.err = err; return r }
+
 	sync.rw_mutex_shared_lock(&db.mu)
 	defer sync.rw_mutex_shared_unlock(&db.mu)
 
@@ -232,6 +234,7 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 		r.rows = flat_rows
 		return r
 	}
+
 	r.err = .Not_Supported
 	return r
 }

@@ -246,6 +246,7 @@ walk_chain :: proc(
 				return
 			}
 		}
+
 		pager.unpin_page(p, page)
 		page = next_page
 	}
@@ -337,6 +338,7 @@ print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 		tag := get_tag(p, page)
 		fmt.printf("#%-5d %-8s ts=%d", h.snapshot_id, Snapshot_Operation(h.operation), h.timestamp)
 		if tag != "" { fmt.printf("  [%s]", tag) }
+
 		fmt.println()
 		return true
 	})
@@ -368,9 +370,11 @@ set_header_state :: proc(
 		}
 		return false
 	}
+
 	// Old format: single header on page
 	h := (^Snapshot_Header)(raw_data(pg.data))
 	if string(h.magic[:]) != SNAPSHOT_MAGIC { return false }
+
 	h.state = u8(state)
 	pager.mark_dirty(p, page)
 	return true

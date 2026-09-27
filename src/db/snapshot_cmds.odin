@@ -37,6 +37,7 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 			fmt.printf("  %-20s MODIFIED (root %d → %d)\n", e.table_name, e.old_root, e.new_root)
 		}
 	}
+
 	fmt.printf("(%d table(s) changed)\n", len(entries))
 	return .None
 }
@@ -48,6 +49,7 @@ snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> DB_Error {
 	if !has_page {
 		return .Snapshot_Not_Found
 	}
+
 	snapshot.set_tag(db.pager, page, tag)
 	return .None
 }

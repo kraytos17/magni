@@ -34,6 +34,7 @@ main :: proc() {
 			flags.write_usage(os.to_stream(os.stderr), CLI, os.args[0], .Unix)
 			return
 		}
+
 		fmt.eprintln("Error:", err)
 		return
 	}

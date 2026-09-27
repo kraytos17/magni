@@ -1,11 +1,100 @@
 package executor
 
+import "core:hash"
 import "core:log"
 import "core:strconv"
 import "core:strings"
 import "src:parser"
 import "src:schema"
 import "src:types"
+
+// FNV-1a constants shared by hash_values.
+@(private="file")
+FNV_OFFSET_BASIS :: u64(0xcbf29ce484222325)
+
+@(private="file")
+FNV_PRIME :: u64(0x100000001b3)
+
+// hash_values computes a single FNV-1a hash over a row's values (or a subset
+// via indices; nil indices hashes all values). Each value is prefixed with a
+// fixed tag byte so that e.g. integer 1 and string "1" hash differently and
+// column boundaries are unambiguous. Used for DISTINCT dedup, set-operation
+// membership, GROUP BY keys, and hash-join keys. Collisions fall back to
+// types.value_compare at every call site — this is a hash-map key, not a digest.
+@(private)
+hash_values :: proc(values: []types.Value, indices: []int = nil) -> u64 {
+	h := FNV_OFFSET_BASIS
+	if indices == nil {
+		for v in values {
+			switch val in v {
+			case types.Null:
+				h = fnv_mix(h, 0)
+			case i64:
+				h = fnv_mix(h, 1)
+				h = fnv_mix(h, u64(val))
+			case f64:
+				h = fnv_mix(h, 2)
+				h = fnv_mix(h, transmute(u64)val)
+			case string:
+				h = fnv_mix(h, 3)
+				h = hash.fnv64a(transmute([]u8)val, h)
+			case []u8:
+				h = fnv_mix(h, 4)
+				h = hash.fnv64a(val, h)
+			}
+		}
+	} else {
+		for col_idx in indices {
+			v := values[col_idx]
+			switch val in v {
+			case types.Null:
+				h = fnv_mix(h, 0)
+			case i64:
+				h = fnv_mix(h, 1)
+				h = fnv_mix(h, u64(val))
+			case f64:
+				h = fnv_mix(h, 2)
+				h = fnv_mix(h, transmute(u64)val)
+			case string:
+				h = fnv_mix(h, 3)
+				h = hash.fnv64a(transmute([]u8)val, h)
+			case []u8:
+				h = fnv_mix(h, 4)
+				h = hash.fnv64a(val, h)
+			}
+		}
+	}
+	return h
+}
+
+@(private="file")
+fnv_mix :: proc(h, w: u64) -> u64 {
+	return (h ~ w) * FNV_PRIME
+}
+
+// hash_value computes the FNV-1a hash of a single value, using the same
+// per-type tags as hash_values. Used for hash-join keys.
+@(private)
+hash_value :: proc(v: types.Value) -> u64 {
+	h := FNV_OFFSET_BASIS
+	switch val in v {
+	case types.Null:
+		h = fnv_mix(h, 0)
+	case i64:
+		h = fnv_mix(h, 1)
+		h = fnv_mix(h, u64(val))
+	case f64:
+		h = fnv_mix(h, 2)
+		h = fnv_mix(h, transmute(u64)val)
+	case string:
+		h = fnv_mix(h, 3)
+		h = hash.fnv64a(transmute([]u8)val, h)
+	case []u8:
+		h = fnv_mix(h, 4)
+		h = hash.fnv64a(val, h)
+	}
+	return h
+}
 
 @(private)
 resolve_qualified_column :: proc(

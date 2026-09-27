@@ -1,7 +1,5 @@
 package parser
 
-import "core:unicode"
-
 Keyword_Entry :: struct {
 	word: string,
 	tok:  Token_Type,
@@ -76,8 +74,25 @@ match_keyword :: proc(ident: string) -> Token_Type {
 }
 
 @(private="file")
-is_hex_digit :: proc(c: rune) -> bool {
-	return unicode.is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+is_hex_digit :: proc(c: byte) -> bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// ASCII byte predicates for the lexer hot loop. SQL lexing is an ASCII
+// problem — these avoid the Unicode table lookups in core:unicode per byte.
+@(private="file")
+is_space_byte :: proc(c: byte) -> bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
+}
+
+@(private="file")
+is_digit_byte :: proc(c: byte) -> bool {
+	return c >= '0' && c <= '9'
+}
+
+@(private="file")
+is_alpha_byte :: proc(c: byte) -> bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
@@ -85,8 +100,8 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 	i := 0
 	line := u32(1)
 	for i < len(sql) {
-		c := rune(sql[i])
-		if unicode.is_space(c) {
+		c := sql[i]
+		if is_space_byte(c) {
 			if c == '\n' do line += 1
 			i += 1
 			continue
@@ -133,31 +148,32 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			hex_len := i - start
 			if hex_len % 2 != 0 { delete(tokens); return nil, false }
 			for j in start ..< i {
-				if !is_hex_digit(rune(sql[j])) { delete(tokens); return nil, false }
+				if !is_hex_digit(sql[j]) { delete(tokens); return nil, false }
 			}
 
 			append(&tokens, Token{.BLOB_LITERAL, sql[start:i], token_line})
-			i += 1; continue
+			i += 1
+			continue
 		}
-		if unicode.is_digit(c) ||
-		   (c == '-' && i + 1 < len(sql) && unicode.is_digit(rune(sql[i + 1]))) {
+		if is_digit_byte(c) ||
+		   (c == '-' && i + 1 < len(sql) && is_digit_byte(sql[i + 1])) {
 			start := i
 			if c == '-' do i += 1
 			// Hex literal: 0xFF, 0xDEAD
 			if i + 1 < len(sql) && sql[i] == '0' && (sql[i + 1] | 0x20) == 'x' {
 				i += 2
-				if i >= len(sql) || !is_hex_digit(rune(sql[i])) {
+				if i >= len(sql) || !is_hex_digit(sql[i]) {
 					delete(tokens)
 					return nil, false
 				}
-				for i < len(sql) && is_hex_digit(rune(sql[i])) { i += 1 }
+				for i < len(sql) && is_hex_digit(sql[i]) { i += 1 }
 				append(&tokens, Token{.NUMBER, sql[start:i], line}); continue
 			}
 
 			has_dot := false
 			for i < len(sql) {
 				ch := sql[i]
-				if unicode.is_digit(rune(ch)) {
+				if is_digit_byte(ch) {
 					i += 1
 				} else if ch == '.' && !has_dot {
 					has_dot = true
@@ -166,17 +182,18 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 					// Only consume exponent if followed by [+-]digit or digit.
 					ep := i + 1
 					if sql[ep] == '+' || sql[ep] == '-' {
-						if ep + 1 < len(sql) && unicode.is_digit(rune(sql[ep + 1])) {
+						if ep + 1 < len(sql) && is_digit_byte(sql[ep + 1]) {
 							i = ep + 2
 						} else {
 							break
 						}
-					} else if unicode.is_digit(rune(sql[ep])) {
+					} else if is_digit_byte(sql[ep]) {
 						i = ep + 1
 					} else {
 						break
 					}
-					for i < len(sql) && unicode.is_digit(rune(sql[i])) { i += 1 }
+
+					for i < len(sql) && is_digit_byte(sql[i]) { i += 1 }
 					break
 				} else {
 					break
@@ -184,11 +201,11 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			}
 			append(&tokens, Token{.NUMBER, sql[start:i], line}); continue
 		}
-		if unicode.is_alpha(c) || c == '_' {
+		if is_alpha_byte(c) || c == '_' {
 			start := i
 			for i < len(sql) &&
-			    (unicode.is_alpha(rune(sql[i])) ||
-					    unicode.is_digit(rune(sql[i])) ||
+			    (is_alpha_byte(sql[i]) ||
+					    is_digit_byte(sql[i]) ||
 					    sql[i] == '_') { i += 1 }
 
 			token_type := match_keyword(sql[start:i])
@@ -234,6 +251,7 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			delete(tokens); return nil, false
 		}
 	}
+
 	append(&tokens, Token{.EOF, "", line})
 	return tokens[:], true
 }

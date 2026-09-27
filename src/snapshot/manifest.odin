@@ -60,6 +60,7 @@ create_manifest :: proc(p: ^pager.Pager, tables: []types.Table) -> u32 {
 		copy(data[offset:], transmute([]u8)tbl.name)
 		offset += len(tbl.name)
 	}
+
 	pager.mark_dirty(p, page.page_num); pager.unpin_page(p, page.page_num)
 	return page.page_num
 }

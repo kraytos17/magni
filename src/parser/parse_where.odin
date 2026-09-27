@@ -90,6 +90,7 @@ parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 			where_nodes_free(children, allocator)
 			return nil, false
 		}
+
 		append(&children, right)
 		if !match(p, .OR) { break }
 	}
@@ -113,6 +114,7 @@ parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bo
 			where_nodes_free(children, allocator)
 			return nil, false
 		}
+
 		append(&children, right)
 		if !match(p, .AND) { break }
 	}
@@ -123,6 +125,99 @@ parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bo
 }
 
 @(private="file")
+Between_Parse :: enum {
+	Not_Between, // lookahead says this isn't a BETWEEN expression; keep parsing
+	Parsed, // BETWEEN parsed (node owns its strings)
+	Error, // BETWEEN detected but malformed; p.err_msg is set
+}
+
+// make_between_cond builds one leaf comparison of a BETWEEN desugar,
+// cloning the column name for the node's ownership.
+@(private="file")
+make_between_cond :: proc(
+	op: Token_Type,
+	val: types.Value,
+	col_name: string,
+	allocator: mem.Allocator,
+) -> (^Where_Node, bool) {
+	c := Condition { column = strings.clone(col_name, allocator), operator = op, rhs = val }
+	n := new(Where_Node, allocator)
+	n^ = Where_Node{kind = .COND, cond = c}
+	return n, true
+}
+
+// try_parse_between parses `col BETWEEN lo AND hi` (and NOT BETWEEN),
+// desugaring to `col >= lo AND col <= hi` (or `<`/`>` under negation).
+@(private="file")
+try_parse_between :: proc(
+	p: ^Parser,
+	allocator: mem.Allocator,
+) -> (
+	node: ^Where_Node,
+	status: Between_Parse,
+) {
+	peek0 := peek(p)
+	peek1_type := Token_Type.EOF
+	peek2_type := Token_Type.EOF
+	if p.current + 1 < len(p.tokens) { peek1_type = p.tokens[p.current + 1].type }
+	if p.current + 2 < len(p.tokens) { peek2_type = p.tokens[p.current + 2].type }
+
+	is_between := peek0.type != .NOT && peek1_type == .BETWEEN
+	is_not_between := (peek0.type == .NOT && peek2_type == .BETWEEN) ||
+		(peek0.type != .NOT && peek1_type == .NOT && peek2_type == .BETWEEN)
+	if !is_between && !is_not_between { return nil, .Not_Between }
+
+	// Detect negation: consume leading NOT(s) and optional NOT before BETWEEN
+	negated := false
+	for peek(p).type == .NOT { match(p, .NOT); negated = !negated }
+
+	col_name, col_ok := parse_qualified_identifier(p, allocator)
+	if !col_ok { return nil, .Error }
+	if peek(p).type == .NOT { match(p, .NOT); negated = !negated }
+	advance(p) // consume BETWEEN
+
+	lower_val, lower_ok := parse_value(p, allocator)
+	if !lower_ok { delete(col_name, allocator); return nil, .Error }
+	if !expect_match(p, .AND, "Expected AND in BETWEEN expression") {
+		delete(col_name, allocator); types.value_delete(lower_val, allocator)
+		return nil, .Error
+	}
+
+	upper_val, upper_ok := parse_value(p, allocator)
+	if !upper_ok {
+		delete(col_name, allocator); types.value_delete(lower_val, allocator)
+		return nil, .Error
+	}
+
+	left_op, right_op, kind := Token_Type.GREATER_EQUAL, Token_Type.LESS_EQUAL, Where_Kind.AND
+	if negated {
+		left_op, right_op, kind = Token_Type.LESS_THAN, Token_Type.GREATER_THAN, Where_Kind.OR
+	}
+
+	left, lok := make_between_cond(left_op, lower_val, col_name, allocator)
+	if !lok {
+		delete(col_name, allocator)
+		types.value_delete(upper_val, allocator)
+		return nil, .Error
+	}
+
+	right, rok := make_between_cond(right_op, upper_val, col_name, allocator)
+	if !rok {
+		delete(col_name, allocator)
+		where_node_free(left, allocator)
+		return nil, .Error
+	}
+
+	delete(col_name, allocator)
+	children := make([dynamic]^Where_Node, allocator)
+	append(&children, left)
+	append(&children, right)
+	node = new(Where_Node, allocator)
+	node^ = Where_Node{kind = kind, children = children}
+	return node, .Parsed
+}
+
+@(private="file")
 parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	p.nest_depth += 1
 	defer p.nest_depth -= 1
@@ -130,95 +225,9 @@ parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 		if p.err_msg == "" { p.err_msg = "Expression nesting too deep" }
 		return nil, false
 	}
-
-	{
-		peek0 := peek(p)
-		peek1_type := Token_Type.EOF
-		peek2_type := Token_Type.EOF
-		if p.current + 1 < len(p.tokens) { peek1_type = p.tokens[p.current + 1].type }
-		if p.current + 2 < len(p.tokens) { peek2_type = p.tokens[p.current + 2].type }
-
-		is_between := peek0.type != .NOT && peek1_type == .BETWEEN
-		is_not_between := (peek0.type == .NOT && peek2_type == .BETWEEN) ||
-			(peek0.type != .NOT && peek1_type == .NOT && peek2_type == .BETWEEN)
-
-		if is_between || is_not_between {
-			// Detect negation: consume leading NOT(s) and optional NOT before BETWEEN
-			negated := false
-			for peek(p).type == .NOT { match(p, .NOT); negated = !negated }
-			col_name, col_ok := parse_qualified_identifier(p, allocator)
-			if !col_ok { return nil, false }
-			if peek(p).type == .NOT { match(p, .NOT); negated = !negated }
-			advance(p) // consume BETWEEN
-
-			lower_val, lower_ok := parse_value(p, allocator)
-			if !lower_ok { delete(col_name, allocator); return nil, false }
-			if !expect_match(p, .AND, "Expected AND in BETWEEN expression") {
-				delete(col_name, allocator); types.value_delete(lower_val, allocator)
-				return nil, false
-			}
-
-			upper_val, upper_ok := parse_value(p, allocator)
-			if !upper_ok {
-				delete(col_name, allocator); types.value_delete(lower_val, allocator)
-				return nil, false
-			}
-
-			make_cond := proc(op: Token_Type, val: types.Value, cn: string, alloc: mem.Allocator) -> (^Where_Node, bool) {
-				c := Condition { column = strings.clone(cn, alloc), operator = op, rhs = val }
-				n := new(Where_Node, alloc)
-				n^ = Where_Node{kind = .COND, cond = c}
-				return n, true
-			}
-
-			if negated {
-				left, lok := make_cond(.LESS_THAN, lower_val, col_name, allocator)
-				if !lok {
-					delete(col_name, allocator)
-					types.value_delete(upper_val, allocator)
-					return nil, false
-				}
-
-				right, rok := make_cond(.GREATER_THAN, upper_val, col_name, allocator)
-				if !rok {
-					delete(col_name, allocator)
-					where_node_free(left, allocator)
-					return nil, false
-				}
-
-				delete(col_name, allocator)
-				children := make([dynamic]^Where_Node, allocator)
-				append(&children, left)
-				append(&children, right)
-				node := new(Where_Node, allocator)
-				node^ = Where_Node{kind = .OR, children = children}
-				return node, true
-			} else {
-				left, lok := make_cond(.GREATER_EQUAL, lower_val, col_name, allocator)
-				if !lok {
-					delete(col_name, allocator)
-					types.value_delete(upper_val, allocator)
-					return nil, false
-				}
-
-				right, rok := make_cond(.LESS_EQUAL, upper_val, col_name, allocator)
-				if !rok {
-					delete(col_name, allocator)
-					where_node_free(left, allocator)
-					return nil, false
-				}
-
-				delete(col_name, allocator)
-				children := make([dynamic]^Where_Node, allocator)
-				append(&children, left)
-				append(&children, right)
-				node := new(Where_Node, allocator)
-				node^ = Where_Node{kind = .AND, children = children}
-				return node, true
-			}
-		}
+	if between_node, between_status := try_parse_between(p, allocator); between_status != .Not_Between {
+		return between_node, between_status == .Parsed
 	}
-
 	if match(p, .NOT) {
 		child, child_ok := parse_primary(p, allocator)
 		if !child_ok { return nil, false }

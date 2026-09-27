@@ -48,6 +48,7 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		for col in s.columns {
 			delete(col.name, allocator)
 			if def, ok := col.default_value.?; ok { types.value_delete(def, allocator) }
+			if chk, ok := col.check_expr.?; ok { delete(chk, allocator) }
 		}
 
 		delete(s.columns, allocator)

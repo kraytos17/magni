@@ -6,12 +6,6 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-@(private)
-hash_join_key :: proc(v: types.Value) -> string {
-	if s, ok := v.(string); ok { return s }
-	return types.value_to_string(v)
-}
-
 @(private="file")
 join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[dynamic]Row_Entry) {
 	combined := make([]types.Value, len(outer.values) + len(inner), context.temp_allocator)
@@ -36,6 +30,7 @@ join_emit_null_left_row :: proc(right_row: Row_Entry, left_col_count: int, new_r
 	for k in 0 ..< left_col_count {
 		null_row[k] = types.value_null()
 	}
+
 	copy(null_row[left_col_count:], right_row.values)
 	append(new_rows, Row_Entry{0, null_row})
 }
@@ -117,6 +112,7 @@ join_hash_i64 :: proc(
 			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
 		}
 	}
+
 	delete(matched_left)
 	delete(matched_right)
 }
@@ -133,19 +129,27 @@ join_hash_string :: proc(
 	is_right: bool,
 	new_rows: ^[dynamic]Row_Entry,
 ) {
+	// Hash on u64 fingerprints (no per-row string allocation). Collisions fall
+	// back to value_compare. NULL keys never match (SQL semantics, mirrors the
+	// i64 path which skips non-i64 keys).
 	build_left := len(rows) <= len(right_rows)
 	build_cap := len(rows) if build_left else len(right_rows)
-	ht := make(map[string][dynamic]int, build_cap, context.temp_allocator)
+	ht := make(map[u64][dynamic]int, build_cap, context.temp_allocator)
 	if build_left {
 		for row, ri in rows {
-			key := hash_join_key(row.values[left_col])
+			v := row.values[left_col]
+			if types.is_null(v) { continue }
+			key := hash_value(v)
 			bucket := ht[key]
 			append(&bucket, ri)
 			ht[key] = bucket
 		}
 	} else {
 		for r_row, ri in right_rows {
-			key := hash_join_key(r_row.values[right_col])
+			v := r_row.values[right_col]
+			if types.is_null(v) { continue }
+
+			key := hash_value(v)
 			bucket := ht[key]
 			append(&bucket, ri)
 			ht[key] = bucket
@@ -156,9 +160,13 @@ join_hash_string :: proc(
 	matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
 	if build_left {
 		for r_row, ri in right_rows {
-			key := hash_join_key(r_row.values[right_col])
+			rv := r_row.values[right_col]
+			if types.is_null(rv) { continue }
+
+			key := hash_value(rv)
 			if matches, has := ht[key]; has {
 				for li in matches {
+					if !types.value_compare(rows[li].values[left_col], rv) { continue }
 					matched_left[li] = true
 					matched_right[ri] = true
 					join_emit_combined(rows[li], r_row.values, new_rows)
@@ -167,9 +175,13 @@ join_hash_string :: proc(
 		}
 	} else {
 		for l_row, li in rows {
-			key := hash_join_key(l_row.values[left_col])
+			lv := l_row.values[left_col]
+			if types.is_null(lv) { continue }
+
+			key := hash_value(lv)
 			if matches, has := ht[key]; has {
 				for ri in matches {
+					if !types.value_compare(lv, right_rows[ri].values[right_col]) { continue }
 					matched_left[li] = true
 					matched_right[ri] = true
 					join_emit_combined(l_row, right_rows[ri].values, new_rows)
@@ -192,37 +204,26 @@ join_hash_string :: proc(
 			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
 		}
 	}
+
 	delete(matched_left)
 	delete(matched_right)
 }
 
-@(private)
-build_join_result :: proc(
+@(private="file")
+resolve_from_source :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	ctx: ^Table_Context,
 	cache: ^schema.Table_Cache = nil,
-) -> (
-	[]Row_Entry,
-	[]types.Column,
-	[]Table_Col_Range,
-	int,
-	bool,
-) {
-	table_count := 1 + len(stmt.joins)
-	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
-	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
-	info: ^types.Table
-	found: bool
-	t0_alias: string
-	col_count_0 := 0
+) -> bool {
 	if tbl_name, is_table := stmt.from.(string); is_table {
-		info, found = schema.find_table_cached(t, tbl_name, cache)
+		info, found := schema.find_table_cached(t, tbl_name, cache)
 		if !found {
 			log.errorf("Error: Table not found: %s", tbl_name)
-			return nil, nil, nil, 0, false
+			return false
 		}
 
-		table_ctxs[0] = Table_Context {
+		ctx^ = Table_Context {
 			info = {table = info^, tree = btree.init(t.pager, info.root_page)},
 			range = {
 				table_name = stmt.from_alias if stmt.from_alias != "" else tbl_name,
@@ -230,60 +231,216 @@ build_join_result :: proc(
 				col_count = len(info.columns),
 			},
 		}
-
-		table_ranges[0] = table_ctxs[0].range
-		t0_alias = stmt.from_alias if stmt.from_alias != "" else tbl_name
-		col_count_0 = len(info.columns)
+		return true
 	} else if vt, is_vt := stmt.from.(^parser.Select_Stmt); is_vt {
 		inner_rows, inner_cols := exec_subquery(t, vt^, cache)
-		if inner_rows == nil { return nil, nil, nil, 0, false }
-
-		table_ctxs[0] = Table_Context {
+		if inner_rows == nil { return false }
+		ctx^ = Table_Context {
 			info = {virtual = Virtual_Table{columns = inner_cols, rows = inner_rows}},
 			range = {table_name = stmt.from_alias, start_col = 0, col_count = len(inner_cols)},
 		}
+		return true
+	}
+	return false
+}
 
-		table_ranges[0] = table_ctxs[0].range
-		t0_alias = stmt.from_alias
-		col_count_0 = len(inner_cols)
+@(private="file")
+resolve_join_source :: proc(
+	t: ^btree.Tree,
+	join: parser.Join_Clause,
+	prev_range: Table_Col_Range,
+	ctx: ^Table_Context,
+	cache: ^schema.Table_Cache = nil,
+) -> bool {
+	if jt_name, is_table := join.source.(string); is_table {
+		info, found := schema.find_table_cached(t, jt_name, cache)
+		if !found {
+			log.errorf("Error: Table not found: %s", jt_name)
+			return false
+		}
+
+		alias := join.alias if join.alias != "" else jt_name
+		ctx^ = Table_Context {
+			info = {table = info^, tree = btree.init(t.pager, info.root_page)},
+			range = {
+				table_name = alias,
+				start_col = prev_range.start_col + prev_range.col_count,
+				col_count = len(info.columns),
+			},
+		}
+		return true
+	} else if subq, is_subquery := join.source.(^parser.Select_Stmt); is_subquery {
+		inner_rows, inner_cols := exec_subquery(t, subq^, cache)
+		if inner_rows == nil { return false }
+
+		alias := join.alias if join.alias != "" else ""
+		ctx^ = Table_Context {
+			info = {virtual = Virtual_Table{columns = inner_cols, rows = inner_rows}},
+			range = {
+				table_name = alias,
+				start_col = prev_range.start_col + prev_range.col_count,
+				col_count = len(inner_cols),
+			},
+		}
+		return true
+	}
+	return false
+}
+
+// execute_single_join runs one JOIN clause: materializes the right side,
+// picks hash vs nested-loop, and returns the combined rows.
+@(private="file")
+execute_single_join :: proc(
+	t: ^btree.Tree,
+	jb: ^Join_Build,
+	jc: parser.Join_Clause,
+	info_idx: int,
+	rows: []Row_Entry,
+	filter: Maybe(parser.Where_Clause),
+	cache: ^schema.Table_Cache = nil,
+) -> []Row_Entry {
+	is_left := jc.join_type == .LEFT
+	is_right := jc.join_type == .RIGHT
+	left_col_count := jb.ctxs[info_idx - 1].range.col_count
+	right_col_count := jb.ctxs[info_idx].range.col_count
+	new_rows := make([dynamic]Row_Entry, context.temp_allocator)
+	right_rows: []Row_Entry
+	if vt, is_vt := jb.ctxs[info_idx].info.virtual.?; is_vt {
+		right_rows = vt.rows
+	} else {
+		// Materialize the right table once, then match against every left row
+		right_rows, _ = scan_table(
+			&jb.ctxs[info_idx].info.tree,
+			&jb.ctxs[info_idx].info.table,
+			filter,
+			nil,
+			t,
+			context.temp_allocator,
+			cache,
+		)
 	}
 
+	hash_used := false
+	if on_cl, has_on := jc.on_clause.?; has_on {
+		if cond, has_cond := where_single_condition(on_cl); has_cond && cond.operator == .EQUALS {
+			if rhs_str, is_col := cond.rhs.(string); is_col {
+				left_idx, left_ok := resolve_qualified_column(
+					jb.cols,
+					jb.ranges,
+					cond.column,
+				)
+				right_idx, right_ok := resolve_qualified_column(
+					jb.cols,
+					jb.ranges,
+					rhs_str,
+				)
+				if left_ok && right_ok {
+					hash_used = true
+					right_adjust := jb.ctxs[info_idx].range.start_col
+					key_is_int := false
+					if len(rows) > 0 && len(right_rows) > 0 {
+						if _, ok := rows[0].values[left_idx].(i64);
+						   ok { key_is_int = true }
+					}
+					if key_is_int {
+						join_hash_i64(
+							rows,
+							right_rows,
+							left_idx,
+							right_idx - right_adjust,
+							right_col_count,
+							left_col_count,
+							is_left,
+							is_right,
+							&new_rows,
+						)
+					} else {
+						join_hash_string(
+							rows,
+							right_rows,
+							left_idx,
+							right_idx - right_adjust,
+							right_col_count,
+							left_col_count,
+							is_left,
+							is_right,
+							&new_rows,
+						)
+					}
+				}
+			}
+		}
+	}
+	if !hash_used {
+		matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
+		if is_left || len(right_rows) >= len(rows) {
+			for outer_row in rows {
+				matched := false
+				for right_row, ri in right_rows {
+					try_join_match(
+						outer_row,
+						right_row.values,
+						jc,
+						jb.cols,
+						jb.ranges,
+						&new_rows,
+						&matched,
+					)
+					if matched { matched_right[ri] = true }
+				}
+				if is_left && !matched {
+					join_emit_null_row(outer_row, right_col_count, &new_rows)
+				}
+			}
+		} else {
+			for r_row, r_idx in right_rows {
+				for l_row in rows {
+					dummy := false
+					try_join_match(
+						l_row,
+						r_row.values,
+						jc,
+						jb.cols,
+						jb.ranges,
+						&new_rows,
+						&dummy,
+					)
+					if dummy { matched_right[r_idx] = true }
+				}
+			}
+		}
+		if is_right {
+			for ri in 0 ..< len(right_rows) {
+				if ri in matched_right { continue }
+				join_emit_null_left_row(right_rows[ri], left_col_count, &new_rows)
+			}
+		}
+		delete(matched_right)
+	}
+	return new_rows[:]
+}
+
+@(private)
+build_join_result :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
+) -> Join_Build {
+	table_count := 1 + len(stmt.joins)
+	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
+	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
+	if !resolve_from_source(t, stmt, &table_ctxs[0], cache) {
+		return {}
+	}
+
+	table_ranges[0] = table_ctxs[0].range
+	col_count_0 := table_ctxs[0].range.col_count
 	for join, i in stmt.joins {
 		idx := i + 1
-		if jt_name, is_table := join.source.(string); is_table {
-			info, found = schema.find_table_cached(t, jt_name, cache)
-			if !found {
-				log.errorf("Error: Table not found: %s", jt_name)
-				return nil, nil, nil, 0, false
-			}
-
-			prev := table_ctxs[idx - 1].range
-			alias := join.alias if join.alias != "" else jt_name
-			table_ctxs[idx] = Table_Context {
-				info = {table = info^, tree = btree.init(t.pager, info.root_page)},
-				range = {
-					table_name = alias,
-					start_col = prev.start_col + prev.col_count,
-					col_count = len(info.columns),
-				},
-			}
-			table_ranges[idx] = table_ctxs[idx].range
-		} else if subq, is_subquery := join.source.(^parser.Select_Stmt); is_subquery {
-			inner_rows, inner_cols := exec_subquery(t, subq^, cache)
-			if inner_rows == nil { return nil, nil, nil, 0, false }
-
-			alias := join.alias if join.alias != "" else ""
-			prev := table_ctxs[idx - 1].range
-			table_ctxs[idx] = Table_Context {
-				info = {virtual = Virtual_Table{columns = inner_cols, rows = inner_rows}},
-				range = {
-					table_name = alias,
-					start_col = prev.start_col + prev.col_count,
-					col_count = len(inner_cols),
-				},
-			}
-			table_ranges[idx] = table_ctxs[idx].range
+		if !resolve_join_source(t, join, table_ctxs[idx - 1].range, &table_ctxs[idx], cache) {
+			return {}
 		}
+		table_ranges[idx] = table_ctxs[idx].range
 	}
 
 	total_cols :=
@@ -318,139 +475,31 @@ build_join_result :: proc(
 			context.temp_allocator,
 			cache,
 		)
-		if scan_err { return nil, nil, nil, 0, false }
+		if scan_err { return {} }
 		rows = r
 	} else if vt, is_virtual := table_ctxs[0].info.virtual.?; is_virtual {
 		rows = vt.rows
 	}
 
+	jb := Join_Build {
+		ctxs = table_ctxs,
+		ranges = table_ranges,
+		cols = combined_cols,
+	}
 	for j_idx in 0 ..< len(stmt.joins) {
 		jc := stmt.joins[j_idx]
 		info_idx := j_idx + 1
-		is_left := jc.join_type == .LEFT
-		is_right := jc.join_type == .RIGHT
-		left_col_count := table_ctxs[info_idx - 1].range.col_count
-		right_col_count := table_ctxs[info_idx].range.col_count
-		new_rows := make([dynamic]Row_Entry, context.temp_allocator)
-		right_rows: []Row_Entry
-		if vt, is_vt := table_ctxs[info_idx].info.virtual.?; is_vt {
-			right_rows = vt.rows
-		} else {
-			// Materialize the right table once, then match against every left row
-			right_rows, _ = scan_table(
-				&table_ctxs[info_idx].info.tree,
-				&table_ctxs[info_idx].info.table,
-				join_filters[info_idx] if info_idx < len(join_filters) else nil,
-				nil,
-				t,
-				context.temp_allocator,
-				cache,
-			)
-		}
-
-		hash_used := false
-		if on_cl, has_on := jc.on_clause.?; has_on {
-			if cond, has_cond := where_single_condition(on_cl); has_cond && cond.operator == .EQUALS {
-				if rhs_str, is_col := cond.rhs.(string); is_col {
-					left_idx, left_ok := resolve_qualified_column(
-						combined_cols,
-						table_ranges,
-						cond.column,
-					)
-					right_idx, right_ok := resolve_qualified_column(
-						combined_cols,
-						table_ranges,
-						rhs_str,
-					)
-					if left_ok && right_ok {
-						hash_used = true
-						right_adjust := table_ctxs[info_idx].range.start_col
-						key_is_int := false
-						if len(rows) > 0 && len(right_rows) > 0 {
-							if _, ok := rows[0].values[left_idx].(i64);
-							   ok { key_is_int = true }
-						}
-						if key_is_int {
-							join_hash_i64(
-								rows,
-								right_rows,
-								left_idx,
-								right_idx - right_adjust,
-								right_col_count,
-								left_col_count,
-								is_left,
-								is_right,
-								&new_rows,
-							)
-						} else {
-							join_hash_string(
-								rows,
-								right_rows,
-								left_idx,
-								right_idx - right_adjust,
-								right_col_count,
-								left_col_count,
-								is_left,
-								is_right,
-								&new_rows,
-							)
-						}
-					}
-				}
-			}
-		}
-		if !hash_used {
-			matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
-			if is_left || len(right_rows) >= len(rows) {
-				for outer_row in rows {
-					matched := false
-					for right_row, ri in right_rows {
-						try_join_match(
-							outer_row,
-							right_row.values,
-							jc,
-							combined_cols,
-							table_ranges,
-							&new_rows,
-							&matched,
-						)
-						if matched { matched_right[ri] = true }
-					}
-					if is_left && !matched {
-						join_emit_null_row(outer_row, right_col_count, &new_rows)
-					}
-				}
-			} else {
-				for r_row, r_idx in right_rows {
-					for l_row in rows {
-						dummy := false
-						try_join_match(
-							l_row,
-							r_row.values,
-							jc,
-							combined_cols,
-							table_ranges,
-							&new_rows,
-							&dummy,
-						)
-						if dummy { matched_right[r_idx] = true }
-					}
-				}
-			}
-			if is_right {
-				for ri in 0 ..< len(right_rows) {
-					if ri in matched_right { continue }
-					join_emit_null_left_row(right_rows[ri], left_col_count, &new_rows)
-				}
-			}
-			delete(matched_right)
-		}
-		rows = new_rows[:]
+		filter := join_filters[info_idx] if info_idx < len(join_filters) else nil
+		rows = execute_single_join(t, &jb, jc, info_idx, rows, filter, cache)
 	}
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		rows = filter_rows(rows, &where_clause, combined_cols, table_ranges)
 	}
-	return rows, combined_cols, table_ranges, total_cols, true
+
+	jb.rows = rows
+	jb.total_cols = total_cols
+	jb.ok = true
+	return jb
 }
 
 // exec_select_join_data evaluates a SELECT with JOINs and returns projected
@@ -465,12 +514,13 @@ exec_select_join_data :: proc(
 	[]types.Column,
 	bool,
 ) {
-	rows, combined_cols, table_ranges, total_cols, ok := build_join_result(t, stmt, cache)
-	if !ok { return nil, nil, false }
+	jb := build_join_result(t, stmt, cache)
+	if !jb.ok { return nil, nil, false }
+
+	rows, combined_cols, table_ranges, total_cols := jb.rows, jb.cols, jb.ranges, jb.total_cols
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, combined_cols, table_ranges)
 	}
-
 	// Sort on the full combined rows (so qualified ORDER BY names resolve),
 	// then project to the requested columns.
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
