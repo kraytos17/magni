@@ -1,7 +1,6 @@
 package executor
 
 import "core:log"
-import "core:strings"
 import "src:btree"
 import "src:parser"
 import "src:schema"
@@ -59,35 +58,32 @@ exec_subquery :: proc(
 
 		proj_cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 		for col_name, i in stmt.columns {
-			proj_cols[i] = types.Column {
-				name = strings.clone(col_name, context.temp_allocator),
-				type = .TEXT,
-			}
+			// Borrow: stmt strings share the temp lifetime of the output.
+			proj_cols[i] = types.Column{name = col_name, type = .TEXT}
 		}
 		return projected[:], proj_cols
 	}
 	return rows, table.columns
 }
 
-// materialize_subquery_rows clones the inner subquery result rows (they borrow
-// from the inner scan) and applies the outer WHERE filter. Returns the rows and
-// the virtual-column table-range descriptor used for resolution/display.
+// materialize_subquery_rows applies the outer WHERE filter to the inner
+// subquery result rows. Values are borrowed (all temp-allocated with the same
+// lifetime) — no deep copy. Returns the rows and the virtual-column
+// table-range descriptor used for resolution/display.
 @(private)
 materialize_subquery_rows :: proc(
 	inner_rows: []Row_Entry,
 	virtual_cols: []types.Column,
 	stmt: parser.Select_Stmt,
 ) -> (rows: [dynamic]Row_Entry, single_range: []Table_Col_Range) {
-	rows = make([dynamic]Row_Entry, context.temp_allocator)
-	for entry in inner_rows {
-		cloned := deep_copy_values(entry.values)
-		append(&rows, Row_Entry{entry.rowid, cloned})
-	}
+	rows = make([dynamic]Row_Entry, 0, len(inner_rows), context.temp_allocator)
+	append(&rows, ..inner_rows)
 
 	alias := stmt.from_alias
 	single_range = []Table_Col_Range {
 		{table_name = alias, start_col = 0, col_count = len(virtual_cols)},
 	}
+
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		filtered := filter_rows(rows[:], &where_clause, virtual_cols, single_range)
 		clear(&rows)

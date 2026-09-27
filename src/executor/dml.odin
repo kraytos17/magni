@@ -308,7 +308,20 @@ Update_Plan :: struct {
 	table_name: string,
 	update_map: map[int]types.Value,
 	filter:     Maybe(parser.Where_Clause),
+	// Resolved once per scan (not per row) by update_by_scan.
+	filter_ctx: Maybe(Where_Eval_Ctx),
 	direct:     bool,
+}
+
+// eval_plan_filter evaluates the plan's pre-resolved filter against one row.
+// No filter → true; unresolvable filter → false (mirrors evaluate_where).
+@(private="file")
+eval_plan_filter :: proc(plan: ^Update_Plan, values: []types.Value) -> bool {
+	if _, has_wc := plan.filter.?; !has_wc { return true }
+	if ctx, ok := plan.filter_ctx.?; ok {
+		return evaluate_where_ctx(ctx, values)
+	}
+	return false
 }
 
 // update_by_pk handles the PK fast path. Returns handled=false to fall
@@ -379,6 +392,10 @@ update_by_scan :: proc(
 	if cursor_err != .None { return false, t.root, {} }
 	defer btree.cursor_destroy(&cursor)
 
+	// Resolve the filter once, not per row.
+	if wc, has_wc := plan.filter.?; has_wc {
+		plan.filter_ctx = init_where_ctx(&wc, plan.tbl.columns, nil, nil, context.temp_allocator)
+	}
 	if plan.direct {
 		return update_scan_direct(t, plan, table_tree, &cursor)
 	}
@@ -406,10 +423,7 @@ update_scan_direct :: proc(
 			continue
 		}
 
-		should_update := true
-		if where_clause, has_where := plan.filter.?; has_where {
-			should_update = evaluate_where(&where_clause, c.values, plan.tbl.columns, nil)
-		}
+		should_update := eval_plan_filter(plan, c.values)
 		if should_update {
 			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, true)
 			if !had_err && new_row != nil {
@@ -452,10 +466,7 @@ update_scan_cow :: proc(
 		}
 
 		defer cell.destroy(&c, context.temp_allocator)
-		should_update := true
-		if where_cl, has_where := plan.filter.?; has_where {
-			should_update = evaluate_where(&where_cl, c.values, plan.tbl.columns, nil)
-		}
+		should_update := eval_plan_filter(plan, c.values)
 		if should_update {
 			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, false)
 			if !had_err && new_row != nil {
@@ -524,6 +535,8 @@ Delete_Plan :: struct {
 	tbl:        types.Table,
 	table_name: string,
 	filter:     Maybe(parser.Where_Clause),
+	// Resolved once per scan (not per row) by collect_delete_targets.
+	filter_ctx: Maybe(Where_Eval_Ctx),
 	direct:     bool,
 }
 
@@ -567,6 +580,17 @@ delete_by_pk :: proc(
 	return true, true, t.root, {}
 }
 
+// eval_delete_filter evaluates the plan's pre-resolved filter against one row.
+// No filter → true; unresolvable filter → false (mirrors evaluate_where).
+@(private="file")
+eval_delete_filter :: proc(plan: ^Delete_Plan, values: []types.Value) -> bool {
+	if _, has_wc := plan.filter.?; !has_wc { return true }
+	if ctx, ok := plan.filter_ctx.?; ok {
+		return evaluate_where_ctx(ctx, values)
+	}
+	return false
+}
+
 // collect_delete_targets scans for rowids matching the filter.
 @(private="file")
 collect_delete_targets :: proc(
@@ -578,6 +602,10 @@ collect_delete_targets :: proc(
 	if err != .None { return targets }
 	defer btree.cursor_destroy(&cursor)
 
+	// Resolve the filter once, not per row.
+	if wc, has_wc := plan.filter.?; has_wc {
+		plan.filter_ctx = init_where_ctx(&wc, plan.tbl.columns, nil, nil, context.temp_allocator)
+	}
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
@@ -586,10 +614,7 @@ collect_delete_targets :: proc(
 		}
 		defer cell.destroy(&c, context.temp_allocator)
 
-		should_delete := true
-		if where_cl, has_where := plan.filter.?; has_where {
-			should_delete = evaluate_where(&where_cl, c.values, plan.tbl.columns, nil)
-		}
+		should_delete := eval_delete_filter(plan, c.values)
 		if should_delete {
 			append(&targets, c.rowid)
 		}

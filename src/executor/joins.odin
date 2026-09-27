@@ -299,10 +299,6 @@ execute_single_join :: proc(
 	filter: Maybe(parser.Where_Clause),
 	cache: ^schema.Table_Cache = nil,
 ) -> []Row_Entry {
-	is_left := jc.join_type == .LEFT
-	is_right := jc.join_type == .RIGHT
-	left_col_count := jb.ctxs[info_idx - 1].range.col_count
-	right_col_count := jb.ctxs[info_idx].range.col_count
 	new_rows := make([dynamic]Row_Entry, context.temp_allocator)
 	right_rows: []Row_Entry
 	if vt, is_vt := jb.ctxs[info_idx].info.virtual.?; is_vt {
@@ -320,104 +316,159 @@ execute_single_join :: proc(
 		)
 	}
 
-	hash_used := false
-	if on_cl, has_on := jc.on_clause.?; has_on {
-		if cond, has_cond := where_single_condition(on_cl); has_cond && cond.operator == .EQUALS {
-			if rhs_str, is_col := cond.rhs.(string); is_col {
-				left_idx, left_ok := resolve_qualified_column(
-					jb.cols,
-					jb.ranges,
-					cond.column,
-				)
-				right_idx, right_ok := resolve_qualified_column(
-					jb.cols,
-					jb.ranges,
-					rhs_str,
-				)
-				if left_ok && right_ok {
-					hash_used = true
-					right_adjust := jb.ctxs[info_idx].range.start_col
-					key_is_int := false
-					if len(rows) > 0 && len(right_rows) > 0 {
-						if _, ok := rows[0].values[left_idx].(i64);
-						   ok { key_is_int = true }
-					}
-					if key_is_int {
-						join_hash_i64(
-							rows,
-							right_rows,
-							left_idx,
-							right_idx - right_adjust,
-							right_col_count,
-							left_col_count,
-							is_left,
-							is_right,
-							&new_rows,
-						)
-					} else {
-						join_hash_string(
-							rows,
-							right_rows,
-							left_idx,
-							right_idx - right_adjust,
-							right_col_count,
-							left_col_count,
-							is_left,
-							is_right,
-							&new_rows,
-						)
-					}
-				}
-			}
-		}
-	}
+	hash_used := try_hash_join(jb, jc, info_idx, rows, right_rows, &new_rows)
 	if !hash_used {
-		matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
-		if is_left || len(right_rows) >= len(rows) {
-			for outer_row in rows {
-				matched := false
-				for right_row, ri in right_rows {
-					try_join_match(
-						outer_row,
-						right_row.values,
-						jc,
-						jb.cols,
-						jb.ranges,
-						&new_rows,
-						&matched,
-					)
-					if matched { matched_right[ri] = true }
-				}
-				if is_left && !matched {
-					join_emit_null_row(outer_row, right_col_count, &new_rows)
-				}
-			}
-		} else {
-			for r_row, r_idx in right_rows {
-				for l_row in rows {
-					dummy := false
-					try_join_match(
-						l_row,
-						r_row.values,
-						jc,
-						jb.cols,
-						jb.ranges,
-						&new_rows,
-						&dummy,
-					)
-					if dummy { matched_right[r_idx] = true }
-				}
-			}
-		}
-		if is_right {
-			for ri in 0 ..< len(right_rows) {
-				if ri in matched_right { continue }
-				join_emit_null_left_row(right_rows[ri], left_col_count, &new_rows)
-			}
-		}
-		delete(matched_right)
+		nested_loop_join(jb, jc, info_idx, rows, right_rows, &new_rows)
 	}
 	return new_rows[:]
+}
+
+// try_hash_join attempts the hash-join fast path for single-COND equi-joins
+// with a column RHS. Returns false to fall back to nested loop.
+@(private="file")
+try_hash_join :: proc(
+	jb: ^Join_Build,
+	jc: parser.Join_Clause,
+	info_idx: int,
+	rows: []Row_Entry,
+	right_rows: []Row_Entry,
+	new_rows: ^[dynamic]Row_Entry,
+) -> bool {
+	is_left := jc.join_type == .LEFT
+	is_right := jc.join_type == .RIGHT
+	left_col_count := jb.ctxs[info_idx - 1].range.col_count
+	right_col_count := jb.ctxs[info_idx].range.col_count
+	on_cl, has_on := jc.on_clause.?
+	if !has_on { return false }
+
+	cond, has_cond := where_single_condition(on_cl)
+	if !has_cond || cond.operator != .EQUALS { return false }
+
+	rhs_str, is_col := cond.rhs.(string)
+	if !is_col { return false }
+
+	left_idx, left_ok := resolve_qualified_column(
+		jb.cols,
+		jb.ranges,
+		cond.column,
+	)
+	right_idx, right_ok := resolve_qualified_column(
+		jb.cols,
+		jb.ranges,
+		rhs_str,
+	)
+	if !left_ok || !right_ok { return false }
+
+	right_adjust := jb.ctxs[info_idx].range.start_col
+	key_is_int := false
+	if len(rows) > 0 && len(right_rows) > 0 {
+		if _, ok := rows[0].values[left_idx].(i64);
+		   ok { key_is_int = true }
+	}
+	if key_is_int {
+		join_hash_i64(
+			rows,
+			right_rows,
+			left_idx,
+			right_idx - right_adjust,
+			right_col_count,
+			left_col_count,
+			is_left,
+			is_right,
+			new_rows,
+		)
+	} else {
+		join_hash_string(
+			rows,
+			right_rows,
+			left_idx,
+			right_idx - right_adjust,
+			right_col_count,
+			left_col_count,
+			is_left,
+			is_right,
+			new_rows,
+		)
+	}
+	return true
+}
+
+// nested_loop_join is the fallback for non-equi and multi-conjunct joins:
+// pair-wise ON evaluation with null extension for outer joins.
+@(private="file")
+nested_loop_join :: proc(
+	jb: ^Join_Build,
+	jc: parser.Join_Clause,
+	info_idx: int,
+	rows: []Row_Entry,
+	right_rows: []Row_Entry,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	is_left := jc.join_type == .LEFT
+	is_right := jc.join_type == .RIGHT
+	left_col_count := jb.ctxs[info_idx - 1].range.col_count
+	right_col_count := jb.ctxs[info_idx].range.col_count
+	// Resolve the ON filter once, not per pair. Unresolvable ON matches
+	// nothing (mirrors evaluate_where); absent ON matches everything.
+	filter: Maybe(Where_Eval_Ctx)
+	if on_cl, has := jc.on_clause.?; has {
+		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, nil, context.temp_allocator)
+		if _, ok := filter.?; !ok {
+			// Still emit null-extended rows for outer joins.
+			if is_left {
+				for outer_row in rows {
+					join_emit_null_row(outer_row, right_col_count, new_rows)
+				}
+			}
+			if is_right {
+				for ri in 0 ..< len(right_rows) {
+					join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
+				}
+			}
+			return
+		}
+	}
+
+	matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
+	if is_left || len(right_rows) >= len(rows) {
+		for outer_row in rows {
+			matched := false
+			for right_row, ri in right_rows {
+				try_join_match(
+					outer_row,
+					right_row.values,
+					filter,
+					new_rows,
+					&matched,
+				)
+				if matched { matched_right[ri] = true }
+			}
+			if is_left && !matched {
+				join_emit_null_row(outer_row, right_col_count, new_rows)
+			}
+		}
+	} else {
+		for r_row, r_idx in right_rows {
+			for l_row in rows {
+				dummy := false
+				try_join_match(
+					l_row,
+					r_row.values,
+					filter,
+					new_rows,
+					&dummy,
+				)
+				if dummy { matched_right[r_idx] = true }
+			}
+		}
+	}
+	if is_right {
+		for ri in 0 ..< len(right_rows) {
+			if ri in matched_right { continue }
+			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
+		}
+	}
+	delete(matched_right)
 }
 
 @(private)
@@ -569,13 +620,11 @@ exec_select_join_data :: proc(
 try_join_match :: proc(
 	outer_row: Row_Entry,
 	inner_values: []types.Value,
-	jc: parser.Join_Clause,
-	combined_cols: []types.Column,
-	table_ranges: []Table_Col_Range,
+	filter: Maybe(Where_Eval_Ctx),
 	new_rows: ^[dynamic]Row_Entry,
 	matched: ^bool,
 ) {
-	if on_cl, has_on := jc.on_clause.?; has_on {
+	if f, has_f := filter.?; has_f {
 		tmp := make(
 			[]types.Value,
 			len(outer_row.values) + len(inner_values),
@@ -584,7 +633,7 @@ try_join_match :: proc(
 
 		copy(tmp[:len(outer_row.values)], outer_row.values)
 		copy(tmp[len(outer_row.values):], inner_values)
-		if !evaluate_where(&on_cl, tmp, combined_cols, table_ranges) { return }
+		if !evaluate_where_ctx(f, tmp) { return }
 	}
 
 	matched^ = true
