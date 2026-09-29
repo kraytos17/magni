@@ -1,0 +1,5 @@
+usage: magni.py test-cli [-h] [--full]
+
+options:
+  -h, --help  show this help message and exit
+  --full      comprehensive CLI integration

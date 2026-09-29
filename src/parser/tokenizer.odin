@@ -25,7 +25,7 @@ keyword_table := []Keyword_Entry{
 	// len 6
 	{"select", .SELECT}, {"delete", .DELETE}, {"update", .UPDATE}, {"create", .CREATE},
 	{"insert", .INSERT}, {"offset", .OFFSET}, {"having", .HAVING}, {"values", .VALUES},
-	{"except", .EXCEPT},
+	{"except", .EXCEPT}, {"commit", .COMMIT},
 	// len 7
 	{"default", .DEFAULT}, {"primary", .PRIMARY}, {"integer", .INTEGER},
 	{"explain", .EXPLAIN}, {"foreign", .FOREIGN}, {"between", .BETWEEN},
@@ -33,14 +33,14 @@ keyword_table := []Keyword_Entry{
 	{"distinct", .DISTINCT}, {"rollback", .ROLLBACK}, {"snapshot", .SNAPSHOT},
 	// len 9
 	{"timestamp", .TIMESTAMP}, {"intersect", .INTERSECT},
-	// len 11
+	// len 10
 	{"references", .REFERENCES},
 }
 
 // keyword_bucket_offsets[i] = start index into keyword_table for words of length i+2.
 // The final value equals len(keyword_table); the bucket for length N spans
 // keyword_table[offsets[N-2]:offsets[N-1]].
-keyword_bucket_offsets := [10]int{0, 6, 13, 25, 40, 49, 55, 58, 60, 61}
+keyword_bucket_offsets := [10]int{0, 6, 13, 25, 40, 50, 56, 59, 61, 62}
 
 @(private="file")
 match_keyword :: proc(ident: string) -> Token_Type {

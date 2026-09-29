@@ -1,0 +1,7 @@
+usage: magni.py fuzz run [-h] ...
+
+positional arguments:
+  extra
+
+options:
+  -h, --help  show this help message and exit

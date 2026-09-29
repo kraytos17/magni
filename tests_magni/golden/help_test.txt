@@ -1,0 +1,6 @@
+usage: magni.py test [-h] [--verbose] [--name NAME]
+
+options:
+  -h, --help   show this help message and exit
+  --verbose
+  --name NAME  single test name

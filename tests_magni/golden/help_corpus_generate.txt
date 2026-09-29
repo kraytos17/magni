@@ -1,0 +1,5 @@
+usage: magni.py corpus generate [-h] [--exec]
+
+options:
+  -h, --help  show this help message and exit
+  --exec      regenerate exec scripts from gen_exec_corpus.py instead

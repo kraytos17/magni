@@ -1,0 +1,7 @@
+usage: magni.py corpus promote [-h] [--minimize] [--dry-run] [--test]
+
+options:
+  -h, --help  show this help message and exit
+  --minimize
+  --dry-run
+  --test      regenerate corpus + ASan gate after promoting

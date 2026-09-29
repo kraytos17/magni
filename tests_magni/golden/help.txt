@@ -1,0 +1,51 @@
+MagniDB — magni.py help
+
+  BUILD
+    magni.py build              build debug binary → build/magni
+    magni.py build --release    build release binary (LTO) → build/magni_release
+    magni.py build --asan       ASan fuzz target → fuzz/fuzz_target
+    magni.py build --cov        coverage target → fuzz/fuzz_target_cov
+    magni.py build --cov --cmplog  RedQueen binary → fuzz/fuzz_target_cmplog
+    magni.py build --cov --laf     LAF-INTEL binary → fuzz/fuzz_target_laf
+    magni.py build --exec         executor/storage target (coverage + ASan)
+    magni.py build --check-only parse + type check (no vet)
+
+  TEST
+    magni.py test               run all Odin tests
+    magni.py test --verbose     verbose (no fancy)
+    magni.py test --name NAME   one test: --name test_integration_vacuum
+    magni.py test-py            run magni.py's own unit tests (no Odin/AFL needed)
+    magni.py test-cli           basic CLI smoke (needs build/magni)
+    magni.py test-cli --full    comprehensive CLI integration
+
+  VET
+    magni.py vet                fast vet (odin check, full flags)
+    magni.py vet --all          LLVM vet via build+test (strict, shadowing)
+    magni.py vet --shadowing|--unused|--style|--cast|--semicolon
+
+  FUZZ
+    magni.py fuzz run [-- --extra args]   interactive AFL++ campaign
+    magni.py fuzz campaign -w N -s SEC [--roles R,...]
+      default roles: master + rotation (cmplog,asan,fast,explore,coe,laf,mopt)
+      roles: master,explore,fast,coe,seek,cmplog,asan,laf,mopt,oldq,exec,grammar,exec_grammar
+        (exec runs full scripts against scratch DBs, own seed pool+timeout)
+        (grammar/exec_grammar add the SQL-aware Python mutator on top of havoc)
+    magni.py fuzz status                   per-worker fuzzer_stats
+    magni.py fuzz stop                     pkill afl-fuzz
+    magni.py fuzz showmap                  coverage tuples for current corpus
+    magni.py fuzz cmin                     minimize corpus → /tmp/min
+
+  CORPUS
+    magni.py corpus generate               regenerate seeds → fuzz/corpus/
+    magni.py corpus generate --exec         regenerate exec scripts → fuzz/corpus_exec/
+    magni.py corpus test                   ASan gate (every corpus seed)
+    magni.py corpus test --exec             ASan gate (every exec script)
+    magni.py corpus promote [--minimize] [--dry-run] [--test]
+    magni.py corpus minimize               cmin + purge, rewrite promoted_seeds.py
+
+  CLEAN
+    magni.py clean              remove build/ only
+    magni.py clean --all        remove build/ + fuzz artifacts
+
+  Env overrides: ODIN=odin, MAGNI_FUZZ_OUT=<dir>
+

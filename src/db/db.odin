@@ -218,8 +218,8 @@ maybe_auto_checkpoint :: proc(db: ^Database) {
 close :: proc(db: ^Database) {
 	if db == nil { return }
 	sync.rw_mutex_lock(&db.mu)
-	defer sync.rw_mutex_unlock(&db.mu)
-
+	// NOTE: explicit unlock before free at the end (not defer): the mutex
+	// lives inside db, so unlocking after free(db) is heap-use-after-free.
 	if db.snapshot_batch_count > 0 {
 		db.snapshot_batch_threshold = 1
 		db.snapshot_batch_count = 1
@@ -262,7 +262,10 @@ close :: proc(db: ^Database) {
 	}
 
 	schema.table_cache_free(&db.table_cache)
-	delete(db.snapshot_index); delete(db.path); free(db)
+	delete(db.snapshot_index)
+	delete(db.path)
+	sync.rw_mutex_unlock(&db.mu)
+	free(db)
 }
 
 @(private="file")

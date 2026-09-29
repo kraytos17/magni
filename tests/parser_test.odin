@@ -1425,3 +1425,45 @@ test_tokenize_negative_hex :: proc(t: ^testing.T) {
 	testing.expect(t, tokens[0].type == .NUMBER, "Expected NUMBER")
 	testing.expect(t, tokens[0].lexeme == "-0xFF", "Expected '-0xFF' lexeme")
 }
+
+@(test)
+test_commit_keyword :: proc(t: ^testing.T) {
+	// COMMIT was missing from keyword_table (Token_Type.COMMIT existed but the
+	// lexer could never produce it). Regression test for the bucket fix.
+	tokens, ok := parser.tokenize("COMMIT;", context.temp_allocator)
+	testing.expect(t, ok, "COMMIT must tokenize")
+	testing.expect(t, tokens[0].type == .COMMIT, "Expected COMMIT token")
+
+	stmt, pok, _ := parser.parse("COMMIT;", context.temp_allocator)
+	testing.expect(t, pok, "COMMIT; must parse")
+	txn, is_txn := stmt.type.(parser.Txn_Stmt)
+	testing.expect(t, is_txn, "Expected Txn_Stmt variant")
+	testing.expect(t, txn.op == .COMMIT, "Expected COMMIT op")
+}
+
+@(test)
+test_keyword_bucket_offsets :: proc(t: ^testing.T) {
+	// Every keyword_table word must resolve to its token (guards the
+	// length-bucket offsets against desync when keywords are added).
+	keywords := [][2]string{
+		{"in", "IN"}, {"of", "OF"}, {"int", "INTEGER"}, {"not", "NOT"},
+		{"from", "FROM"}, {"null", "NULL"}, {"table", "TABLE"},
+		{"where", "WHERE"}, {"begin", "BEGIN"}, {"commit", "COMMIT"},
+		{"select", "SELECT"}, {"except", "EXCEPT"}, {"default", "DEFAULT"},
+		{"between", "BETWEEN"}, {"distinct", "DISTINCT"},
+		{"rollback", "ROLLBACK"}, {"timestamp", "TIMESTAMP"},
+		{"intersect", "INTERSECT"}, {"references", "REFERENCES"},
+	}
+
+	for kw in keywords {
+		tokens, ok := parser.tokenize(kw[0], context.temp_allocator)
+		testing.expect(t, ok, "keyword must tokenize")
+		if !ok || len(tokens) == 0 { continue }
+
+		testing.expect(
+			t,
+			fmt.tprintf("%v", tokens[0].type) == kw[1],
+			fmt.tprintf("keyword '%s' must resolve", kw[0]),
+		)
+	}
+}

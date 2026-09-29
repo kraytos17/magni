@@ -94,13 +94,18 @@ render_result :: proc(out: Result) {
 	table_rows := make([dynamic][]string, context.temp_allocator)
 	row_count := 0
 	for entry in out.rows {
+		// Defensive: a producer bug yielding a short row must never panic
+		// the renderer — skip it instead.
+		if len(entry.values) != len(cols) { continue }
 		row_strs := make([]string, len(cols), context.temp_allocator)
 		for i in 0 ..< len(cols) {
 			row_strs[i] = value_string(entry.values[i])
 		}
+
 		append(&table_rows, row_strs)
 		row_count += 1
 	}
+
 	render_table(header, table_rows[:])
 	fmt.printf("(%d rows)\n", row_count)
 }

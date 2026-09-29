@@ -1,0 +1,5 @@
+usage: magni.py corpus test [-h] [--exec]
+
+options:
+  -h, --help  show this help message and exit
+  --exec      gate exec seeds with the exec target instead

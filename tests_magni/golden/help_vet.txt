@@ -1,0 +1,11 @@
+usage: magni.py vet [-h] [--all] [--shadowing] [--unused] [--style] [--cast]
+                    [--semicolon]
+
+options:
+  -h, --help   show this help message and exit
+  --all
+  --shadowing
+  --unused
+  --style
+  --cast
+  --semicolon

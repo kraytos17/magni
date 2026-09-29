@@ -1,0 +1,4 @@
+usage: magni.py help [-h]
+
+options:
+  -h, --help  show this help message and exit

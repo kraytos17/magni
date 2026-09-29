@@ -1,6 +1,7 @@
 package db
 
 import "core:sync"
+import "src:btree"
 import "src:executor"
 import "src:pager"
 import "src:parser"
@@ -44,28 +45,11 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 
 	st := Schema_Tree(db)
 	as_of_override := false
+	as_of_err := DB_Error.None
 	if sel, is_sel := stmt.type.(parser.Select_Stmt); is_sel {
-		if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
-			snap_page, has_page := db.snapshot_index[snap_id]
-			if !has_page {
-				return .Snapshot_Not_Found
-			}
-
-			snap_h, snap_ok := snapshot.load(db.pager, snap_page, snap_id)
-			if !snap_ok {
-				return .Snapshot_Failed
-			}
-
-			st.root = snap_h.schema_root
-			as_of_override = true
-		} else if ts_val, has_ts := sel.as_of_timestamp.?; has_ts {
-			snap_h, snap_ok := snapshot.find_by_timestamp(db.pager, db.latest_snapshot, ts_val)
-			if !snap_ok {
-				return .Snapshot_Not_Found
-			}
-
-			st.root = snap_h.schema_root
-			as_of_override = true
+		as_of_override, as_of_err = resolve_as_of(db, &st, sel)
+		if as_of_err != .None {
+			return as_of_err
 		}
 	}
 
@@ -168,26 +152,10 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 
 	st := Schema_Tree(db)
 	if sel, is_sel := stmt.type.(parser.Select_Stmt); is_sel {
-		if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
-			snap_page, has_page := db.snapshot_index[snap_id]
-			if !has_page {
-				r.err = .Snapshot_Not_Found
-				return r
-			}
-
-			snap_h, snap_ok := snapshot.load(db.pager, snap_page, snap_id)
-			if !snap_ok {
-				r.err = .Snapshot_Failed
-				return r
-			}
-			st.root = snap_h.schema_root
-		} else if ts_val, has_ts := sel.as_of_timestamp.?; has_ts {
-			snap_h, snap_ok := snapshot.find_by_timestamp(db.pager, db.latest_snapshot, ts_val)
-			if !snap_ok {
-				r.err = .Snapshot_Not_Found
-				return r
-			}
-			st.root = snap_h.schema_root
+		_, err := resolve_as_of(db, &st, sel)
+		if err != .None {
+			r.err = err
+			return r
 		}
 
 		rows, cols, q_ok := executor.exec_query(&st, sel, &db.table_cache)
@@ -195,46 +163,67 @@ query :: proc(db: ^Database, sql: string) -> Query_Result {
 			r.err = .IO_Error
 			return r
 		}
-
-		col_names := make([]string, len(cols), context.temp_allocator)
-		col_types := make([]types.Column_Type, len(cols), context.temp_allocator)
-		for col, i in cols {
-			col_names[i] = col.name
-			col_types[i] = col.type
-		}
-
-		flat_rows := make([][]types.Value, len(rows), context.temp_allocator)
-		for entry, i in rows { flat_rows[i] = entry.values }
-
-		r.ok = true
-		r.columns = col_names
-		r.col_types = col_types
-		r.rows = flat_rows
-		return r
+		return pack_query_result(rows, cols)
 	} else if comp, is_comp := stmt.type.(parser.Compound_Stmt); is_comp {
 		rows, cols, q_ok := executor.exec_compound_data(&st, comp, &db.table_cache)
 		if !q_ok {
 			r.err = .IO_Error
 			return r
 		}
-
-		col_names := make([]string, len(cols), context.temp_allocator)
-		col_types := make([]types.Column_Type, len(cols), context.temp_allocator)
-		for col, i in cols {
-			col_names[i] = col.name
-			col_types[i] = col.type
-		}
-
-		flat_rows := make([][]types.Value, len(rows), context.temp_allocator)
-		for entry, i in rows { flat_rows[i] = entry.values }
-
-		r.ok = true
-		r.columns = col_names
-		r.col_types = col_types
-		r.rows = flat_rows
-		return r
+		return pack_query_result(rows, cols)
 	}
 
 	r.err = .Not_Supported
 	return r
+}
+
+// resolve_as_of points st at the requested AS OF snapshot (if any).
+// Returns (overrode, err); err is .None on success, including when the
+// statement has no AS OF clause at all.
+@(private="file")
+resolve_as_of :: proc(db: ^Database, st: ^btree.Tree, sel: parser.Select_Stmt) -> (bool, DB_Error) {
+	if snap_id, has_snap := sel.as_of_snapshot.?; has_snap {
+		snap_page, has_page := db.snapshot_index[snap_id]
+		if !has_page {
+			return false, .Snapshot_Not_Found
+		}
+
+		snap_h, snap_ok := snapshot.load(db.pager, snap_page, snap_id)
+		if !snap_ok {
+			return false, .Snapshot_Failed
+		}
+
+		st.root = snap_h.schema_root
+		return true, .None
+	} else if ts_val, has_ts := sel.as_of_timestamp.?; has_ts {
+		snap_h, snap_ok := snapshot.find_by_timestamp(db.pager, db.latest_snapshot, ts_val)
+		if !snap_ok {
+			return false, .Snapshot_Not_Found
+		}
+
+		st.root = snap_h.schema_root
+		return true, .None
+	}
+	return false, .None
+}
+
+// pack_query_result flattens executor rows/cols into the API result struct.
+@(private="file")
+pack_query_result :: proc(rows: []executor.Row_Entry, cols: []types.Column) -> Query_Result {
+	col_names := make([]string, len(cols), context.temp_allocator)
+	col_types := make([]types.Column_Type, len(cols), context.temp_allocator)
+	for col, i in cols {
+		col_names[i] = col.name
+		col_types[i] = col.type
+	}
+
+	flat_rows := make([][]types.Value, len(rows), context.temp_allocator)
+	for entry, i in rows { flat_rows[i] = entry.values }
+	return Query_Result{
+		columns   = col_names,
+		col_types = col_types,
+		rows      = flat_rows,
+		ok        = true,
+		err       = .None,
+	}
 }

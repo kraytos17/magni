@@ -1,0 +1,13 @@
+usage: magni.py fuzz campaign [-h] [-w WORKERS] [-s SECONDS] [--roles ROLES]
+                              ...
+
+positional arguments:
+  extra
+
+options:
+  -h, --help            show this help message and exit
+  -w, --workers WORKERS
+  -s, --seconds SECONDS
+  --roles ROLES         comma-separated worker roles (default: master +
+                        rotation). Roles: master,explore,fast,coe,seek,cmplog,
+                        asan,laf,mopt,oldq,exec,grammar,exec_grammar

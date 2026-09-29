@@ -1,0 +1,6 @@
+usage: magni.py clean [-h] [--all] [--fuzz-only]
+
+options:
+  -h, --help   show this help message and exit
+  --all
+  --fuzz-only

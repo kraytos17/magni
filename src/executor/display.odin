@@ -1,6 +1,5 @@
 package executor
 
-import "core:fmt"
 import "core:log"
 import "core:strings"
 import "src:parser"
@@ -10,52 +9,6 @@ import "src:types"
 @(private)
 value_string :: proc(v: types.Value) -> string {
 	return types.value_to_string(v)
-}
-
-display_results :: proc(
-	rows: []Row_Entry,
-	cols: []types.Column,
-	display_indices: []int,
-	limit, offset: Maybe(u64),
-	aliases: []string = nil,
-) {
-	skip_count := u64(0)
-	if off, has_off := offset.?; has_off { skip_count = off }
-
-	limit_count := u64(0)
-	has_limit := false
-	if lim, has_lim := limit.?; has_lim {
-		limit_count = lim
-		has_limit = true
-	}
-
-	header := make([]string, len(display_indices), context.temp_allocator)
-	for idx, i in display_indices {
-		if aliases != nil && i < len(aliases) && aliases[i] != "" {
-			header[i] = aliases[i]
-		} else {
-			header[i] = cols[idx].name
-		}
-	}
-
-	table_rows := make([dynamic][]string, context.temp_allocator)
-	row_count := 0
-	for entry in rows {
-		if skip_count > 0 {
-			skip_count -= 1
-			continue
-		}
-
-		row_strs := make([]string, len(display_indices), context.temp_allocator)
-		for idx, i in display_indices { row_strs[i] = value_string(entry.values[idx]) }
-
-		append(&table_rows, row_strs)
-		row_count += 1
-		if has_limit && u64(row_count) >= limit_count { break }
-	}
-
-	render_table(header, table_rows[:])
-	fmt.printf("(%d rows)\n", row_count)
 }
 
 @(private)

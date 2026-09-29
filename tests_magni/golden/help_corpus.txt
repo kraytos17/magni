@@ -1,0 +1,11 @@
+usage: magni.py corpus [-h] {generate,test,promote,minimize} ...
+
+positional arguments:
+  {generate,test,promote,minimize}
+    generate            regenerate corpus from gen_corpus.py
+    test                ASan gate on every seed
+    promote             promote grown queue into gen_corpus.py
+    minimize            afl-cmin + monster purge, rewrite promoted_seeds.py
+
+options:
+  -h, --help            show this help message and exit

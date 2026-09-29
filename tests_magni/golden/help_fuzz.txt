@@ -1,0 +1,13 @@
+usage: magni.py fuzz [-h] {run,campaign,status,stop,showmap,cmin} ...
+
+positional arguments:
+  {run,campaign,status,stop,showmap,cmin}
+    run                 interactive AFL++ campaign
+    campaign            headless parallel campaign
+    status              per-worker fuzzer_stats
+    stop                pkill afl-fuzz
+    showmap             coverage tuples for current corpus
+    cmin                minimize corpus → /tmp/min
+
+options:
+  -h, --help            show this help message and exit

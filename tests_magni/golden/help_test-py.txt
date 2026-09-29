@@ -1,0 +1,4 @@
+usage: magni.py test-py [-h]
+
+options:
+  -h, --help  show this help message and exit

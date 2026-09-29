@@ -92,35 +92,8 @@ materialize_subquery_rows :: proc(
 	return rows, single_range
 }
 
-@(private)
-exec_select_subquery :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
-	subq, subq_ok := stmt.from.(^parser.Select_Stmt)
-	if !subq_ok { return false }
-
-	inner_rows, virtual_cols := exec_subquery(t, subq^)
-	if inner_rows == nil { return false }
-
-	rows, single_range := materialize_subquery_rows(inner_rows, virtual_cols, stmt)
-	display_indices, ok := build_display_indices(
-		stmt.columns,
-		virtual_cols,
-		single_range,
-		len(virtual_cols),
-	)
-
-	if !ok { return false }
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		if !sort_rows(rows[:], order_clause, virtual_cols, single_range) {
-			return false
-		}
-	}
-
-	display_results(rows[:], virtual_cols, display_indices[:], stmt.limit, stmt.offset, stmt.aliases)
-	return true
-}
-
 // exec_subquery_data evaluates a SELECT whose FROM is a subquery and returns
-// the projected rows/columns without printing. Mirror of exec_select_subquery.
+// the projected rows/columns without printing.
 @(private)
 exec_subquery_data :: proc(
 	t: ^btree.Tree,
@@ -144,7 +117,15 @@ exec_subquery_data :: proc(
 		single_range,
 		len(virtual_cols),
 	)
+
 	if !ok { return nil, nil, false }
+	// Sort on the full rows (so ORDER BY names outside the projected
+	// columns resolve), then project — same order as exec_select_join_data.
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		if !sort_rows(rows[:], order_clause, virtual_cols, single_range) {
+			return nil, nil, false
+		}
+	}
 
 	// Project to the requested columns.
 	proj_rows := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
@@ -156,12 +137,6 @@ exec_subquery_data :: proc(
 
 	proj_cols := make([]types.Column, len(display_indices), context.temp_allocator)
 	for idx, i in display_indices { proj_cols[i] = virtual_cols[idx] }
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		range0 := []Table_Col_Range {{table_name = "", start_col = 0, col_count = len(proj_cols)}}
-		if !sort_rows(proj_rows[:], order_clause, proj_cols, range0) {
-			return nil, nil, false
-		}
-	}
 
 	out := proj_rows[:]
 	if stmt.is_distinct { out = dedup_rows(out) }

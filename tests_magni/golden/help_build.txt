@@ -1,0 +1,12 @@
+usage: magni.py build [-h] [--release] [--asan] [--cov] [--cmplog] [--laf]
+                      [--exec] [--check-only]
+
+options:
+  -h, --help    show this help message and exit
+  --release
+  --asan
+  --cov
+  --cmplog      with --cov: RedQueen input-to-state binary
+  --laf         with --cov: LAF-INTEL comparison-splitting binary
+  --exec        executor/storage target (coverage + ASan combined)
+  --check-only

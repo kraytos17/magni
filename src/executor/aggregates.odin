@@ -1,6 +1,5 @@
 package executor
 
-import "core:fmt"
 import "core:log"
 import "src:parser"
 import "src:types"
@@ -96,57 +95,6 @@ build_groups :: proc(
 		append(&groups, Group{rows = make([dynamic]Row_Entry, context.temp_allocator)})
 	}
 	return groups, group_by_indices, true
-}
-
-@(private)
-exec_select_aggregate_combined :: proc(
-	stmt: parser.Select_Stmt,
-	rows: []Row_Entry,
-	combined_cols: []types.Column,
-	table_ranges: []Table_Col_Range,
-) -> bool {
-	groups, group_by_indices, g_ok := build_groups(stmt, rows, combined_cols, table_ranges)
-	if !g_ok { return false }
-
-	rows_mat := make([dynamic][]string, context.temp_allocator)
-	for gi in 0 ..< len(groups) {
-		group_rows := make([][]types.Value, len(groups[gi].rows), context.temp_allocator)
-		for row_entry, ri in groups[gi].rows { group_rows[ri] = row_entry.values }
-
-		agg_vals := compute_aggregates(
-			group_rows,
-			stmt.aggregates,
-			combined_cols,
-			context.temp_allocator,
-		)
-		if having_cl, has_having := stmt.having.?; has_having {
-			if !evaluate_where_having(
-				having_cl,
-				groups[gi].key_values,
-				agg_vals,
-				stmt.group_by,
-				stmt.aggregates,
-			) { continue }
-		}
-
-		row_strs := make([]string, len(stmt.columns), context.temp_allocator)
-		val_idx := 0
-		for _, i in stmt.columns {
-			if val_idx < len(group_by_indices) {
-				row_strs[i] = value_string(groups[gi].key_values[val_idx])
-				val_idx += 1
-			} else {
-				agg_idx := val_idx - len(group_by_indices)
-				row_strs[i] = value_string(agg_vals[agg_idx])
-				val_idx += 1
-			}
-		}
-		append(&rows_mat, row_strs)
-	}
-
-	render_table(select_header_names(stmt), rows_mat[:])
-	fmt.printf("(%d rows)\n", len(rows_mat))
-	return true
 }
 
 // exec_select_aggregate_data evaluates a SELECT with aggregates/GROUP BY and returns

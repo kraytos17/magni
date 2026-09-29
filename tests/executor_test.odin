@@ -1008,7 +1008,7 @@ test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
 
-	ok := executor.exec_select(&tree, sel)
+	_, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "skewed-key INNER JOIN should execute")
 }
 
@@ -1064,7 +1064,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
 
-	ok := executor.exec_select(&tree, sel)
+	_, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "string-key INNER JOIN should execute")
 }
 
@@ -1138,7 +1138,7 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 	testing.expect(t, parse_ok, "INNER JOIN with NULL key should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
-	ok := executor.exec_select(&tree, sel)
+	_, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "INNER JOIN with NULL key should not crash")
 }
 
@@ -1205,7 +1205,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 	testing.expect(t, parse_ok, "string-key INNER JOIN with NULL key should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
-	ok := executor.exec_select(&tree, sel)
+	_, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "string-key INNER JOIN with NULL key should not crash")
 }
 
@@ -1255,7 +1255,7 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 	testing.expect(t, parse_ok, "LEFT JOIN with NULL key should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
-	ok := executor.exec_select(&tree, sel)
+	_, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "LEFT JOIN with NULL key should not crash")
 }
 
@@ -1314,6 +1314,111 @@ test_exec_join_no_matches :: proc(t: ^testing.T) {
 	testing.expect(t, parse_ok, "INNER JOIN no matches should parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
-	ok := executor.exec_select(&tree, sel)
+	_, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "INNER JOIN no matches should not crash")
+}
+
+// Canonical SELECT evaluation order (sort-full-rows → dedup → limit →
+// project) after the print-path/data-path collapse (R1).
+@(test)
+test_exec_subquery_order_nonprojected :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "path_equiv_order")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
+
+	sql := "SELECT name FROM (SELECT * FROM t) AS s ORDER BY id;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "subquery ORDER BY should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	// Regression (R1): the data path used to project before sorting, so ORDER
+	// BY a non-projected column failed where the (now deleted) print path
+	// succeeded. Canonical order is sort-full-rows before projection.
+	data_rows, _, data_ok := executor.exec_query(&tree, sel)
+	testing.expect(t, data_ok, "ORDER BY non-projected column must succeed")
+	if data_ok {
+		testing.expect_value(t, len(data_rows), 3)
+		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_text("a")), "row 0 in id order")
+		testing.expect(t, types.value_compare(data_rows[2].values[0], types.value_text("c")), "row 2 in id order")
+	}
+}
+
+@(test)
+test_exec_subquery_distinct :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "path_equiv_distinct")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "a", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "b", 3.0))
+
+	sql := "SELECT DISTINCT name FROM (SELECT * FROM t) AS s;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "subquery DISTINCT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	data_rows, _, data_ok := executor.exec_query(&tree, sel)
+	testing.expect(t, data_ok, "DISTINCT subquery should succeed")
+	if data_ok {
+		testing.expect_value(t, len(data_rows), 2)
+	}
+}
+
+@(test)
+test_exec_count_fast_path :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "path_equiv_count")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
+
+	sql := "SELECT COUNT(*) FROM t;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "COUNT(*) should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	data_rows, _, data_ok := executor.exec_query(&tree, sel)
+	testing.expect(t, data_ok, "COUNT(*) fast path should succeed")
+	if data_ok {
+		testing.expect_value(t, len(data_rows), 1)
+		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_int(3)), "count is 3")
+	}
+}
+
+@(test)
+test_exec_subquery_limit_offset :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "path_equiv_join")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t1"))
+	executor.execute(&tree, make_insert_stmt("t1", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t1", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t1", 3, "c", 3.0))
+
+	sql := "SELECT id FROM (SELECT * FROM t1) AS s ORDER BY id LIMIT 2 OFFSET 1;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "subquery LIMIT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	data_rows, _, data_ok := executor.exec_query(&tree, sel)
+	testing.expect(t, data_ok, "subquery LIMIT/OFFSET should succeed")
+	if data_ok {
+		testing.expect_value(t, len(data_rows), 2)
+		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_int(2)), "offset row is id 2")
+	}
 }

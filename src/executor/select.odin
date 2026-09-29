@@ -1,6 +1,5 @@
 package executor
 
-import "core:fmt"
 import "core:log"
 import "src:btree"
 import "src:cell"
@@ -50,6 +49,19 @@ exec_select_literals :: proc(
 	[]types.Column,
 	bool,
 ) {
+	// A bare SELECT without FROM resolves every projection to a literal at
+	// parse time. A column reference (e.g. `SELECT k`) yields a column name
+	// with no corresponding literal value — that is a clean error, not a
+	// short row (which would panic the renderers indexing values[i]).
+	if len(stmt.literal_values) != len(stmt.columns) {
+		if len(stmt.literal_values) < len(stmt.columns) {
+			log.errorf("Error: Unknown column: %s", stmt.columns[len(stmt.literal_values)])
+		} else {
+			log.error("Error: Column/value count mismatch in SELECT without FROM")
+		}
+		return nil, nil, false
+	}
+
 	row := Row_Entry{rowid = 1, values = stmt.literal_values}
 	cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 	for name, i in stmt.columns {
@@ -64,51 +76,6 @@ exec_select_literals :: proc(
 	return rows, cols, true
 }
 
-exec_select :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
-	plan := plan_select(stmt)
-	if plan.is_literal_only {
-		rows, cols, ok := exec_select_literals(t, stmt)
-		if !ok { return false }
-
-		indices := make([]int, len(cols), context.temp_allocator)
-		for i in 0 ..< len(cols) { indices[i] = i }
-
-		display_results(rows, cols, indices, nil, nil, stmt.aliases)
-		return true
-	}
-
-	if plan.has_subquery { return exec_select_subquery(t, stmt) }
-	if plan.single_table { return exec_select_single(t, stmt) }
-
-	jb := build_join_result(t, stmt)
-	if !jb.ok { return false }
-
-	rows, combined_cols, table_ranges, total_cols := jb.rows, jb.cols, jb.ranges, jb.total_cols
-	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
-		return exec_select_aggregate_combined(stmt, rows, combined_cols, table_ranges)
-	}
-
-	display_indices, d_ok := build_display_indices(
-		stmt.columns,
-		combined_cols,
-		table_ranges,
-		total_cols,
-	)
-
-	if !d_ok { return false }
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		if !sort_rows(rows, order_clause, combined_cols, table_ranges) {
-			return false
-		}
-	}
-	if stmt.is_distinct { rows = dedup_rows(rows) }
-
-	display_results(rows, combined_cols, display_indices[:], stmt.limit, stmt.offset, stmt.aliases)
-	return true
-}
-
-// single_range_for returns a single flat table-range covering all columns —
-// used when a result has no per-table column ranges (compound results, joins).
 @(private="file")
 single_range_for :: proc(col_count: int) -> []Table_Col_Range {
 	range0 := []Table_Col_Range {
@@ -117,26 +84,11 @@ single_range_for :: proc(col_count: int) -> []Table_Col_Range {
 	return range0
 }
 
-// select_header_names returns the display names for a SELECT's columns,
-// substituting AS aliases where present.
-@(private)
-select_header_names :: proc(stmt: parser.Select_Stmt) -> []string {
-	names := make([dynamic]string, 0, len(stmt.columns), context.temp_allocator)
-	for col, i in stmt.columns {
-		if i < len(stmt.aliases) && stmt.aliases[i] != "" {
-			append(&names, stmt.aliases[i])
-		} else {
-			append(&names, col)
-		}
-	}
-	return names[:]
-}
-
 @(private)
 // fetch_single_rows scans a single-table SELECT (no joins), applying the WHERE
 // filter with LIMIT pushdown, and returns the rows, the table's columns, and
 // the single table-range descriptor. Aggregate routing, sort/dedup, projection,
-// and display are left to the caller (printing vs data variants differ there).
+// and display are left to the caller.
 fetch_single_rows :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
@@ -195,14 +147,23 @@ apply_sort_dedup :: proc(
 	return out, true
 }
 
-@(private="file")
-exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
+exec_select_single_data :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
 	tbl_name, name_ok := stmt.from.(string)
-	if !name_ok { return false }
+	if !name_ok { return nil, nil, false }
 
-	table, found := schema.get_table(t, tbl_name, context.temp_allocator)
-	if !found { log.errorf("Error: Table not found: %s", tbl_name); return false }
-	defer schema.table_free(table, context.temp_allocator)
+	table, found := schema.find_table_cached(t, tbl_name, cache)
+	if !found {
+		log.errorf("Error: Table not found: %s", tbl_name)
+		return nil, nil, false
+	}
 
 	table_tree := btree.init(t.pager, table.root_page)
 	has_order := false
@@ -223,63 +184,21 @@ exec_select_single :: proc(t: ^btree.Tree, stmt: parser.Select_Stmt) -> bool {
 		count, count_err := btree.tree_count_rows(&table_tree)
 		if count_err != .None {
 			log.error("Error: Failed to count rows")
-			return false
+			return nil, nil, false
 		}
 
-		rows_mat := make([][]string, 1, context.temp_allocator)
-		row_strs := make([]string, len(stmt.columns), context.temp_allocator)
-		for i in 0 ..< len(stmt.columns) {
-			row_strs[i] = fmt.aprintf("%d", i64(count), allocator = context.temp_allocator)
-		}
+		vals := make([]types.Value, 1, context.temp_allocator)
+		vals[0] = types.value_int(i64(count))
+		rows_mat := make([]Row_Entry, 1, context.temp_allocator)
+		rows_mat[0] = Row_Entry{rowid = 1, values = vals}
 
-		rows_mat[0] = row_strs
-		render_table(select_header_names(stmt), rows_mat)
-		fmt.printf("(%d rows)\n", 1)
-		return true
-	}
+		name := "COUNT(*)"
+		if len(stmt.columns) > 0 { name = stmt.columns[0] }
+		if len(stmt.aliases) > 0 && stmt.aliases[0] != "" { name = stmt.aliases[0] }
 
-	rows, cols, single_range, f_ok := fetch_single_rows(
-		t,
-		table,
-		tbl_name,
-		stmt,
-		context.temp_allocator,
-	)
-	if !f_ok { return false }
-	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
-		return exec_select_aggregate_combined(stmt, rows, cols, single_range)
-	}
-
-	display_indices, ok := build_display_indices(
-		stmt.columns,
-		cols,
-		single_range,
-		len(cols),
-	)
-	if !ok { return false }
-
-	rows, ok = apply_sort_dedup(rows, stmt, cols, single_range)
-	if !ok { return false }
-	display_results(rows, cols, display_indices, stmt.limit, stmt.offset, stmt.aliases)
-	return true
-}
-
-exec_select_single_data :: proc(
-	t: ^btree.Tree,
-	stmt: parser.Select_Stmt,
-	cache: ^schema.Table_Cache = nil,
-) -> (
-	[]Row_Entry,
-	[]types.Column,
-	bool,
-) {
-	tbl_name, name_ok := stmt.from.(string)
-	if !name_ok { return nil, nil, false }
-
-	table, found := schema.find_table_cached(t, tbl_name, cache)
-	if !found {
-		log.errorf("Error: Table not found: %s", tbl_name)
-		return nil, nil, false
+		cols_mat := make([]types.Column, 1, context.temp_allocator)
+		cols_mat[0] = types.Column{name = name, type = .INTEGER}
+		return rows_mat, cols_mat, true
 	}
 
 	rows, cols, single_range, f_ok := fetch_single_rows(
@@ -290,6 +209,7 @@ exec_select_single_data :: proc(
 		context.temp_allocator,
 		cache,
 	)
+
 	if !f_ok { return nil, nil, false }
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, cols, single_range)
@@ -308,7 +228,7 @@ exec_select_single_data :: proc(
 		rows = rows[start:end]
 	}
 	// Project to the requested columns (e.g. `SELECT c FROM u` on a multi-column
-	// table returns only column c). Full projection matches exec_select_single.
+	// table returns only column c).
 	if len(stmt.columns) > 0 {
 		indices, i_ok := build_display_indices(
 			stmt.columns,

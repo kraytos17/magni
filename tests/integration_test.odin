@@ -2325,3 +2325,25 @@ test_columnar_cursor_large :: proc(t: ^testing.T) {
 	testing.expect(t, all_ok, "all columnar rows decode correctly")
 	testing.expect_value(t, count, 300)
 }
+
+@(test)
+test_integration_select_bare_column_errors_cleanly :: proc(t: ^testing.T) {
+	// Regression (grammar-mutator fuzzin): `SELECT k` without FROM
+	// produced a 0-value row for 1 column and panicked the result renderer
+	// (executor.odin index OOB). Must return a clean error instead.
+	//
+	// NOTE: muted to .Fatal because Odin's test runner fails any test that
+	// emits an error-level log, and these paths intentionally log their clean errors.
+	context.logger.lowest_level = .Fatal
+	d := setup_db(t, "bare_col")
+	defer teardown_db(d, "bare_col")
+
+	err := db.execute(d, "SELECT k;")
+	testing.expect(t, err != .None, "SELECT bare column without FROM should error cleanly")
+
+	err2 := db.execute(d, "SELECT a, b;")
+	testing.expect(t, err2 != .None, "SELECT multiple bare columns should error cleanly")
+
+	err3 := db.execute(d, "SELECT 1;")
+	testing.expect(t, err3 == .None, "SELECT literal without FROM should succeed")
+}
