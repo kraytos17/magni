@@ -188,7 +188,7 @@ dot_cmd_schema :: proc(database: ^db.Database, args: string) -> bool {
 
 @(private="file")
 dot_cmd_debug_schema :: proc(database: ^db.Database, args: string) -> bool {
-	if err := admin.print_schema_debug(database); err != .None {
+	if err := admin.print_schema(database, debug = true); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
 	return false
@@ -212,7 +212,7 @@ dot_cmd_tree_page :: proc(database: ^db.Database, args: string) -> bool {
 
 @(private="file")
 dot_cmd_snapshot_debug :: proc(database: ^db.Database, args: string) -> bool {
-	if err := admin.print_snapshot_debug(database); err != .None {
+	if err := admin.print_snapshots(database, debug = true); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
 	return false

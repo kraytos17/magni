@@ -48,19 +48,54 @@ SWAP_CLASSES = [
     [b"COMMIT", b"ROLLBACK"],
 ]
 
-# Tokens worth inserting: keywords, operators, punctuation, literals, idents.
-# Mirrors fuzz/sql.dict + identifier pool from the seed corpus.
-INSERT_TOKENS = [
+# Tokens worth inserting: the sql.dict entries plus extras the dict can't
+# declare (literals, identifiers, multi-word combos). Dict values load from
+# fuzz/sql.dict at import so the two can never drift; SWAP_CLASSES stays
+# handwritten (semantic classes aren't derivable from a flat dict).
+def _load_dict_tokens():
+    import os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sql.dict")
+    toks = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            _, _, value = line.partition("=")
+            value = value.strip().strip('"')
+            if value:
+                toks.append(value.encode())
+    if not toks:
+        raise ValueError("no tokens parsed")
+    return toks
+
+
+# Fallback if sql.dict is missing/unreadable: today's dict subset, verbatim.
+# Fuzzing must never break on a helper-file problem.
+_DICT_FALLBACK = [
     b"SELECT", b"FROM", b"WHERE", b"JOIN", b"ON", b"USING", b"GROUP BY",
-    b"ORDER BY", b"HAVING", b"LIMIT", b"UNION ALL", b"LEFT OUTER JOIN",
-    b"RIGHT JOIN", b"AND", b"OR", b"NOT", b"BETWEEN", b"IN", b"LIKE",
-    b"IS NOT NULL", b"AS", b"DISTINCT", b"EXPLAIN", b"BEGIN", b"COMMIT",
-    b"*", b",", b";", b"(", b")", b"=", b"<>", b">",
+    b"ORDER BY", b"HAVING", b"LIMIT", b"UNION ALL",
+    b"AND", b"OR", b"NOT", b"BETWEEN", b"IN", b"LIKE",
+    b"IS NULL", b"AS", b"DISTINCT", b"EXPLAIN", b"BEGIN", b"COMMIT",
+    b"*", b",", b";", b"(", b")", b"=", b"<>", b">", b"NULL",
+]
+
+# Not declarable in sql.dict: multi-word combos, literals, identifiers,
+# aggregate snippets. ("NULL" lives in the dict, so it is not repeated here.)
+_EXTRA_TOKENS = [
+    b"LEFT OUTER JOIN", b"RIGHT JOIN", b"IS NOT NULL",
     b"1", b"0", b"42", b"0xCAFE", b"1.5e3", b"'x'", b"'O''Reilly'",
-    b"NULL", b"X'DEADBEEF'",
+    b"X'DEADBEEF'",
     b"t", b"users", b"a", b"b", b"x", b"id", b"name", b"sub",
     b"COUNT(*)", b"AS OF SNAPSHOT 1",
 ]
+
+try:
+    DICT_TOKENS = _load_dict_tokens()
+except Exception:
+    DICT_TOKENS = _DICT_FALLBACK
+
+INSERT_TOKENS = DICT_TOKENS + _EXTRA_TOKENS
 
 WRAP_TEMPLATES = [
     b"SELECT * FROM (%s) AS sub;",
@@ -274,6 +309,10 @@ def _selftest():
     want = {"keyword_swap", "token_insert", "splice_stmts", "literal_tweak", "wrap_struct"}
     missing = want - seen
     assert not missing, f"strategies never fired: {missing} (seen={seen})"
+    # Pool hygiene: every sql.dict value is insertable (no drift), no dupes.
+    assert len(set(INSERT_TOKENS)) == len(INSERT_TOKENS), "duplicate insert tokens"
+    for tok in _load_dict_tokens():
+        assert tok in INSERT_TOKENS, f"dict token missing from pool: {tok!r}"
     # havoc path exercises the same core without add_buf.
     h = havoc_mutation(b"SELECT 1;", 65536)
     assert isinstance(h, (bytes, bytearray)) and len(h) <= 65536

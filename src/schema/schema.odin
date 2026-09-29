@@ -354,11 +354,35 @@ update_root_page_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
+	return update_schema_root_cow(t, table_name, new_root_page, set_data_root, "update_root_page_cow")
+}
+
+@(private="file")
+set_data_root :: proc(sr: ^Schema_Row, root: u32) { sr.root_page = root }
+
+@(private="file")
+set_skip_root :: proc(sr: ^Schema_Row, root: u32) { sr.skip_root = root }
+
+// update_schema_root_cow is the shared core behind update_root_page_cow and
+// update_skip_root_cow: fetch the schema row, apply the field setter, and
+// commit it copy-on-write. Callers keep their names, so no call-site churn.
+@(private="file")
+update_schema_root_cow :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	new_root: u32,
+	set_root: proc(sr: ^Schema_Row, root: u32),
+	op_name: string,
+) -> (
+	new_schema_root: u32,
+	ok: bool,
+) {
 	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
 		log.errorf(
-			"[schema] update_root_page_cow: tree_find failed for '%s' rowid=%v root=%d",
+			"[schema] %s: tree_find failed for '%s' rowid=%v root=%d",
+			op_name,
 			table_name,
 			rowid,
 			t.root,
@@ -370,24 +394,26 @@ update_root_page_cow :: proc(
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {
 		log.errorf(
-			"[schema] update_root_page_cow: schema_row_from_values failed for '%s'",
+			"[schema] %s: schema_row_from_values failed for '%s'",
+			op_name,
 			table_name,
 		)
 		return t.root, false
 	}
 
-	sr.root_page = new_root_page
+	set_root(&sr, new_root)
 	values := schema_row_to_values(sr)
-	new_root, upd_err := btree.tree_update_cow(t, rowid, values)
+	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
 	if upd_err != .None {
 		log.errorf(
-			"[schema] update_root_page_cow: tree_update_cow failed for '%s': %v",
+			"[schema] %s: tree_update_cow failed for '%s': %v",
+			op_name,
 			table_name,
 			upd_err,
 		)
 		return t.root, false
 	}
-	return new_root, true
+	return upd_root, true
 }
 
 update_skip_root_cow :: proc(
@@ -398,35 +424,7 @@ update_skip_root_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
-	c, err := btree.tree_find(t, rowid, context.temp_allocator)
-	if err != .None {
-		log.errorf("[schema] update_skip_root_cow: tree_find failed for '%s'", table_name)
-		return t.root, false
-	}
-	defer cell.destroy(&c, context.temp_allocator)
-
-	sr, sr_ok := schema_row_from_values(c.values)
-	if !sr_ok {
-		log.errorf(
-			"[schema] update_skip_root_cow: schema_row_from_values failed for '%s'",
-			table_name,
-		)
-		return t.root, false
-	}
-
-	sr.skip_root = new_skip_root
-	values := schema_row_to_values(sr)
-	new_root, upd_err := btree.tree_update_cow(t, rowid, values)
-	if upd_err != .None {
-		log.errorf(
-			"[schema] update_skip_root_cow: tree_update_cow failed for '%s': %v",
-			table_name,
-			upd_err,
-		)
-		return t.root, false
-	}
-	return new_root, true
+	return update_schema_root_cow(t, table_name, new_skip_root, set_skip_root, "update_skip_root_cow")
 }
 
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {

@@ -10,6 +10,7 @@ Keyword_Entry :: struct {
 keyword_table := []Keyword_Entry{
 	// len 2
 	{"in", .IN}, {"of", .OF}, {"on", .ON}, {"as", .AS}, {"by", .BY}, {"or", .OR},
+	{"is", .IS},
 	// len 3
 	{"int", .INTEGER}, {"not", .NOT}, {"set", .SET}, {"key", .KEY}, {"and", .AND},
 	{"asc", .ASC}, {"all", .ALL},
@@ -40,7 +41,7 @@ keyword_table := []Keyword_Entry{
 // keyword_bucket_offsets[i] = start index into keyword_table for words of length i+2.
 // The final value equals len(keyword_table); the bucket for length N spans
 // keyword_table[offsets[N-2]:offsets[N-1]].
-keyword_bucket_offsets := [10]int{0, 6, 13, 25, 40, 50, 56, 59, 61, 62}
+keyword_bucket_offsets := [10]int{0, 7, 14, 26, 41, 51, 57, 60, 62, 63}
 
 @(private="file")
 match_keyword :: proc(ident: string) -> Token_Type {

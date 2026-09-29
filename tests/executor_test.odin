@@ -1422,3 +1422,351 @@ test_exec_subquery_limit_offset :: proc(t: ^testing.T) {
 		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_int(2)), "offset row is id 2")
 	}
 }
+
+// Single-table DISTINCT must deduplicate projected values, not full rows:
+// (1,a) and (3,a) differ in id but project to the same name.
+@(test)
+test_exec_single_distinct_dedups_projected :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "single_distinct")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "a", 3.0))
+
+	sql := "SELECT DISTINCT name FROM t;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "DISTINCT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	data_rows, _, data_ok := executor.exec_query(&tree, sel)
+	testing.expect(t, data_ok, "DISTINCT should succeed")
+	if data_ok {
+		testing.expect_value(t, len(data_rows), 2)
+		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_text("a")), "row 0 is a")
+		testing.expect(t, types.value_compare(data_rows[1].values[0], types.value_text("b")), "row 1 is b")
+	}
+}
+
+// LIMIT must apply after DISTINCT: 3 rows dedup to [a,b], then LIMIT 2 keeps
+// both — not [a,a] from slicing pre-dedup rows.
+@(test)
+test_exec_single_distinct_limit_applies_after_dedup :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "single_distinct_limit")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	executor.execute(&tree, make_insert_stmt("t", 2, "a", 2.0))
+	executor.execute(&tree, make_insert_stmt("t", 3, "b", 3.0))
+
+	sql := "SELECT DISTINCT name FROM t LIMIT 2;"
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, parse_ok, "DISTINCT LIMIT should parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+
+	data_rows, _, data_ok := executor.exec_query(&tree, sel)
+	testing.expect(t, data_ok, "DISTINCT LIMIT should succeed")
+	if data_ok {
+		testing.expect_value(t, len(data_rows), 2)
+		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_text("a")), "row 0 is a")
+		testing.expect(t, types.value_compare(data_rows[1].values[0], types.value_text("b")), "row 1 is b")
+	}
+}
+
+// Regression (exec fuzzing): a bare literal beside aggregates
+// (SELECT 0, COUNT(*) ...) shifted the aggregate index and panicked with an
+// out-of-range index. Must be a clean error, never a crash.
+@(test)
+test_exec_aggregate_literal_mix_errors_cleanly :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "agg_lit_mix")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	queries := [3]string{
+		"SELECT 0, COUNT(*) FROM t;",
+		"SELECT COUNT(*), 0 FROM t;",
+		"SELECT 0, COUNT(*), SUM(score) FROM t;",
+	}
+	for sql in queries {
+		stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, parse_ok, "literal+aggregate should parse")
+		sel, is_sel := stmt.type.(parser.Select_Stmt)
+		testing.expect(t, is_sel, "expected Select_Stmt")
+		if !is_sel { continue }
+
+		saved, ctx := suppress_expected_errors()
+		context = ctx
+		_, _, ok := executor.exec_query(&tree, sel)
+		context = restore_logger(saved)
+		testing.expect(t, !ok, "literal beside aggregates must error cleanly")
+	}
+}
+
+// Regression (exec fuzzing): aggregates over unknown columns used to
+// silently yield NULL/0 (and MIN/MAX panicked outright before the R1
+// follow-up guards). Unknown columns are a clean error everywhere else
+// (WHERE, GROUP BY, bare SELECT), so aggregates resolve the same way.
+@(test)
+test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "agg_unknown_col")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
+	queries := [4]string{
+		"SELECT MAX(nosuchcol) FROM t;",
+		"SELECT MIN(nosuchcol) FROM t;",
+		"SELECT SUM(nosuchcol) FROM t;",
+		"SELECT COUNT(nosuchcol) FROM t;",
+	}
+	for sql in queries {
+		stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, parse_ok, "aggregate over unknown column should parse")
+		sel, is_sel := stmt.type.(parser.Select_Stmt)
+		testing.expect(t, is_sel, "expected Select_Stmt")
+		if !is_sel { continue }
+
+		saved, ctx := suppress_expected_errors()
+		context = ctx
+		_, _, ok := executor.exec_query(&tree, sel)
+		context = restore_logger(saved)
+		testing.expect(t, !ok, "unknown aggregate column must error cleanly")
+	}
+
+	// COUNT(*) takes no column and is unaffected by the resolver.
+	stmt, pok, _ := parser.parse("SELECT COUNT(*) FROM t;", context.temp_allocator)
+	testing.expect(t, pok, "COUNT(*) should parse")
+	if pok {
+		sel := stmt.type.(parser.Select_Stmt)
+		rows, _, ok := executor.exec_query(&tree, sel)
+		testing.expect(t, ok, "COUNT(*) must still succeed")
+		if ok {
+			testing.expect_value(t, len(rows), 1)
+			testing.expect(t, types.value_compare(rows[0].values[0], types.value_int(1)), "count is 1")
+		}
+	}
+}
+
+// ids_of_query runs a single-column id SELECT and returns the ids.
+@(private="file")
+ids_of_query :: proc(t: ^testing.T, tree: ^btree.Tree, sql: string) -> ([]i64, bool) {
+	stmt, pok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, pok, "query must parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	if !is_sel { return nil, false }
+
+	rows, _, ok := executor.exec_query(tree, sel)
+	testing.expect(t, ok, "query must succeed")
+	ids := make([]i64, len(rows), context.temp_allocator)
+	for r, i in rows {
+		v, is_int := r.values[0].(i64)
+		testing.expect(t, is_int, "expected int id")
+		if !is_int { return nil, false }
+		ids[i] = v
+	}
+	return ids, ok
+}
+
+// IS [NOT] NULL filtering: nullness test (never = NULL matching), combos
+// with AND/OR/NOT, and a column literally named `is`.
+@(test)
+test_exec_is_null_filtering :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "is_null")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	inserts := [3]string{
+		"INSERT INTO t VALUES (1, 'a', 1.0);",
+		"INSERT INTO t VALUES (2, NULL, 2.0);",
+		"INSERT INTO t VALUES (3, 'b', 3.0);",
+	}
+	for sql in inserts {
+		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, pok, "setup INSERT must parse")
+		if !pok { continue }
+
+		sok, _, _ := executor.execute(&tree, stmt)
+		testing.expect(t, sok, "setup INSERT must execute")
+	}
+
+	ids, ok := ids_of_query(t, &tree, "SELECT id FROM t WHERE name IS NULL;")
+	if ok {
+		testing.expect_value(t, len(ids), 1)
+		if len(ids) == 1 { testing.expect_value(t, ids[0], 2) }
+	}
+
+	ids, ok = ids_of_query(t, &tree, "SELECT id FROM t WHERE name IS NOT NULL;")
+	if ok {
+		testing.expect_value(t, len(ids), 2)
+		if len(ids) == 2 {
+			testing.expect_value(t, ids[0], 1)
+			testing.expect_value(t, ids[1], 3)
+		}
+	}
+
+	ids, ok = ids_of_query(t, &tree, "SELECT id FROM t WHERE score > 1.0 AND name IS NOT NULL;")
+	if ok {
+		testing.expect_value(t, len(ids), 1)
+		if len(ids) == 1 { testing.expect_value(t, ids[0], 3) }
+	}
+
+	ids, ok = ids_of_query(t, &tree, "SELECT id FROM t WHERE name IS NULL OR id = 1;")
+	if ok {
+		testing.expect_value(t, len(ids), 2)
+		if len(ids) == 2 {
+			testing.expect_value(t, ids[0], 1)
+			testing.expect_value(t, ids[1], 2)
+		}
+	}
+
+	ids, ok = ids_of_query(t, &tree, "SELECT id FROM t WHERE NOT name IS NULL;")
+	if ok {
+		testing.expect_value(t, len(ids), 2)
+		if len(ids) == 2 {
+			testing.expect_value(t, ids[0], 1)
+			testing.expect_value(t, ids[1], 3)
+		}
+	}
+}
+
+@(test)
+test_exec_is_null_keyword_column :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "is_col")
+	defer teardown_executor_env(tree, file)
+
+	setup_k := [3]string{
+		"CREATE TABLE k (is INT);",
+		"INSERT INTO k VALUES (1);",
+		"INSERT INTO k VALUES (NULL);",
+	}
+	for sql in setup_k {
+		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, pok, "setup SQL must parse")
+		if !pok { continue }
+
+		sok, _, _ := executor.execute(&tree, stmt)
+		testing.expect(t, sok, "setup SQL must execute")
+	}
+
+	stmt, pok, _ := parser.parse(
+		"SELECT is FROM k WHERE is IS NULL;", context.temp_allocator)
+	testing.expect(t, pok, "column named `is` with IS NULL must parse")
+	if !pok { return }
+
+	sel := stmt.type.(parser.Select_Stmt)
+	rows, _, ok := executor.exec_query(&tree, sel)
+	testing.expect(t, ok, "must succeed")
+	if ok { testing.expect_value(t, len(rows), 1) }
+}
+
+// LIMIT must not truncate the scan feeding aggregates: SUM/COUNT run over
+// the full filtered set, with LIMIT applying to the (single) result row.
+@(test)
+test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "agg_limit")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	setup_agg_limit := [3]string{
+		"INSERT INTO t VALUES (1, 'a', 1.0);",
+		"INSERT INTO t VALUES (2, 'b', 2.0);",
+		"INSERT INTO t VALUES (3, 'c', 3.0);",
+	}
+	for sql in setup_agg_limit {
+		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, pok, "setup INSERT must parse")
+		if !pok { continue }
+		sok, _, _ := executor.execute(&tree, stmt)
+		testing.expect(t, sok, "setup INSERT must execute")
+	}
+
+	// score column holds 1.0/2.0/3.0; SUM over all three is 6.0.
+	stmt, pok, _ := parser.parse(
+		"SELECT SUM(score) FROM t LIMIT 2;", context.temp_allocator)
+	testing.expect(t, pok, "SUM LIMIT should parse")
+	sel := stmt.type.(parser.Select_Stmt)
+	rows, _, ok := executor.exec_query(&tree, sel)
+	testing.expect(t, ok, "SUM LIMIT should succeed")
+	if ok {
+		testing.expect_value(t, len(rows), 1)
+		if len(rows) == 1 {
+			testing.expect(t, types.value_compare(rows[0].values[0], types.value_real(6.0)), "SUM runs over all rows, not the LIMIT prefix")
+		}
+	}
+
+	stmt2, pok2, _ := parser.parse(
+		"SELECT COUNT(*) FROM t LIMIT 2;", context.temp_allocator)
+	testing.expect(t, pok2, "COUNT LIMIT should parse")
+	sel2 := stmt2.type.(parser.Select_Stmt)
+	rows2, _, ok2 := executor.exec_query(&tree, sel2)
+	testing.expect(t, ok2, "COUNT LIMIT should succeed")
+	if ok2 {
+		testing.expect_value(t, len(rows2), 1)
+		if len(rows2) == 1 {
+			testing.expect(t, types.value_compare(rows2[0].values[0], types.value_int(3)), "COUNT runs over all rows")
+		}
+	}
+}
+
+// HAVING ... IS [NOT] NULL tests nullness of the resolved group key or
+// aggregate value (the separate having evaluator predates IS support).
+@(test)
+test_exec_having_is_null :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "having_is_null")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("t"))
+	setup_having := [3]string{
+		"INSERT INTO t VALUES (1, 'a', 1.0);",
+		"INSERT INTO t VALUES (2, NULL, 2.0);",
+		"INSERT INTO t VALUES (3, 'b', 3.0);",
+	}
+	for sql in setup_having {
+		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, pok, "setup INSERT must parse")
+		if !pok { continue }
+		sok, _, _ := executor.execute(&tree, stmt)
+		testing.expect(t, sok, "setup INSERT must execute")
+	}
+
+	stmt, pok, _ := parser.parse(
+		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING name IS NULL;",
+		context.temp_allocator)
+	testing.expect(t, pok, "HAVING IS NULL should parse")
+	sel := stmt.type.(parser.Select_Stmt)
+	rows, _, ok := executor.exec_query(&tree, sel)
+	testing.expect(t, ok, "HAVING IS NULL should succeed")
+	if ok { testing.expect_value(t, len(rows), 1) }
+
+	stmt2, pok2, _ := parser.parse(
+		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING name IS NOT NULL;",
+		context.temp_allocator)
+	testing.expect(t, pok2, "HAVING IS NOT NULL should parse")
+	sel2 := stmt2.type.(parser.Select_Stmt)
+	rows2, _, ok2 := executor.exec_query(&tree, sel2)
+	testing.expect(t, ok2, "HAVING IS NOT NULL should succeed")
+	if ok2 { testing.expect_value(t, len(rows2), 2) }
+
+	stmt3, pok3, _ := parser.parse(
+		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING COUNT(*) IS NOT NULL;",
+		context.temp_allocator)
+	testing.expect(t, pok3, "HAVING agg IS NOT NULL should parse")
+	sel3 := stmt3.type.(parser.Select_Stmt)
+	rows3, _, ok3 := executor.exec_query(&tree, sel3)
+	testing.expect(t, ok3, "HAVING agg IS NOT NULL should succeed")
+	if ok3 { testing.expect_value(t, len(rows3), 3) }
+}

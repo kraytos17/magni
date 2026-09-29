@@ -1442,11 +1442,54 @@ test_commit_keyword :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_is_null_keyword :: proc(t: ^testing.T) {
+	// IS was missing from keyword_table; WHERE x IS [NOT] NULL silently
+	// failed to parse. The bucket-offset table must account for it.
+	tokens, ok := parser.tokenize("is", context.temp_allocator)
+	testing.expect(t, ok, "IS must tokenize")
+	testing.expect(t, tokens[0].type == .IS, "Expected IS token")
+
+	// A column literally named `is` must keep working as an identifier.
+	_, pok, _ := parser.parse("SELECT is FROM t;", context.temp_allocator)
+	testing.expect(t, pok, "column named `is` must still parse")
+}
+
+@(test)
+test_is_null_parse_shape :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse(
+		"SELECT * FROM t WHERE b IS NULL;", context.temp_allocator)
+	testing.expect(t, ok, "IS NULL should parse")
+	sel := stmt.type.(parser.Select_Stmt)
+	clause, has_where := sel.where_clause.?
+	testing.expect(t, has_where, "expected WHERE clause")
+	if !has_where { return }
+
+	testing.expect(t, clause.root.kind == .COND, "expected COND node")
+	testing.expect(t, clause.root.cond.operator == .IS, "expected IS operator")
+	testing.expect(t, !clause.root.cond.negated, "IS NULL is not negated")
+
+	stmt2, ok2, _ := parser.parse(
+		"SELECT * FROM t WHERE b IS NOT NULL;", context.temp_allocator)
+	testing.expect(t, ok2, "IS NOT NULL should parse")
+	sel2 := stmt2.type.(parser.Select_Stmt)
+	clause2, _ := sel2.where_clause.?
+	testing.expect(t, clause2.root.cond.operator == .IS, "expected IS operator")
+	testing.expect(t, clause2.root.cond.negated, "IS NOT NULL is negated")
+
+	// Invalid forms must fail cleanly, not parse.
+	bad_queries := [2]string{"SELECT * FROM t WHERE b IS 5;", "SELECT * FROM t WHERE b NOT IS NULL;"}
+	for bad in bad_queries {
+		_, bok, _ := parser.parse(bad, context.temp_allocator)
+		testing.expect(t, !bok, "invalid IS form must not parse")
+	}
+}
+
+@(test)
 test_keyword_bucket_offsets :: proc(t: ^testing.T) {
 	// Every keyword_table word must resolve to its token (guards the
 	// length-bucket offsets against desync when keywords are added).
 	keywords := [][2]string{
-		{"in", "IN"}, {"of", "OF"}, {"int", "INTEGER"}, {"not", "NOT"},
+		{"in", "IN"}, {"of", "OF"}, {"is", "IS"}, {"int", "INTEGER"}, {"not", "NOT"},
 		{"from", "FROM"}, {"null", "NULL"}, {"table", "TABLE"},
 		{"where", "WHERE"}, {"begin", "BEGIN"}, {"commit", "COMMIT"},
 		{"select", "SELECT"}, {"except", "EXCEPT"}, {"default", "DEFAULT"},

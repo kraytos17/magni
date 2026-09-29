@@ -3,12 +3,16 @@
 Run from the repo root: python3 magni.py corpus generate --exec
 
 EXEC_SEEDS are hand-written scripts covering DDL/DML/queries/txns/snapshots.
-EXEC_PROMOTED holds fuzzer-grown finds appended by `corpus promote --exec`
-(future; empty until the first exec campaign promotes coverage).
+EXEC_PROMOTED (in promoted_seeds.py) holds fuzzer-grown finds appended by
+`corpus promote --exec`.
 """
 
 import os
 import sys
+
+sys.path.insert(0, os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..")))
+import seedgen
 
 CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 
@@ -21,6 +25,8 @@ DROP TABLE products;
     ("script_dml", """\
 CREATE TABLE t (a INT, b TEXT);
 INSERT INTO t VALUES (1, 'Alice'), (2, 'Bob'), (3, NULL);
+SELECT * FROM t WHERE b IS NULL;
+SELECT * FROM t WHERE b IS NOT NULL;
 UPDATE t SET b = 'X' WHERE a > 1;
 DELETE FROM t WHERE a = 3;
 SELECT * FROM t;
@@ -113,23 +119,24 @@ SELECT k;
 SELECT a, b;
 SELECT *;
 """),
+    ("script_aggregate_errors", """\
+CREATE TABLE g (u INT);
+INSERT INTO g VALUES (5);
+SELECT 0, COUNT(*) FROM g;
+SELECT MAX(nosuchcol) FROM g;
+SELECT MIN(nosuchcol) FROM g;
+SELECT COUNT(*) FROM g;
+"""),
 ]
 
-EXEC_PROMOTED = [
-]
+from promoted_seeds import EXEC_PROMOTED
 
 
 def main():
-    names = {name for name, _ in EXEC_SEEDS} | {name for name, _ in EXEC_PROMOTED}
-    for fn in os.listdir(CORPUS):
-        if fn in names:
-            os.remove(os.path.join(CORPUS, fn))
+    names = seedgen.managed_names(EXEC_SEEDS) | seedgen.managed_names(EXEC_PROMOTED)
+    seedgen.clear_managed(CORPUS, names)
 
-    written = 0
-    for name, content in EXEC_SEEDS + EXEC_PROMOTED:
-        with open(os.path.join(CORPUS, name), "w") as f:
-            f.write(content)
-        written += 1
+    written = seedgen.write_entries(CORPUS, EXEC_SEEDS + EXEC_PROMOTED)
 
     print(f"wrote {written} exec seeds to {CORPUS}")
 

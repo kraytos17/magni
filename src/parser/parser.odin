@@ -93,6 +93,7 @@ Token_Type :: enum u8 {
 	ALL,
 	BETWEEN,
 	USING,
+	IS,
 }
 
 parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, string) {

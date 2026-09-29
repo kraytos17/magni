@@ -125,8 +125,8 @@ fuzz-stop: ## pkill afl-fuzz
 fuzz-clean: ## remove fuzz artifacts (afl-output, build, pycache)
 	@python3 magni.py clean --fuzz-only
 
-fuzz-promote: fuzz-cov ## merge grown queue → update gen_corpus.py (MIN=1 to minimize, TEST=1 for full gate)
-	@python3 magni.py corpus promote $(if $(filter 1,$(MIN)),--minimize) $(if $(filter 1,$(TEST)),--test)
+fuzz-promote: fuzz-cov ## merge grown queue → update gen_corpus.py (MIN=1 to minimize, TEST=1 for full gate, EXEC=1 for exec pool)
+	@python3 magni.py corpus promote $(if $(filter 1,$(MIN)),--minimize) $(if $(filter 1,$(TEST)),--test) $(if $(filter 1,$(EXEC)),--exec)
 
 fuzz-one: fuzz-build ## repro one crash: make fuzz-one FILE=fuzz/afl-output/.../id:000000
 	@test -n "$(FILE)" || { echo "usage: make fuzz-one FILE=<path>" >&2; exit 2; }

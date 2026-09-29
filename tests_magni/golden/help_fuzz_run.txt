@@ -1,7 +1,8 @@
-usage: magni.py fuzz run [-h] ...
+usage: magni.py fuzz run [-h] [--rebuild] ...
 
 positional arguments:
   extra
 
 options:
   -h, --help  show this help message and exit
+  --rebuild   force target rebuild even if fresh

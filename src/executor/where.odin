@@ -215,7 +215,7 @@ build_resolved_node :: proc(
 			child_rn, ok := build_resolved_node(child, cols, table_ranges, schema_tree, allocator, cache)
 			if !ok {
 				for j in 0 ..< i { free_resolved_node(children[j], allocator) }
-				
+
 				delete(children, allocator)
 				free(rn, allocator)
 				return nil, false
@@ -266,7 +266,7 @@ resolve_condition :: proc(
 	if rhs_str, is_col := cond.rhs.(string); is_col {
 		right_idx, rc_found := resolve_qualified_column(cols, table_ranges, rhs_str)
 		if !rc_found { return {}, false }
-		
+
 		rc.has_right_col = true
 		rc.right_idx = right_idx
 	} else if val, is_val := cond.rhs.(types.Value); is_val {
@@ -326,11 +326,15 @@ evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Va
 evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition, row: []types.Value) -> bool {
 	left_val := row[rc.col_idx]
 	cond_result: bool
-	if rc.has_right_col {
+	if rc.operator == .IS {
+		// SQL null test: = NULL never matches; IS NULL checks nullness.
+		cond_result = types.is_null(left_val)
+	} else if rc.has_right_col {
 		cond_result = compare_condition(left_val, rc.operator, row[rc.right_idx])
 	} else {
 		cond_result = compare_condition(left_val, rc.operator, rc.rhs)
 	}
+
 	if rc.has_in && rc.in_values != nil {
 		cond_result = false
 		for v in rc.in_values {

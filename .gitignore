@@ -11,6 +11,7 @@ fuzz/corpus/*
 !fuzz/corpus/promoted_seeds.py
 fuzz/corpus_exec/*
 !fuzz/corpus_exec/gen_exec_corpus.py
+!fuzz/corpus_exec/promoted_seeds.py
 
 # AFL++ runtime outputs (generated)
 fuzz/corpus_grown/

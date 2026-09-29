@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import config
 from .build import (
+    apply_rebuild_flag,
     ensure_asan_target,
     ensure_cmplog_target,
     ensure_cov_target,
@@ -27,6 +28,7 @@ def fuzz_out_dir() -> Path:
 
 def cmd_fuzz(args: argparse.Namespace) -> None:
     """Fuzz subcommand dispatcher."""
+    apply_rebuild_flag(args)
     if args.fuzz_cmd == "run":
         ensure_cov_target()
         config.CORPUS_DIR.mkdir(exist_ok=True)

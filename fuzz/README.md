@@ -149,6 +149,9 @@ Crashes land in `<out>/crashes/`, hangs in `<out>/hangs/`.
 | 3 | Coverage fuzz | `parse_ddl.odin` FK error-cleanup freed FK strings via `context.allocator` instead of the passed allocator → bad free | pass `allocator` to the FK `delete`s |
 | 4 | Exec harness, first script (Phase 5) | `db.close` unlocked `db.mu` after `free(db)` → heap-use-after-free write on every close | explicit unlock before free; `defer` would fire too late |
 | 5 | Grammar-mutator exec campaign (Phase 6) | `SELECT k` without FROM built a 0-value row for 1 column → index OOB panic in result renderer | `exec_select_literals` returns clean "Unknown column" error on column/value mismatch + defensive short-row guards in both renderers; regression test `test_integration_select_bare_column_errors_cleanly` + `script_bare_select` exec seed |
+| 6 | Exec grammar campaign (DISTINCT follow-up) | `SELECT 0, COUNT(*) …` shifted the aggregate index (literal occupies a column slot with no aggregate value) → index OOB in `exec_select_aggregate_data` | bounds guard returns clean "Cannot mix non-aggregate column" error; regression test `test_exec_aggregate_literal_mix_errors_cleanly` + `script_aggregate_errors` exec seed |
+| 7 | Exec grammar campaign (DISTINCT follow-up) | `MIN`/`MAX` over an unknown column initialized the accumulator with `rows[0][-1]` → index OOB on non-empty tables | `col_idx < 0` yields NULL like the empty-table path; later superseded by #8 (unknown aggregate columns resolve to a clean error) |
+| 8 | Aggregate correctness pass | `SUM`/`MIN`/`MAX`/`COUNT(col)` over unknown columns silently yielded 0/NULL, contradicting the clean-error stance for unknown columns everywhere else | `build_groups` resolves every aggregate argument up front ("Unknown column in aggregate"); regression test `test_exec_aggregate_unknown_column_errors_cleanly` |
 
 ## Toolchain
 
@@ -173,8 +176,10 @@ governor check) and `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` (system
   paths must mute with `context.logger.lowest_level = .Fatal` (see the #5
   test); the usual `.Error` mute still trips the runner.
 - Single source of truth per corpus is the generator script; never hand-edit
-  generated seeds. `EXEC_PROMOTED` promotion tooling (`corpus promote --exec`)
-  is still future work — append manually for now.
+  generated seeds. Exec promotion works like parser promotion against the
+  exec campaign dir: `MAGNI_FUZZ_OUT=fuzz/afl-exec-output make fuzz-promote
+  EXEC=1` (append to `corpus_exec/promoted_seeds.py`, own `promoted_NNNN`
+  counter). Never mix parser and exec output dirs — different binaries/maps.
 
 ## Regression policy
 

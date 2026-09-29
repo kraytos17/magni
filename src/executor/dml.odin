@@ -289,7 +289,7 @@ exec_update_impl :: proc(
 		tbl        = tbl,
 		table_name = stmt.table_name,
 		update_map = update_map,
-		filter     = stmt.where_clause,
+		filt       = {filter = stmt.where_clause},
 		direct     = mode == .Direct,
 	}
 
@@ -307,21 +307,48 @@ Update_Plan :: struct {
 	tbl:        types.Table,
 	table_name: string,
 	update_map: map[int]types.Value,
-	filter:     Maybe(parser.Where_Clause),
-	// Resolved once per scan (not per row) by update_by_scan.
-	filter_ctx: Maybe(Where_Eval_Ctx),
+	using filt: Mutation_Filter,
 	direct:     bool,
 }
 
-// eval_plan_filter evaluates the plan's pre-resolved filter against one row.
-// No filter → true; unresolvable filter → false (mirrors evaluate_where).
+// eval_mutation_filter evaluates a mutation plan's pre-resolved filter
+// against one row. No filter → true; unresolvable filter → false (mirrors
+// evaluate_where). Shared by UPDATE and DELETE.
 @(private="file")
-eval_plan_filter :: proc(plan: ^Update_Plan, values: []types.Value) -> bool {
-	if _, has_wc := plan.filter.?; !has_wc { return true }
-	if ctx, ok := plan.filter_ctx.?; ok {
+eval_mutation_filter :: proc(f: ^Mutation_Filter, values: []types.Value) -> bool {
+	if _, has_wc := f.filter.?; !has_wc { return true }
+	if ctx, ok := f.filter_ctx.?; ok {
 		return evaluate_where_ctx(ctx, values)
 	}
 	return false
+}
+
+// resolve_mutation_filter resolves the plan filter once per scan (not per
+// row). Shared by update_by_scan and collect_delete_targets.
+@(private="file")
+resolve_mutation_filter :: proc(f: ^Mutation_Filter, cols: []types.Column) {
+	if wc, has_wc := f.filter.?; has_wc {
+		f.filter_ctx = init_where_ctx(&wc, cols, nil, nil, context.temp_allocator)
+	}
+}
+
+// pk_target_rowid extracts a PK rowid from an equality filter, if usable.
+// Shared prologue for update_by_pk and delete_by_pk.
+@(private="file")
+pk_target_rowid :: proc(tbl: types.Table, filter: Maybe(parser.Where_Clause)) -> (types.Row_ID, bool) {
+	where_clause, has_where := filter.?
+	if !has_where { return 0, false }
+	return try_pk_lookup(tbl, where_clause)
+}
+
+// commit_cow_root publishes a COW-mutated table root to the schema.
+// Shared tail for the COW write paths (pk + scan, update + delete);
+// callers log their own row counts.
+@(private="file")
+commit_cow_root :: proc(t: ^btree.Tree, table_name: string, nroot: u32) -> (u32, Mutated_Table_Info, bool) {
+	new_schema_root, ok := schema.update_root_page_cow(t, table_name, nroot)
+	if !ok { return t.root, {}, false }
+	return new_schema_root, Mutated_Table_Info{name = table_name, root = nroot}, true
 }
 
 // update_by_pk handles the PK fast path. Returns handled=false to fall
@@ -337,10 +364,7 @@ update_by_pk :: proc(
 	root: u32,
 	info: Mutated_Table_Info,
 ) {
-	where_clause, has_where := plan.filter.?
-	if !has_where { return false, false, 0, {} }
-
-	target_rowid, pk_ok := try_pk_lookup(plan.tbl, where_clause)
+	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.filter)
 	if !pk_ok { return false, false, 0, {} }
 
 	c, find_err := btree.tree_find(table_tree, target_rowid, context.temp_allocator)
@@ -370,11 +394,11 @@ update_by_pk :: proc(
 		return true, false, t.root, {}
 	}
 
-	new_schema_root, ok1 := schema.update_root_page_cow(t, plan.table_name, nroot)
+	new_schema_root, committed, ok1 := commit_cow_root(t, plan.table_name, nroot)
 	if !ok1 { return true, false, t.root, {} }
 
 	log.info("Updated 1 row.")
-	return true, true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = nroot}
+	return true, true, new_schema_root, committed
 }
 
 // update_by_scan runs the cursor scan, dispatching on write mode.
@@ -393,9 +417,7 @@ update_by_scan :: proc(
 	defer btree.cursor_destroy(&cursor)
 
 	// Resolve the filter once, not per row.
-	if wc, has_wc := plan.filter.?; has_wc {
-		plan.filter_ctx = init_where_ctx(&wc, plan.tbl.columns, nil, nil, context.temp_allocator)
-	}
+	resolve_mutation_filter(&plan.filt, plan.tbl.columns)
 	if plan.direct {
 		return update_scan_direct(t, plan, table_tree, &cursor)
 	}
@@ -423,7 +445,7 @@ update_scan_direct :: proc(
 			continue
 		}
 
-		should_update := eval_plan_filter(plan, c.values)
+		should_update := eval_mutation_filter(&plan.filt, c.values)
 		if should_update {
 			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, true)
 			if !had_err && new_row != nil {
@@ -466,7 +488,7 @@ update_scan_cow :: proc(
 		}
 
 		defer cell.destroy(&c, context.temp_allocator)
-		should_update := eval_plan_filter(plan, c.values)
+		should_update := eval_mutation_filter(&plan.filt, c.values)
 		if should_update {
 			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, false)
 			if !had_err && new_row != nil {
@@ -481,11 +503,11 @@ update_scan_cow :: proc(
 		btree.cursor_advance(cursor)
 	}
 	if count > 0 {
-		new_schema_root, ok1 := schema.update_root_page_cow(t, plan.table_name, current_root)
+		new_schema_root, info, ok1 := commit_cow_root(t, plan.table_name, current_root)
 		if !ok1 { return false, t.root, {} }
 
 		log.infof("Updated %d rows.", count)
-		return true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = current_root}
+		return true, new_schema_root, info
 	}
 
 	log.info("Updated 0 rows.")
@@ -516,7 +538,7 @@ exec_delete_impl :: proc(
 	plan := Delete_Plan {
 		tbl        = table,
 		table_name = stmt.table_name,
-		filter     = stmt.where_clause,
+		filt       = {filter = stmt.where_clause},
 		direct     = mode == .Direct,
 	}
 
@@ -534,9 +556,7 @@ exec_delete_impl :: proc(
 Delete_Plan :: struct {
 	tbl:        types.Table,
 	table_name: string,
-	filter:     Maybe(parser.Where_Clause),
-	// Resolved once per scan (not per row) by collect_delete_targets.
-	filter_ctx: Maybe(Where_Eval_Ctx),
+	using filt: Mutation_Filter,
 	direct:     bool,
 }
 
@@ -553,10 +573,7 @@ delete_by_pk :: proc(
 	root: u32,
 	info: Mutated_Table_Info,
 ) {
-	where_cl, has_where := plan.filter.?
-	if !has_where { return false, false, 0, {} }
-
-	target_rowid, pk_ok := try_pk_lookup(plan.tbl, where_cl)
+	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.filter)
 	if !pk_ok { return false, false, 0, {} }
 	if plan.direct {
 		if btree.tree_delete(table_tree, target_rowid) == .None {
@@ -569,26 +586,15 @@ delete_by_pk :: proc(
 
 	nroot, del_err := btree.tree_delete_cow(table_tree, target_rowid)
 	if del_err == .None {
-		new_schema_root, ok1 := schema.update_root_page_cow(t, plan.table_name, nroot)
+		new_schema_root, info1, ok1 := commit_cow_root(t, plan.table_name, nroot)
 		if !ok1 { return true, false, t.root, {} }
 
 		log.info("Deleted 1 row.")
-		return true, true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = nroot}
+		return true, true, new_schema_root, info1
 	}
 
 	log.info("Deleted 0 rows.")
 	return true, true, t.root, {}
-}
-
-// eval_delete_filter evaluates the plan's pre-resolved filter against one row.
-// No filter → true; unresolvable filter → false (mirrors evaluate_where).
-@(private="file")
-eval_delete_filter :: proc(plan: ^Delete_Plan, values: []types.Value) -> bool {
-	if _, has_wc := plan.filter.?; !has_wc { return true }
-	if ctx, ok := plan.filter_ctx.?; ok {
-		return evaluate_where_ctx(ctx, values)
-	}
-	return false
 }
 
 // collect_delete_targets scans for rowids matching the filter.
@@ -603,9 +609,7 @@ collect_delete_targets :: proc(
 	defer btree.cursor_destroy(&cursor)
 
 	// Resolve the filter once, not per row.
-	if wc, has_wc := plan.filter.?; has_wc {
-		plan.filter_ctx = init_where_ctx(&wc, plan.tbl.columns, nil, nil, context.temp_allocator)
-	}
+	resolve_mutation_filter(&plan.filt, plan.tbl.columns)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
@@ -614,7 +618,7 @@ collect_delete_targets :: proc(
 		}
 		defer cell.destroy(&c, context.temp_allocator)
 
-		should_delete := eval_delete_filter(plan, c.values)
+		should_delete := eval_mutation_filter(&plan.filt, c.values)
 		if should_delete {
 			append(&targets, c.rowid)
 		}
@@ -658,11 +662,11 @@ apply_deletes :: proc(
 		}
 	}
 	if count > 0 {
-		new_schema_root, ok := schema.update_root_page_cow(t, plan.table_name, current_root)
+		new_schema_root, info, ok := commit_cow_root(t, plan.table_name, current_root)
 		if !ok { return false, t.root, {} }
 
 		log.infof("Deleted %d rows.", count)
-		return true, new_schema_root, Mutated_Table_Info{name = plan.table_name, root = current_root}
+		return true, new_schema_root, info
 	}
 
 	log.info("Deleted 0 rows.")

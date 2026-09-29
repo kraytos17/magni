@@ -10,14 +10,17 @@ from .corpus import stage_corpus_tmp
 from .util import die, log
 
 
-def afl_cmin(src: Path, dst: Path, timeout_ms: str = "1000") -> list[str]:
+def afl_cmin(src: Path, dst: Path, timeout_ms: str = "1000",
+           target: Path | None = None) -> list[str]:
     """Minimize src corpus into dst with afl-cmin. Returns kept filenames."""
+    if target is None:
+        target = config.FUZZ_TARGET_COV
     dst.mkdir(parents=True, exist_ok=True)
     e = {**os.environ, "AFL_MAP_SIZE": config.AFL_MAP_SIZE}
     result = subprocess.run(
         ["afl-cmin", "-i", str(src), "-o", str(dst),
          "-m", "none", "-t", timeout_ms,
-         "--", str(config.FUZZ_TARGET_COV), "@@"],
+         "--", str(target), "@@"],
         cwd=str(config.ROOT), env=e, capture_output=True, text=True)
     if result.returncode != 0:
         die(f"afl-cmin failed:\n{result.stderr}")

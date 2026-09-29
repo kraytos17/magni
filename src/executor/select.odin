@@ -110,7 +110,14 @@ fetch_single_rows :: proc(
 	}
 
 	_, has_lim := stmt.limit.?
-	max_rows := stmt.limit if has_lim && !has_order else nil
+	// LIMIT pushdown is only valid for plain row-returning scans. ORDER BY
+	// and DISTINCT need the full row set, and aggregates/GROUP BY/HAVING
+	// change cardinality — pushing LIMIT into those scans silently truncates
+	// the aggregation input.
+	pushable := has_lim && !has_order && !stmt.is_distinct &&
+		len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil
+
+	max_rows := stmt.limit if pushable else nil
 	rows, scan_err := scan_table(
 		&table_tree,
 		&tbl,
@@ -127,24 +134,6 @@ fetch_single_rows :: proc(
 		{table_name = from_name, start_col = 0, col_count = len(tbl.columns)},
 	}
 	return rows, tbl.columns, single_range, true
-}
-
-@(private)
-// apply_sort_dedup applies ORDER BY and DISTINCT to a result set, in that
-// order (matching the standard pipeline). Returns false on sort failure.
-apply_sort_dedup :: proc(
-	rows: []Row_Entry,
-	stmt: parser.Select_Stmt,
-	cols: []types.Column,
-	single_range: []Table_Col_Range,
-	allocator := context.allocator,
-) -> (out: []Row_Entry, ok: bool) {
-	out = rows
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		if !sort_rows(out, order_clause, cols, single_range) { return nil, false }
-	}
-	if stmt.is_distinct { out = dedup_rows(out) }
-	return out, true
 }
 
 exec_select_single_data :: proc(
@@ -170,8 +159,12 @@ exec_select_single_data :: proc(
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
 		has_order = true
 	}
-	// Fast path: SELECT COUNT(*) FROM table (no WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT)
+	// Fast path: SELECT COUNT(*) FROM table (exactly one projected column, no
+	// WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT). The single-column check is
+	// load-bearing: companion columns (e.g. SELECT 0, COUNT(*)) must take the
+	// general aggregate path, never be silently dropped here.
 	if len(stmt.aggregates) == 1 &&
+	   len(stmt.columns) == 1 &&
 	   stmt.aggregates[0].func == .COUNT &&
 	   stmt.aggregates[0].column == "" &&
 	   stmt.where_clause == nil &&
@@ -214,47 +207,63 @@ exec_select_single_data :: proc(
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, cols, single_range)
 	}
+	// Sort on the full rows (so ORDER BY names outside the projected columns
+	// resolve), then project, dedup, and limit — same order as
+	// exec_select_join_data.
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		if !sort_rows(rows, order_clause, cols, single_range) {
+			return nil, nil, false
+		}
+	}
+	if len(stmt.columns) == 0 {
+		out := rows
+		if stmt.is_distinct { out = dedup_rows(out) }
+		if limit, has_limit := stmt.limit.?; has_limit {
+			off := u64(0)
+			if o, has_off := stmt.offset.?; has_off { off = o }
 
-	sorted_rows, ok := apply_sort_dedup(rows, stmt, cols, single_range)
-	if !ok { return nil, nil, false }
+			start := int(min(off, u64(len(out))))
+			end := int(min(off + limit, u64(len(out))))
+			out = out[start:end]
+		}
+		return out, cols, true
+	}
+	// Project to the requested columns (e.g. `SELECT c FROM u` on a multi-column
+	// table returns only column c).
+	indices, i_ok := build_display_indices(
+		stmt.columns,
+		cols,
+		single_range,
+		len(cols),
+	)
+	if !i_ok { return nil, nil, false }
 
-	rows = sorted_rows
+	proj := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
+	for entry in rows {
+		vals := make([]types.Value, len(indices), context.temp_allocator)
+		for idx, i in indices { vals[i] = entry.values[idx] }
+		append(&proj, Row_Entry{entry.rowid, vals})
+	}
+
+	proj_cols := make([]types.Column, len(indices), context.temp_allocator)
+	for idx, i in indices {
+		proj_cols[i] = cols[idx]
+		if i < len(stmt.aliases) && stmt.aliases[i] != "" {
+			proj_cols[i].name = stmt.aliases[i]
+		}
+	}
+
+	out := proj[:]
+	if stmt.is_distinct { out = dedup_rows(out) }
 	if limit, has_limit := stmt.limit.?; has_limit {
 		off := u64(0)
 		if o, has_off := stmt.offset.?; has_off { off = o }
 
-		start := int(min(off, u64(len(rows))))
-		end := int(min(off + limit, u64(len(rows))))
-		rows = rows[start:end]
+		start := int(min(off, u64(len(out))))
+		end := int(min(off + limit, u64(len(out))))
+		out = out[start:end]
 	}
-	// Project to the requested columns (e.g. `SELECT c FROM u` on a multi-column
-	// table returns only column c).
-	if len(stmt.columns) > 0 {
-		indices, i_ok := build_display_indices(
-			stmt.columns,
-			cols,
-			single_range,
-			len(cols),
-		)
-		if !i_ok { return nil, nil, false }
-
-		proj := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
-		for entry in rows {
-			vals := make([]types.Value, len(indices), context.temp_allocator)
-			for idx, i in indices { vals[i] = entry.values[idx] }
-			append(&proj, Row_Entry{entry.rowid, vals})
-		}
-
-		proj_cols := make([]types.Column, len(indices), context.temp_allocator)
-		for idx, i in indices {
-			proj_cols[i] = cols[idx]
-			if i < len(stmt.aliases) && stmt.aliases[i] != "" {
-				proj_cols[i].name = stmt.aliases[i]
-			}
-		}
-		return proj[:], proj_cols, true
-	}
-	return rows, cols, true
+	return out, proj_cols, true
 }
 
 exec_query :: proc(

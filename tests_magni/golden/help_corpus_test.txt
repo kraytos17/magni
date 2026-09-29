@@ -1,5 +1,6 @@
-usage: magni.py corpus test [-h] [--exec]
+usage: magni.py corpus test [-h] [--exec] [--rebuild]
 
 options:
   -h, --help  show this help message and exit
   --exec      gate exec seeds with the exec target instead
+  --rebuild   force target rebuild even if fresh

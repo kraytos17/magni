@@ -1,7 +1,8 @@
-usage: magni.py corpus promote [-h] [--minimize] [--dry-run] [--test]
+usage: magni.py corpus promote [-h] [--minimize] [--dry-run] [--test] [--exec]
 
 options:
   -h, --help  show this help message and exit
   --minimize
   --dry-run
   --test      regenerate corpus + ASan gate after promoting
+  --exec      promote exec queue into corpus_exec/promoted_seeds.py instead

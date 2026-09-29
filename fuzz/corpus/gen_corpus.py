@@ -15,6 +15,10 @@ the over-limit seed exercises that guard rather than crashing.
 import os
 import sys
 
+sys.path.insert(0, os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..")))
+import seedgen
+
 CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 
 HAND_SEEDS = [
@@ -76,6 +80,9 @@ HAND_SEEDS = [
     ("where_or_flat", 'SELECT * FROM t WHERE a=1 OR b=2;'),
     ("where_not_prefix", 'SELECT * FROM t WHERE NOT (a=1 OR b=2);'),
     ("where_not_chain", 'SELECT * FROM t WHERE NOT NOT a=1;'),
+    ("where_is_null", 'SELECT * FROM t WHERE b IS NULL;'),
+    ("where_is_not_null", 'SELECT * FROM t WHERE b IS NOT NULL;'),
+    ("where_is_null_combo", 'SELECT a FROM t WHERE b IS NULL OR a = 1 AND b IS NOT NULL;'),
     ("where_mixed_precedence", 'SELECT * FROM t WHERE a=1 AND b=2 OR c=3 AND d=4;'),
     ("where_and_3way", 'SELECT * FROM t WHERE a=1 AND b=2 AND c=3;'),
     ("join_bare", 'SELECT * FROM a JOIN b ON a.x=b.y;'),
@@ -169,7 +176,7 @@ def deep_parens_not(levels):
 
 
 def main():
-    seed_names = {name for name, _ in SEEDS}
+    seed_names = seedgen.managed_names(SEEDS)
     seed_names |= {
         "deep_subquery_under_guard",
         "deep_subquery_over_guard",
@@ -181,16 +188,9 @@ def main():
     }
 
     # Clear the corpus dir of any files we manage (keeps stale seeds from lingering).
-    for fn in os.listdir(CORPUS):
-        if fn in seed_names:
-            os.remove(os.path.join(CORPUS, fn))
+    seedgen.clear_managed(CORPUS, seed_names)
 
-    written = 0
-    for name, content in SEEDS:
-        with open(os.path.join(CORPUS, name), "wb") as f:
-            data = content.encode("utf-8") if isinstance(content, str) else content
-            f.write(data)
-        written += 1
+    written = seedgen.write_entries(CORPUS, SEEDS)
 
     with open(os.path.join(CORPUS, "deep_subquery_under_guard"), "w") as f:
         f.write(deep_subquery(500))

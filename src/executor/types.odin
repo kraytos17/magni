@@ -91,6 +91,15 @@ Where_Eval_Ctx :: struct {
 	schema_tree: ^btree.Tree,
 }
 
+// Mutation_Filter holds a DML statement's optional row filter plus its
+// once-resolved evaluation context. Embedded (via `using`) in Update_Plan
+// and Delete_Plan so both verbs share one filter implementation instead of
+// parallel eval_plan_filter / eval_delete_filter twins.
+Mutation_Filter :: struct {
+	filter:     Maybe(parser.Where_Clause),
+	filter_ctx: Maybe(Where_Eval_Ctx),
+}
+
 // Scan_Plan captures the resolved state for one table scan: optional filter
 // context (nil = no filter), skip-index bounds, and row limit. Built once by
 // build_scan_plan, consumed by the cursor loop in scan_table.

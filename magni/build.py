@@ -3,6 +3,7 @@
 import argparse
 import os
 import shutil
+from pathlib import Path
 
 from . import config
 from .util import die, log, require_tool, run
@@ -10,6 +11,7 @@ from .util import die, log, require_tool, run
 
 def cmd_build(args: argparse.Namespace) -> None:
     """Build debug, release, ASan, or coverage fuzz targets."""
+    apply_rebuild_flag(args)
     config.BUILD_DIR.mkdir(exist_ok=True)
     if args.asan:
         build_asan()
@@ -101,31 +103,95 @@ def _is_executable(path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+# Set by --rebuild (or MAGNI_REBUILD=1): ensure_* rebuild unconditionally.
+FORCE_REBUILD = False
+
+
+def apply_rebuild_flag(args) -> None:
+    """Honor --rebuild from any command that triggers an ensure_* build."""
+    global FORCE_REBUILD
+    if getattr(args, "rebuild", False):
+        FORCE_REBUILD = True
+
+# Harness source roots whose mtime invalidates a linked target.
+# (Odin core itself is toolchain-versioned; fuzz/toolchain-version.txt pins it.)
+HARNESS_WATCH = {
+    "fuzz": ["src", "fuzz/main.odin"],
+    "fuzz_exec": ["src", "fuzz_exec/main.odin"],
+}
+
+_mtime_cache: dict[str, float] = {}
+
+
+def newest_mtime_under(roots: list[Path]) -> float:
+    """Newest .odin mtime under the given files/dirs (0.0 if none)."""
+    newest = 0.0
+    for p in roots:
+        if p.is_file():
+            newest = max(newest, p.stat().st_mtime)
+        elif p.is_dir():
+            for f in p.rglob("*.odin"):
+                if f.is_file():
+                    newest = max(newest, f.stat().st_mtime)
+    return newest
+
+
+def newest_source_mtime(harness: str) -> float:
+    """Newest mtime under the harness's watched roots (cached per process)."""
+    if harness in _mtime_cache:
+        return _mtime_cache[harness]
+    newest = newest_mtime_under([config.ROOT / rel for rel in HARNESS_WATCH[harness]])
+    _mtime_cache[harness] = newest
+    return newest
+
+
+def is_fresh(target, harness: str) -> bool:
+    """A target is usable only if built and newer than all its sources.
+
+    The old existence-only check silently validated stale binaries (gates
+    passed against days-old code). Missing, non-executable, forced, or older
+    than any watched source all count as stale.
+    """
+    if FORCE_REBUILD or os.environ.get("MAGNI_REBUILD") == "1":
+        return False
+    if not _is_executable(target):
+        return False
+    try:
+        return target.stat().st_mtime >= newest_source_mtime(harness)
+    except OSError:
+        return False
+
+
 def ensure_cov_target() -> None:
-    if not _is_executable(config.FUZZ_TARGET_COV):
-        log("Coverage target missing, building...")
-        build_cov()
+    if is_fresh(config.FUZZ_TARGET_COV, "fuzz"):
+        return
+    log("Coverage target missing or stale, building...")
+    build_cov()
 
 
 def ensure_cmplog_target() -> None:
-    if not _is_executable(config.FUZZ_TARGET_CMPLOG):
-        log("cmplog target missing, building...")
-        build_cov("cmplog")
+    if is_fresh(config.FUZZ_TARGET_CMPLOG, "fuzz"):
+        return
+    log("cmplog target missing or stale, building...")
+    build_cov("cmplog")
 
 
 def ensure_laf_target() -> None:
-    if not _is_executable(config.FUZZ_TARGET_LAF):
-        log("laf target missing, building...")
-        build_cov("laf")
+    if is_fresh(config.FUZZ_TARGET_LAF, "fuzz"):
+        return
+    log("laf target missing or stale, building...")
+    build_cov("laf")
 
 
 def ensure_asan_target() -> None:
-    if not _is_executable(config.FUZZ_TARGET):
-        log("ASan target missing, building...")
-        build_asan()
+    if is_fresh(config.FUZZ_TARGET, "fuzz"):
+        return
+    log("ASan target missing or stale, building...")
+    build_asan()
 
 
 def ensure_exec_target() -> None:
-    if not _is_executable(config.FUZZ_EXEC_TARGET):
-        log("Exec target missing, building...")
-        build_exec()
+    if is_fresh(config.FUZZ_EXEC_TARGET, "fuzz_exec"):
+        return
+    log("Exec target missing or stale, building...")
+    build_exec()

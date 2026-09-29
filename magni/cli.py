@@ -7,14 +7,27 @@ places (help heredoc, --roles help, Makefile comment).
 
 import argparse
 
-from .build import cmd_build
+from .build import apply_rebuild_flag, cmd_build
 from .clean import cmd_clean
 from .corpus import corpus_generate, corpus_test
 from .fuzz import cmd_fuzz
 from .minimize import corpus_minimize
 from .promote import corpus_promote
+from .promote_exec import corpus_promote_exec
 from .roles import role_names
 from .testcmd import cmd_test, cmd_test_cli, cmd_test_py, cmd_vet
+
+
+def _corpus_test(args: argparse.Namespace) -> None:
+    apply_rebuild_flag(args)
+    corpus_test(exec_scripts=args.exec_test)
+
+
+def _corpus_promote(args: argparse.Namespace) -> None:
+    if args.exec_promote:
+        corpus_promote_exec(args.minimize, args.dry_run, test_after=args.test)
+    else:
+        corpus_promote(args.minimize, args.dry_run, test_after=args.test)
 
 
 def cmd_help(_args: argparse.Namespace) -> None:
@@ -60,14 +73,14 @@ def cmd_help(_args: argparse.Namespace) -> None:
     magni.py corpus generate --exec         regenerate exec scripts → fuzz/corpus_exec/
     magni.py corpus test                   ASan gate (every corpus seed)
     magni.py corpus test --exec             ASan gate (every exec script)
-    magni.py corpus promote [--minimize] [--dry-run] [--test]
+    magni.py corpus promote [--minimize] [--dry-run] [--test] [--exec]
     magni.py corpus minimize               cmin + purge, rewrite promoted_seeds.py
 
   CLEAN
     magni.py clean              remove build/ only
     magni.py clean --all        remove build/ + fuzz artifacts
 
-  Env overrides: ODIN=odin, MAGNI_FUZZ_OUT=<dir>
+  Env overrides: ODIN=odin, MAGNI_FUZZ_OUT=<dir>, MAGNI_REBUILD=1 (force rebuild)
 """)
 
 
@@ -87,6 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--exec", dest="exec_fuzz", action="store_true",
                     help="executor/storage target (coverage + ASan combined)")
     pb.add_argument("--check-only", action="store_true")
+    pb.add_argument("--rebuild", action="store_true",
+                    help="force rebuild even if the target looks fresh")
     pb.set_defaults(func=cmd_build)
 
     # test
@@ -118,10 +133,14 @@ def build_parser() -> argparse.ArgumentParser:
     pf = sub.add_parser("fuzz", help="AFL++ campaign management")
     fsub = pf.add_subparsers(dest="fuzz_cmd", required=True)
     fr = fsub.add_parser("run", help="interactive AFL++ campaign")
+    fr.add_argument("--rebuild", action="store_true",
+                    help="force target rebuild even if fresh")
     fr.add_argument("extra", nargs=argparse.REMAINDER)
     fc = fsub.add_parser("campaign", help="headless parallel campaign")
     fc.add_argument("-w", "--workers", type=int, default=4)
     fc.add_argument("-s", "--seconds", type=int, default=3600)
+    fc.add_argument("--rebuild", action="store_true",
+                    help="force target rebuild even if fresh")
     fc.add_argument("--roles", default=None,
                     help="comma-separated worker roles (default: master + rotation). "
                          f"Roles: {role_names()}")
@@ -142,14 +161,17 @@ def build_parser() -> argparse.ArgumentParser:
     ct = csub.add_parser("test", help="ASan gate on every seed")
     ct.add_argument("--exec", dest="exec_test", action="store_true",
                     help="gate exec seeds with the exec target instead")
-    ct.set_defaults(func=lambda args: corpus_test(exec_scripts=args.exec_test))
+    ct.add_argument("--rebuild", action="store_true",
+                    help="force target rebuild even if fresh")
+    ct.set_defaults(func=_corpus_test)
     pp = csub.add_parser("promote", help="promote grown queue into gen_corpus.py")
     pp.add_argument("--minimize", action="store_true")
     pp.add_argument("--dry-run", action="store_true")
     pp.add_argument("--test", action="store_true",
                     help="regenerate corpus + ASan gate after promoting")
-    pp.set_defaults(func=lambda args: corpus_promote(
-        args.minimize, args.dry_run, test_after=args.test))
+    pp.add_argument("--exec", dest="exec_promote", action="store_true",
+                    help="promote exec queue into corpus_exec/promoted_seeds.py instead")
+    pp.set_defaults(func=_corpus_promote)
     cm = csub.add_parser("minimize",
                          help="afl-cmin + monster purge, rewrite promoted_seeds.py")
     cm.set_defaults(func=lambda _args: corpus_minimize())

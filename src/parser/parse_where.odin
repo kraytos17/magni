@@ -330,12 +330,27 @@ parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Conditio
 			}
 			cond.in_values = in_vals[:]
 		}
+	case .IS:
+		// `col IS [NOT] NULL`. A NOT directly before IS (`col NOT IS NULL`)
+		// is not valid SQL — NOT belongs after IS.
+		if cond.negated {
+			if p.err_msg == "" { p.err_msg = "Expected NULL after IS" }
+			condition_cleanup(&cond, allocator); return {}, false
+		}
+
+		advance(p)
+		if match(p, .NOT) { cond.negated = true }
+
+		cond.operator = .IS
+		if !expect_match(p, .NULL, "Expected NULL after IS [NOT]") {
+			condition_cleanup(&cond, allocator); return {}, false
+		}
 	case:
 		if p.err_msg == "" { p.err_msg = "Expected comparison operator in WHERE condition" }
 		condition_cleanup(&cond, allocator); return {}, false
 	}
 
-	if cond.operator != .IN {
+	if cond.operator != .IN && cond.operator != .IS {
 		if peek(p).type == .IDENTIFIER {
 			rhs_str, rhs_ok := parse_qualified_identifier(p, allocator)
 			if !rhs_ok {

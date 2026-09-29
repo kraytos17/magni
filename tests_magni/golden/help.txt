@@ -40,12 +40,12 @@ MagniDB — magni.py help
     magni.py corpus generate --exec         regenerate exec scripts → fuzz/corpus_exec/
     magni.py corpus test                   ASan gate (every corpus seed)
     magni.py corpus test --exec             ASan gate (every exec script)
-    magni.py corpus promote [--minimize] [--dry-run] [--test]
+    magni.py corpus promote [--minimize] [--dry-run] [--test] [--exec]
     magni.py corpus minimize               cmin + purge, rewrite promoted_seeds.py
 
   CLEAN
     magni.py clean              remove build/ only
     magni.py clean --all        remove build/ + fuzz artifacts
 
-  Env overrides: ODIN=odin, MAGNI_FUZZ_OUT=<dir>
+  Env overrides: ODIN=odin, MAGNI_FUZZ_OUT=<dir>, MAGNI_REBUILD=1 (force rebuild)
 

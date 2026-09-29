@@ -1,5 +1,5 @@
 usage: magni.py build [-h] [--release] [--asan] [--cov] [--cmplog] [--laf]
-                      [--exec] [--check-only]
+                      [--exec] [--check-only] [--rebuild]
 
 options:
   -h, --help    show this help message and exit
@@ -10,3 +10,4 @@ options:
   --laf         with --cov: LAF-INTEL comparison-splitting binary
   --exec        executor/storage target (coverage + ASan combined)
   --check-only
+  --rebuild     force rebuild even if the target looks fresh

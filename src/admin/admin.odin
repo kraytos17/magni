@@ -229,21 +229,17 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	return .None
 }
 
-print_schema :: proc(database: ^db.Database) -> db.DB_Error {
+print_schema :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
-	st := db.Schema_Tree(database)
-	schema.print_ddl(&st)
-	return .None
-}
 
-print_schema_debug :: proc(database: ^db.Database) -> db.DB_Error {
-	db.db_check(database) or_return
-	sync.lock(&database.mu)
-	defer sync.unlock(&database.mu)
 	st := db.Schema_Tree(database)
-	schema.debug_print_all(&st)
+	if debug {
+		schema.debug_print_all(&st)
+	} else {
+		schema.print_ddl(&st)
+	}
 	return .None
 }
 
@@ -256,7 +252,7 @@ print_tree_page :: proc(database: ^db.Database, page_num: u32) -> db.DB_Error {
 	return .None
 }
 
-print_snapshots :: proc(database: ^db.Database) -> db.DB_Error {
+print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.rw_mutex_shared_lock(&database.mu)
 	defer sync.rw_mutex_unlock(&database.mu)
@@ -265,19 +261,10 @@ print_snapshots :: proc(database: ^db.Database) -> db.DB_Error {
 		return .None
 	}
 
-	snapshot.print_chain(database.pager, database.latest_snapshot)
-	return .None
-}
-
-print_snapshot_debug :: proc(database: ^db.Database) -> db.DB_Error {
-	db.db_check(database) or_return
-	sync.rw_mutex_shared_lock(&database.mu)
-	defer sync.rw_mutex_unlock(&database.mu)
-	if database.latest_snapshot == 0 {
-		fmt.println("No snapshots.")
-		return .None
+	if debug {
+		snapshot.debug_print_chain(database.pager, database.latest_snapshot)
+	} else {
+		snapshot.print_chain(database.pager, database.latest_snapshot)
 	}
-
-	snapshot.debug_print_chain(database.pager, database.latest_snapshot)
 	return .None
 }
