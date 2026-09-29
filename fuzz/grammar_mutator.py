@@ -118,7 +118,7 @@ def fuzz_count(buf):
 
 
 def _split_stmts(data: bytes) -> list:
-    """Split on ';' outside string literals (mirrors split_script)."""
+    """Split on ';' outside string literals (mirrors sqltext.split_statements)."""
     parts, start, in_str = [], 0, False
     i = 0
     while i < len(data):

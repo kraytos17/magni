@@ -123,14 +123,15 @@ the conventions contributors must uphold.
     `db.vacuum`. Run it periodically to reclaim space.
 
 11. **Row count tracking** — Per-page row counts are maintained incrementally on insert/delete
-    and cached in the pager. `COUNT(*)` without WHERE/GROUP BY/DISTINCT/ORDER BY/LIMIT is
-    served directly from the cache without scanning.
+    and cached in the pager. `COUNT(*)` with exactly one projected column and no WHERE/GROUP
+    BY/DISTINCT/ORDER BY/LIMIT is served directly from the cache without scanning (companion
+    columns take the general aggregate path).
 
 12. **Logging as a side channel** — Library code propagates errors via `DB_Error`/`or_return`;
     `core:log` messages are a side channel, not control flow. Logs go to stderr so stdout
-    carries only query results. Tests quiet expected-error paths with
-    `context.logger.lowest_level = .Error` (not a nil logger) so `log.error` events still reach
-    the test runner's failure counting.
+    carries only query results. Tests that exercise expected-error paths silence them with
+    the `suppress_expected_errors` / `restore_logger` helpers in `tests/test_util.odin` (nil
+    logger), because the test runner counts error-level logs as failures.
 
 ---
 
@@ -139,7 +140,7 @@ the conventions contributors must uphold.
 ### Package layers
 
 ```
-Layer 0  types            util/varint
+Layer 0  types            util/varint        sqltext
 Layer 1  cell             pager            parser           linedit
 Layer 2  btree
 Layer 3  schema           snapshot
@@ -153,6 +154,7 @@ Layer 7  main
 |---|---|---|
 | `types` | — | Shared domain model (`Value`, `Column`, `Table`, ...). Leaf. |
 | `util/varint` | — | Generic primitives, no database knowledge. Leaf. |
+| `sqltext` | — | Statement splitter. Leaf (core-only imports); shared by CLI + fuzz harness. |
 | `cell` | types, util/varint | Row/columnar cell codec. |
 | `pager` | types | Page cache, WAL, freelist, page bitmap (`core:container/bit_array`). |
 | `parser` | types | Self-contained SQL front end — **must stay storage-independent**. |
@@ -163,7 +165,7 @@ Layer 7  main
 | `executor` | btree, cell, pager, parser, schema, types | Query engine. |
 | `db` | btree, cell, executor, pager, parser, schema, snapshot, types | Top-level facade. |
 | `admin` | db, btree, cell, executor, pager, schema, snapshot, types | CLI introspection/presentation. |
-| `main` | db, admin, linedit, schema | CLI entry point. |
+| `main` | db, admin, linedit, schema, sqltext | CLI entry point. |
 
 ### Rules
 
@@ -215,13 +217,15 @@ directories, re-run the private-marking pass to tighten further.
 ### 1. SQL Layer — `parser/` and `executor/`
 
 **Parser** (`parser.odin`):
-- Lexer: character-by-character scanner producing `[]Token` (76 token types as `enum u8`,
+- Lexer: character-by-character scanner producing `[]Token` (79 token types as `enum u8`,
   including `.EOF`).
 - Recursive-descent parser: one function per grammar rule (`parse_create_table`,
   `parse_insert`, `parse_select`, `parse_update`, `parse_delete`, `parse_drop_table`).
 - `Select_Stmt` supports `AS OF SNAPSHOT <id>` and `AS OF TIMESTAMP <micros>`.
 - All AST nodes allocated on caller-provided allocator; no per-node cleanup needed.
 - `LIMIT` without `ORDER BY` uses pushdown: `scan_table` stops early when `max_rows` is reached.
+  Pushdown is skipped when `ORDER BY`, `DISTINCT`, or aggregates/GROUP BY/HAVING are present,
+  since all three change which rows survive.
 
 **Executor** (`executor.odin`):
 - Entry: `execute(schema_tree, stmt, out: ^Result = nil, cache: ^schema.Table_Cache = nil) -> (ok, new_schema_root)`.
@@ -272,8 +276,10 @@ Key subroutines:
 
 **WHERE** conditions parse into a boolean-expression tree with standard SQL precedence (AND binds
 tighter than OR), parentheses, and `NOT` support — both prefix (`NOT <expr>` wraps its child in a
-`.NOT` node) and infix (`col NOT IN (...)` / `col NOT LIKE 'x'` negate the leaf condition):
-`a = 1 AND b = 2 OR c = 3` parses as `(a = 1 AND b = 2) OR c = 3`. `parse_where_clause` builds the
+`.NOT` node) and infix (`col NOT IN (...)` / `col NOT LIKE 'x'` / `col IS NOT NULL` negate the
+leaf condition):
+`a = 1 AND b = 2 OR c = 3` parses as `(a = 1 AND b = 2) OR c = 3`. `col IS NULL` tests
+nullness directly (`= NULL` never matches, per SQL semantics); `IS NOT NULL` negates the leaf. `parse_where_clause` builds the
 tree in `parse_where.odin`
 (`parse_or_expr` / `parse_and_expr` / `parse_primary`); HAVING and JOIN `ON` clauses reuse it.
 `init_where_ctx` resolves each leaf once into a `Resolved_Node` tree (column indices, column-column
@@ -290,7 +296,7 @@ chained-bucket pattern used by set operations). No stringification, no allocatio
 no float-precision loss. Groups are printed using the original `key_values` `[]types.Value`
 stored in each `Group` struct.
 
-**HAVING** evaluates the same boolean-expression tree (`evaluate_where_having` in `display.odin`,
+**HAVING** evaluates the same boolean-expression tree (`evaluate_where_having` in `aggregates.odin`,
 recursive over `parser.Where_Node`) against both group-key values and computed aggregate values.
 Supports
 aggregate function references (e.g., `HAVING count > 1`) as well as group-by column comparisons.
@@ -848,7 +854,7 @@ on zero-copy paths points directly into page buffers. `cell.destroy` must use th
 allocator that was passed at creation time — mismatch causes bad-free on string/blob values.
 
 **Borrowed strings and the `temp_allocator`**: `schema.find_table`/`list_tables` and the
-`combined_cols` slice in `exec_select` return `Column.name` strings that borrow from the
+`combined_cols` slice in `exec_query` return `Column.name` strings that borrow from the
 allocator passed to the lookup. `context.temp_allocator` is a bump arena: allocations never
 free or overwrite earlier blocks within one statement, so borrowed strings remain valid across
 subsequent `make` calls. When a borrowed string must outlive further allocations on the same
@@ -931,7 +937,7 @@ assignment rather than relying on composite-literal aliasing.
 | Cache location | `btree.Stats.row_counts: map[u32]int` (stored pager-scoped via the opaque `stats` handle so it survives transient `btree.Tree` instances) |
 | Update cost | O(1) per insert/delete (incremental) |
 | COUNT(*) fast path | O(1) if cached, O(pages) on first access |
-| Bypass conditions | Queries with WHERE, GROUP BY, DISTINCT, ORDER BY, or LIMIT use full scan |
+| Bypass conditions | Queries with WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT, or companion projected columns use full scan |
 
 ---
 

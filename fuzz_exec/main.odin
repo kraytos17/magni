@@ -16,30 +16,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "src:db"
-
-// Statement splitting mirrors split_statements in src/script.odin
-// (string-literal-aware ';' split). Kept in sync manually; the fuzzer
-// only needs approximate statement boundaries.
-split_script :: proc(sql: string) -> []string {
-	result := make([dynamic]string, context.temp_allocator)
-	start := 0
-	in_string := false
-	for i in 0 ..< len(sql) {
-		if sql[i] == '\'' {
-			in_string = !in_string
-		} else if sql[i] == ';' && !in_string {
-			append(&result, sql[start:i + 1])
-			start = i + 1
-		}
-	}
-	if start < len(sql) {
-		remaining := strings.trim_space(sql[start:])
-		if len(remaining) > 0 {
-			append(&result, remaining)
-		}
-	}
-	return result[:]
-}
+import "src:sqltext"
 
 main :: proc() {
 	if len(os.args) != 2 {
@@ -66,7 +43,7 @@ main :: proc() {
 
 	// Execute as a script: DDL → DML → queries interplay is where the
 	// executor/storage bugs live. Errors are normal; only crashes matter.
-	for stmt in split_script(string(data)) {
+	for stmt in sqltext.split_statements(string(data), context.temp_allocator) {
 		trimmed := strings.trim_space(stmt)
 		if len(trimmed) <= 1 { continue }
 		db.execute(database, trimmed)

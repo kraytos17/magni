@@ -26,8 +26,8 @@ ROLES ?=
 .PHONY: check vet vet-all
 .PHONY: perf bench
 .PHONY: fuzz-build fuzz-test fuzz-exec-build fuzz-exec-test
-.PHONY: fuzz-corpus fuzz-exec-corpus fuzz-run fuzz-campaign fuzz-status fuzz-stop
-.PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-grammar-test
+.PHONY: fuzz-corpus fuzz-exec-corpus fuzz-cov fuzz-run fuzz-campaign fuzz-status fuzz-stop
+.PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-one-exec fuzz-grammar-test
 .PHONY: help
 
 all: build ## default: build debug binary
@@ -77,7 +77,7 @@ ci: vet-all test test-py fuzz-test ## CI gate: vet-all + test + test-py + fuzz c
 check: ## parse + type check (no vet)
 	@python3 magni.py build --check-only
 
-vet: ## vet (fast, no LLVM): vet | vet FLAGS=shadowing
+vet: ## vet (fast, no LLVM): vet | vet VET_FLAGS=shadowing
 	@python3 magni.py vet $(VET_FLAGS)
 
 vet-all: ## vet via build+test (LLVM, strict-style, shadowing)
@@ -100,13 +100,13 @@ fuzz-build: ## build ASan fuzz target → fuzz/fuzz_target
 fuzz-cov: ## build coverage-instrumented target → fuzz/fuzz_target_cov
 	@python3 magni.py build --cov
 
-fuzz-test: fuzz-build ## run every corpus seed under ASan (regression gate)
+fuzz-test: ## run every corpus seed under ASan (regression gate; target auto-rebuilds if stale)
 	@python3 magni.py corpus test
 
 fuzz-exec-build: ## build executor/storage target (coverage + ASan) → fuzz/fuzz_exec_target
 	@python3 magni.py build --exec
 
-fuzz-exec-test: fuzz-exec-build ## run every exec seed under ASan (regression gate)
+fuzz-exec-test: ## run every exec seed under ASan (regression gate; target auto-rebuilds if stale)
 	@python3 magni.py corpus test --exec
 
 fuzz-run: fuzz-cov ## launch interactive AFL++ campaign (Ctrl-C to stop, pass ARGS=" -V 60")
@@ -131,6 +131,10 @@ fuzz-promote: fuzz-cov ## merge grown queue → update gen_corpus.py (MIN=1 to m
 fuzz-one: fuzz-build ## repro one crash: make fuzz-one FILE=fuzz/afl-output/.../id:000000
 	@test -n "$(FILE)" || { echo "usage: make fuzz-one FILE=<path>" >&2; exit 2; }
 	@ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 ./fuzz/fuzz_target "$(FILE)"
+
+fuzz-one-exec: fuzz-exec-build ## repro one exec crash: make fuzz-one-exec FILE=fuzz/afl-exec-output/.../id:000000
+	@test -n "$(FILE)" || { echo "usage: make fuzz-one-exec FILE=<path>" >&2; exit 2; }
+	@ASAN_OPTIONS=abort_on_error=1:symbolize=0 ./fuzz/fuzz_exec_target "$(FILE)"
 
 fuzz-grammar-test: ## selftest the SQL-aware Python mutator (no AFL++ needed)
 	@python3 fuzz/grammar_mutator.py --selftest

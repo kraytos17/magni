@@ -47,6 +47,11 @@ join_hash_i64 :: proc(
 	is_right: bool,
 	new_rows: ^[dynamic]Row_Entry,
 ) {
+	// Defensive: avoid OOB if a future caller bypasses the try_hash_join guard.
+	if left_col < 0 || left_col >= left_col_count || right_col < 0 || right_col >= right_col_count {
+		return
+	}
+
 	build_left := len(rows) <= len(right_rows)
 	build_cap := len(rows) if build_left else len(right_rows)
 	ht := make(map[i64][dynamic]int, build_cap, context.temp_allocator)
@@ -129,6 +134,10 @@ join_hash_string :: proc(
 	is_right: bool,
 	new_rows: ^[dynamic]Row_Entry,
 ) {
+	// Defensive: avoid OOB if a future caller bypasses the try_hash_join guard.
+	if left_col < 0 || left_col >= left_col_count || right_col < 0 || right_col >= right_col_count {
+		return
+	}
 	// Hash on u64 fingerprints (no per-row string allocation). Collisions fall
 	// back to value_compare. NULL keys never match (SQL semantics, mirrors the
 	// i64 path which skips non-i64 keys).
@@ -336,7 +345,9 @@ try_hash_join :: proc(
 ) -> bool {
 	is_left := jc.join_type == .LEFT
 	is_right := jc.join_type == .RIGHT
-	left_col_count := jb.ctxs[info_idx - 1].range.col_count
+	// Accumulated left width: rows hold all tables joined so far, not just
+	// the previous table (chained RIGHT JOINs emitted narrow rows otherwise).
+	left_col_count := jb.ctxs[info_idx - 1].range.start_col + jb.ctxs[info_idx - 1].range.col_count
 	right_col_count := jb.ctxs[info_idx].range.col_count
 	on_cl, has_on := jc.on_clause.?
 	if !has_on { return false }
@@ -360,10 +371,23 @@ try_hash_join :: proc(
 	if !left_ok || !right_ok { return false }
 
 	right_adjust := jb.ctxs[info_idx].range.start_col
+	lcc := jb.ctxs[info_idx - 1].range.col_count
+	rcc := jb.ctxs[info_idx].range.col_count
+
+	// Verify both ON columns belong to their respective sides, accounting
+	// for the current table's start_col. Multi-JOIN or junk ON clauses can
+	// resolve to indices outside the table's range; the nested-loop path
+	// resolves per-table correctly, so fall through here instead of OOB-ing.
+	if left_idx < 0 || left_idx >= lcc ||
+	   right_idx < right_adjust || right_idx >= right_adjust + rcc {
+		return false
+	}
+
 	key_is_int := false
 	if len(rows) > 0 && len(right_rows) > 0 {
-		if _, ok := rows[0].values[left_idx].(i64);
-		   ok { key_is_int = true }
+		if _, ok := rows[0].values[left_idx].(i64); ok {
+			key_is_int = true
+		}
 	}
 	if key_is_int {
 		join_hash_i64(
@@ -406,7 +430,9 @@ nested_loop_join :: proc(
 ) {
 	is_left := jc.join_type == .LEFT
 	is_right := jc.join_type == .RIGHT
-	left_col_count := jb.ctxs[info_idx - 1].range.col_count
+	// Accumulated left width: rows hold all tables joined so far, not just
+	// the previous table (chained RIGHT JOINs emitted narrow rows otherwise).
+	left_col_count := jb.ctxs[info_idx - 1].range.start_col + jb.ctxs[info_idx - 1].range.col_count
 	right_col_count := jb.ctxs[info_idx].range.col_count
 	// Resolve the ON filter once, not per pair. Unresolvable ON matches
 	// nothing (mirrors evaluate_where); absent ON matches everything.

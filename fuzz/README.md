@@ -110,10 +110,10 @@ own havoc. See `make fuzz-grammar-test`.
 ## Triage workflow
 
 1. **Reproduce.** Parser crash: `make fuzz-one
-   FILE=fuzz/afl-output/.../id:000000,*` (ASan gate). Exec crash: run the
-   input through the exec target directly —
-   `ASAN_OPTIONS=abort_on_error=1:symbolize=0 ./fuzz/fuzz_exec_target FILE`
-   (`make fuzz-one` only covers the parser target). In dumb-mode runs, ASan
+   FILE=fuzz/afl-output/.../id:000000,*` (ASan gate). Exec crash:
+   `make fuzz-one-exec FILE=fuzz/afl-exec-output/.../id:000000,*`
+   (equivalent to `ASAN_OPTIONS=abort_on_error=1:symbolize=0
+   ./fuzz/fuzz_exec_target FILE`). In dumb-mode runs, ASan
    can emit non-reproducible `SIGILL` fork artifacts — unreproducible under
    the gate means not real.
 2. **Minimize** with `afl-tmin -i crash -o small.sql -- <target> @@`.
@@ -152,6 +152,8 @@ Crashes land in `<out>/crashes/`, hangs in `<out>/hangs/`.
 | 6 | Exec grammar campaign (DISTINCT follow-up) | `SELECT 0, COUNT(*) …` shifted the aggregate index (literal occupies a column slot with no aggregate value) → index OOB in `exec_select_aggregate_data` | bounds guard returns clean "Cannot mix non-aggregate column" error; regression test `test_exec_aggregate_literal_mix_errors_cleanly` + `script_aggregate_errors` exec seed |
 | 7 | Exec grammar campaign (DISTINCT follow-up) | `MIN`/`MAX` over an unknown column initialized the accumulator with `rows[0][-1]` → index OOB on non-empty tables | `col_idx < 0` yields NULL like the empty-table path; later superseded by #8 (unknown aggregate columns resolve to a clean error) |
 | 8 | Aggregate correctness pass | `SUM`/`MIN`/`MAX`/`COUNT(col)` over unknown columns silently yielded 0/NULL, contradicting the clean-error stance for unknown columns everywhere else | `build_groups` resolves every aggregate argument up front ("Unknown column in aggregate"); regression test `test_exec_aggregate_unknown_column_errors_cleanly` |
+| 9 | Exec campaign on refactored executor | Hash-join fast path indexed `values[]` with global combined-column indices against per-table rows (junk/multi-JOIN ON clauses → negative or past-the-end indices at 5 sites) | `try_hash_join` verifies ON-column side membership and falls back to nested-loop; defense-in-depth bounds checks in both hash scans; regression test `test_exec_join_on_index_oob_crashers` |
+| 10 | Same campaign | Chained RIGHT JOIN null-extension emitted rows spanning only the previous table, not all tables joined so far (projection OOB downstream) | null-extension uses accumulated left width (`start_col + col_count`); regression test `test_exec_chained_right_join_width` |
 
 ## Toolchain
 

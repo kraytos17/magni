@@ -17,14 +17,7 @@ import "src:types"
 setup_db :: proc(t: ^testing.T, name: string) -> ^db.Database {
 	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_int_%s.db", name)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
+	clean_db_files(filename)
 
 	database, open_err := db.open(filename)
 	testing.expect(t, open_err == .None, "Failed to open database")
@@ -34,13 +27,7 @@ setup_db :: proc(t: ^testing.T, name: string) -> ^db.Database {
 teardown_db :: proc(db_handle: ^db.Database, name: string) {
 	filename := fmt.tprintf("test_int_%s.db", name)
 	db.close(db_handle)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
+	clean_db_files(filename)
 }
 
 @(test)

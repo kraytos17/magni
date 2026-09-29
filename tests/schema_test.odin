@@ -1,7 +1,6 @@
 package tests
 
 import "core:fmt"
-import "core:os"
 import "core:strings"
 import "core:testing"
 import "src:btree"
@@ -13,7 +12,7 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_schema_%s.db", test_name)
 	safe_filename, _ := strings.clone(filename, context.allocator)
-	os.remove(safe_filename)
+	clean_db_files(safe_filename)
 
 	p, err := pager.open(safe_filename)
 	testing.expect(t, err == nil, "Failed to open pager")
@@ -32,9 +31,7 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 
 teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
 	_ = pager.close(tree.pager)
-	os.remove(filename)
-	wal_name := fmt.tprintf("%s-wal", filename)
-	os.remove(wal_name)
+	clean_db_files(filename)
 	delete(filename, context.allocator)
 }
 

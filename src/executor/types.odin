@@ -82,6 +82,7 @@ Resolved_Condition :: struct {
 	right_idx:           int,
 	has_in:              bool, // true → use in_values or in_subquery instead of rhs
 	in_values:           []types.Value, // literal IN list
+	in_set:              map[u64]bool, // fingerprint prefilter over in_values (nil = scan)
 	in_subquery:         ^parser.Select_Stmt, // subquery IN (SELECT ...)
 	in_subquery_results: []types.Value, // materialized subquery (filled once, not per row)
 }

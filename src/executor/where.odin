@@ -233,6 +233,7 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	switch n.kind {
 	case .COND:
 		delete(n.cond.in_subquery_results, allocator)
+		delete(n.cond.in_set)
 	case .AND, .OR, .NOT:
 		for child in n.children { free_resolved_node(child, allocator) }
 		delete(n.children, allocator)
@@ -275,6 +276,13 @@ resolve_condition :: proc(
 
 	if cond.in_values != nil {
 		rc.in_values = cond.in_values
+		// Fingerprint prefilter: O(1) miss check per row instead of O(list).
+		// Hits still verify with compare_values, so hash collisions and
+		// NULL semantics are exactly the linear scan's.
+		rc.in_set = make(map[u64]bool, len(cond.in_values), allocator)
+		for v in cond.in_values {
+			rc.in_set[hash_value(v)] = true
+		}
 	}
 	if cond.in_subquery != nil {
 		rc.in_subquery = cond.in_subquery
@@ -337,9 +345,17 @@ evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition,
 
 	if rc.has_in && rc.in_values != nil {
 		cond_result = false
-		for v in rc.in_values {
-			if compare_values(left_val, v) == 0 {
-				cond_result = true; break
+		// Prefilter on the fingerprint set; verify hits exactly. A nil set
+		// (hand-built node) falls back to the linear scan.
+		scan := true
+		if rc.in_set != nil {
+			_, scan = rc.in_set[hash_value(left_val)]
+		}
+		if scan {
+			for v in rc.in_values {
+				if compare_values(left_val, v) == 0 {
+					cond_result = true; break
+				}
 			}
 		}
 	} else if rc.has_in && rc.in_subquery_results != nil {

@@ -4,6 +4,7 @@ import "core:log"
 import "core:os"
 import "core:strings"
 import "src:db"
+import "src:sqltext"
 
 @(private)
 execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error: bool = false) {
@@ -27,7 +28,7 @@ execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = fals
 
 @(private)
 execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = false) {
-	statements := split_statements(sql)
+	statements := sqltext.split_statements(sql)
 	defer delete(statements)
 	for stmt in statements {
 		trimmed := strings.trim_space(stmt)
@@ -39,26 +40,4 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 			os.exit(1)
 		}
 	}
-}
-
-@(private="file")
-split_statements :: proc(sql: string) -> []string {
-	result := make([dynamic]string, context.allocator)
-	start := 0
-	in_string := false
-	for i in 0 ..< len(sql) {
-		if sql[i] == '\'' {
-			in_string = !in_string
-		} else if sql[i] == ';' && !in_string {
-			append(&result, sql[start:i + 1])
-			start = i + 1
-		}
-	}
-	if start < len(sql) {
-		remaining := strings.trim_space(sql[start:])
-		if len(remaining) > 0 {
-			append(&result, remaining)
-		}
-	}
-	return result[:]
 }

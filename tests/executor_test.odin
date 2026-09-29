@@ -1,7 +1,6 @@
 package tests
 
 import "core:fmt"
-import "core:os"
 import "core:strings"
 import "core:testing"
 import "src:btree"
@@ -23,13 +22,7 @@ setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, str
 	context.logger.lowest_level = .Error
 	temp_name := fmt.tprintf("test_exec_%s.db", test_name)
 	filename := strings.clone(temp_name, context.allocator)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
+	clean_db_files(filename)
 
 	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "Failed to open pager")
@@ -48,13 +41,7 @@ setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, str
 
 teardown_executor_env :: proc(tree: btree.Tree, filename: string) {
 	pager.close(tree.pager)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
+	clean_db_files(filename)
 	delete(filename)
 }
 
@@ -1769,4 +1756,120 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 	rows3, _, ok3 := executor.exec_query(&tree, sel3)
 	testing.expect(t, ok3, "HAVING agg IS NOT NULL should succeed")
 	if ok3 { testing.expect_value(t, len(rows3), 3) }
+}
+
+// Join-hash index OOB: grammar-mutator inputs crashed join_hash_i64/string via
+// right-column indices outside the current table's range. The nested-loop path
+// resolves per-table ranges correctly, so try_hash_join must reject mismatched
+// columns rather than passing them to the scan.
+@(test)
+test_exec_join_on_index_oob_crashers :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "join_oob")
+	defer teardown_executor_env(tree, file)
+
+	// Reproduce the minimized AFL crashers. Inputs replayed against leftover
+	// state may legitimately log errors; silence them — the regression is
+	// "no crash", which the calls themselves prove.
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	crashers := [3]string{
+		"CREATE TABLE a(id INT,v TEXT);CREATE TABLE b(d INT,w TEXT);INSERT INTO b VALUES(0,'')'';SELECT*FROM a JOIN b ON d=id",
+		"CREATE TABLE a(d INT,v TEXT);CREATE TABLE b(id INT,w TEXT);INSERT INTO b VALUES(0,'')'';SELECT*FROM a JOIN b ON d=0JOIN b ON d=b.id",
+		"SELECT * FROM a JOIN b ON d=0 JOIN b ON d=b.id",
+	}
+
+	for sql in crashers {
+		stmt, stmt_ok, _ := parser.parse(sql, context.temp_allocator)
+		if sel, is_sel := stmt.type.(parser.Select_Stmt); is_sel && stmt_ok {
+			// No-crash regression: ok is irrelevant here (replayed crashers
+			// run against leftover state and may legitimately fail).
+			_, _, _ = executor.exec_query(&tree, sel)
+		} else if stmt_ok {
+			// DDL/INSERT paths still run; the regression is "no crash".
+			_, _, _ = executor.execute(&tree, stmt)
+		}
+	}
+	context = restore_logger(saved)
+
+	// Hash path still works for correct ON columns, even with two joins.
+	stmts := [4]string{
+		"CREATE TABLE m(id INT, v TEXT);",
+		"CREATE TABLE n(id INT, w TEXT);",
+		"INSERT INTO m VALUES (1,'x'),(2,'y');",
+		"INSERT INTO n VALUES (1,'p'),(2,'q');",
+	}
+
+	for stmt_sql in stmts {
+		stmt, _, _ := parser.parse(stmt_sql, context.temp_allocator)
+		executor.execute(&tree, stmt)
+	}
+
+	join_stmt, _, _ := parser.parse(
+		"SELECT * FROM m JOIN n ON m.id = n.id JOIN n AS n2 ON m.id = n2.id;",
+		context.temp_allocator)
+	sel, ok := join_stmt.type.(parser.Select_Stmt)
+	testing.expect(t, ok, "three-table join must parse")
+	if ok {
+		rows, _, q_ok := executor.exec_query(&tree, sel)
+		testing.expect(t, q_ok, "three-table join must succeed")
+		if q_ok {
+			// Both joins match id=1 and id=2 → 2 rows × 4 cols.
+			testing.expect_value(t, len(rows), 2)
+		}
+	}
+}
+
+// Chained RIGHT JOIN null-extension: the emitted row must span all tables
+// joined so far, not just the previous table (fuzz crasher: narrow rows
+// panicked the projection with Index OOB).
+@(test)
+test_exec_chained_right_join_width :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "right_chain")
+	defer teardown_executor_env(tree, file)
+
+	stmts := [5]string{
+		"CREATE TABLE a(d INT);",
+		"CREATE TABLE b(d INT);",
+		"CREATE TABLE c(d INT);",
+		"INSERT INTO b VALUES (0);",
+		"INSERT INTO c VALUES (0);",
+	}
+	for stmt_sql in stmts {
+		stmt, _, _ := parser.parse(stmt_sql, context.temp_allocator)
+		executor.execute(&tree, stmt)
+	}
+
+	// a is empty: RIGHT JOINs null-extend across the accumulated width.
+	join_stmt, _, _ := parser.parse(
+		"SELECT * FROM a JOIN b ON b.d = 0 RIGHT JOIN c ON c.d = 0;",
+		context.temp_allocator)
+	sel, ok := join_stmt.type.(parser.Select_Stmt)
+	testing.expect(t, ok, "chained RIGHT JOIN must parse")
+	if ok {
+		rows, _, q_ok := executor.exec_query(&tree, sel)
+		testing.expect(t, q_ok, "chained RIGHT JOIN must succeed")
+		if q_ok {
+			testing.expect_value(t, len(rows), 1)
+			if len(rows) == 1 {
+				testing.expect_value(t, len(rows[0].values), 3)
+				testing.expect(t, types.is_null(rows[0].values[0]), "left cols null-extended")
+			}
+		}
+	}
+
+	// Minimized AFL crasher: duplicate table + RIGHT OUTER JOIN + literal ON.
+	dup_stmt, _, _ := parser.parse(
+		"SELECT*FROM a JOIN b ON b.d=0 RIGHT OUTER JOIN b ON b.d=0;",
+		context.temp_allocator)
+	dsel, dok := dup_stmt.type.(parser.Select_Stmt)
+	testing.expect(t, dok, "dup-table RIGHT JOIN must parse")
+	if dok {
+		saved, ctx := suppress_expected_errors()
+		context = ctx
+		_, _, qok := executor.exec_query(&tree, dsel)
+		context = restore_logger(saved)
+		_ = qok // must not crash; ok is state-dependent
+	}
 }

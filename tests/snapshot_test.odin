@@ -1,7 +1,6 @@
 package tests
 
 import "core:fmt"
-import "core:os"
 import "core:testing"
 import "src:pager"
 import "src:snapshot"
@@ -10,13 +9,7 @@ import "src:types"
 setup_snapshot_env :: proc(t: ^testing.T, test_name: string) -> ^pager.Pager {
 	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_snap_%s.db", test_name)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
+	clean_db_files(filename)
 
 	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "Failed to open pager")
@@ -26,13 +19,7 @@ setup_snapshot_env :: proc(t: ^testing.T, test_name: string) -> ^pager.Pager {
 teardown_snapshot_env :: proc(p: ^pager.Pager, test_name: string) {
 	filename := fmt.tprintf("test_snap_%s.db", test_name)
 	pager.close(p)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
+	clean_db_files(filename)
 }
 
 @(test)
