@@ -76,6 +76,15 @@ Aggregate_Expr :: struct {
 	column: string,
 }
 
+// Select_Column_Kind tags each entry of Select_Stmt.columns so the executor
+// can distinguish aggregate slots from literal slots (e.g. SELECT 0,
+// COUNT(*)) and bare columns (still a clean error beside aggregates).
+Select_Column_Kind :: enum {
+	COLUMN,
+	LITERAL,
+	AGGREGATE,
+}
+
 Join_Type :: enum {
 	INNER,
 	CROSS,
@@ -112,7 +121,9 @@ Select_Stmt :: struct {
 	joins:           []Join_Clause,
 	columns:         []string, // projected column names; empty = *
 	aliases:         []string, // parallel to columns: AS alias or "" when none
-	literal_values:  []types.Value, // FROM-less SELECT: literal column values
+	literal_values:  []types.Value, // literal column values (FROM-less + mixed)
+	col_kinds:       []Select_Column_Kind, // parallel to columns
+	col_literal_idx: []int, // parallel to columns: index into literal_values for LITERAL, -1 otherwise
 	aggregates:      []Aggregate_Expr,
 	is_distinct:     bool,
 	where_clause:    Maybe(Where_Clause),

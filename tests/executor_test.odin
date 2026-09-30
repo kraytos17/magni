@@ -1466,35 +1466,80 @@ test_exec_single_distinct_limit_applies_after_dedup :: proc(t: ^testing.T) {
 	}
 }
 
-// Regression (exec fuzzing): a bare literal beside aggregates
-// (SELECT 0, COUNT(*) ...) shifted the aggregate index and panicked with an
-// out-of-range index. Must be a clean error, never a crash.
+// Literals beside aggregates evaluate per group: SELECT 0, COUNT(*) yields
+// (0, N), with the literal repeating for every group in both orders.
+// Bare columns beside aggregates remain a clean error.
 @(test)
-test_exec_aggregate_literal_mix_errors_cleanly :: proc(t: ^testing.T) {
+test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "agg_lit_mix")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
-	queries := [3]string{
-		"SELECT 0, COUNT(*) FROM t;",
-		"SELECT COUNT(*), 0 FROM t;",
-		"SELECT 0, COUNT(*), SUM(score) FROM t;",
+	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
+	rows, _, ok := executor.exec_query(&tree, must_parse_select(t, "SELECT 0, COUNT(*) FROM t;"))
+	testing.expect(t, ok, "literal-first aggregate must succeed")
+	if ok {
+		testing.expect_value(t, len(rows), 1)
+		if len(rows) == 1 {
+			testing.expect(t, types.value_compare(rows[0].values[0], types.value_int(0)), "literal repeats")
+			testing.expect(t, types.value_compare(rows[0].values[1], types.value_int(2)), "count is 2")
+		}
 	}
-	for sql in queries {
-		stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-		testing.expect(t, parse_ok, "literal+aggregate should parse")
-		sel, is_sel := stmt.type.(parser.Select_Stmt)
-		testing.expect(t, is_sel, "expected Select_Stmt")
-		if !is_sel { continue }
 
-		saved, ctx := suppress_expected_errors()
-		context = ctx
-		_, _, ok := executor.exec_query(&tree, sel)
-		context = restore_logger(saved)
-		testing.expect(t, !ok, "literal beside aggregates must error cleanly")
+	rows2, _, ok2 := executor.exec_query(&tree, must_parse_select(t, "SELECT COUNT(*), 0 FROM t;"))
+	testing.expect(t, ok2, "literal-second aggregate must succeed")
+	if ok2 && len(rows2) == 1 {
+		testing.expect(t, types.value_compare(rows2[0].values[0], types.value_int(2)), "count is 2")
+		testing.expect(t, types.value_compare(rows2[0].values[1], types.value_int(0)), "literal repeats")
 	}
+
+	rows3, _, ok3 := executor.exec_query(&tree, must_parse_select(t, "SELECT 0, COUNT(*), SUM(score) FROM t;"))
+	testing.expect(t, ok3, "multi-aggregate with literal must succeed")
+	if ok3 && len(rows3) == 1 {
+		testing.expect(t, types.value_compare(rows3[0].values[0], types.value_int(0)), "literal repeats")
+		testing.expect(t, types.value_compare(rows3[0].values[1], types.value_int(2)), "count is 2")
+		testing.expect(t, types.value_compare(rows3[0].values[2], types.value_real(3.0)), "sum is 3.0")
+	}
+
+	// String literal keeps its value and TEXT typing beside aggregates.
+	rows4, cols4, ok4 := executor.exec_query(&tree, must_parse_select(t, "SELECT 'x', COUNT(*) FROM t;"))
+	testing.expect(t, ok4, "string literal beside aggregate must succeed")
+	if ok4 && len(rows4) == 1 {
+		testing.expect(t, types.value_compare(rows4[0].values[0], types.value_text("x")), "string literal repeats")
+		testing.expect(t, types.value_compare(rows4[0].values[1], types.value_int(2)), "count is 2")
+		if len(cols4) == 2 {
+			testing.expect(t, cols4[0].type == .TEXT, "literal column types as TEXT")
+		}
+	}
+
+	// GROUP BY: the literal repeats per group.
+	rows5, _, ok5 := executor.exec_query(&tree, must_parse_select(t, "SELECT 0, COUNT(*) FROM t GROUP BY name;"))
+	testing.expect(t, ok5, "grouped literal+aggregate must succeed")
+	if ok5 {
+		testing.expect_value(t, len(rows5), 2)
+		for r in rows5 {
+			testing.expect(t, types.value_compare(r.values[0], types.value_int(0)), "literal repeats per group")
+			testing.expect(t, types.value_compare(r.values[1], types.value_int(1)), "per-group count is 1")
+		}
+	}
+
+	// Empty table: the single implicit group still carries the literal.
+	executor.execute(&tree, make_create_stmt("t2"))
+	rows6, _, ok6 := executor.exec_query(&tree, must_parse_select(t, "SELECT 0, COUNT(*) FROM t2;"))
+	testing.expect(t, ok6, "empty-table literal+aggregate must succeed")
+	if ok6 && len(rows6) == 1 {
+		testing.expect(t, types.value_compare(rows6[0].values[0], types.value_int(0)), "literal present on empty table")
+		testing.expect(t, types.value_compare(rows6[0].values[1], types.value_int(0)), "count is 0")
+	}
+
+	// A bare column beside aggregates is still a clean error, not a crash.
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	_, _, bare_ok := executor.exec_query(&tree, must_parse_select(t, "SELECT name, COUNT(*) FROM t;"))
+	context = restore_logger(saved)
+	testing.expect(t, !bare_ok, "bare column beside aggregates must error cleanly")
 }
 
 // Regression (exec fuzzing): aggregates over unknown columns used to
@@ -1871,5 +1916,70 @@ test_exec_chained_right_join_width :: proc(t: ^testing.T) {
 		_, _, qok := executor.exec_query(&tree, dsel)
 		context = restore_logger(saved)
 		_ = qok // must not crash; ok is state-dependent
+	}
+}
+
+// must_parse_select parses a SELECT or fails the test outright.
+@(private="file")
+must_parse_select :: proc(t: ^testing.T, sql: string) -> parser.Select_Stmt {
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "query must parse")
+	sel, is_sel := stmt.type.(parser.Select_Stmt)
+	testing.expect(t, is_sel, "expected Select_Stmt")
+	return sel
+}
+
+// CHECK constraints apply to UPDATE, not just INSERT: a violating UPDATE
+// fails cleanly and leaves the row untouched, like a type violation.
+@(test)
+test_exec_update_check_enforcement :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "update_check")
+	defer teardown_executor_env(tree, file)
+
+	setup_chk := [2]string{
+		"CREATE TABLE products (price INT CHECK (price > 0));",
+		"INSERT INTO products VALUES (10);",
+	}
+	for sql in setup_chk {
+		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, pok, "setup SQL must parse")
+		if !pok { continue }
+		sok, _, _ := executor.execute(&tree, stmt)
+		testing.expect(t, sok, "setup SQL must execute")
+	}
+
+	bad_stmt, pok, _ := parser.parse(
+		"UPDATE products SET price = -5;", context.temp_allocator)
+	testing.expect(t, pok, "violating UPDATE should parse")
+	if pok {
+		saved, ctx := suppress_expected_errors()
+		context = ctx
+		// NOTE: violating rows are skipped with an error log, but the
+		// statement itself still reports ok (same tri-state protocol as
+		// type violations). The regression signal is the untouched row.
+		_, _, _ = executor.execute(&tree, bad_stmt)
+		context = restore_logger(saved)
+	}
+
+	// The row keeps its old value; a valid UPDATE still succeeds.
+	rows, _, ok := executor.exec_query(&tree, must_parse_select(t, "SELECT price FROM products;"))
+	if ok {
+		testing.expect_value(t, len(rows), 1)
+		if len(rows) == 1 {
+			testing.expect(t, types.value_compare(rows[0].values[0], types.value_int(10)), "row unchanged after rejected UPDATE")
+		}
+	}
+
+	good_stmt, pok2, _ := parser.parse(
+		"UPDATE products SET price = 20;", context.temp_allocator)
+	testing.expect(t, pok2, "valid UPDATE should parse")
+	if pok2 {
+		gok, _, _ := executor.execute(&tree, good_stmt)
+		testing.expect(t, gok, "valid UPDATE must succeed")
+		rows2, _, ok2 := executor.exec_query(&tree, must_parse_select(t, "SELECT price FROM products;"))
+		if ok2 && len(rows2) == 1 {
+			testing.expect(t, types.value_compare(rows2[0].values[0], types.value_int(20)), "valid UPDATE applies")
+		}
 	}
 }

@@ -179,6 +179,8 @@ parse_select_columns :: proc(
 	columns: ^[dynamic]string,
 	aliases: ^[dynamic]string,
 	literal_values: ^[dynamic]types.Value,
+	col_kinds: ^[dynamic]Select_Column_Kind,
+	col_literal_idx: ^[dynamic]int,
 	aggregates: ^[dynamic]Aggregate_Expr,
 	allocator := context.allocator,
 ) -> bool {
@@ -192,7 +194,10 @@ parse_select_columns :: proc(
 				if !agg_ok {
 					col, cok := parse_identifier(p, allocator)
 					if !cok { return false }
+
 					append(columns, col)
+					append(col_kinds, Select_Column_Kind.COLUMN)
+					append(col_literal_idx, -1)
 				} else {
 					advance(p); advance(p)
 					is_star := match(p, .ASTERISK)
@@ -206,24 +211,36 @@ parse_select_columns :: proc(
 
 					arg_display := "*" if is_star else arg_col
 					display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
+
 					append(columns, display)
+					append(col_kinds, Select_Column_Kind.AGGREGATE)
+					append(col_literal_idx, -1)
+
 					agg_col := "" if is_star else arg_col
 					append(aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
 				}
 			} else {
-				// Literal tokens (NUMBER/STRING/BLOB_LITERAL/NULL) are allowed in a
-				// FROM-less SELECT; their values are captured for materialization.
+				// Literal tokens (NUMBER/STRING/BLOB_LITERAL/NULL) are captured
+				// for materialization. FROM-less SELECTs read them via
+				// literal_values; mixed literal+aggregate SELECTs map each
+				// LITERAL slot through col_literal_idx (single owner:
+				// literal_values, so no double-free).
 				#partial switch tok.type {
 				case .NUMBER, .STRING, .BLOB_LITERAL, .NULL:
 					val, vok := parse_value(p, allocator)
 					if !vok { return false }
 
 					append(columns, strings.clone(tok.lexeme, allocator))
+					append(col_kinds, Select_Column_Kind.LITERAL)
+					append(col_literal_idx, len(literal_values))
 					append(literal_values, val)
 				case:
 					col, cok := parse_qualified_identifier(p, allocator)
 					if !cok { return false }
+
 					append(columns, col)
+					append(col_kinds, Select_Column_Kind.COLUMN)
+					append(col_literal_idx, -1)
 				}
 			}
 			consume_column_alias(p, aliases, allocator)
@@ -398,11 +415,17 @@ parse_select :: proc(
 	literal_values := make([dynamic]types.Value, allocator)
 	defer if !ok do delete(literal_values)
 
+	col_kinds := make([dynamic]Select_Column_Kind, allocator)
+	defer if !ok do delete(col_kinds)
+
+	col_literal_idx := make([dynamic]int, allocator)
+	defer if !ok do delete(col_literal_idx)
+
 	aggregates := make([dynamic]Aggregate_Expr, allocator)
 	defer if !ok do delete(aggregates)
 
 	is_distinct := match(p, .DISTINCT)
-	if !parse_select_columns(p, &columns, &aliases, &literal_values, &aggregates, allocator) {
+	if !parse_select_columns(p, &columns, &aliases, &literal_values, &col_kinds, &col_literal_idx, &aggregates, allocator) {
 		return nil, false
 	}
 
@@ -472,6 +495,8 @@ parse_select :: proc(
 			columns = columns[:],
 			aliases = aliases[:],
 			literal_values = literal_values[:],
+			col_kinds = col_kinds[:],
+			col_literal_idx = col_literal_idx[:],
 			aggregates = aggregates[:],
 			is_distinct = is_distinct,
 			where_clause = where_clause,

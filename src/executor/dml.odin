@@ -267,6 +267,14 @@ apply_update :: proc(
 		}
 		return nil, true // true = had an error
 	}
+	if !check_constraints(new_row, table^) {
+		if skip_violation {
+			log.warn("Skipping UPDATE row", c.rowid, "— violates CHECK constraint")
+		} else {
+			log.error("Error: UPDATE violates CHECK constraint")
+		}
+		return nil, true
+	}
 	if values_equal(c.values, new_row) {
 		return nil, false // false = no change, not an error
 	}

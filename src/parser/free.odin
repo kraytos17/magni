@@ -94,6 +94,9 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 
 		delete(s.aliases, allocator)
 		types.values_delete(s.literal_values, allocator)
+
+		delete(s.col_kinds, allocator)
+		delete(s.col_literal_idx, allocator)
 		for agg in s.aggregates { delete(agg.column, allocator) }
 
 		delete(s.aggregates, allocator)

@@ -148,23 +148,63 @@ exec_select_aggregate_data :: proc(
 		}
 
 		out := make([]types.Value, len(stmt.columns), context.temp_allocator)
-		val_idx := 0
+		// Kind-dispatched projection: LITERAL slots read their literal (borrowed
+		// header, same as group keys and MIN/MAX below — the statement outlives
+		// execution), AGGREGATE slots consume agg_vals in order (select-list
+		// aggregates come first; HAVING-only aggregates are appended after),
+		// COLUMN slots take the next group key or error if there is none.
+		// Hand-built statements without kinds fall back to the legacy
+		// positional path (first N slots are group keys).
+		agg_cursor, group_cursor := 0, 0
+		use_kinds := len(stmt.col_kinds) == len(stmt.columns) &&
+			len(stmt.col_literal_idx) == len(stmt.columns)
 		for i in 0 ..< len(stmt.columns) {
-			if val_idx < len(group_by_indices) {
-				out[i] = groups[gi].key_values[val_idx]
-				val_idx += 1
+			if use_kinds {
+				#partial switch stmt.col_kinds[i] {
+				case .LITERAL:
+					li := stmt.col_literal_idx[i]
+					if li < 0 || li >= len(stmt.literal_values) {
+						log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
+						return nil, nil, false
+					}
+
+					out[i] = stmt.literal_values[li]
+					continue
+				case .AGGREGATE:
+					if agg_cursor >= len(agg_vals) {
+						log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
+						return nil, nil, false
+					}
+
+					out[i] = agg_vals[agg_cursor]
+					agg_cursor += 1
+					continue
+				case .COLUMN:
+					if group_cursor < len(groups[gi].key_values) {
+						out[i] = groups[gi].key_values[group_cursor]
+						group_cursor += 1
+						continue
+					}
+
+					log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
+					return nil, nil, false
+				}
+			}
+			if group_cursor < len(group_by_indices) {
+				out[i] = groups[gi].key_values[group_cursor]
+				group_cursor += 1
 			} else {
-				// A bare literal (e.g. SELECT 0, COUNT(*) ...) occupies a
+				// A bare column (e.g. SELECT name, COUNT(*) ...) occupies a
 				// column slot with no corresponding aggregate value — that
 				// is a clean error, not an out-of-range index.
-				agg_idx := val_idx - len(group_by_indices)
+				agg_idx := agg_cursor
 				if agg_idx < 0 || agg_idx >= len(agg_vals) {
 					log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
 					return nil, nil, false
 				}
 
 				out[i] = agg_vals[agg_idx]
-				val_idx += 1
+				agg_cursor += 1
 			}
 		}
 		append(&result, Row_Entry{rowid = types.Row_ID(gi), values = out})
@@ -174,9 +214,33 @@ exec_select_aggregate_data :: proc(
 	for name, i in stmt.columns {
 		display := name
 		if i < len(stmt.aliases) && stmt.aliases[i] != "" { display = stmt.aliases[i] }
-		cols[i] = types.Column {name = display, type = .INTEGER}
+
+		col_type := types.Column_Type.INTEGER
+		if len(stmt.col_kinds) == len(stmt.columns) &&
+		   stmt.col_kinds[i] == .LITERAL &&
+		   stmt.col_literal_idx[i] >= 0 &&
+		   stmt.col_literal_idx[i] < len(stmt.literal_values) {
+			col_type = literal_column_type(stmt.literal_values[stmt.col_literal_idx[i]])
+		}
+		cols[i] = types.Column{name = display, type = col_type}
 	}
 	return result[:], cols, true
+}
+
+// literal_column_type maps a literal value to its display column type.
+@(private="file")
+literal_column_type :: proc(v: types.Value) -> types.Column_Type {
+	#partial switch _ in v {
+	case i64:
+		return .INTEGER
+	case f64:
+		return .REAL
+	case string:
+		return .TEXT
+	case []u8:
+		return .BLOB
+	}
+	return .INTEGER
 }
 
 // group_key_hash computes a hash over GROUP BY key columns. Implemented via
