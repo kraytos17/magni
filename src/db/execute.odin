@@ -5,7 +5,6 @@ import "src:btree"
 import "src:executor"
 import "src:pager"
 import "src:parser"
-import "src:schema"
 import "src:snapshot"
 import "src:types"
 
@@ -128,43 +127,11 @@ maybe_snapshot :: proc(db: ^Database, stmt: parser.Statement, ctx: Exec_Ctx) {
 
 	pager.wal_begin_txn(db.pager)
 	if make_snapshot {
-		write_snapshot(db, snapshot_op(stmt))
+		capture_snapshot(db, snapshot_op(stmt))
 	}
 
 	pager.wal_commit_txn(db.pager)
 	maybe_auto_checkpoint(db)
-}
-
-// write_snapshot manifests the current tables and records one snapshot.
-// The manifest page is unpinned once recorded (previously held to
-// execute-return; it is unused past snapshot.create).
-@(private="file")
-write_snapshot :: proc(db: ^Database, op: snapshot.Snapshot_Operation) {
-	snap_st := Schema_Tree(db)
-	schema_tables := schema.list_tables(&snap_st, context.temp_allocator)
-	tables := make([dynamic]types.Table, context.temp_allocator)
-	for tbl in schema_tables {
-		append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
-	}
-
-	manifest_page := snapshot.create_manifest(db.pager, tables[:])
-	defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
-
-	db.txn_snapshot_id += 1
-	snap_id := db.txn_snapshot_id
-	snap_page, snap_ok := snapshot.create(
-		db.pager,
-		snap_id,
-		db.latest_snapshot,
-		db.schema_root_page,
-		manifest_page,
-		op,
-	)
-	if snap_ok {
-		db.snapshot_index[snap_id] = snap_page
-		db.latest_snapshot = snap_page
-		record_main_ref(db, snap_id)
-	}
 }
 
 Query_Result :: struct {

@@ -2,50 +2,46 @@ package snapshot
 
 import "src:pager"
 
-expire_snapshots :: proc(
+@(private="file")
+Mark_Accum :: struct {
+	p:       ^pager.Pager,
+	expired: ^[dynamic]u64,
+	keep:    int,
+	seen:    int,
+}
+
+// mark_abandoned marks all but the newest keep_count COMMITTED snapshots
+// ABANDONED and returns the expired ids in walk (newest-first) order. The
+// single mark pass behind both prune and expire_and_collect. Packed-format
+// aware via set_header_state: never stamp (^Snapshot_Header)(pg.data)
+// directly, which would hit headers[0] regardless of which header expired.
+@(private)
+mark_abandoned :: proc(
 	p: ^pager.Pager,
 	latest_page: u32,
 	keep_count: int,
-) -> (
-	expired_ids: [dynamic]u64,
-) {
-	expired_ids = make([dynamic]u64, context.temp_allocator)
-	CommittedPage :: struct {
-		page: u32,
-		id:   u64,
-	}
-
-	committed := make([dynamic]CommittedPage, context.temp_allocator)
-	defer delete(committed)
-
-	walk_chain(
-		p,
-		latest_page,
-		&committed,
-		proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-			committed := cast(^[dynamic]CommittedPage)data
-			if Snapshot_State(h.state) == .COMMITTED {
-				append(committed, CommittedPage{page, h.snapshot_id})
+	allocator := context.allocator,
+) -> [dynamic]u64 {
+	expired := make([dynamic]u64, allocator)
+	d := Mark_Accum{p, &expired, keep_count, 0}
+	walk_chain(p, latest_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
+		d := cast(^Mark_Accum)data
+		if snapshot_state_from_u8(h.state) == .COMMITTED {
+			d.seen += 1
+			if d.seen > d.keep {
+				set_header_state(d.p, page, h.snapshot_id, .ABANDONED)
+				append(d.expired, h.snapshot_id)
 			}
-			return true
-		},
-	)
-
-	total := len(committed)
-	if total <= keep_count { return expired_ids }
-	for i := keep_count; i < total; i += 1 {
-		pg, err := pager.get_page(p, committed[i].page)
-		if err == .None {
-			(^Snapshot_Header)(raw_data(pg.data)).state = u8(Snapshot_State.ABANDONED)
-			pager.mark_dirty(p, committed[i].page); pager.unpin_page(p, committed[i].page)
-			append(&expired_ids, committed[i].id)
 		}
-	}
-	return expired_ids
+		return true
+	})
+	return expired
 }
 
 expire_and_collect :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) -> (expired_ids: [dynamic]u64) {
-	expired_ids = expire_snapshots(p, latest_page, keep_count)
+	// Temp-scoped ids (consumed immediately by the caller): matches the old
+	// expire_snapshots contract, so per-expire heap churn stays zero.
+	expired_ids = mark_abandoned(p, latest_page, keep_count, context.temp_allocator)
 	max_page := pager.page_count(p)
 	if max_page < GC_MIN_PAGES { return expired_ids }
 

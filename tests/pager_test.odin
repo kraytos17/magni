@@ -790,3 +790,48 @@ test_wal_checksum_corruption :: proc(t: ^testing.T) {
 	)
 	pager.close(p2)
 }
+
+@(test)
+test_wal_abort_evicts_dirty_pages :: proc(t: ^testing.T) {
+	// Aborted-txn content must not linger in cache as clean: evict it
+	// without writeback (unreachable by construction once roots restore).
+	context.logger.lowest_level = .Error
+	p, file := create_test_wal_env(t, "abort_evict")
+	defer destroy_test_wal_env(p, file)
+
+	pg, err := pager.allocate_page(p)
+	testing.expect(t, err == .None, "allocate failed")
+	pg_num := pg.page_num
+	write_u32(pg.data[:4], 0xDEADBEEF)
+	pager.mark_dirty(p, pg.page_num)
+	pager.unpin_page(p, pg.page_num)
+	testing.expect(t, pager.page_in_cache(p, pg_num), "page cached before abort")
+
+	pager.wal_begin_txn(p)
+	report := pager.wal_abort_txn(p)
+	testing.expect_value(t, report.evicted, u32(1))
+	testing.expect_value(t, report.skipped_pinned, u32(0))
+	testing.expect(t, !pager.page_in_cache(p, pg_num), "aborted page evicted from cache")
+}
+
+@(test)
+test_wal_abort_skips_pinned_pages :: proc(t: ^testing.T) {
+	// Fail-open: a pinned page survives abort for the next GC instead of
+	// being destroyed under its holder.
+	context.logger.lowest_level = .Error
+	p, file := create_test_wal_env(t, "abort_pinned")
+	defer destroy_test_wal_env(p, file)
+
+	pg, err := pager.allocate_page(p)
+	testing.expect(t, err == .None, "allocate failed")
+	write_u32(pg.data[:4], 0xCAFEBABE)
+	pager.mark_dirty(p, pg.page_num)
+	// Still pinned (allocate returns pin_count 1): no unpin.
+
+	pager.wal_begin_txn(p)
+	report := pager.wal_abort_txn(p)
+	testing.expect_value(t, report.evicted, u32(0))
+	testing.expect_value(t, report.skipped_pinned, u32(1))
+	testing.expect(t, pager.page_in_cache(p, pg.page_num), "pinned page survives abort")
+	pager.unpin_page(p, pg.page_num)
+}

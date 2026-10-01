@@ -131,6 +131,7 @@ cache_delete :: proc(p: ^Pager, page_num: u32) {
 	for {
 		j = (j + 1) & (CACHE_TABLE_SIZE - 1)
 		if p.cache_table[j].page_num == 0 { break }
+
 		k := cache_bucket(p.cache_table[j].page_num)
 		in_range := k > i && k <= j if i <= j else (k > i || k <= j)
 		if !in_range {
@@ -187,11 +188,51 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 			slot.page = {}
 			slot.referenced = false
 			p.slot_count -= 1
+
 			append(&p.free_slots, slot)
 			return .None
 		}
 	}
 	return .Cache_Full
+}
+
+// Evict_Report counts an abort-time cache purge. Pinned skips are fail-open
+// survivals: pins shouldn't exist at a statement boundary, so a skipped page
+// is left for the next GC rather than destroyed.
+Evict_Report :: struct {
+	evicted:        u32,
+	skipped_pinned: u32,
+}
+
+// evict_aborted drops cached copies of aborted-txn pages WITHOUT writeback:
+// after wal_abort_txn their content is unreachable by construction (live
+// roots restored, WAL frames dropped). Mirrors evict_one_slot minus the WAL
+// frame. Takes p.mutex itself; callers must hold db.mu at most (never
+// p.mutex) to respect the db.mu -> p.mutex order.
+@(private)
+evict_aborted :: proc(p: ^Pager, pages: []u32) -> (report: Evict_Report) {
+	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
+	for page_num in pages {
+		if page_num == 0 { continue }
+		slot := find_slot(p, page_num)
+		if slot == nil { continue }
+		if slot.page.pin_count > 0 {
+			report.skipped_pinned += 1
+			continue
+		}
+
+		cache_delete(p, page_num)
+		if p.on_evict != nil { p.on_evict(p.stats, page_num) }
+
+		slot.page = {}
+		slot.page.data = nil
+		slot.referenced = false
+		p.slot_count -= 1
+
+		append(&p.free_slots, slot)
+		report.evicted += 1
+	}
+	return report
 }
 
 // Open (or create) a database file at path. Initializes the pager, page cache,

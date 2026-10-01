@@ -194,11 +194,27 @@ dot_cmd_debug_schema :: proc(database: ^db.Database, args: string) -> bool {
 	return false
 }
 
+// dot_parts splits dot-command args on spaces (temp-scoped). Every numeric
+// handler shared this split by hand; one choke point, one convention.
+@(private="file")
+dot_parts :: proc(args: string) -> []string {
+	return strings.split(args, " ", context.temp_allocator)
+}
+
+// dot_uint_arg parses parts[idx] as u64. Single choke point for all numeric
+// dot args (expire keep stays i64: it must SEE negatives to clamp them).
+@(private="file")
+dot_uint_arg :: proc(parts: []string, idx: int) -> (u64, bool) {
+	if len(parts) <= idx { return 0, false }
+	v, ok := strconv.parse_u64(parts[idx])
+	return v, ok
+}
+
 @(private="file")
 dot_cmd_tree_page :: proc(database: ^db.Database, args: string) -> bool {
-	parts := strings.split(args, " ", context.temp_allocator)
+	parts := dot_parts(args)
 	if len(parts) == 2 {
-		page_num, num_ok := strconv.parse_u64(parts[1])
+		page_num, num_ok := dot_uint_arg(parts, 1)
 		if num_ok {
 			if err := admin.print_tree_page(database, u32(page_num)); err != .None {
 				log.errorf("%s", db.db_error_string(err))
@@ -260,10 +276,10 @@ dot_cmd_snapshots :: proc(database: ^db.Database, args: string) -> bool {
 
 @(private="file")
 dot_cmd_snapdiff :: proc(database: ^db.Database, args: string) -> bool {
-	parts := strings.split(args, " ", context.temp_allocator)
+	parts := dot_parts(args)
 	if len(parts) == 3 {
-		older, older_ok := strconv.parse_u64(parts[1])
-		newer, newer_ok := strconv.parse_u64(parts[2])
+		older, older_ok := dot_uint_arg(parts, 1)
+		newer, newer_ok := dot_uint_arg(parts, 2)
 		if older_ok && newer_ok {
 			if err := db.snapshot_diff(database, older, newer); err != .None {
 				log.errorf("%s", db.db_error_string(err))
@@ -309,9 +325,9 @@ dot_cmd_integrity :: proc(database: ^db.Database, args: string) -> bool {
 
 @(private="file")
 dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string) -> bool {
-	parts := strings.split(args, " ", context.temp_allocator)
+	parts := dot_parts(args)
 	if len(parts) >= 3 {
-		id, id_ok := strconv.parse_u64(parts[2])
+		id, id_ok := dot_uint_arg(parts, 2)
 		if id_ok && len(parts) >= 4 {
 			tag := strings.join(parts[3:], " ", context.temp_allocator)
 			if err := db.snapshot_tag(database, id, tag); err != .None {
@@ -330,9 +346,9 @@ dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string) -> bool {
 
 @(private="file")
 dot_cmd_snapshot_restore :: proc(database: ^db.Database, args: string) -> bool {
-	parts := strings.split(args, " ", context.temp_allocator)
+	parts := dot_parts(args)
 	if len(parts) == 3 {
-		id, id_ok := strconv.parse_u64(parts[2])
+		id, id_ok := dot_uint_arg(parts, 2)
 		if id_ok {
 			if err := db.snapshot_restore(database, id); err != .None {
 				log.errorf("%s", db.db_error_string(err))
@@ -348,11 +364,19 @@ dot_cmd_snapshot_restore :: proc(database: ^db.Database, args: string) -> bool {
 
 @(private="file")
 dot_cmd_expire :: proc(database: ^db.Database, args: string) -> bool {
-	parts := strings.split(args, " ", context.temp_allocator)
+	parts := dot_parts(args)
 	keep := db.DEFAULT_KEEP
 	if len(parts) >= 2 {
 		if v, ok := strconv.parse_i64(parts[1]); ok { keep = int(v) }
 	}
+	if keep < 1 {
+		// keep < 1 would mark nothing live (build_live_set walks zero
+		// snapshots) and sweep the whole database into the freelist.
+		// Clamp to default: fail-closed, warned, never silent.
+		log.warnf("expire keep %d invalid; using default %d", keep, db.DEFAULT_KEEP)
+		keep = db.DEFAULT_KEEP
+	}
+
 	db.expire_snapshots(database, keep)
 	return false
 }

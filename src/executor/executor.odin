@@ -99,7 +99,7 @@ render_result :: proc(out: Result) {
 		if len(entry.values) != len(cols) { continue }
 		row_strs := make([]string, len(cols), context.temp_allocator)
 		for i in 0 ..< len(cols) {
-			row_strs[i] = value_string(entry.values[i])
+			row_strs[i] = types.value_to_string(entry.values[i])
 		}
 
 		append(&table_rows, row_strs)

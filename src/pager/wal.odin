@@ -151,7 +151,7 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 	return .None
 }
 
-wal_abort_txn :: proc(p: ^Pager) {
+wal_abort_txn :: proc(p: ^Pager) -> Evict_Report {
 	ws := &p.wal_state
 	// Drop aborted frames from the WAL file (same committed_upto rule as
 	// wal_recover/wal_checkpoint). Otherwise a later checkpoint copies them
@@ -188,15 +188,14 @@ wal_abort_txn :: proc(p: ^Pager) {
 	}
 
 	clear(&ws.txn_index)
-	for page_num in p.dirty_pages {
-		if page_num == 0 { continue }
-		if slot := find_slot(p, page_num); slot != nil && slot.page.dirty {
-			slot.page.dirty = false
-		}
+	report := evict_aborted(p, p.dirty_pages[:])
+	if report.skipped_pinned > 0 {
+		log.warnf("WAL abort: %d pinned pages kept; space reclaimed by next GC", report.skipped_pinned)
 	}
 
 	clear(&p.dirty_pages)
 	ws.txn_active = false
+	return report
 }
 
 @(private)

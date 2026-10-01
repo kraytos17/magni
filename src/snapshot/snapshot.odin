@@ -46,19 +46,43 @@ Snapshot_State :: enum u8 {
 	ABANDONED = 2,
 }
 
+// snapshot_operation_from_u8 validates raw header bytes. Unchecked casts
+// turn corrupt headers into garbage names; invalid values fall back to
+// UNKNOWN (display) and can never equal .COMMITTED (decisions).
+@(private)
+snapshot_operation_from_u8 :: proc(v: u8) -> Snapshot_Operation {
+	if v < u8(len(Snapshot_Operation)) { return Snapshot_Operation(v) }
+	return .UNKNOWN
+}
+
+// snapshot_state_from_u8 validates raw header bytes. Invalid values fall
+// back to PENDING, which never equals .COMMITTED, so corrupt headers are
+// skipped by every committed-only decision path by construction.
+@(private)
+snapshot_state_from_u8 :: proc(v: u8) -> Snapshot_State {
+	if v < u8(len(Snapshot_State)) { return Snapshot_State(v) }
+	return .PENDING
+}
+
 TAG_OFFSET :: HEADER_PREFIX_SIZE + MAX_HEADERS_PER_PAGE * size_of(Snapshot_Header)
 TAG_SIZE :: 64
 
-Find_By_Id_Data :: struct {
-	result:    ^Snapshot_Header,
-	found:     ^bool,
-	target_id: u64,
+// Snapshot_Query selects one chain link by id or by timestamp. The match
+// condition travels as data (not a closure) because walk callbacks are
+// proc literals and cannot capture locals.
+Snapshot_Query_Kind :: enum { By_Id, By_Timestamp }
+
+Snapshot_Query :: struct {
+	kind:      Snapshot_Query_Kind,
+	id:        u64,
+	timestamp: u64,
 }
 
-Find_Ts_Data :: struct {
-	result:    ^Snapshot_Header,
-	found:     ^bool,
-	target_ts: u64,
+@(private="file")
+Find_Query_Data :: struct {
+	result: ^Snapshot_Header,
+	found:  ^bool,
+	query:  Snapshot_Query,
 }
 
 Debug_Data :: struct {
@@ -267,14 +291,20 @@ list_snapshots :: proc(
 	return result[:]
 }
 
-find_by_id :: proc(p: ^pager.Pager, start_page: u32, target_id: u64) -> (Snapshot_Header, bool) {
+find_snapshot :: proc(p: ^pager.Pager, start_page: u32, query: Snapshot_Query) -> (Snapshot_Header, bool) {
 	result: Snapshot_Header
 	found := false
-	d := Find_By_Id_Data{&result, &found, target_id}
-
+	d := Find_Query_Data{&result, &found, query}
 	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		d := cast(^Find_By_Id_Data)data
-		if h.snapshot_id == d.target_id {
+		d := cast(^Find_Query_Data)data
+		match := false
+		#partial switch d.query.kind {
+		case .By_Id:
+			match = h.snapshot_id == d.query.id
+		case .By_Timestamp:
+			match = snapshot_state_from_u8(h.state) == .COMMITTED && h.timestamp <= d.query.timestamp
+		}
+		if match {
 			d.result^ = h
 			d.found^ = true
 			return false
@@ -282,6 +312,10 @@ find_by_id :: proc(p: ^pager.Pager, start_page: u32, target_id: u64) -> (Snapsho
 		return true
 	})
 	return result, found
+}
+
+find_by_id :: proc(p: ^pager.Pager, start_page: u32, target_id: u64) -> (Snapshot_Header, bool) {
+	return find_snapshot(p, start_page, Snapshot_Query{.By_Id, target_id, 0})
 }
 
 find_by_timestamp :: proc(
@@ -292,19 +326,7 @@ find_by_timestamp :: proc(
 	Snapshot_Header,
 	bool,
 ) {
-	result: Snapshot_Header; found := false
-	d := Find_Ts_Data{&result, &found, target_ts}
-
-	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		d := cast(^Find_Ts_Data)data
-		if Snapshot_State(h.state) == .COMMITTED && h.timestamp <= d.target_ts {
-			d.result^ = h
-			d.found^ = true
-			return false
-		}
-		return true
-	})
-	return result, found
+	return find_snapshot(p, start_page, Snapshot_Query{.By_Timestamp, 0, target_ts})
 }
 
 debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
@@ -319,8 +341,8 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 			"  Snapshot %-4d  page=%-4d  op=%-6s  state=%-9s  ts=%d",
 			h.snapshot_id,
 			page,
-			Snapshot_Operation(h.operation),
-			Snapshot_State(h.state),
+			snapshot_operation_from_u8(h.operation),
+			snapshot_state_from_u8(h.state),
 			h.timestamp,
 		)
 
@@ -363,8 +385,8 @@ chain_infos :: proc(p: ^pager.Pager, start_page: u32, allocator := context.alloc
 			Snapshot_Info {
 				id = h.snapshot_id,
 				page = page,
-				operation = Snapshot_Operation(h.operation),
-				state = Snapshot_State(h.state),
+				operation = snapshot_operation_from_u8(h.operation),
+				state = snapshot_state_from_u8(h.state),
 				timestamp = h.timestamp,
 				tag = strings.clone(get_tag(d.p, page), d.alloc),
 			},

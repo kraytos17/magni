@@ -354,7 +354,7 @@ exec_compound :: proc(t: ^btree.Tree, compound: parser.Compound_Stmt) -> bool {
 	table_rows := make([][]string, len(rows), context.temp_allocator)
 	for ri in 0 ..< len(rows) {
 		row_strs := make([]string, len(rows[ri].values), context.temp_allocator)
-		for v, vi in rows[ri].values { row_strs[vi] = value_string(v) }
+		for v, vi in rows[ri].values { row_strs[vi] = types.value_to_string(v) }
 		table_rows[ri] = row_strs
 	}
 

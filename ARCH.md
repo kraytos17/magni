@@ -854,13 +854,24 @@ Database.mu (sync.RW_Mutex)         ← SELECT = shared; writes = exclusive
 Every mutation outside a transaction creates an implicit snapshot. Time-travel queries
 (`AS OF SNAPSHOT` / `AS OF TIMESTAMP`) read against the historical schema root. COW
 guarantees that old B-tree pages remain intact and readable.
-
 ```
 INSERT INTO t VALUES (1);   → snapshot 1 created (root = 100)
 INSERT INTO t VALUES (2);   → snapshot 2 created (root = 105, COW of root)
 
-SELECT * FROM t AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
+SELECT * FROM tt AS OF SNAPSHOT 1;  → reads schema_root=100 → old data
 ```
+
+### Transaction / GC interaction rules
+
+- **Expire never runs inside a transaction** (`Reclaim_Decision` in
+  `db/snapshot_cmds.odin`): uncommitted COW pages exist in no snapshot live
+  set, so a sweep would free them out from under the txn (observed: whole
+  tables vanishing mid-txn). The call stays a warned no-op (`.None`), never
+  an error, so checkpoint still flushes WAL mid-txn.
+- **Abort evicts without writeback** (`pager.evict_aborted`, reported via
+  `Evict_Report`): aborted-txn cache copies are unreachable by construction
+  once roots restore, so they drop straight to the free-slot pool instead of
+  lingering as clean. Pinned pages are fail-open skips for the next GC.
 
 ---
 

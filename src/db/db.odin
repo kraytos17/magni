@@ -243,31 +243,7 @@ close :: proc(db: ^Database) {
 	if db.snapshot_batch_count > 0 {
 		db.snapshot_batch_threshold = 1
 		db.snapshot_batch_count = 1
-		st := Schema_Tree(db)
-		schema_tables := schema.list_tables(&st, context.temp_allocator)
-		tables := make([dynamic]types.Table, context.temp_allocator)
-		for tbl in schema_tables {
-			append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
-		}
-
-		manifest_page := snapshot.create_manifest(db.pager, tables[:])
-		defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
-
-		db.txn_snapshot_id += 1
-		snap_id := db.txn_snapshot_id
-		snap_page, snap_ok := snapshot.create(
-			db.pager,
-			snap_id,
-			db.latest_snapshot,
-			db.schema_root_page,
-			manifest_page,
-			.COMMIT,
-		)
-		if snap_ok {
-			db.snapshot_index[snap_id] = snap_page
-			db.latest_snapshot = snap_page
-			record_main_ref(db, snap_id)
-		}
+		capture_snapshot(db, .COMMIT)
 		wal_update_header(db)
 	}
 

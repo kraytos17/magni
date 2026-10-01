@@ -3,42 +3,22 @@ package snapshot
 import "src:btree"
 import "src:pager"
 
-walk_chain_data :: struct {
-	p:         ^pager.Pager,
-	max_keep:  int,
-	committed: int,
-	target_id: u64,
-	result:    ^Snapshot_Header,
-	found:     ^bool,
-	count:     ^int,
-}
-
 count_committed :: proc(p: ^pager.Pager, start_page: u32) -> int {
 	count := 0
 	walk_chain(p, start_page, &count, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		if Snapshot_State(h.state) == .COMMITTED { (cast(^int)data)^ += 1 }; return true
+		if snapshot_state_from_u8(h.state) == .COMMITTED {
+			(cast(^int)data)^ += 1
+		}
+		return true
 	})
 	return count
 }
 
 prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
-	total := count_committed(p, start_page)
-	if total <= max_keep { return }
-	d := walk_chain_data {
-		p        = p,
-		max_keep = max_keep,
-	}
-
-	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		d := cast(^walk_chain_data)data
-		if Snapshot_State(h.state) == .COMMITTED {
-			d.committed += 1
-			if d.committed > d.max_keep {
-				set_header_state(d.p, page, h.snapshot_id, .ABANDONED)
-			}
-		}
-		return true
-	})
+	// Single mark pass shared with expire_and_collect; the ids are
+	// temp-allocated and reclaimed with the caller's temp scope.
+	expired := mark_abandoned(p, start_page, max_keep)
+	delete(expired)
 }
 
 GC_MIN_PAGES :: 512

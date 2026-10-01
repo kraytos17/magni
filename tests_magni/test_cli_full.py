@@ -406,6 +406,16 @@ class TestTransactions(MagniCLITestCase):
             "ROLLBACK; SELECT * FROM t;")
         self.assertNoErr(p)
 
+    def test_expire_in_txn_warns_and_preserves_uncommitted(self):
+        # One --file script = one process = one session, so the txn spans
+        # the .expire (separate --eval calls can't share txn state).
+        d = self.db()
+        p = self.run_file(
+            "CREATE TABLE t (a INT);\nBEGIN;\nINSERT INTO t VALUES (7);\n"
+            ".expire 1\nCOMMIT;\nSELECT a FROM t;\n", d)
+        self.assertHas(p, "transaction active")
+        self.assertHas(p, "|7|")
+
 
 class TestTimeTravel(MagniCLITestCase):
     SETUP = (
@@ -488,6 +498,13 @@ class TestDotCommands(MagniCLITestCase):
             "INSERT INTO t VALUES (2);\n.expire 1\nSELECT COUNT(*) FROM t;\n", d)
         self.assertHas(p, "older than last 1")
         self.assertHas(p, "COUNT(*)")
+
+    def test_expire_negative_keep_clamps_to_default(self):
+        d = self._t_db()
+        p = self.run_eval(".expire -1", d)
+        self.assertHas(p, "invalid; using default")
+        q = self.run_eval("SELECT COUNT(*) FROM t;", d)
+        self.assertHas(q, "(1 rows)")
 
 
 class TestEdgeCases(MagniCLITestCase):

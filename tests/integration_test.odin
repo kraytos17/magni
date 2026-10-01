@@ -2479,3 +2479,132 @@ test_open_heals_stale_freelist :: proc(t: ^testing.T) {
 	db.close(d2)
 	clean_db_files(filename)
 }
+
+@(test)
+test_expire_in_txn_preserves_uncommitted :: proc(t: ^testing.T) {
+	// Fail-first: expiring inside a txn must not touch uncommitted rows.
+	// Uncommitted COW pages exist in no snapshot live set, so a sweep frees
+	// them out from under the txn; later writes reuse and overwrite them.
+	d := setup_db(t, "expire_txn")
+	defer teardown_db(d, "expire_txn")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	for i in 1 ..= 700 {
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) == .None,
+			"insert",
+		)
+	}
+	testing.expect(t, db.expire_snapshots(d, 1) == .None, "expire in txn")
+	for i in 701 ..= 1400 {
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) == .None,
+			"insert2",
+		)
+	}
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
+
+	q := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
+	testing.expect(t, q.ok && len(q.rows) == 1, "final query")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(1400))
+	testing.expect_value(t, q.rows[0][1].(i64), i64(1))
+	testing.expect_value(t, q.rows[0][2].(i64), i64(1400))
+}
+
+@(test)
+test_wide_text_volume_exact :: proc(t: ^testing.T) {
+	// Regression lock: bulk INT+TEXT+REAL inserts must all be readable.
+	// A prior data-loss bug returned COUNT 0 here (healed by the GC /
+	// freelist / WAL fixes; exact healer unbisected). Keep the volume
+	// modest: the 50k-row CLI sweep covers scale, this pins the pattern.
+	d := setup_db(t, "wide_vol")
+	defer teardown_db(d, "wide_vol")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, name TEXT, score REAL);") == .None, "create")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	for i in 1 ..= 2000 {
+		testing.expect(
+			t,
+			db.execute(
+				d,
+				fmt.tprintf(
+					"INSERT INTO t VALUES (%d, 'n%d_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', %d.5);",
+					i,
+					i,
+					i,
+				),
+			) == .None,
+			"insert",
+		)
+	}
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
+
+	q := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
+	testing.expect(t, q.ok && len(q.rows) == 1, "query")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(2000))
+	testing.expect_value(t, q.rows[0][1].(i64), i64(1))
+	testing.expect_value(t, q.rows[0][2].(i64), i64(2000))
+}
+
+@(test)
+test_gc_reclaims_cow_waste :: proc(t: ^testing.T) {
+	// COW inserts inside one txn allocate ~3 pages/row with no interior
+	// snapshots; expire must return dead path pages to the freelist while
+	// keeping every live row, and later writes must reuse (not grow).
+	// Regression: build_live_set pre-marked roots, so collect_pages
+	// early-returned and freed the live subtree; free_page also skipped
+	// the freelist link for non-cached pages.
+	d := setup_db(t, "gc_reclaim")
+	defer teardown_db(d, "gc_reclaim")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	for i in 1 ..= 700 {
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) == .None,
+			"insert",
+		)
+	}
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
+
+	q := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok && len(q.rows) == 1, "count query")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(700))
+
+	before := pager.page_count(d.pager)
+	testing.expect(t, int(before) > snapshot.GC_MIN_PAGES, "fixture must engage GC")
+
+	testing.expect(t, db.expire_snapshots(d, 1) == .None, "expire")
+	testing.expect(t, d.pager.first_free_page != 0, "freelist must be populated")
+
+	// Data intact after sweep.
+	q2 := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
+	testing.expect(t, q2.ok && len(q2.rows) == 1, "post-gc query")
+	testing.expect_value(t, q2.rows[0][0].(i64), i64(700))
+	testing.expect_value(t, q2.rows[0][1].(i64), i64(1))
+	testing.expect_value(t, q2.rows[0][2].(i64), i64(700))
+
+	// Reuse: 700 more rows must mostly reuse the freelist. Fresh these
+	// cost ~1900 pages; from freelist only the overflow is new (<1 page/row).
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin2")
+	for i in 701 ..= 1400 {
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) == .None,
+			"insert2",
+		)
+	}
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit2")
+	after := pager.page_count(d.pager)
+	testing.expect(t, int(after)-int(before) < 700, "second batch must reuse freelist")
+
+	q3 := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
+	testing.expect(t, q3.ok && len(q3.rows) == 1, "final query")
+	testing.expect_value(t, q3.rows[0][0].(i64), i64(1400))
+	testing.expect_value(t, q3.rows[0][1].(i64), i64(1))
+	testing.expect_value(t, q3.rows[0][2].(i64), i64(1400))
+}

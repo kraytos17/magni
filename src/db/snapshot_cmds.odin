@@ -1,9 +1,30 @@
 package db
 
 import "core:fmt"
+import "core:log"
 import "core:sync"
 import "src:executor"
+import "src:pager"
+import "src:schema"
 import "src:snapshot"
+import "src:types"
+
+// Reclaim_Decision explains an expire call's fate. Skips stay .None
+// (warned no-ops, never errors) so existing flows that expire mid-txn keep
+// working, minus the corruption: uncommitted COW pages exist in no snapshot
+// live set, so a sweep would free them out from under the txn.
+Reclaim_Decision :: enum {
+	Proceed,
+	Empty_No_Snapshots,
+	Blocked_Active_Txn,
+}
+
+@(private="file")
+reclaim_decision :: proc(db: ^Database) -> Reclaim_Decision {
+	if db.latest_snapshot == 0 { return .Empty_No_Snapshots }
+	if db.txn_state == .Active { return .Blocked_Active_Txn }
+	return .Proceed
+}
 
 snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 	db_check(db) or_return
@@ -138,6 +159,39 @@ rollforward :: proc(db: ^Database) -> DB_Error {
 	return .None
 }
 
+// capture_snapshot records the current schema state as a new snapshot:
+// manifest, id bump, create, index/latest/ref publication. Shared by the
+// per-statement path and close (pending batch at shutdown) so the two can
+// never drift apart.
+@(private)
+capture_snapshot :: proc(db: ^Database, op: snapshot.Snapshot_Operation) {
+	st := Schema_Tree(db)
+	schema_tables := schema.list_tables(&st, context.temp_allocator)
+	tables := make([dynamic]types.Table, context.temp_allocator)
+	for tbl in schema_tables {
+		append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
+	}
+
+	manifest_page := snapshot.create_manifest(db.pager, tables[:])
+	defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
+
+	db.txn_snapshot_id += 1
+	snap_id := db.txn_snapshot_id
+	snap_page, snap_ok := snapshot.create(
+		db.pager,
+		snap_id,
+		db.latest_snapshot,
+		db.schema_root_page,
+		manifest_page,
+		op,
+	)
+	if snap_ok {
+		db.snapshot_index[snap_id] = snap_page
+		db.latest_snapshot = snap_page
+		record_main_ref(db, snap_id)
+	}
+}
+
 expire_snapshots :: proc(db: ^Database, keep_count: int) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
@@ -145,7 +199,14 @@ expire_snapshots :: proc(db: ^Database, keep_count: int) -> DB_Error {
 }
 
 expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
-	if db.latest_snapshot == 0 { return .None }
+	#partial switch reclaim_decision(db) {
+	case .Empty_No_Snapshots:
+		return .None
+	case .Blocked_Active_Txn:
+		log.warnf("expire skipped: transaction active; uncommitted data is not in any snapshot live set")
+		return .None
+	case .Proceed:
+	}
 
 	expired_ids := snapshot.expire_and_collect(db.pager, db.latest_snapshot, keep_count)
 	for id in expired_ids {

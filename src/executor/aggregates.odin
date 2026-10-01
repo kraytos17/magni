@@ -288,11 +288,6 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 }
 
 @(private)
-value_string :: proc(v: types.Value) -> string {
-	return types.value_to_string(v)
-}
-
-@(private)
 build_display_indices :: proc(
 	columns: []string,
 	cols: []types.Column,
