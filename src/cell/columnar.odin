@@ -208,7 +208,6 @@ read_columnar_cell :: proc(
 		}
 		append(&scratch, val)
 	}
-
 	if len(scratch) != num_cols { return {}, false }
 
 	result_values := make([]types.Value, len(scratch), alloc)

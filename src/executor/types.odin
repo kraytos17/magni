@@ -74,17 +74,32 @@ Result :: struct {
 }
 
 Resolved_Condition :: struct {
-	col_idx:             int, // column index in the row's values array
-	operator:            parser.Token_Type,
-	negated:             bool, // col NOT IN (...) / col NOT LIKE 'x'
-	rhs:                 types.Value, // compared value (ignored if has_right_col or has_in)
-	has_right_col:       bool, // true → rhs is another column at right_idx
-	right_idx:           int,
-	has_in:              bool, // true → use in_values or in_subquery instead of rhs
-	in_values:           []types.Value, // literal IN list
-	in_set:              map[u64]bool, // fingerprint prefilter over in_values (nil = scan)
-	in_subquery:         ^parser.Select_Stmt, // subquery IN (SELECT ...)
-	in_subquery_results: []types.Value, // materialized subquery (filled once, not per row)
+	col_idx:       int, // column index in the row's values array
+	operator:      parser.Token_Type,
+	negated:       bool, // col NOT IN (...) / col NOT LIKE 'x'
+	rhs:           types.Value, // compared value (ignored if has_right_col or has_in)
+	has_right_col: bool, // true → rhs is another column at right_idx
+	right_idx:     int,
+	has_in:        bool, // true → consult in_mem instead of rhs
+	in_mem:        In_Membership, // resolved IN membership (see below)
+	in_subquery:   ^parser.Select_Stmt, // unresolved IN subquery for per-row fallback
+}
+
+// In_Kind names which membership source an IN condition resolved to.
+In_Kind :: enum {
+	None,
+	Values, // literal IN list (+ fingerprint prefilter)
+	Subquery, // materialized IN (SELECT ...) results
+}
+
+// In_Membership bundles one IN condition's resolved state: its source kind,
+// the candidate values, and the fingerprint prefilter over Values (nil =
+// linear scan, e.g. hand-built nodes). Values borrows the parser's list;
+// Subquery results are owned (made at resolve time).
+In_Membership :: struct {
+	kind:   In_Kind,
+	values: []types.Value,
+	set:    map[u64]bool,
 }
 
 Where_Eval_Ctx :: struct {

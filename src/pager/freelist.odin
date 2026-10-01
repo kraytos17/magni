@@ -6,6 +6,36 @@ import "core:os"
 import "core:sync"
 import "src:types"
 
+// read_page_into reads the latest image of page_num into slot._data_buf.
+// WAL frames shadow the main file (same order as get_page). Caller MUST hold
+// p.mutex (write-locked). Returns false if the page could not be read.
+@(private)
+read_page_into :: proc(p: ^Pager, slot: ^Page_Slot, page_num: u32) -> bool {
+	ws := &p.wal_state
+	if fo, ok := ws.txn_index[page_num]; ok {
+		_, read_err := os.read_at(ws.file, slot._data_buf[:], fo + types.WAL_FRAME_HEADER_SIZE)
+		if read_err == nil { return true }
+	}
+	if fo, ok := ws.page_index[page_num]; ok {
+		_, read_err := os.read_at(ws.file, slot._data_buf[:], fo + types.WAL_FRAME_HEADER_SIZE)
+		if read_err == nil { return true }
+	}
+
+	offset := i64(page_num - 1) * i64(p.page_size)
+	bytes_read, read_err := os.read_at(p.file, slot._data_buf[:], offset)
+	return read_err == nil && bytes_read == int(p.page_size)
+}
+
+// release_slot returns a popped slot to the pool after a failed fill.
+// Caller MUST hold p.mutex (write-locked).
+@(private="file")
+release_slot :: proc(p: ^Pager, slot: ^Page_Slot) {
+	slot.page = {}
+	slot.page.data = nil
+	p.slot_count -= 1
+	append(&p.free_slots, slot)
+}
+
 // Allocates a page from the free-page linked list. Caller MUST hold p.mutex (write-locked).
 // Reads the first 4 bytes of the free page as the next-free pointer.
 @(private)
@@ -13,40 +43,107 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	free_page_num := p.first_free_page
 	slot := find_empty_slot(p)
 	if slot == nil { return nil, .Cache_Full }
-
-	offset := i64(free_page_num - 1) * i64(p.page_size)
-	bytes_read, read_err := os.read_at(p.file, slot._data_buf[:], offset)
-	if read_err != nil || bytes_read < int(p.page_size) {
-		slot.page.page_num = 0
-		slot.page.data = nil
-		p.slot_count -= 1
+	// WAL-first read: free_page persists links via WAL frames, which may not
+	// have checkpointed yet. A raw main-file read would see stale content.
+	if !read_page_into(p, slot, free_page_num) {
+		release_slot(p, slot)
 		return nil, .IO_Error
 	}
 
 	next_free := (^u32)(raw_data(slot._data_buf[:]))^
+	// Validate the link: a torn/foreign pointer must end the list, never
+	// hand out an out-of-range page. (Heals DBs written by the old
+	// non-cached free path, which left stale content as links.)
+	max_page := u32(p.file_len / i64(p.page_size))
+	if next_free == free_page_num || next_free > max_page + 1 { next_free = 0 }
+
 	p.first_free_page = next_free
 	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
 	slot.page.page_num = free_page_num; slot.page.pin_count = 1
+
 	mark_slot_dirty(p, slot)
 	cache_insert(p, free_page_num, slot)
 	bit_array.set(&p.page_bitmap, free_page_num, true, p.allocator)
 	return &slot.page, .None
 }
 
+// rewind_after_abort discards the file tail allocated by an aborted
+// transaction and persists the rewind to disk. The caller must have already
+// restored live roots from the last snapshot and aborted the WAL txn, so
+// every page past the cut is unreachable by construction.
+//
+// Fail-closed: a pinned page past the cut (something still references it)
+// or any I/O error aborts the rewind with the file untouched. The freelist
+// head resets because its links may reference the abandoned tail; the next
+// GC rebuilds it from scratch (temporary regrowth, never corruption).
+rewind_after_abort :: proc(p: ^Pager, new_page_count: u32) -> (rewound: bool, err: Error) {
+	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
+	max_page := u32(p.file_len / i64(p.page_size))
+	if new_page_count >= max_page || new_page_count < 1 { return false, .None }
+
+	// Drop cached copies past the cut WITHOUT writeback: unreachable by
+	// construction (roots restored, WAL txn aborted). A pinned page past
+	// the cut contradicts that — abort instead of destroying it.
+	for i in 0 ..< len(p.slots) {
+		slot := &p.slots[i]
+		pn := slot.page.page_num
+		if pn == 0 || pn <= new_page_count { continue }
+		if slot.page.pin_count > 0 { return false, .None }
+		cache_delete(p, pn)
+		if p.on_evict != nil { p.on_evict(p.stats, pn) }
+		slot.page = {}
+		slot.page.data = nil
+		slot.referenced = false
+		p.slot_count -= 1
+		append(&p.free_slots, slot)
+	}
+
+	// Bits for the abandoned tail: freed ones already clear; the rest
+	// (aborted-txn pages) clear here. No I/O involved.
+	for pn := new_page_count + 1; pn <= max_page; pn += 1 {
+		bit_array.unset(&p.page_bitmap, pn, p.allocator)
+	}
+
+	p.first_free_page = 0
+	new_len := i64(new_page_count) * i64(p.page_size)
+	if terr := os.truncate(p.file, new_len); terr != nil { return false, .IO_Error }
+	p.file_len = new_len
+	if serr := os.sync(p.file); serr != nil { return true, .IO_Error }
+	return true, .None
+}
+
 // Adds a page to the free-page linked list and evicts it from cache.
 free_page :: proc(p: ^Pager, page_num: u32) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	if page_num <= 1 { return }
-	if slot := find_slot(p, page_num); slot != nil {
-		if slot.page.pin_count > 0 { return }
 
-		(^u32)(raw_data(slot._data_buf[:]))^ = p.first_free_page
-		slot.page.dirty = true
-		wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
-		cache_delete(p, page_num)
-		if p.on_evict != nil { p.on_evict(p.stats, page_num) }
-		slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
+	slot := find_slot(p, page_num)
+	if slot == nil {
+		// Page not cached: bring it in so the freelist link is actually
+		// written to storage. Skipping the write leaves stale content on
+		// disk, which alloc_from_freelist would misread as a next pointer.
+		slot = find_empty_slot(p)
+		if slot == nil { return } // Cache exhausted: leave allocated; retry next GC.
+		if !read_page_into(p, slot, page_num) {
+			release_slot(p, slot)
+			return
+		}
+
+		slot.page.page_num = page_num
+		slot.page.pin_count = 0
+		cache_insert(p, page_num, slot)
 	}
+	if slot.page.pin_count > 0 { return }
+
+	(^u32)(raw_data(slot._data_buf[:]))^ = p.first_free_page
+	slot.page.dirty = true
+
+	wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
+	cache_delete(p, page_num)
+	if p.on_evict != nil { p.on_evict(p.stats, page_num) }
+
+	slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
+	append(&p.free_slots, slot)
 	p.first_free_page = page_num
 	bit_array.unset(&p.page_bitmap, page_num, p.allocator)
 }

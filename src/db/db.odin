@@ -34,6 +34,7 @@ DB_Error :: enum u8 {
 	No_Ref,
 	Nothing_To_Roll,
 	Not_Supported,
+	Unsupported_Format,
 }
 
 db_error_string :: proc(err: DB_Error) -> string {
@@ -70,6 +71,8 @@ db_error_string :: proc(err: DB_Error) -> string {
 		return "Nothing to roll forward to"
 	case .Not_Supported:
 		return "Operation not supported"
+	case .Unsupported_Format:
+		return "Unsupported page format version (export data and reimport)"
 	case:
 		return "Unknown error"
 	}
@@ -165,9 +168,26 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 		db.latest_snapshot = u32(header.latest_snapshot_page)
 		db.txn_snapshot_id = u64(header.snapshot_id_counter)
 		db.pager.first_free_page = u32(header.first_free_page)
+		if db.pager.first_free_page > pager.page_count(db.pager) {
+			// Self-heal: a header persisted before an uncompleted shrink
+			// may reference pages past EOF. Dropping the freelist leaks
+			// space until the next GC rebuilds it, but can never misread:
+			// freelist links are validated on use.
+			log.warnf(
+				"Database header references free page %d past end of file; dropping freelist",
+				db.pager.first_free_page,
+			)
+			db.pager.first_free_page = 0
+		}
+
 		db.refs_page = u32(header.refs_page)
 		pfv := u32(header.page_format_version)
 		if pfv == 0 { pfv = u32(header.schema_version) }
+		if pfv != u32(types.PAGE_FORMAT_VERSION) {
+			pager.unpin_page(db.pager, 1)
+			close(db)
+			return nil, .Unsupported_Format
+		}
 
 		db.pager.page_format_version = pfv
 		pager.unpin_page(db.pager, 1)
@@ -246,12 +266,9 @@ close :: proc(db: ^Database) {
 		if snap_ok {
 			db.snapshot_index[snap_id] = snap_page
 			db.latest_snapshot = snap_page
-			snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
+			record_main_ref(db, snap_id)
 		}
-
-		pager.wal_begin_txn(db.pager)
-		update_header(db)
-		pager.wal_commit_txn(db.pager)
+		wal_update_header(db)
 	}
 
 	update_header(db)
@@ -329,6 +346,21 @@ verify_header :: proc(db: ^Database) -> DB_Error {
 		return .Page_Size_Mismatch
 	}
 	return .None
+}
+
+// record_main_ref points the MAIN branch ref at the given snapshot id.
+record_main_ref :: proc(db: ^Database, snap_id: u64) {
+	snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
+}
+
+// wal_update_header persists a header change inside a WAL transaction.
+// Covers the bare begin/update/commit sites; transaction commit and
+// multi-page initializers keep their explicit framing (different
+// commit-error semantics).
+wal_update_header :: proc(db: ^Database) {
+	pager.wal_begin_txn(db.pager)
+	update_header(db)
+	pager.wal_commit_txn(db.pager)
 }
 
 update_header :: proc(db: ^Database) {

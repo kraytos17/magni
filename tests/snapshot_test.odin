@@ -380,7 +380,7 @@ test_snapshot_gc :: proc(t: ^testing.T) {
 
 	// Keep only the latest 2 snapshots
 	snapshot.prune(p, p3, 2)
-	snapshot.gc(p, p3, 2)
+	snapshot.expire_and_collect(p, p3, 2)
 
 	// Verify page count didn't crash or go to zero
 	c := snapshot.count_committed(p, p3)

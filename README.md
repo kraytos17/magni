@@ -180,6 +180,10 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `.begin` / `.commit` / `.rollback` | Transaction control |
 | `.snapshot_debug` | Verbose snapshot chain dump |
 
+Tabular results (queries, `.snapshots`, `.snapdiff`, `.tables`, `.stats`,
+`.desc`, `.dump`) all render as markdown tables with an `(N rows)` footer;
+diagnostics and errors go to stderr, never mixed into stdout.
+
 ### REPL Keyboard Shortcuts
 
 | Key | Action |
@@ -301,7 +305,12 @@ src/
 │                          fuzz harness
 └── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
-└── *_test.odin            392 test functions across all packages
+└── *_test.odin            393 test functions across all packages
+tests_magni/
+├── clirunner.py           Shared black-box CLI harness (subprocess + timeouts)
+├── test_cli_smoke.py      CLI smoke: binary surface basics (6 tests)
+├── test_cli_full.py       CLI integration: full binary surface (81 tests)
+└── test_*.py              magni.py orchestrator unit tests (run via `test-py`)
 ```
 
 ---

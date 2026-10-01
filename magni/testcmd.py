@@ -18,9 +18,20 @@ def cmd_test(args: argparse.Namespace) -> None:
 
 
 def cmd_test_cli(args: argparse.Namespace) -> None:
-    """Run CLI smoke or full integration tests."""
-    script = config.TEST_DIR / ("cli_test.sh" if args.full else "cli_smoke.sh")
-    run(["bash", str(script)])
+    """Run CLI smoke or full black-box integration tests.
+
+    Python unittest suite (tests_magni/test_cli_{smoke,full}.py) driving
+    the built binary as subprocesses: real exit codes, per-test timeouts
+    (hangs fail instead of wedging CI), and split stdout/stderr.
+    """
+    import sys
+    import unittest
+    mod = ("tests_magni.test_cli_full" if args.full
+           else "tests_magni.test_cli_smoke")
+    suite = unittest.TestLoader().loadTestsFromName(mod)
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    if not result.wasSuccessful():
+        sys.exit(1)
 
 
 def cmd_test_py(_args: argparse.Namespace) -> None:

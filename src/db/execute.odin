@@ -16,15 +16,8 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		return .Parse_Error
 	}
 
-	is_read := false
-	#partial switch s in stmt.type {
-	case parser.Select_Stmt:
-		is_read = true
-	case parser.Compound_Stmt:
-		is_read = true
-	}
-
-	if is_read {
+	ctx := Exec_Ctx{is_read = stmt_is_read(stmt)}
+	if ctx.is_read {
 		sync.rw_mutex_shared_lock(&db.mu)
 		defer sync.rw_mutex_shared_unlock(&db.mu)
 	} else {
@@ -32,101 +25,146 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		defer sync.rw_mutex_unlock(&db.mu)
 	}
 
-	if txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt); is_txn {
-		switch txn_stmt.op {
-		case .BEGIN:
-			return begin_impl(db)
-		case .COMMIT:
-			return commit_impl(db)
-		case .ROLLBACK:
-			return rollback_impl(db)
-		}
+	if handled, txn_err := dispatch_txn(db, stmt); handled {
+		return txn_err
 	}
 
 	st := Schema_Tree(db)
-	as_of_override := false
-	as_of_err := DB_Error.None
 	if sel, is_sel := stmt.type.(parser.Select_Stmt); is_sel {
-		as_of_override, as_of_err = resolve_as_of(db, &st, sel)
+		override, as_of_err := resolve_as_of(db, &st, sel)
 		if as_of_err != .None {
 			return as_of_err
 		}
+		ctx.as_of_override = override
 	}
 
 	result: executor.Result
 	exec_ok, new_root, _ := executor.execute(&st, stmt, &result, &db.table_cache)
-	if !as_of_override && !is_read {
+	if !ctx.as_of_override && !ctx.is_read {
 		db.schema_root_page = new_root
 		update_header(db)
 	}
-	if exec_ok && !is_read && db.txn_state == .None && !as_of_override {
-		db.snapshot_batch_count += 1
-		threshold := db.snapshot_batch_threshold
-		if threshold <= 0 { threshold = 1 }
-
-		make_snapshot := db.snapshot_batch_count >= threshold
-		if make_snapshot {
-			db.snapshot_batch_count = 0
-		}
-
-		pager.wal_begin_txn(db.pager)
-		snap_op: snapshot.Snapshot_Operation
-		#partial switch s in stmt.type {
-		case parser.Insert_Stmt:
-			snap_op = .INSERT
-		case parser.Update_Stmt:
-			snap_op = .UPDATE
-		case parser.Delete_Stmt:
-			snap_op = .DELETE
-		case parser.Create_Stmt:
-			snap_op = .CREATE
-		case parser.Drop_Stmt:
-			snap_op = .DROP
-		}
-
-		if make_snapshot {
-			snap_st := Schema_Tree(db)
-			schema_tables := schema.list_tables(&snap_st, context.temp_allocator)
-			tables := make([dynamic]types.Table, context.temp_allocator)
-			for tbl in schema_tables {
-				append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
-			}
-
-			manifest_page := snapshot.create_manifest(db.pager, tables[:])
-			defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
-
-			db.txn_snapshot_id += 1
-			snap_id := db.txn_snapshot_id
-			snap_page, snap_ok := snapshot.create(
-				db.pager,
-				snap_id,
-				db.latest_snapshot,
-				db.schema_root_page,
-				manifest_page,
-				snap_op,
-			)
-			if snap_ok {
-				db.snapshot_index[snap_id] = snap_page
-				db.latest_snapshot = snap_page
-				snapshot.set_ref(
-					db.pager,
-					db.refs_page,
-					snapshot.MAIN_REF,
-					snap_id,
-					.BRANCH,
-					false,
-				)
-			}
-		}
-
-		pager.wal_commit_txn(db.pager)
-		maybe_auto_checkpoint(db)
+	if exec_ok && !ctx.is_read {
+		maybe_snapshot(db, stmt, ctx)
 	}
 	if exec_ok {
 		if result.is_select { executor.render_result(result) }
 		return .None
 	}
 	return .IO_Error
+}
+
+// Exec_Ctx carries one execute call's cross-stage decisions: whether the
+// statement only reads (shared lock), whether AS OF redirected the schema
+// tree (skip root publication), and which snapshot operation a write maps
+// to. Built once at dispatch, consumed by the commit tail.
+Exec_Ctx :: struct {
+	is_read:        bool,
+	as_of_override: bool,
+	snap_op:        snapshot.Snapshot_Operation,
+}
+
+// stmt_is_read reports whether a statement takes the shared (read) lock.
+@(private="file")
+stmt_is_read :: proc(stmt: parser.Statement) -> bool {
+	_, is_sel := stmt.type.(parser.Select_Stmt)
+	_, is_comp := stmt.type.(parser.Compound_Stmt)
+	return is_sel || is_comp
+}
+
+// dispatch_txn runs a transaction statement directly.
+// Returns (handled, err): unhandled statements fall through to execution.
+@(private="file")
+dispatch_txn :: proc(db: ^Database, stmt: parser.Statement) -> (bool, DB_Error) {
+	txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt)
+	if !is_txn { return false, .None }
+
+	switch txn_stmt.op {
+	case .BEGIN:
+		return true, begin_impl(db)
+	case .COMMIT:
+		return true, commit_impl(db)
+	case .ROLLBACK:
+		return true, rollback_impl(db)
+	}
+	return true, .None
+}
+
+// snapshot_op maps a write statement to its snapshot operation.
+// Reads and transactions never reach here (guarded by is_read + dispatch);
+// UNKNOWN is the unreachable default.
+@(private="file")
+snapshot_op :: proc(stmt: parser.Statement) -> snapshot.Snapshot_Operation {
+	#partial switch _ in stmt.type {
+	case parser.Insert_Stmt:
+		return .INSERT
+	case parser.Update_Stmt:
+		return .UPDATE
+	case parser.Delete_Stmt:
+		return .DELETE
+	case parser.Create_Stmt:
+		return .CREATE
+	case parser.Drop_Stmt:
+		return .DROP
+	}
+	return .UNKNOWN
+}
+
+// maybe_snapshot runs WAL + snapshot bookkeeping for a successful write:
+// batch counting, WAL framing, periodic manifest snapshots, and commit.
+// No-op inside transactions or under AS OF (mirrors the inline guards).
+@(private="file")
+maybe_snapshot :: proc(db: ^Database, stmt: parser.Statement, ctx: Exec_Ctx) {
+	if db.txn_state != .None || ctx.as_of_override { return }
+
+	db.snapshot_batch_count += 1
+	threshold := db.snapshot_batch_threshold
+	if threshold <= 0 { threshold = 1 }
+
+	make_snapshot := db.snapshot_batch_count >= threshold
+	if make_snapshot {
+		db.snapshot_batch_count = 0
+	}
+
+	pager.wal_begin_txn(db.pager)
+	if make_snapshot {
+		write_snapshot(db, snapshot_op(stmt))
+	}
+
+	pager.wal_commit_txn(db.pager)
+	maybe_auto_checkpoint(db)
+}
+
+// write_snapshot manifests the current tables and records one snapshot.
+// The manifest page is unpinned once recorded (previously held to
+// execute-return; it is unused past snapshot.create).
+@(private="file")
+write_snapshot :: proc(db: ^Database, op: snapshot.Snapshot_Operation) {
+	snap_st := Schema_Tree(db)
+	schema_tables := schema.list_tables(&snap_st, context.temp_allocator)
+	tables := make([dynamic]types.Table, context.temp_allocator)
+	for tbl in schema_tables {
+		append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
+	}
+
+	manifest_page := snapshot.create_manifest(db.pager, tables[:])
+	defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
+
+	db.txn_snapshot_id += 1
+	snap_id := db.txn_snapshot_id
+	snap_page, snap_ok := snapshot.create(
+		db.pager,
+		snap_id,
+		db.latest_snapshot,
+		db.schema_root_page,
+		manifest_page,
+		op,
+	)
+	if snap_ok {
+		db.snapshot_index[snap_id] = snap_page
+		db.latest_snapshot = snap_page
+		record_main_ref(db, snap_id)
+	}
 }
 
 Query_Result :: struct {

@@ -320,6 +320,78 @@ build_display_indices :: proc(
 	return indices[:], true
 }
 
+// Agg_Input is one resolved aggregate argument: the group's rows plus the
+// column index (-1 for COUNT(*) or unresolvable columns).
+Agg_Input :: struct {
+	rows:    [][]types.Value,
+	col_idx: int,
+}
+
+// resolve_agg_input maps an aggregate's column name to its index.
+@(private="file")
+resolve_agg_input :: proc(
+	rows: [][]types.Value,
+	agg: parser.Aggregate_Expr,
+	columns: []types.Column,
+) -> Agg_Input {
+	if agg.column == "" { return {rows, -1} }
+
+	idx, found := schema.find_column_index(columns, agg.column)
+	if !found { idx = -1 }
+	return {rows, idx}
+}
+
+// sum_count folds the numeric non-NULL values of one column into a total and
+// count. Shared by SUM and AVG.
+@(fast_math = {
+	.Allow_Reassoc,
+	.No_NaNs,
+	.No_Infs,
+	.No_Signed_Zeros,
+	.Allow_Reciprocal,
+	.Allow_Contract,
+	.Approx_Func,
+})
+@(private="file")
+sum_count :: proc(ai: Agg_Input) -> (sum: f64, count: int) {
+	for row_vals in ai.rows {
+		if ai.col_idx >= 0 && !types.is_null(row_vals[ai.col_idx]) {
+			#partial switch v in row_vals[ai.col_idx] {
+			case i64:
+				sum += f64(v); count += 1
+			case f64:
+				sum += v; count += 1
+			}
+		}
+	}
+	return sum, count
+}
+
+Extremum_Dir :: enum {
+	Min,
+	Max,
+}
+
+// extremum returns the MIN/MAX non-NULL value of one column, or NULL when
+// the group is empty or the column is unresolvable.
+@(private="file")
+extremum :: proc(ai: Agg_Input, dir: Extremum_Dir) -> types.Value {
+	if len(ai.rows) == 0 || ai.col_idx < 0 {
+		return types.value_null()
+	}
+
+	best := ai.rows[0][ai.col_idx]
+	for row_vals in ai.rows {
+		if ai.col_idx >= 0 && !types.is_null(row_vals[ai.col_idx]) {
+			cmp := compare_values(row_vals[ai.col_idx], best)
+			if (dir == .Min && cmp < 0) || (dir == .Max && cmp > 0) {
+				best = row_vals[ai.col_idx]
+			}
+		}
+	}
+	return best
+}
+
 @(fast_math = {
 	.Allow_Reassoc,
 	.No_NaNs,
@@ -338,87 +410,30 @@ compute_aggregates :: proc(
 ) -> []types.Value {
 	results := make([]types.Value, len(aggregates), allocator)
 	for agg, i in aggregates {
-		col_idx := -1
-		if agg.column != "" {
-			found: bool
-			col_idx, found = schema.find_column_index(columns, agg.column)
-			if !found { col_idx = -1 }
-		}
-
+		ai := resolve_agg_input(rows, agg, columns)
 		switch agg.func {
 		case .COUNT:
 			if agg.column == "" {
-				results[i] = types.value_int(i64(len(rows)))
+				results[i] = types.value_int(i64(len(ai.rows)))
 			} else {
 				count := 0
-				for row_vals in rows {
-					if col_idx >= 0 && !types.is_null(row_vals[col_idx]) {
+				for row_vals in ai.rows {
+					if ai.col_idx >= 0 && !types.is_null(row_vals[ai.col_idx]) {
 						count += 1
 					}
 				}
 				results[i] = types.value_int(i64(count))
 			}
 		case .SUM:
-			sum: f64
-			for row_vals in rows {
-				if col_idx >= 0 && !types.is_null(row_vals[col_idx]) {
-					#partial switch v in row_vals[col_idx] {
-					case i64:
-						sum += f64(v)
-					case f64:
-						sum += v
-					}
-				}
-			}
+			sum, _ := sum_count(ai)
 			results[i] = types.value_real(sum)
 		case .AVG:
-			sum: f64
-			count := 0
-			for row_vals in rows {
-				if col_idx >= 0 && !types.is_null(row_vals[col_idx]) {
-					#partial switch v in row_vals[col_idx] {
-					case i64:
-						sum += f64(v); count += 1
-					case f64:
-						sum += v; count += 1
-					}
-				}
-			}
-			if count > 0 {
-				results[i] = types.value_real(sum / f64(count))
-			} else {
-				results[i] = types.value_null()
-			}
+			sum, count := sum_count(ai)
+			results[i] = types.value_real(sum / f64(count)) if count > 0 else types.value_null()
 		case .MIN:
-			if len(rows) == 0 || col_idx < 0 {
-				results[i] = types.value_null()
-				break
-			}
-
-			min := rows[0][col_idx]
-			for row_vals in rows {
-				if col_idx >= 0 && !types.is_null(row_vals[col_idx]) {
-					if compare_values(row_vals[col_idx], min) < 0 {
-						min = row_vals[col_idx]
-					}
-				}
-			}
-			results[i] = min
+			results[i] = extremum(ai, .Min)
 		case .MAX:
-			if len(rows) == 0 || col_idx < 0 {
-				results[i] = types.value_null()
-				break
-			}
-
-			max := rows[0][col_idx]
-			for row_vals in rows {
-				if col_idx >= 0 && !types.is_null(row_vals[col_idx]) {
-					if compare_values(row_vals[col_idx], max) > 0 {
-						max = row_vals[col_idx]
-					}
-				}
-			}
-			results[i] = max
+			results[i] = extremum(ai, .Max)
 		}
 	}
 	return results
@@ -434,6 +449,41 @@ evaluate_where_having :: proc(
 ) -> bool {
 	if clause.root == nil { return true }
 	return evaluate_having_node(clause.root, group_keys, agg_values, group_cols, aggregates)
+}
+
+// aggregate_func_name maps an aggregate to its HAVING reference name
+// (lowercase; HAVING count and HAVING COUNT both match via equal_fold).
+@(private="file")
+aggregate_func_name :: proc(func: parser.Aggregate_Func) -> string {
+	switch func {
+	case .COUNT:
+		return "count"
+	case .SUM:
+		return "sum"
+	case .AVG:
+		return "avg"
+	case .MIN:
+		return "min"
+	case .MAX:
+		return "max"
+	}
+	return ""
+}
+
+// find_having_aggregate returns the computed value of the aggregate a HAVING
+// condition names (case-insensitive), or false.
+@(private="file")
+find_having_aggregate :: proc(
+	column: string,
+	aggregates: []parser.Aggregate_Expr,
+	agg_values: []types.Value,
+) -> (types.Value, bool) {
+	for agg, i in aggregates {
+		if strings.equal_fold(column, aggregate_func_name(agg.func)) {
+			return agg_values[i], true
+		}
+	}
+	return {}, false
 }
 
 // resolve_having_value finds the group-key or aggregate value a HAVING
@@ -452,27 +502,7 @@ resolve_having_value :: proc(
 			return group_keys[i], true
 		}
 	}
-	for agg, i in aggregates {
-		name := ""
-		switch agg.func {
-		case .COUNT:
-			name = "count"
-		case .SUM:
-			name = "sum"
-		case .AVG:
-			name = "avg"
-		case .MIN:
-			name = "min"
-		case .MAX:
-			name = "max"
-		}
-		// Compare case-insensitively: HAVING count and HAVING COUNT both
-		// reference the COUNT aggregate (cond.column is stored as written).
-		if strings.to_lower(cond.column, context.temp_allocator) == name {
-			return agg_values[i], true
-		}
-	}
-	return {}, false
+	return find_having_aggregate(cond.column, aggregates, agg_values)
 }
 
 @(private="file")
@@ -539,26 +569,8 @@ evaluate_having_condition :: proc(
 		}
 	}
 	if !cond_result {
-		for agg, i in aggregates {
-			name := ""
-			switch agg.func {
-			case .COUNT:
-				name = "count"
-			case .SUM:
-				name = "sum"
-			case .AVG:
-				name = "avg"
-			case .MIN:
-				name = "min"
-			case .MAX:
-				name = "max"
-			}
-			// Compare case-insensitively: HAVING count > 1 and HAVING COUNT > 1
-			// both reference the COUNT aggregate (cond.column is stored as written).
-			if strings.to_lower(cond.column, context.temp_allocator) == name && rhs_is_val {
-				cond_result = compare_condition(agg_values[i], cond.operator, rhs_val)
-				break
-			}
+		if v, ok := find_having_aggregate(cond.column, aggregates, agg_values); ok && rhs_is_val {
+			cond_result = compare_condition(v, cond.operator, rhs_val)
 		}
 	}
 	if cond.negated { cond_result = !cond_result }

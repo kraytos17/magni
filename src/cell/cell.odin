@@ -30,6 +30,7 @@ create :: proc(
 			for j in 0 ..< i {
 				types.value_delete(values_copy[j])
 			}
+
 			delete(values_copy, allocator)
 			return {}, err
 		}
@@ -57,6 +58,7 @@ destroy :: proc(c: ^Cell, allocator := context.allocator) {
 
 get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	if offset >= len(src) { return 0, false }
+
 	pos := offset
 	_, n, ok := varint.decode(src, pos)
 	if !ok { return 0, false }
@@ -69,6 +71,7 @@ get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 
 get_size :: proc(src: []u8, offset := 0) -> (int, bool) {
 	if offset >= len(src) { return 0, false }
+
 	payload_size, n, ok := varint.decode(src, offset)
 	if !ok { return 0, false }
 	return n + int(payload_size), true

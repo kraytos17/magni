@@ -5,7 +5,6 @@ package btree
 //   [offset+2]: block size        (u16le, total bytes including header)
 FREEBLOCK_HDR_SIZE :: 4
 
-
 @(private="file")
 freeblock_read_next :: proc(data: []u8, off: u16) -> u16le {
 	return (^u16le)(raw_data(data[int(off):]))^

@@ -1027,18 +1027,15 @@ test_columnar_integration :: proc(t: ^testing.T) {
 
 	// Verify: deserialize cells from row-major page
 	for i in 0 ..< 3 {
-		ptrs := btree.get_pointers(buf[:], page_id)
-		testing.expect(t, i < len(ptrs), fmt.tprintf("cell pointer %d exists", i))
-		if i < len(ptrs) {
-			c, _, des_ok := cell.deserialize(
-				buf[:],
-				int(ptrs[i]),
-				cell.Config{allocator = context.temp_allocator},
-			)
-			testing.expect(t, des_ok, fmt.tprintf("deserialize cell %d", i))
-			if des_ok {
-				testing.expect_value(t, types.Row_ID(c.rowid), rowids[i])
-			}
+		ptr := btree.get_cell_ptr(buf[:], page_id, i, btree.CELL_ENTRY_STRIDE)
+		c, _, des_ok := cell.deserialize(
+			buf[:],
+			int(ptr),
+			cell.Config{allocator = context.temp_allocator},
+		)
+		testing.expect(t, des_ok, fmt.tprintf("deserialize cell %d", i))
+		if des_ok {
+			testing.expect_value(t, types.Row_ID(c.rowid), rowids[i])
 		}
 	}
 }
@@ -2333,4 +2330,152 @@ test_integration_select_bare_column_errors_cleanly :: proc(t: ^testing.T) {
 
 	err3 := db.execute(d, "SELECT 1;")
 	testing.expect(t, err3 == .None, "SELECT literal without FROM should succeed")
+}
+
+// v1 page-format files are rejected at open with a clean error (never a
+// crash): flip the header version of a valid database and reopen it.
+@(test)
+test_db_rejects_v1_format :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	filename := fmt.tprintf("test_int_%s.db", "v1_reject")
+	clean_db_files(filename)
+
+	d := setup_db(t, "v1_reject")
+	db.close(d)
+
+	// Patch the header's page_format_version (offset 25: 13 magic + 3 u32)
+	// to 1 directly in the file.
+	raw, read_err := os.read_entire_file_from_path(filename, context.temp_allocator)
+	testing.expect(t, read_err == nil, "db file must be readable")
+	if read_err != nil {
+		clean_db_files(filename)
+		return
+	}
+	testing.expect(t, len(raw) > 29, "db file must hold a header")
+	testing.expect(t, string(raw[:8]) == "MAGNI_DB", "header magic must match")
+	if len(raw) <= 29 || string(raw[:8]) != "MAGNI_DB" {
+		clean_db_files(filename)
+		return
+	}
+	raw[25], raw[26], raw[27], raw[28] = 1, 0, 0, 0
+	testing.expect(t, os.write_entire_file(filename, raw) == nil, "version patch must write")
+
+	reopened, open_err := db.open(filename)
+	testing.expect(t, open_err == .Unsupported_Format, "v1 file must be rejected cleanly")
+	testing.expect(t, reopened == nil, "rejected open must return nil db")
+	clean_db_files(filename)
+}
+
+@(test)
+test_rollback_truncates_file :: proc(t: ^testing.T) {
+	// Aborted transactions abandon their tail pages (never snapshotted,
+	// unreachable once roots restore). Rollback must persist that rewind
+	// to disk, not just in memory.
+	context.logger.lowest_level = .Error
+	filename := fmt.tprintf("test_int_%s.db", "rollback_shrink")
+	clean_db_files(filename)
+
+	d := setup_db(t, "rollback_shrink")
+	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	for i in 1 ..= 700 {
+		if db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) != .None {
+			testing.expect(t, false, "insert")
+			db.close(d)
+			clean_db_files(filename)
+			return
+		}
+	}
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
+	steady_pages := pager.page_count(d.pager)
+
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin2")
+	for i in 701 ..= 1200 {
+		if db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) != .None {
+			testing.expect(t, false, "insert2")
+			db.close(d)
+			clean_db_files(filename)
+			return
+		}
+	}
+	testing.expect(t, pager.page_count(d.pager) > steady_pages, "txn must grow the file")
+
+	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback")
+	testing.expect(
+		t,
+		pager.page_count(d.pager) == steady_pages,
+		"rollback must rewind the file",
+	)
+	testing.expect(t, d.pager.first_free_page == 0, "freelist resets on rewind")
+
+	q := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
+	testing.expect(t, q.ok && len(q.rows) == 1, "post-rollback query")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(700))
+	testing.expect_value(t, q.rows[0][1].(i64), i64(1))
+	testing.expect_value(t, q.rows[0][2].(i64), i64(700))
+
+	// The rewind is durable: reopened file keeps the small footprint and
+	// later writes reuse the reclaimed tail by append.
+	db.close(d)
+	d2, open_err := db.open(filename)
+	testing.expect(t, open_err == .None, "reopen after rollback")
+	if open_err != .None {
+		clean_db_files(filename)
+		return
+	}
+	testing.expect(
+		t,
+		pager.page_count(d2.pager) == steady_pages,
+		"reopened file keeps the rewound footprint",
+	)
+	testing.expect(t, db.execute(d2, "INSERT INTO t VALUES (701, 2103);") == .None, "insert after reopen")
+	q2 := db.query(d2, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q2.ok && len(q2.rows) == 1, "post-reopen query")
+	testing.expect_value(t, q2.rows[0][0].(i64), i64(701))
+	db.close(d2)
+	clean_db_files(filename)
+}
+@(test)
+test_open_heals_stale_freelist :: proc(t: ^testing.T) {
+	// A header persisted before an uncompleted shrink may point past EOF.
+	// Open must reset the freelist (leaked space, never misread) and the
+	// database must stay fully usable. first_free_page lives at file offset
+	// 45 (13 magic + 4 page_size + 4 page_count + 4 schema_version +
+	// 4 format_version + 4 schema_root + 4 latest_snapshot + 8 snap_counter).
+	context.logger.lowest_level = .Error
+	filename := fmt.tprintf("test_int_%s.db", "stale_free")
+	clean_db_files(filename)
+
+	d := setup_db(t, "stale_free")
+	testing.expect(t, db.execute(d, "CREATE TABLE t (x INT);") == .None, "create")
+	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (1);") == .None, "insert")
+	db.close(d)
+
+	raw, read_err := os.read_entire_file_from_path(filename, context.temp_allocator)
+	testing.expect(t, read_err == nil, "db file must be readable")
+	if read_err != nil {
+		clean_db_files(filename)
+		return
+	}
+	testing.expect(t, len(raw) > 49, "db file must hold a header")
+	if len(raw) <= 49 {
+		clean_db_files(filename)
+		return
+	}
+	raw[45], raw[46], raw[47], raw[48] = 0xff, 0xff, 0xff, 0xff
+	testing.expect(t, os.write_entire_file(filename, raw) == nil, "freelist patch must write")
+
+	d2, open_err := db.open(filename)
+	testing.expect(t, open_err == .None, "open with stale freelist must succeed")
+	if open_err != .None {
+		clean_db_files(filename)
+		return
+	}
+	testing.expect(t, d2.pager.first_free_page == 0, "stale freelist must reset")
+	testing.expect(t, db.execute(d2, "INSERT INTO t VALUES (2);") == .None, "insert after heal")
+	q := db.query(d2, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok && len(q.rows) == 1, "query after heal")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(2))
+	db.close(d2)
+	clean_db_files(filename)
 }

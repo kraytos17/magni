@@ -54,7 +54,7 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 
 	db.latest_snapshot = snap_page
 	db.snapshot_index[snap_id] = snap_page
-	snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
+	record_main_ref(db, snap_id)
 	if err := pager.wal_commit_txn(db.pager); err != .None {
 		return .IO_Error
 	}
@@ -74,7 +74,14 @@ rollback_impl :: proc(db: ^Database) -> DB_Error {
 
 	pager.wal_abort_txn(db.pager)
 	if db.txn_start_file_len < u64(db.pager.file_len) {
-		db.pager.file_len = i64(db.txn_start_file_len)
+		// Persist the rewind: pages allocated by the aborted txn were never
+		// snapshotted and are unreachable once roots are restored below.
+		// On failure the disk simply stays big (status quo ante) while the
+		// in-memory state is already consistent.
+		rewound_pages := u32(db.txn_start_file_len / u64(types.PAGE_SIZE))
+		if _, rerr := pager.rewind_after_abort(db.pager, rewound_pages); rerr != .None {
+			log.warnf("rollback could not truncate file; space will be reused")
+		}
 	}
 	if db.latest_snapshot != 0 {
 		snap_h, snap_ok := snapshot.load(db.pager, db.latest_snapshot)

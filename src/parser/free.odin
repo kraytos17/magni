@@ -11,8 +11,7 @@ condition_free :: proc(cond: Condition, allocator := context.allocator) {
 
 	types.values_delete(cond.in_values, allocator)
 	if subq := cond.in_subquery; subq != nil {
-		statement_free(Statement{type = subq^, sql = ""}, allocator)
-		free(subq, allocator)
+		select_free(subq, allocator)
 	}
 }
 
@@ -39,6 +38,47 @@ where_clause_free :: proc(w: Where_Clause, allocator := context.allocator) {
 	where_node_free(w.root, allocator)
 }
 
+// delete_each frees each element then the slice itself. Instantiated for
+// []string throughout the statement free paths.
+@(private)
+delete_each :: proc(xs: []$T, allocator := context.allocator) {
+	for x in xs { delete(x, allocator) }
+	delete(xs, allocator)
+}
+
+// select_free releases an owned subquery SELECT and its pointer.
+@(private)
+select_free :: proc(sel: ^Select_Stmt, allocator := context.allocator) {
+	statement_free(Statement{type = sel^, sql = ""}, allocator)
+	free(sel, allocator)
+}
+
+// from_source_free releases a FROM/JOIN source: a table name or subquery.
+@(private)
+from_source_free :: proc(src: From_Source, allocator := context.allocator) {
+	#partial switch s in src {
+	case string:
+		delete(s, allocator)
+	case ^Select_Stmt:
+		select_free(s, allocator)
+	}
+}
+
+// maybe_where_free releases an optional WHERE/HAVING/ON clause.
+@(private)
+maybe_where_free :: proc(w: Maybe(Where_Clause), allocator := context.allocator) {
+	if clause, ok := w.?; ok { where_clause_free(clause, allocator) }
+}
+
+// order_by_free releases an optional ORDER BY column list.
+@(private)
+order_by_free :: proc(order: Maybe([]Order_By_Column), allocator := context.allocator) {
+	if cols, ok := order.?; ok {
+		for o in cols { delete(o.column, allocator) }
+		delete(cols, allocator)
+	}
+}
+
 @(private)
 statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 	delete(stmt.sql, allocator)
@@ -60,39 +100,21 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		delete(s.foreign_keys, allocator)
 	case Insert_Stmt:
 		delete(s.table_name, allocator)
-		for col in s.columns { delete(col, allocator) }
-		delete(s.columns, allocator)
+		delete_each(s.columns, allocator)
 		for row in s.values { types.values_delete(row, allocator) }
 		delete(s.values, allocator)
 	case Select_Stmt:
-		#partial switch src in s.from {
-		case string:
-			delete(src, allocator)
-		case ^Select_Stmt:
-			statement_free(Statement{type = src^, sql = ""}, allocator); free(src, allocator)
-		}
-
+		from_source_free(s.from, allocator)
 		if s.from_alias != "" { delete(s.from_alias, allocator) }
 		for j in s.joins {
-			#partial switch j_src in j.source {
-			case string:
-				delete(j_src, allocator)
-			case ^Select_Stmt:
-				statement_free(Statement{type = j_src^, sql = ""}, allocator)
-				free(j_src, allocator)
-			}
-
+			from_source_free(j.source, allocator)
 			if j.alias != "" { delete(j.alias, allocator) }
-			if on_cl, ok := j.on_clause.?; ok { where_clause_free(on_cl, allocator) }
+			maybe_where_free(j.on_clause, allocator)
 		}
 
 		delete(s.joins, allocator)
-		for col in s.columns { delete(col, allocator) }
-
-		delete(s.columns, allocator)
-		for al in s.aliases { delete(al, allocator) }
-
-		delete(s.aliases, allocator)
+		delete_each(s.columns, allocator)
+		delete_each(s.aliases, allocator)
 		types.values_delete(s.literal_values, allocator)
 
 		delete(s.col_kinds, allocator)
@@ -100,42 +122,26 @@ statement_free :: proc(stmt: Statement, allocator := context.allocator) {
 		for agg in s.aggregates { delete(agg.column, allocator) }
 
 		delete(s.aggregates, allocator)
-		if w, ok := s.where_clause.?; ok { where_clause_free(w, allocator) }
-		if order, ok := s.order_by.?; ok {
-			for o in order {
-				delete(o.column, allocator)
-			}
-			delete(order, allocator)
-		}
-		for col in s.group_by { delete(col, allocator) }
-
-		delete(s.group_by, allocator)
-		if h, ok := s.having.?; ok { where_clause_free(h, allocator) }
+		maybe_where_free(s.where_clause, allocator)
+		order_by_free(s.order_by, allocator)
+		delete_each(s.group_by, allocator)
+		maybe_where_free(s.having, allocator)
 	case Compound_Stmt:
-		statement_free(Statement{type = s.first^, sql = ""}, allocator)
-		free(s.first, allocator)
+		select_free(s.first, allocator)
 		for operand in s.operands {
-			statement_free(Statement{type = operand.select^, sql = ""}, allocator)
-			free(operand.select, allocator)
+			select_free(operand.select, allocator)
 		}
 
 		delete(s.operands, allocator)
-		if order, ok := s.order_by.?; ok {
-			for o in order {
-				delete(o.column, allocator)
-			}
-			delete(order, allocator)
-		}
+		order_by_free(s.order_by, allocator)
 	case Update_Stmt:
 		delete(s.table_name, allocator)
-		for col in s.update_columns { delete(col, allocator) }
-
-		delete(s.update_columns, allocator)
+		delete_each(s.update_columns, allocator)
 		types.values_delete(s.update_values, allocator)
-		if w, ok := s.where_clause.?; ok { where_clause_free(w, allocator) }
+		maybe_where_free(s.where_clause, allocator)
 	case Delete_Stmt:
 		delete(s.table_name, allocator)
-		if w, ok := s.where_clause.?; ok { where_clause_free(w, allocator) }
+		maybe_where_free(s.where_clause, allocator)
 	case Drop_Stmt:
 		delete(s.table_name, allocator)
 	case Txn_Stmt:

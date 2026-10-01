@@ -67,6 +67,31 @@ Mutation_Mode :: enum {
 	COW,
 }
 
+// Violation_Policy decides whether a constraint-violating row fails the
+// statement (Fail) or is skipped with a warning (Skip, Direct scans where
+// siblings still apply).
+Violation_Policy :: enum {
+	Fail,
+	Skip,
+}
+
+// Row_Check names which validation stage (if any) rejected a candidate row.
+Row_Check :: enum {
+	Ok,
+	Type_Error,
+	Check_Error,
+}
+
+// check_row runs type validation then CHECK constraints for one candidate
+// row. Logging stays with the caller, which owns the INSERT-vs-UPDATE
+// message vocabulary; check_constraints logs its own specifics on failure.
+@(private)
+check_row :: proc(values: []types.Value, table: types.Table) -> Row_Check {
+	if !cell.validate(values, table.columns) { return .Type_Error }
+	if !check_constraints(values, table) { return .Check_Error }
+	return .Ok
+}
+
 // Insert_Row_Info holds the validated, column-ordered values and row ID for a
 // single INSERT row. Shared by the direct and COW insert paths.
 Insert_Row_Info :: struct {
@@ -129,11 +154,12 @@ prepare_insert_row :: proc(
 		)
 		return {}, false
 	}
-	if !cell.validate(values, table.columns) {
-		log.error("Error: Data type validation failed")
+	if check := check_row(values, table); check != .Ok {
+		if check == .Type_Error {
+			log.error("Error: Data type validation failed")
+		}
 		return {}, false
 	}
-	if !check_constraints(values, table) { return {}, false }
 
 	table_tree := btree.init(t.pager, root_page)
 	next_rowid: types.Row_ID
@@ -253,27 +279,20 @@ apply_update :: proc(
 	c: ^cell.Cell,
 	update_map: map[int]types.Value,
 	table: ^types.Table,
-	skip_violation: bool,
+	policy: Violation_Policy,
 ) -> ([]types.Value, bool) {
 	new_row := deep_copy_values(c.values)
 	for idx, val in update_map {
 		new_row[idx] = val
 	}
-	if !cell.validate(new_row, table.columns) {
-		if skip_violation {
-			log.warn("Skipping UPDATE row", c.rowid, "— violates column constraints")
+	if check := check_row(new_row, table^); check != .Ok {
+		reason := "violates column constraints" if check == .Type_Error else "violates CHECK constraint"
+		if policy == .Skip {
+			log.warn("Skipping UPDATE row", c.rowid, "—", reason)
 		} else {
-			log.error("Error: UPDATE violates column constraints")
+			log.error("Error: UPDATE", reason)
 		}
 		return nil, true // true = had an error
-	}
-	if !check_constraints(new_row, table^) {
-		if skip_violation {
-			log.warn("Skipping UPDATE row", c.rowid, "— violates CHECK constraint")
-		} else {
-			log.error("Error: UPDATE violates CHECK constraint")
-		}
-		return nil, true
 	}
 	if values_equal(c.values, new_row) {
 		return nil, false // false = no change, not an error
@@ -382,7 +401,7 @@ update_by_pk :: proc(
 	}
 	defer cell.destroy(&c, context.temp_allocator)
 
-	new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, false)
+	new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, .Fail)
 	if had_err && new_row == nil {
 		return true, false, t.root, {}
 	}
@@ -455,7 +474,7 @@ update_scan_direct :: proc(
 
 		should_update := eval_mutation_filter(&plan.filt, c.values)
 		if should_update {
-			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, true)
+			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, .Skip)
 			if !had_err && new_row != nil {
 				append(&ops, Update_Op{c.rowid, new_row})
 			}
@@ -498,7 +517,7 @@ update_scan_cow :: proc(
 		defer cell.destroy(&c, context.temp_allocator)
 		should_update := eval_mutation_filter(&plan.filt, c.values)
 		if should_update {
-			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, false)
+			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, .Fail)
 			if !had_err && new_row != nil {
 				tree_at := btree.init(t.pager, current_root)
 				nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)

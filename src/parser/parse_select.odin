@@ -176,12 +176,7 @@ parse_single_join :: proc(
 @(private="file")
 parse_select_columns :: proc(
 	p: ^Parser,
-	columns: ^[dynamic]string,
-	aliases: ^[dynamic]string,
-	literal_values: ^[dynamic]types.Value,
-	col_kinds: ^[dynamic]Select_Column_Kind,
-	col_literal_idx: ^[dynamic]int,
-	aggregates: ^[dynamic]Aggregate_Expr,
+	b: ^Select_Builder,
 	allocator := context.allocator,
 ) -> bool {
 	if match(p, .ASTERISK) {  } else {
@@ -195,9 +190,9 @@ parse_select_columns :: proc(
 					col, cok := parse_identifier(p, allocator)
 					if !cok { return false }
 
-					append(columns, col)
-					append(col_kinds, Select_Column_Kind.COLUMN)
-					append(col_literal_idx, -1)
+					append(&b.columns, col)
+					append(&b.col_kinds, Select_Column_Kind.COLUMN)
+					append(&b.col_literal_idx, -1)
 				} else {
 					advance(p); advance(p)
 					is_star := match(p, .ASTERISK)
@@ -212,12 +207,12 @@ parse_select_columns :: proc(
 					arg_display := "*" if is_star else arg_col
 					display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
 
-					append(columns, display)
-					append(col_kinds, Select_Column_Kind.AGGREGATE)
-					append(col_literal_idx, -1)
+					append(&b.columns, display)
+					append(&b.col_kinds, Select_Column_Kind.AGGREGATE)
+					append(&b.col_literal_idx, -1)
 
 					agg_col := "" if is_star else arg_col
-					append(aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
+					append(&b.aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
 				}
 			} else {
 				// Literal tokens (NUMBER/STRING/BLOB_LITERAL/NULL) are captured
@@ -230,20 +225,21 @@ parse_select_columns :: proc(
 					val, vok := parse_value(p, allocator)
 					if !vok { return false }
 
-					append(columns, strings.clone(tok.lexeme, allocator))
-					append(col_kinds, Select_Column_Kind.LITERAL)
-					append(col_literal_idx, len(literal_values))
-					append(literal_values, val)
+					append(&b.columns, strings.clone(tok.lexeme, allocator))
+					append(&b.col_kinds, Select_Column_Kind.LITERAL)
+					append(&b.col_literal_idx, len(b.literal_values))
+					append(&b.literal_values, val)
 				case:
 					col, cok := parse_qualified_identifier(p, allocator)
 					if !cok { return false }
 
-					append(columns, col)
-					append(col_kinds, Select_Column_Kind.COLUMN)
-					append(col_literal_idx, -1)
+					append(&b.columns, col)
+					append(&b.col_kinds, Select_Column_Kind.COLUMN)
+					append(&b.col_literal_idx, -1)
 				}
 			}
-			consume_column_alias(p, aliases, allocator)
+
+			consume_column_alias(p, &b.aliases, allocator)
 			if !match(p, .COMMA) { break }
 		}
 	}
@@ -391,6 +387,115 @@ parse_join_clauses :: proc(p: ^Parser, left_alias: string, allocator := context.
 // overflows, so cap well below that and reject the query with an error.
 MAX_PARSE_NESTING :: 512
 
+// Select_Builder accumulates the SELECT list's parallel arrays so parse sites
+// stay in lockstep; finalize slices them into the statement, abandon frees
+// them after a parse failure.
+Select_Builder :: struct {
+	columns:         [dynamic]string,
+	aliases:         [dynamic]string,
+	literal_values:  [dynamic]types.Value,
+	col_kinds:       [dynamic]Select_Column_Kind,
+	col_literal_idx: [dynamic]int,
+	aggregates:      [dynamic]Aggregate_Expr,
+}
+
+@(private="file")
+builder_new :: proc(allocator := context.allocator) -> Select_Builder {
+	return {
+		columns         = make([dynamic]string, allocator),
+		aliases         = make([dynamic]string, allocator),
+		literal_values  = make([dynamic]types.Value, allocator),
+		col_kinds       = make([dynamic]Select_Column_Kind, allocator),
+		col_literal_idx = make([dynamic]int, allocator),
+		aggregates      = make([dynamic]Aggregate_Expr, allocator),
+	}
+}
+
+// builder_abandon frees a builder after a parse failure. The allocator must
+// be the one the builder was made with: element frees are only valid there
+// (a temp-arena string freed with the heap allocator aborts).
+@(private="file")
+builder_abandon :: proc(b: ^Select_Builder, allocator := context.allocator) {
+	delete(b.columns)
+	delete(b.aliases)
+
+	types.values_delete(b.literal_values[:], allocator)
+	delete(b.col_kinds)
+	delete(b.col_literal_idx)
+	for agg in b.aggregates { delete(agg.column, allocator) }
+	delete(b.aggregates)
+}
+
+// From_Clause is the parsed FROM source plus its joins. A missing FROM is
+// source No_From{} with no joins (FROM-less literal SELECT).
+From_Clause :: struct {
+	source: From_Source,
+	alias:  string,
+	joins:  [dynamic]Join_Clause,
+}
+
+@(private="file")
+parse_from_clause :: proc(p: ^Parser, allocator := context.allocator) -> (fc: From_Clause, ok: bool) {
+	fc.source = No_From{}
+	if !match(p, .FROM) { return fc, true }
+
+	js := parse_join_source(p, allocator)
+	if !js.success { return {}, false }
+
+	fc.source, fc.alias = js.source, js.alias
+	// Resolve "" alias to table name for USING/ON desugar (the AST keeps
+	// "" to mean "same as source"; this local is only for name resolution).
+	left_name := fc.alias
+	if left_name == "" {
+		if tbl, is_tbl := js.source.(string); is_tbl { left_name = tbl }
+	}
+
+	fc.joins = parse_join_clauses(p, left_name, allocator)
+	return fc, true
+}
+
+// As_Of holds an optional AS OF SNAPSHOT/TIMESTAMP time-travel clause.
+As_Of :: struct {
+	snapshot:  Maybe(u64),
+	timestamp: Maybe(u64),
+}
+
+@(private="file")
+parse_as_of :: proc(p: ^Parser) -> (as_of: As_Of, ok: bool) {
+	if match(p, .AS) && match(p, .OF) {
+		if match(p, .SNAPSHOT) {
+			id_token := expect(p, .NUMBER) or_return
+			as_of.snapshot = strconv.parse_u64(id_token.lexeme) or_return
+		} else if match(p, .TIMESTAMP) {
+			id_token := expect(p, .NUMBER) or_return
+			as_of.timestamp = strconv.parse_u64(id_token.lexeme) or_return
+		}
+	}
+	return as_of, true
+}
+
+@(private="file")
+parse_group_by :: proc(p: ^Parser, allocator := context.allocator) -> (group_by: [dynamic]string, ok: bool) {
+	group_by = make([dynamic]string, allocator)
+	if match(p, .GROUP) {
+		if !match(p, .BY) {
+			delete(group_by)
+			return {}, false
+		}
+		for {
+			col, cok := parse_qualified_identifier(p, allocator)
+			if !cok {
+				delete(group_by)
+				return {}, false
+			}
+
+			append(&group_by, col)
+			if !match(p, .COMMA) { break }
+		}
+	}
+	return group_by, true
+}
+
 parse_select :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -406,80 +511,34 @@ parse_select :: proc(
 		return {}, false
 	}
 
-	columns := make([dynamic]string, allocator)
-	defer if !ok do delete(columns)
-
-	aliases := make([dynamic]string, allocator)
-	defer if !ok do delete(aliases)
-
-	literal_values := make([dynamic]types.Value, allocator)
-	defer if !ok do delete(literal_values)
-
-	col_kinds := make([dynamic]Select_Column_Kind, allocator)
-	defer if !ok do delete(col_kinds)
-
-	col_literal_idx := make([dynamic]int, allocator)
-	defer if !ok do delete(col_literal_idx)
-
-	aggregates := make([dynamic]Aggregate_Expr, allocator)
-	defer if !ok do delete(aggregates)
+	b := builder_new(allocator)
+	defer if !ok do builder_abandon(&b, allocator)
 
 	is_distinct := match(p, .DISTINCT)
-	if !parse_select_columns(p, &columns, &aliases, &literal_values, &col_kinds, &col_literal_idx, &aggregates, allocator) {
+	if !parse_select_columns(p, &b, allocator) {
 		return nil, false
 	}
 
 	// FROM is optional. A SELECT without FROM evaluates its columns as literals
 	// (e.g. `SELECT 1, 'a'`) producing a single row.
-	from_val: From_Source = No_From{}
-	from_alias := ""
-	joins: [dynamic]Join_Clause
-	has_from := match(p, .FROM)
-	if has_from {
-		js := parse_join_source(p, allocator)
-		if !js.success { return nil, false }
+	fc, fc_ok := parse_from_clause(p, allocator)
+	if !fc_ok { return nil, false }
+	defer if !ok do delete(fc.joins)
 
-		from_val = js.source; from_alias = js.alias
-		// Resolve "" alias to table name for USING/ON desugar (the AST keeps
-		// "" to mean "same as source"; this local is only for name resolution).
-		left_name := from_alias
-		if left_name == "" {
-			if tbl, is_tbl := js.source.(string); is_tbl { left_name = tbl }
-		}
-		joins = parse_join_clauses(p, left_name, allocator)
-	}
-	defer if !ok do delete(joins)
-
-	as_of_snapshot: Maybe(u64); as_of_timestamp: Maybe(u64)
-	if match(p, .AS) && match(p, .OF) {
-		if match(p, .SNAPSHOT) {
-			id_token := expect(p, .NUMBER) or_return
-			as_of_snapshot = strconv.parse_u64(id_token.lexeme) or_return
-		} else if match(p, .TIMESTAMP) {
-			id_token := expect(p, .NUMBER) or_return
-			as_of_timestamp = strconv.parse_u64(id_token.lexeme) or_return
-		}
-	}
-
+	as_of := parse_as_of(p) or_return
 	where_clause: Maybe(Where_Clause)
 	if match(p, .WHERE) { where_clause = parse_where_clause(p, allocator) or_return }
 
-	group_by := make([dynamic]string, allocator)
+	group_by, gb_ok := parse_group_by(p, allocator)
+	if !gb_ok { return nil, false }
 	defer if !ok do delete(group_by)
-	if match(p, .GROUP) {
-		if !match(p, .BY) { return nil, false }
-		for {
-			append(&group_by, parse_qualified_identifier(p, allocator) or_return)
-			if !match(p, .COMMA) { break }
-		}
-	}
 
 	having_cl: Maybe(Where_Clause)
 	if match(p, .HAVING) { having_cl = parse_where_clause(p, allocator) or_return }
 	// Register aggregates referenced only by HAVING (e.g. `HAVING COUNT(*) >= 2`
 	// with no aggregate in the SELECT list) so the executor computes them.
 	if hc, has_h := having_cl.?; has_h {
-		collect_having_aggregates(hc.root, &aggregates, allocator)
+		collect_having_aggregates(hc.root, &b.aggregates, allocator)
 	}
 
 	order_by: Maybe([]Order_By_Column)
@@ -489,15 +548,15 @@ parse_select :: proc(
 		order_by, limit, offset = parse_order_limit(p, allocator) or_return
 	}
 	return Select_Stmt {
-			from = from_val,
-			from_alias = from_alias,
-			joins = joins[:],
-			columns = columns[:],
-			aliases = aliases[:],
-			literal_values = literal_values[:],
-			col_kinds = col_kinds[:],
-			col_literal_idx = col_literal_idx[:],
-			aggregates = aggregates[:],
+			from = fc.source,
+			from_alias = fc.alias,
+			joins = fc.joins[:],
+			columns = b.columns[:],
+			aliases = b.aliases[:],
+			literal_values = b.literal_values[:],
+			col_kinds = b.col_kinds[:],
+			col_literal_idx = b.col_literal_idx[:],
+			aggregates = b.aggregates[:],
 			is_distinct = is_distinct,
 			where_clause = where_clause,
 			order_by = order_by,
@@ -505,8 +564,8 @@ parse_select :: proc(
 			offset = offset,
 			group_by = group_by[:],
 			having = having_cl,
-			as_of_snapshot = as_of_snapshot,
-			as_of_timestamp = as_of_timestamp,
+			as_of_snapshot = as_of.snapshot,
+			as_of_timestamp = as_of.timestamp,
 		},
 		true
 }

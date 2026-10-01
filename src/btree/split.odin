@@ -12,54 +12,31 @@ Split_Result :: struct #all_or_none {
 	split_key:  types.Row_ID,
 }
 
-@(private)
-node_move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
-	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
-
-	src_ptrs := get_pointers(src.data, src.id)
-	if start_idx + count > len(src_ptrs) { return false }
-
-	hdr_sz := page_header_size(dst.header.page_type)
-	base := get_page_header_offset(dst.id)
-	dst_off := int(dst.header.cell_content_offset)
-	for i in 0 ..< count {
-		idx := start_idx + i
-		src_ptr := int(src_ptrs[idx])
-		cell_sz, ok := cell.get_size(src.data, src_ptr)
-		if !ok { return false }
-
-		dst_off -= cell_sz
-		copy(dst.data[dst_off:dst_off + cell_sz], src.data[src_ptr:src_ptr + cell_sz])
-		ptr_loc := base + hdr_sz + (int(dst.header.cell_count) + i) * 2
-		endian.put_u16(dst.data[ptr_loc:], .Little, u16(dst_off))
-	}
-
-	dst.header.cell_content_offset = u16le(dst_off)
-	dst.header.cell_count = u16le(int(dst.header.cell_count) + count)
-	return true
+// move_src_count reports the source entry count for the pre-move bounds
+// check: entries are fixed-stride, so the header count rules.
+@(private="file")
+move_src_count :: proc(src: ^Node) -> int {
+	return int(src.header.cell_count)
 }
 
+// move_leaf_cells moves count cells to a leaf sibling through the layout
+// primitives.
 @(private)
-node_move_leaf_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
+move_leaf_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
 	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
+	if start_idx + count > move_src_count(src) { return false }
 
 	dst_off := int(dst.header.cell_content_offset)
 	dst_cell_count := int(dst.header.cell_count)
 	for i in 0 ..< count {
 		idx := start_idx + i
-		src_ptr := get_cell_ptr(src.data, src.id, idx, CELL_ENTRY_STRIDE)
-		cell_sz, ok := cell.get_size(src.data, int(src_ptr))
+		src_ptr := int(get_cell_ptr(src.data, src.id, idx, l.stride))
+		cell_sz, ok := cell.get_size(src.data, src_ptr)
 		if !ok { return false }
 
 		dst_off -= cell_sz
-		copy(dst.data[dst_off:dst_off + cell_sz], src.data[int(src_ptr):int(src_ptr) + cell_sz])
-
-		raw_dst := get_raw_entries(dst.data, dst.id)
-		raw_src := get_raw_entries(src.data, src.id)
-		raw_dst[dst_cell_count + i] = Cell_Entry {
-			ptr = Cell_Pointer(u16(dst_off)),
-			key = raw_src[idx].key,
-		}
+		copy(dst.data[dst_off:dst_off + cell_sz], src.data[src_ptr:src_ptr + cell_sz])
+		l.set_entry(dst.data, dst.id, dst_cell_count + i, u16(dst_off), l.get_key(src.data, src.id, idx))
 	}
 
 	dst.header.cell_content_offset = u16le(dst_off)
@@ -67,51 +44,24 @@ node_move_leaf_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: i
 	return true
 }
 
+// move_interior_cells moves count cells to an interior sibling through the
+// layout primitives.
 @(private)
-node_move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
+move_interior_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
 	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
-
-	ptrs := get_pointers(src.data, src.id)
-	dst_int := node_interior(dst^)
-	hdr_sz := size_of(Interior_Header)
-
-	base := get_page_header_offset(dst.id)
-	dst_off := int(dst_int.cell_content_offset)
-	for i in 0 ..< count {
-		off := int(ptrs[start_idx + i])
-		size := interior_cell_size_from_page(src.data, off)
-		dst_off -= size
-
-		copy(dst.data[dst_off:dst_off + size], src.data[off:off + size])
-		ptr_loc := base + hdr_sz + (int(dst_int.cell_count) + i) * 2
-		endian.put_u16(dst.data[ptr_loc:], .Little, u16(dst_off))
-	}
-
-	dst_int.cell_content_offset = u16le(dst_off)
-	dst_int.cell_count = u16le(int(dst_int.cell_count) + count)
-	return true
-}
-
-@(private)
-node_move_interior_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
-	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
+	if start_idx + count > move_src_count(src) { return false }
 
 	dst_int := node_interior(dst^)
 	dst_off := int(dst_int.cell_content_offset)
 	dst_cell_count := int(dst_int.cell_count)
 	for i in 0 ..< count {
 		idx := start_idx + i
-		ptr := get_cell_ptr(src.data, src.id, idx, CELL_ENTRY_STRIDE)
-		cell_sz := interior_cell_size_from_page(src.data, int(ptr))
-		dst_off -= cell_sz
+		src_off := int(get_cell_ptr(src.data, src.id, idx, l.stride))
+		cell_sz := interior_cell_size_from_page(src.data, src_off)
 
-		copy(dst.data[dst_off:dst_off + cell_sz], src.data[int(ptr):int(ptr) + cell_sz])
-		raw_dst := get_raw_entries(dst.data, dst.id)
-		raw_src := get_raw_entries(src.data, src.id)
-		raw_dst[dst_cell_count + i] = Cell_Entry {
-			ptr = Cell_Pointer(u16(dst_off)),
-			key = raw_src[idx].key,
-		}
+		dst_off -= cell_sz
+		copy(dst.data[dst_off:dst_off + cell_sz], src.data[src_off:src_off + cell_sz])
+		l.set_entry(dst.data, dst.id, dst_cell_count + i, u16(dst_off), l.get_key(src.data, src.id, idx))
 	}
 
 	dst_int.cell_content_offset = u16le(dst_off)
@@ -122,7 +72,6 @@ node_move_interior_cells_v2 :: proc(src: ^Node, dst: ^Node, start_idx: int, coun
 @(private)
 split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if node_leaf(curr^).cell_count == 0 { return {}, .Page_Full }
-	// If the page is columnar, convert to row-major before splitting
 	if is_columnar(curr.data, curr.id) {
 		num_cols, found := detect_columnar_col_count(curr.data, curr.id)
 		if !found { return {}, .Page_Full }
@@ -195,7 +144,7 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 
 	total := int(node_leaf(curr^).cell_count)
 	mid := total / 2
-	if !curr.layout.move_leaf(curr, &right_node, mid, total - mid) {
+	if !move_leaf_cells(curr.layout, curr, &right_node, mid, total - mid) {
 		return {}, .Serialization_Failed
 	}
 	if mid > 0 {
@@ -279,7 +228,7 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	child_from_mid_cell, _ = endian.get_u32(curr.data[mid_ptr:], .Big)
 	count_right := total - (mid + 1)
 	if count_right > 0 {
-		if !curr.layout.move_interior(curr, &right_node, mid + 1, count_right) {
+		if !move_interior_cells(curr.layout, curr, &right_node, mid + 1, count_right) {
 			return {}, .Serialization_Failed
 		}
 	}
@@ -373,10 +322,10 @@ split_leaf_root :: proc(
 
 	total := int(node_leaf(root_node).cell_count)
 	mid := total / 2
-	if !root_node.layout.move_leaf(&root_node, &left_node, 0, mid) {
+	if !move_leaf_cells(root_node.layout, &root_node, &left_node, 0, mid) {
 		return 0, .Serialization_Failed
 	}
-	if !root_node.layout.move_leaf(&root_node, &right_node, mid, total - mid) {
+	if !move_leaf_cells(root_node.layout, &root_node, &right_node, mid, total - mid) {
 		return 0, .Serialization_Failed
 	}
 
@@ -430,7 +379,7 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 	if is_leaf(root_node) { unpin_node(t, root_node); return .Invalid_Page_Header }
 
 	total := int(node_interior(root_node).cell_count)
-	if !root_node.layout.move_interior(&root_node, &left_node, 0, total) {
+	if !move_interior_cells(root_node.layout, &root_node, &left_node, 0, total) {
 		unpin_node(t, root_node)
 		return .Serialization_Failed
 	}

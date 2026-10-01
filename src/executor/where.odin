@@ -232,8 +232,13 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	if n == nil { return }
 	switch n.kind {
 	case .COND:
-		delete(n.cond.in_subquery_results, allocator)
-		delete(n.cond.in_set)
+		// Only Subquery values are owned (made at resolve time); Values
+		// borrows the parser's list (freed by condition_free), so freeing
+		// it here would double-free borrowed strings.
+		if n.cond.in_mem.kind == .Subquery {
+			delete(n.cond.in_mem.values, allocator)
+		}
+		delete(n.cond.in_mem.set)
 	case .AND, .OR, .NOT:
 		for child in n.children { free_resolved_node(child, allocator) }
 		delete(n.children, allocator)
@@ -260,7 +265,6 @@ resolve_condition :: proc(
 		has_in        = cond.operator == .IN,
 		has_right_col = false,
 		right_idx     = 0,
-		in_values     = nil,
 		in_subquery   = nil,
 	}
 
@@ -275,13 +279,14 @@ resolve_condition :: proc(
 	}
 
 	if cond.in_values != nil {
-		rc.in_values = cond.in_values
 		// Fingerprint prefilter: O(1) miss check per row instead of O(list).
 		// Hits still verify with compare_values, so hash collisions and
 		// NULL semantics are exactly the linear scan's.
-		rc.in_set = make(map[u64]bool, len(cond.in_values), allocator)
+		rc.in_mem.kind = .Values
+		rc.in_mem.values = cond.in_values
+		rc.in_mem.set = make(map[u64]bool, len(cond.in_values), allocator)
 		for v in cond.in_values {
-			rc.in_set[hash_value(v)] = true
+			rc.in_mem.set[hash_value(v)] = true
 		}
 	}
 	if cond.in_subquery != nil {
@@ -289,10 +294,11 @@ resolve_condition :: proc(
 		if schema_tree != nil {
 			subq_rows: []Row_Entry
 			subq_rows, _ = exec_subquery(schema_tree, cond.in_subquery^, cache)
-			rc.in_subquery_results = make([]types.Value, len(subq_rows), allocator)
+			rc.in_mem.kind = .Subquery
+			rc.in_mem.values = make([]types.Value, len(subq_rows), allocator)
 			for ri in 0 ..< len(subq_rows) {
 				if len(subq_rows[ri].values) > 0 {
-					rc.in_subquery_results[ri] = subq_rows[ri].values[0]
+					rc.in_mem.values[ri] = subq_rows[ri].values[0]
 				}
 			}
 		}
@@ -330,6 +336,42 @@ evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Va
 	return false
 }
 
+// membership_test reports whether v is in rc's IN membership. Values hits
+// consult the fingerprint prefilter then verify exactly; Subquery hits scan
+// the materialized results; an unmaterialized subquery executes per row.
+// No membership → false (NULL never matches: it compares unequal to
+// everything, including itself).
+@(private="file")
+membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: types.Value) -> bool {
+	#partial switch rc.in_mem.kind {
+	case .Values:
+		// Prefilter on the fingerprint set; verify hits exactly. A nil set
+		// (hand-built node) falls back to the linear scan.
+		scan := true
+		if rc.in_mem.set != nil {
+			_, scan = rc.in_mem.set[hash_value(v)]
+		}
+		if scan {
+			for c in rc.in_mem.values {
+				if compare_values(v, c) == 0 { return true }
+			}
+		}
+		return false
+	case .Subquery:
+		for c in rc.in_mem.values {
+			if compare_values(v, c) == 0 { return true }
+		}
+		return false
+	}
+	if rc.in_subquery != nil {
+		subq_rows, _ := exec_subquery(schema_tree, rc.in_subquery^)
+		for sr in subq_rows {
+			if len(sr.values) > 0 && compare_values(v, sr.values[0]) == 0 { return true }
+		}
+	}
+	return false
+}
+
 @(private="file")
 evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition, row: []types.Value) -> bool {
 	left_val := row[rc.col_idx]
@@ -343,36 +385,8 @@ evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition,
 		cond_result = compare_condition(left_val, rc.operator, rc.rhs)
 	}
 
-	if rc.has_in && rc.in_values != nil {
-		cond_result = false
-		// Prefilter on the fingerprint set; verify hits exactly. A nil set
-		// (hand-built node) falls back to the linear scan.
-		scan := true
-		if rc.in_set != nil {
-			_, scan = rc.in_set[hash_value(left_val)]
-		}
-		if scan {
-			for v in rc.in_values {
-				if compare_values(left_val, v) == 0 {
-					cond_result = true; break
-				}
-			}
-		}
-	} else if rc.has_in && rc.in_subquery_results != nil {
-		cond_result = false
-		for v in rc.in_subquery_results {
-			if compare_values(left_val, v) == 0 {
-				cond_result = true; break
-			}
-		}
-	} else if rc.has_in && rc.in_subquery != nil {
-		cond_result = false
-		subq_rows, _ := exec_subquery(ctx.schema_tree, rc.in_subquery^)
-		for sr in subq_rows {
-			if len(sr.values) > 0 && compare_values(left_val, sr.values[0]) == 0 {
-				cond_result = true; break
-			}
-		}
+	if rc.has_in {
+		cond_result = membership_test(rc, ctx.schema_tree, left_val)
 	}
 	if rc.negated { cond_result = !cond_result }
 	return cond_result

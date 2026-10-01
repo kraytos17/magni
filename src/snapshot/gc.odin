@@ -2,7 +2,6 @@ package snapshot
 
 import "src:btree"
 import "src:pager"
-import "src:types"
 
 walk_chain_data :: struct {
 	p:         ^pager.Pager,
@@ -56,7 +55,10 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 		live[page] = true
 		if h.manifest_page != 0 { live[h.manifest_page] = true }
 		if h.schema_root != 0 {
-			live[h.schema_root] = true
+			// NOTE: do NOT pre-mark roots before collect_pages. It marks
+			// the root itself and uses presence as its visited guard, so
+			// a pre-marked root returns early and its whole subtree is
+			// lost from the live set (freed while still reachable).
 			t := btree.init(p, h.schema_root)
 			btree.collect_pages(&t, h.schema_root, live)
 			if h.manifest_page != 0 {
@@ -67,8 +69,7 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 				)
 				if load_ok {
 					for i in 0 ..< len(roots) {
-						if roots[i] !=
-						   0 { live[roots[i]] = true; btree.collect_pages(&t, roots[i], live) }
+						if roots[i] != 0 { btree.collect_pages(&t, roots[i], live) }
 					}
 				}
 			}
@@ -100,23 +101,8 @@ sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
 			if pn not_in live^ { pager.free_page(p, pn) }
 		}
 	}
-
-	highest_live: u32
-	for pn, _ in live^ {
-		if pn > highest_live { highest_live = pn }
-	}
-	if highest_live > 0 && highest_live < max_page {
-		new_len := i64(highest_live) * i64(types.PAGE_SIZE)
-		if new_len > 0 { p.file_len = new_len }
-	}
-}
-
-gc :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) {
-	if pager.page_count(p) < GC_MIN_PAGES { return }
-
-	live := make(map[u32]bool, context.temp_allocator)
-	defer delete(live)
-
-	build_live_set(p, latest_page, keep_count, &live)
-	sweep_dead_pages(p, &live)
+	// NOTE: no file truncation here by design. Freed pages recycle through
+	// the freelist; on-disk shrinking of genuinely dead tails (aborted
+	// transactions) is pager.rewind_after_abort, called from rollback with
+	// the allocator truth as its bound.
 }

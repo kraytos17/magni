@@ -5,6 +5,7 @@ package admin
 
 import "core:fmt"
 import "core:sync"
+import "core:time"
 import "src:btree"
 import "src:cell"
 import "src:db"
@@ -104,15 +105,16 @@ list_tables :: proc(database: ^db.Database) -> db.DB_Error {
 
 	st := db.Schema_Tree(database)
 	tables := schema.list_tables(&st, context.temp_allocator)
-	if len(tables) == 0 {
-		fmt.println("No tables found.")
-		return .None
+	cols := []string{"name"}
+	rows := make([][]string, len(tables), context.temp_allocator)
+	for table, i in tables {
+		row := make([]string, 1, context.temp_allocator)
+		row[0] = table.name
+		rows[i] = row
 	}
 
-	fmt.println("Tables:")
-	for table in tables {
-		fmt.printf("  %s\n", table.name)
-	}
+	executor.render_table(cols, rows)
+	fmt.printf("(%d rows)\n", len(tables))
 	return .None
 }
 
@@ -169,18 +171,27 @@ stats :: proc(database: ^db.Database) -> db.DB_Error {
 	defer sync.unlock(&database.mu)
 
 	page_count := pager.page_count(database.pager)
-	fmt.printf("Path: %s\n", database.path)
-	fmt.printf("Page size: %d bytes\n", types.PAGE_SIZE)
-	fmt.printf("Total pages: %d\n", page_count)
-	fmt.printf(
-		"Database size: %d bytes (%.2f KB)\n",
-		page_count * u32(types.PAGE_SIZE),
-		f64(page_count * u32(types.PAGE_SIZE)) / 1024.0,
-	)
-
+	size_bytes := u64(page_count) * u64(types.PAGE_SIZE)
 	st := db.Schema_Tree(database)
 	tables := schema.list_tables(&st, context.temp_allocator)
-	fmt.printf("Total tables: %d\n", len(tables))
+	cols := []string{"property", "value"}
+	rows := [][]string{
+		{"path", database.path},
+		{"page_size", fmt.aprintf("%d", types.PAGE_SIZE, allocator = context.temp_allocator)},
+		{"total_pages", fmt.aprintf("%d", page_count, allocator = context.temp_allocator)},
+		{
+			"database_size",
+			fmt.aprintf(
+				"%d bytes (%.2f KB)",
+				size_bytes,
+				f64(size_bytes) / 1024.0,
+				allocator = context.temp_allocator,
+			),
+		},
+		{"total_tables", fmt.aprintf("%d", len(tables), allocator = context.temp_allocator)},
+	}
+
+	executor.render_table(cols, rows)
 	return .None
 }
 
@@ -247,6 +258,7 @@ print_tree_page :: proc(database: ^db.Database, page_num: u32) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
+
 	st := db.Schema_Tree(database)
 	btree.tree_debug_print_node(&st, page_num)
 	return .None
@@ -255,16 +267,53 @@ print_tree_page :: proc(database: ^db.Database, page_num: u32) -> db.DB_Error {
 print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.rw_mutex_shared_lock(&database.mu)
-	defer sync.rw_mutex_unlock(&database.mu)
+	// NOTE: shared locks must release with shared_unlock. The write unlock
+	// clears only the writer bit and leaks the reader count, which hangs the
+	// next write-lock (e.g. db.close) in sema_wait forever.
+	defer sync.rw_mutex_shared_unlock(&database.mu)
 	if database.latest_snapshot == 0 {
 		fmt.println("No snapshots.")
 		return .None
 	}
 
-	if debug {
-		snapshot.debug_print_chain(database.pager, database.latest_snapshot)
-	} else {
-		snapshot.print_chain(database.pager, database.latest_snapshot)
+	infos := snapshot.chain_infos(
+		database.pager,
+		database.latest_snapshot,
+		context.temp_allocator,
+	)
+
+	cols := []string{"id", "op", "state", "timestamp", "tag"}
+	rows := make([][]string, len(infos), context.temp_allocator)
+	for info, i in infos {
+		row := make([]string, 5, context.temp_allocator)
+		row[0] = fmt.aprintf("%d", info.id, allocator = context.temp_allocator)
+		row[1] = fmt.aprintf("%s", info.operation, allocator = context.temp_allocator)
+		row[2] = fmt.aprintf("%s", info.state, allocator = context.temp_allocator)
+		row[3] = format_snapshot_ts(info.timestamp, context.temp_allocator)
+		row[4] = info.tag
+		rows[i] = row
 	}
+
+	executor.render_table(cols, rows)
+	fmt.printf("(%d rows)\n", len(infos))
 	return .None
+}
+
+// format_snapshot_ts renders unix-microsecond timestamps as UTC wall time.
+// Raw values stay available via .snapshot_debug.
+@(private="file")
+format_snapshot_ts :: proc(micros: u64, allocator := context.allocator) -> string {
+	t := time.unix(i64(micros / 1_000_000), i64(micros % 1_000_000) * 1000)
+	year, month, day := time.date(t)
+	hour, min, sec := time.clock_from_time(t)
+	return fmt.aprintf(
+		"%04d-%02d-%02d %02d:%02d:%02d",
+		year,
+		int(month),
+		day,
+		hour,
+		min,
+		sec,
+		allocator = allocator,
+	)
 }

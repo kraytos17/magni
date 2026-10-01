@@ -96,164 +96,226 @@ is_alpha_byte :: proc(c: byte) -> bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
-	tokens := make([dynamic]Token, 0, len(sql) / 4, allocator)
-	i := 0
-	line := u32(1)
-	for i < len(sql) {
-		c := sql[i]
-		if is_space_byte(c) {
-			if c == '\n' do line += 1
-			i += 1
-			continue
-		}
-		if c == '-' && i + 1 < len(sql) && sql[i + 1] == '-' {
-			for i < len(sql) && sql[i] != '\n' { i += 1 }
-			continue
-		}
-		if c == '/' && i + 1 < len(sql) && sql[i + 1] == '*' {
-			i += 2
-			for i + 1 < len(sql) && !(sql[i] == '*' && sql[i + 1] == '/') {
-				if sql[i] == '\n' { line += 1 }
-				i += 1
-			}
-			if i + 1 >= len(sql) {
-				delete(tokens)
-				return nil, false
-			}
-			i += 2; continue
-		}
-		if c == '\'' {
-			start := i + 1; i += 1; token_line := line
-			for i < len(sql) {
-				if sql[i] == '\'' {
-					if i + 1 < len(sql) && sql[i + 1] == '\'' { i += 2; continue }
-					break
-				}
-				if sql[i] == '\n' { line += 1 }
-				i += 1
-			}
-			if i >= len(sql) { delete(tokens); return nil, false }
+// Lexer holds the scanner cursor over the SQL text. The per-class lex_*
+// scanners below advance it; tokenize dispatches on the leading byte.
+Lexer :: struct {
+	sql:  string,
+	pos:  int,
+	line: u32,
+}
 
-			append(&tokens, Token{.STRING, sql[start:i], token_line})
-			i += 1; continue
+// lex_line_comment consumes a `--` comment to (not past) the newline.
+@(private="file")
+lex_line_comment :: proc(l: ^Lexer) {
+	for l.pos < len(l.sql) && l.sql[l.pos] != '\n' { l.pos += 1 }
+}
+
+// lex_block_comment consumes a `/* ... */` comment. False on unterminated.
+@(private="file")
+lex_block_comment :: proc(l: ^Lexer) -> bool {
+	l.pos += 2
+	for l.pos + 1 < len(l.sql) && !(l.sql[l.pos] == '*' && l.sql[l.pos + 1] == '/') {
+		if l.sql[l.pos] == '\n' { l.line += 1 }
+		l.pos += 1
+	}
+	if l.pos + 1 >= len(l.sql) {
+		return false
+	}
+
+	l.pos += 2
+	return true
+}
+
+// lex_string consumes a quoted string with '' escapes. False on unterminated.
+@(private="file")
+lex_string :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
+	start := l.pos + 1; l.pos += 1; token_line := l.line
+	for l.pos < len(l.sql) {
+		if l.sql[l.pos] == '\'' {
+			if l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '\'' { l.pos += 2; continue }
+			break
 		}
-		if (c == 'X' || c == 'x') && i + 1 < len(sql) && sql[i + 1] == '\'' {
-			start := i + 2; i += 2; token_line := line
-			for i < len(sql) && sql[i] != '\'' {
-				if sql[i] == '\n' { line += 1 }
-				i += 1
-			}
-			if i >= len(sql) { delete(tokens); return nil, false }
+		if l.sql[l.pos] == '\n' { l.line += 1 }
+		l.pos += 1
+	}
+	if l.pos >= len(l.sql) { return false }
 
-			hex_len := i - start
-			if hex_len % 2 != 0 { delete(tokens); return nil, false }
-			for j in start ..< i {
-				if !is_hex_digit(sql[j]) { delete(tokens); return nil, false }
-			}
+	append(tokens, Token{.STRING, l.sql[start:l.pos], token_line})
+	l.pos += 1
+	return true
+}
 
-			append(&tokens, Token{.BLOB_LITERAL, sql[start:i], token_line})
-			i += 1
-			continue
+// lex_blob consumes an X'...' hex literal with even digit count.
+// False on unterminated, odd-length, or non-hex content.
+@(private="file")
+lex_blob :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
+	start := l.pos + 2; l.pos += 2; token_line := l.line
+	for l.pos < len(l.sql) && l.sql[l.pos] != '\'' {
+		if l.sql[l.pos] == '\n' { l.line += 1 }
+		l.pos += 1
+	}
+	if l.pos >= len(l.sql) { return false }
+
+	hex_len := l.pos - start
+	if hex_len % 2 != 0 { return false }
+	for j in start ..< l.pos {
+		if !is_hex_digit(l.sql[j]) { return false }
+	}
+
+	append(tokens, Token{.BLOB_LITERAL, l.sql[start:l.pos], token_line})
+	l.pos += 1
+	return true
+}
+
+// lex_number consumes decimal, 0x hex, float, and exponent forms, including
+// a leading minus. False on a bare 0x with no hex digits.
+@(private="file")
+lex_number :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
+	start := l.pos
+	if l.sql[l.pos] == '-' do l.pos += 1
+	if l.pos + 1 < len(l.sql) && l.sql[l.pos] == '0' && (l.sql[l.pos + 1] | 0x20) == 'x' {
+		l.pos += 2
+		if l.pos >= len(l.sql) || !is_hex_digit(l.sql[l.pos]) {
+			return false
 		}
-		if is_digit_byte(c) ||
-		   (c == '-' && i + 1 < len(sql) && is_digit_byte(sql[i + 1])) {
-			start := i
-			if c == '-' do i += 1
-			// Hex literal: 0xFF, 0xDEAD
-			if i + 1 < len(sql) && sql[i] == '0' && (sql[i + 1] | 0x20) == 'x' {
-				i += 2
-				if i >= len(sql) || !is_hex_digit(sql[i]) {
-					delete(tokens)
-					return nil, false
-				}
-				for i < len(sql) && is_hex_digit(sql[i]) { i += 1 }
-				append(&tokens, Token{.NUMBER, sql[start:i], line}); continue
-			}
+		for l.pos < len(l.sql) && is_hex_digit(l.sql[l.pos]) { l.pos += 1 }
 
-			has_dot := false
-			for i < len(sql) {
-				ch := sql[i]
-				if is_digit_byte(ch) {
-					i += 1
-				} else if ch == '.' && !has_dot {
-					has_dot = true
-					i += 1
-				} else if (ch == 'e' || ch == 'E') && i + 1 < len(sql) {
-					// Only consume exponent if followed by [+-]digit or digit.
-					ep := i + 1
-					if sql[ep] == '+' || sql[ep] == '-' {
-						if ep + 1 < len(sql) && is_digit_byte(sql[ep + 1]) {
-							i = ep + 2
-						} else {
-							break
-						}
-					} else if is_digit_byte(sql[ep]) {
-						i = ep + 1
-					} else {
-						break
-					}
+		append(tokens, Token{.NUMBER, l.sql[start:l.pos], l.line})
+		return true
+	}
 
-					for i < len(sql) && is_digit_byte(sql[i]) { i += 1 }
-					break
+	has_dot := false
+	for l.pos < len(l.sql) {
+		ch := l.sql[l.pos]
+		if is_digit_byte(ch) {
+			l.pos += 1
+		} else if ch == '.' && !has_dot {
+			has_dot = true
+			l.pos += 1
+		} else if (ch == 'e' || ch == 'E') && l.pos + 1 < len(l.sql) {
+			// Only consume exponent if followed by [+-]digit or digit.
+			ep := l.pos + 1
+			if l.sql[ep] == '+' || l.sql[ep] == '-' {
+				if ep + 1 < len(l.sql) && is_digit_byte(l.sql[ep + 1]) {
+					l.pos = ep + 2
 				} else {
 					break
 				}
+			} else if is_digit_byte(l.sql[ep]) {
+				l.pos = ep + 1
+			} else {
+				break
 			}
-			append(&tokens, Token{.NUMBER, sql[start:i], line}); continue
-		}
-		if is_alpha_byte(c) || c == '_' {
-			start := i
-			for i < len(sql) &&
-			    (is_alpha_byte(sql[i]) ||
-					    is_digit_byte(sql[i]) ||
-					    sql[i] == '_') { i += 1 }
 
-			token_type := match_keyword(sql[start:i])
-			append(&tokens, Token{token_type, sql[start:i], line}); continue
-		}
-
-		switch c {
-		case ',':
-			append(&tokens, Token{.COMMA, ",", line}); i += 1
-		case ';':
-			append(&tokens, Token{.SEMICOLON, ";", line}); i += 1
-		case '(':
-			append(&tokens, Token{.LPAREN, "(", line}); i += 1
-		case ')':
-			append(&tokens, Token{.RPAREN, ")", line}); i += 1
-		case '*':
-			append(&tokens, Token{.ASTERISK, "*", line}); i += 1
-		case '=':
-			append(&tokens, Token{.EQUALS, "=", line}); i += 1
-		case '<':
-			if i + 1 < len(sql) && sql[i + 1] == '=' {
-				append(&tokens, Token{.LESS_EQUAL, "<=", line}); i += 2
-			} else if i + 1 < len(sql) && sql[i + 1] == '>' {
-				append(&tokens, Token{.NOT_EQUALS, "<>", line}); i += 2
-			} else {
-				append(&tokens, Token{.LESS_THAN, "<", line}); i += 1
-			}
-		case '>':
-			if i + 1 < len(sql) && sql[i + 1] == '=' {
-				append(&tokens, Token{.GREATER_EQUAL, ">=", line}); i += 2
-			} else {
-				append(&tokens, Token{.GREATER_THAN, ">", line}); i += 1
-			}
-		case '.':
-			append(&tokens, Token{.DOT, ".", line}); i += 1
-		case '!':
-			if i + 1 < len(sql) && sql[i + 1] == '=' {
-				append(&tokens, Token{.NOT_EQUALS, "!=", line}); i += 2
-			} else {
-				delete(tokens); return nil, false
-			}
-		case:
-			delete(tokens); return nil, false
+			for l.pos < len(l.sql) && is_digit_byte(l.sql[l.pos]) { l.pos += 1 }
+			break
+		} else {
+			break
 		}
 	}
 
-	append(&tokens, Token{.EOF, "", line})
+	append(tokens, Token{.NUMBER, l.sql[start:l.pos], l.line})
+	return true
+}
+
+// lex_ident consumes an identifier/keyword word and classifies it.
+@(private="file")
+lex_ident :: proc(l: ^Lexer, tokens: ^[dynamic]Token) {
+	start := l.pos
+	for l.pos < len(l.sql) &&
+	    (is_alpha_byte(l.sql[l.pos]) ||
+			    is_digit_byte(l.sql[l.pos]) ||
+			    l.sql[l.pos] == '_') { l.pos += 1 }
+
+	token_type := match_keyword(l.sql[start:l.pos])
+	append(tokens, Token{token_type, l.sql[start:l.pos], l.line})
+}
+
+// lex_symbol consumes one operator/punctuation token. False on `!` alone
+// and any other unrecognized byte.
+@(private="file")
+lex_symbol :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
+	c := l.sql[l.pos]
+	switch c {
+	case ',':
+		append(tokens, Token{.COMMA, ",", l.line}); l.pos += 1
+	case ';':
+		append(tokens, Token{.SEMICOLON, ";", l.line}); l.pos += 1
+	case '(':
+		append(tokens, Token{.LPAREN, "(", l.line}); l.pos += 1
+	case ')':
+		append(tokens, Token{.RPAREN, ")", l.line}); l.pos += 1
+	case '*':
+		append(tokens, Token{.ASTERISK, "*", l.line}); l.pos += 1
+	case '=':
+		append(tokens, Token{.EQUALS, "=", l.line}); l.pos += 1
+	case '<':
+		if l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '=' {
+			append(tokens, Token{.LESS_EQUAL, "<=", l.line}); l.pos += 2
+		} else if l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '>' {
+			append(tokens, Token{.NOT_EQUALS, "<>", l.line}); l.pos += 2
+		} else {
+			append(tokens, Token{.LESS_THAN, "<", l.line}); l.pos += 1
+		}
+	case '>':
+		if l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '=' {
+			append(tokens, Token{.GREATER_EQUAL, ">=", l.line}); l.pos += 2
+		} else {
+			append(tokens, Token{.GREATER_THAN, ">", l.line}); l.pos += 1
+		}
+	case '.':
+		append(tokens, Token{.DOT, ".", l.line}); l.pos += 1
+	case '!':
+		if l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '=' {
+			append(tokens, Token{.NOT_EQUALS, "!=", l.line}); l.pos += 2
+		} else {
+			return false
+		}
+	case:
+		return false
+	}
+	return true
+}
+
+tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
+	tokens := make([dynamic]Token, 0, len(sql) / 4, allocator)
+	l := Lexer{sql = sql, line = 1}
+	for l.pos < len(l.sql) {
+		c := l.sql[l.pos]
+		if is_space_byte(c) {
+			if c == '\n' do l.line += 1
+			l.pos += 1
+			continue
+		}
+		if c == '-' && l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '-' {
+			lex_line_comment(&l)
+			continue
+		}
+		if c == '/' && l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '*' {
+			if !lex_block_comment(&l) { delete(tokens); return nil, false }
+			continue
+		}
+		if c == '\'' {
+			if !lex_string(&l, &tokens) { delete(tokens); return nil, false }
+			continue
+		}
+		if (c == 'X' || c == 'x') && l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '\'' {
+			if !lex_blob(&l, &tokens) { delete(tokens); return nil, false }
+			continue
+		}
+		if is_digit_byte(c) ||
+		   (c == '-' && l.pos + 1 < len(l.sql) && is_digit_byte(l.sql[l.pos + 1])) {
+			if !lex_number(&l, &tokens) { delete(tokens); return nil, false }
+			continue
+		}
+		if is_alpha_byte(c) || c == '_' {
+			lex_ident(&l, &tokens)
+			continue
+		}
+		if !lex_symbol(&l, &tokens) { delete(tokens); return nil, false }
+	}
+
+	append(&tokens, Token{.EOF, "", l.line})
 	return tokens[:], true
 }
 

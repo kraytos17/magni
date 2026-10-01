@@ -215,7 +215,7 @@ open :: proc(
 	p.wal_state.txn_index = make(map[u32]i64, allocator)
 	p.free_slots = make([dynamic]^Page_Slot, 0, p.max_cache_pages, allocator)
 	p.dirty_pages = make([dynamic]u32, 0, 32, allocator)
-	p.page_format_version = 1
+	p.page_format_version = u32(types.PAGE_FORMAT_VERSION)
 	p.slot_count = 0
 	for i in 0 ..< p.max_cache_pages {
 		append(&p.free_slots, &p.slots[i])

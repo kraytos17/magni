@@ -72,7 +72,6 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 
 				ptr := get_cell_ptr(node.data, page_id, i, node.layout.stride)
 				c, _, ok := cell.deserialize(node.data, int(ptr), cell.Config{zero_copy = true})
-
 				if !ok { continue }
 				if col_index < len(c.values) {
 					if v, is_int := c.values[col_index].(i64); is_int {
@@ -160,16 +159,17 @@ query_skip_index_range :: proc(
 
 	data := pg.data
 	if len(data) < 12 { return 0, 0, false }
+
 	magic := endian.unchecked_get_u32le(data[0:4])
 	if magic != SKIP_FORMAT_MAGIC { return 0, 0, false }
 
 	count := int(endian.unchecked_get_u32le(data[4:8]))
 	if int(endian.unchecked_get_u32le(data[8:12])) != col_index { return 0, 0, false }
+
 	need := 12 + count * size_of(Skip_Entry)
 	if len(data) < need { return 0, 0, false }
 
 	entries := transmute([]Skip_Entry)data[12:need]
-	// hi = last entry with min_int <= val (entries are sorted by min_int).
 	lo, hi := 0, count - 1
 	for lo <= hi {
 		mid := (lo + hi) / 2

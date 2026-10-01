@@ -1,6 +1,5 @@
 package btree
 
-import "core:encoding/endian"
 import "core:mem"
 import "src:cell"
 import "src:util/varint"
@@ -150,14 +149,17 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 
 		info := cell.compute_info(rowids[ri], values[ri])
 		dest_off := int(header.cell_content_offset) - info.total_size
-		if dest_off < off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * 2 {
+		if dest_off < off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * CELL_ENTRY_STRIDE {
 			return
 		}
 
 		cell.serialize(data[dest_off:dest_off + info.total_size], rowids[ri], values[ri], info)
 		header.cell_content_offset = u16le(dest_off)
-		ptr_loc := off + size_of(Leaf_Header) + int(header.cell_count) * 2
-		endian.put_u16(data[ptr_loc:], .Little, u16(dest_off))
+		entry := (^Cell_Entry)(raw_data(data[off + int(size_of(Leaf_Header)) + int(header.cell_count) * CELL_ENTRY_STRIDE:]))
+		entry^ = Cell_Entry {
+			ptr = Cell_Pointer(u16(dest_off)),
+			key = rowids[ri],
+		}
 		header.cell_count = u16le(int(header.cell_count) + 1)
 	}
 }
@@ -186,52 +188,6 @@ detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
 	return n, true
 }
 
-get_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
-	header := get_header(data, page_id)
-	if header == nil { return nil }
-
-	off := get_page_header_offset(page_id)
-	hdr_sz := page_header_size(header.page_type)
-	start := off + hdr_sz
-	if start >= len(data) { return nil }
-
-	max_ptrs := (len(data) - start) / size_of(Cell_Pointer)
-	n := min(int(header.cell_count), max_ptrs)
-	ptr_start := raw_data(data[start:])
-	return ([^]Cell_Pointer)(ptr_start)[:n]
-}
-
-@(private="file")
-get_raw_pointers :: proc(data: []u8, page_id: u32) -> []Cell_Pointer {
-	header := get_header(data, page_id)
-	if header == nil { return nil }
-
-	off := get_page_header_offset(page_id)
-	hdr_sz := page_header_size(header.page_type)
-	start := off + hdr_sz
-	if start >= len(data) { return nil }
-
-	ptr_start := raw_data(data[start:])
-	max_ptrs := (len(data) - start) / size_of(Cell_Pointer)
-	return ([^]Cell_Pointer)(ptr_start)[:max_ptrs]
-}
-
-@(private="file")
-get_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
-	header := get_header(data, page_id)
-	if header == nil { return nil }
-
-	off := get_page_header_offset(page_id)
-	hdr_sz := page_header_size(header.page_type)
-	start := off + hdr_sz
-	if start >= len(data) { return nil }
-
-	max_entries := (len(data) - start) / size_of(Cell_Entry)
-	n := min(int(header.cell_count), max_entries)
-	entry_start := raw_data(data[start:])
-	return ([^]Cell_Entry)(entry_start)[:n]
-}
-
 @(private)
 get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 	header := get_header(data, page_id)
@@ -247,7 +203,6 @@ get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
 	return ([^]Cell_Entry)(entry_start)[:max_entries]
 }
 
-CELL_POINTER_STRIDE :: size_of(Cell_Pointer) // 2
 CELL_ENTRY_STRIDE :: size_of(Cell_Entry) // 10
 
 get_cell_count :: proc(data: []u8, page_id: u32) -> int {
@@ -287,16 +242,12 @@ insert_cell_at :: proc(
 		dst := data[start + (i + 1) * stride:]
 		copy(dst, src)
 	}
+
 	// Write new entry
-	if stride == CELL_ENTRY_STRIDE {
-		entry := (^Cell_Entry)(raw_data(data[start + i * stride:]))
-		entry^ = Cell_Entry {
-			ptr = Cell_Pointer(ptr),
-			key = key,
-		}
-	} else {
-		cell_ptr := (^Cell_Pointer)(raw_data(data[start + i * stride:]))
-		cell_ptr^ = Cell_Pointer(ptr)
+	entry := (^Cell_Entry)(raw_data(data[start + i * stride:]))
+	entry^ = Cell_Entry {
+		ptr = Cell_Pointer(ptr),
+		key = key,
 	}
 }
 

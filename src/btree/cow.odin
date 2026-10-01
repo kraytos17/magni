@@ -37,6 +37,7 @@ relocate_copied_page1 :: proc(page: ^pager.Page, format_version: u32) -> bool {
 		data_sz := types.PAGE_SIZE - SRC_HDR_OFF
 		tmp := make([]u8, data_sz, context.temp_allocator)
 		copy(tmp, page.data[SRC_HDR_OFF:])
+
 		mem.zero_slice(page.data[SRC_HDR_OFF:])
 		copy(page.data[DST_HDR_OFF:], tmp)
 	} else {
@@ -146,7 +147,6 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 		child_id, _ := node_find_child(&node, key, node.layout)
 		child_result, c_err := delete_cow_recursive(t, child_id, key, true)
 		if c_err != .None { return {}, c_err }
-		// Release the child's COW copy pin now that only its page number is used.
 		if child_result.new_page != child_id {
 			pager.unpin_page(t.pager, child_result.new_page)
 		}
@@ -210,7 +210,6 @@ tree_update_cow :: proc(
 		child_id, _ := node_find_child(&node, rowid, node.layout)
 		child_result, c_err := update_recursive(t, child_id, rowid, values, true)
 		if c_err != .None { return {}, c_err }
-		// Release the child's COW copy pin now that only its page number is used.
 		if child_result.new_page != child_id {
 			pager.unpin_page(t.pager, child_result.new_page)
 		}

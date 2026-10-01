@@ -426,7 +426,6 @@ DOT_COMMANDS_PREFIX := []Dot_Command{
 	{".desc ", true, dot_cmd_desc},
 }
 
-@(private="file")
 handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	// ".tree_page" and ".snapdiff" take args but match exactly on the command
 	// word; split off args before the exact lookup.

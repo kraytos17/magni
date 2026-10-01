@@ -153,6 +153,40 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 
 wal_abort_txn :: proc(p: ^Pager) {
 	ws := &p.wal_state
+	// Drop aborted frames from the WAL file (same committed_upto rule as
+	// wal_recover/wal_checkpoint). Otherwise a later checkpoint copies them
+	// to main, resurrecting aborted content and regrowing files that
+	// rollback rewound. A commit marker appended afterwards must not
+	// legitimize them.
+	if ws.file != nil {
+		if file_size, serr := os.file_size(ws.file); serr == nil {
+			committed_upto := i64(types.WAL_HEADER_SIZE)
+			scan := i64(types.WAL_HEADER_SIZE)
+			for scan + types.WAL_FRAME_SIZE <= file_size {
+				fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
+				_, read_err := os.read_at(ws.file, fh_buf[:], scan)
+				if read_err != nil { break }
+
+				fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
+				if u32(fh.db_size_after) != 0 {
+					committed_upto = scan + types.WAL_FRAME_SIZE
+				}
+				scan += types.WAL_FRAME_SIZE
+			}
+
+			drop := make([dynamic]u32, context.temp_allocator)
+			for page_num, fo in ws.page_index {
+				if fo >= committed_upto { append(&drop, page_num) }
+			}
+			for page_num in drop {
+				delete_key(&ws.page_index, page_num)
+			}
+
+			os.truncate(ws.file, committed_upto)
+			ws.write_offset = committed_upto
+		}
+	}
+
 	clear(&ws.txn_index)
 	for page_num in p.dirty_pages {
 		if page_num == 0 { continue }
@@ -160,6 +194,7 @@ wal_abort_txn :: proc(p: ^Pager) {
 			slot.page.dirty = false
 		}
 	}
+
 	clear(&p.dirty_pages)
 	ws.txn_active = false
 }
@@ -226,7 +261,25 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 
 	offset := i64(types.WAL_HEADER_SIZE)
 	frame_count := 0
-	for offset + types.WAL_FRAME_SIZE <= file_size {
+	// First pass: locate the last commit marker (same committed_upto rule
+	// as wal_recover). Frames past it are uncommitted — aborted-txn residue
+	// or in-flight txn pages still authoritative in cache — and must NOT be
+	// copied to main. Copying them resurrects aborted content and regrows
+	// files that rollback rewound.
+	committed_upto := i64(types.WAL_HEADER_SIZE)
+	scan := i64(types.WAL_HEADER_SIZE)
+	for scan + types.WAL_FRAME_SIZE <= file_size {
+		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
+		_, scan_err := os.read_at(ws.file, fh_buf[:], scan)
+		if scan_err != nil { break }
+
+		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
+		if u32(fh.db_size_after) != 0 {
+			committed_upto = scan + types.WAL_FRAME_SIZE
+		}
+		scan += types.WAL_FRAME_SIZE
+	}
+	for offset + types.WAL_FRAME_SIZE <= committed_upto {
 		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
 		_, read_err := os.read_at(ws.file, fh_buf[:], offset)
 		if read_err != nil { break }
@@ -261,6 +314,7 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 	buf: [types.WAL_HEADER_SIZE]u8
 	header := (^WAL_Header)(raw_data(buf[:]))
 	copy(header.magic[:], types.WAL_MAGIC)
+
 	header.format_version = u32le(WAL_FORMAT_VERSION)
 	header.page_size = u32le(types.PAGE_SIZE)
 	header.salt1 = u32le(ws.salt1)
@@ -297,8 +351,6 @@ wal_recover :: proc(p: ^Pager) -> Error {
 		if read_err != nil { break }
 
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
-		// Salt mismatch means this frame belongs to a different WAL generation
-		// (pre-checkpoint-reset). Stop scanning — anything past here is stale.
 		if u32(fh.salt1) != ws.salt1 || u32(fh.salt2) != ws.salt2 { break }
 		if u32(fh.db_size_after) != 0 {
 			committed_upto = offset + types.WAL_FRAME_SIZE
@@ -313,7 +365,6 @@ wal_recover :: proc(p: ^Pager) -> Error {
 		if _, r_err := os.read_at(ws.file, fh_buf[:], offset); r_err != nil { break }
 
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
-		// Verify checksum if present (non-zero)
 		if u32(fh.checksum1) != 0 || u32(fh.checksum2) != 0 {
 			page_buf: [types.PAGE_SIZE]u8
 			_, data_err := os.read_at(ws.file, page_buf[:], offset + types.WAL_FRAME_HEADER_SIZE)
@@ -350,6 +401,7 @@ wal_recover :: proc(p: ^Pager) -> Error {
 
 	new_len := i64(max_page_num) * i64(types.PAGE_SIZE)
 	if new_len > p.file_len { p.file_len = new_len }
+
 	log.infof("WAL: recovery complete, %d frames replayed", len(valid_frames))
 	return .None
 }

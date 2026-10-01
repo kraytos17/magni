@@ -106,22 +106,23 @@ deserialize :: proc(
 	pos := offset
 	_, n, ok_payload := varint.decode(src, pos)
 	if !ok_payload { return {}, 0, false }
-	pos += n
 
+	pos += n
 	rowid_val, n2, ok_rowid := varint.decode(src, pos)
 	if !ok_rowid { return {}, 0, false }
-	pos += n2
 
+	pos += n2
 	header_size, n3, ok_header := varint.decode(src, pos)
 	if !ok_header { return {}, 0, false }
-	pos += n3
 
+	pos += n3
 	header_start := pos
 	serial_types: [types.MAX_COLS]u64
 	serial_count := 0
 	for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
 		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st { return {}, 0, false }
+
 		serial_types[serial_count] = st
 		serial_count += 1
 		pos += n4
@@ -132,7 +133,6 @@ deserialize :: proc(
 	defer if !success && !config.zero_copy {
 		types.values_delete(result_values, alloc)
 	}
-
 	for st_idx in 0 ..< serial_count {
 		st := serial_types[st_idx]
 		content_size, _ := types.serial_type_content_size(st)

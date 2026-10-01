@@ -6,6 +6,7 @@ import "core:encoding/endian"
 import "core:fmt"
 import "core:log"
 import "core:mem"
+import "core:strings"
 import "core:time"
 import "src:pager"
 import "src:types"
@@ -332,16 +333,45 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 	log.debug("======================")
 }
 
-print_chain :: proc(p: ^pager.Pager, start_page: u32) {
-	walk_chain(p, start_page, p, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
-		p := cast(^pager.Pager)data
-		tag := get_tag(p, page)
-		fmt.printf("#%-5d %-8s ts=%d", h.snapshot_id, Snapshot_Operation(h.operation), h.timestamp)
-		if tag != "" { fmt.printf("  [%s]", tag) }
+// Snapshot_Info is one chain link for presentation layers (admin). tag is
+// cloned into allocator: get_tag aliases the (unpinned) page buffer.
+Snapshot_Info :: struct {
+	id:        u64,
+	page:      u32,
+	operation: Snapshot_Operation,
+	state:     Snapshot_State,
+	timestamp: u64, // microseconds since the unix epoch
+	tag:       string,
+}
 
-		fmt.println()
+@(private="file")
+Chain_Collect :: struct {
+	p:     ^pager.Pager,
+	out:   ^[dynamic]Snapshot_Info,
+	alloc: mem.Allocator,
+}
+
+// chain_infos returns newest-first chain links (including ABANDONED ones —
+// callers show state explicitly instead of silently skipping).
+chain_infos :: proc(p: ^pager.Pager, start_page: u32, allocator := context.allocator) -> []Snapshot_Info {
+	out := make([dynamic]Snapshot_Info, allocator)
+	d := Chain_Collect{p, &out, allocator}
+	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
+		d := cast(^Chain_Collect)data
+		append(
+			d.out,
+			Snapshot_Info {
+				id = h.snapshot_id,
+				page = page,
+				operation = Snapshot_Operation(h.operation),
+				state = Snapshot_State(h.state),
+				timestamp = h.timestamp,
+				tag = strings.clone(get_tag(d.p, page), d.alloc),
+			},
+		)
 		return true
 	})
+	return out[:]
 }
 
 // set_header_state modifies the state of a specific snapshot header on a page.

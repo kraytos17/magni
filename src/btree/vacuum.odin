@@ -22,9 +22,13 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 	if e := tree_foreach(t, vacuum_collect_cb, &vc); e != .None {
 		return 0, e
 	}
-	if vc.failed { return 0, .Page_Full }
+	if vc.failed {
+		return 0, .Page_Full
+	}
 	if !vc.leaf_empty {
-		if e := vacuum_finish_leaf(&vc); e != .None { return 0, e }
+		if e := vacuum_finish_leaf(&vc); e != .None {
+			return 0, e
+		}
 	}
 	if len(handles) == 0 {
 		// Empty tree: a single fresh empty leaf is the new root.
@@ -117,6 +121,7 @@ vacuum_collect_cb :: proc(c: ^cell.Cell, ud: rawptr) -> bool {
 		vc.failed = true
 		return false
 	}
+
 	vc.leaf_max = c.rowid
 	return true
 }

@@ -195,7 +195,6 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	c.col_num_cols = 0
 	c.col_rowid_pos = 0
 	n, n_err := node_from_bytes(page_id, page.data, get_layout(c.tree.pager.page_format_version))
-
 	if n_err != .None { return {}, n_err }
 
 	c.cached_cell_count = u16(n.header.cell_count)
@@ -296,7 +295,6 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 	if actual_alloc.procedure == nil {
 		actual_alloc = context.allocator
 	}
-	// Columnar page: decode the current row incrementally
 	if is_columnar(node.data, item.page_id) {
 		num_cols, found := detect_columnar_col_count(node.data, item.page_id)
 		if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }

@@ -161,7 +161,6 @@ node_insert_leaf_cell :: proc(
 	header_size := page_header_size(n.header.page_type)
 	entry_sz := n.layout.stride
 	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * entry_sz
-
 	if ptr_area_end >= int(n.header.cell_content_offset) { return .Page_Full }
 	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end {
 		return .Page_Full
@@ -303,8 +302,6 @@ insert_into_interior :: proc(
 	was_rightmost := child_idx == -1
 	child_result, c_err := insert_recursive(t, child_id, rowid, values, cow)
 	if c_err != .None { return {}, c_err }
-	// The recursion pinned the child's COW copy; release it now that this node
-	// only needs its page number (pins are transient access, not ownership).
 	if cow && child_result.new_page != child_id {
 		pager.unpin_page(t.pager, child_result.new_page)
 	}
@@ -430,11 +427,11 @@ rowid_exists :: proc(
 	target_rowid: types.Row_ID,
 	layout: ^Cell_Layout,
 ) -> bool {
-	pointers := get_pointers(data, page_id)
+	cell_count := get_cell_count(data, page_id)
 	idx, ok := leaf_lower_bound(data, page_id, target_rowid, layout)
-	if !ok || idx >= len(pointers) { return false }
+	if !ok || idx >= cell_count { return false }
 
-	rowid, ok2 := cell.get_rowid(data, int(pointers[idx]))
+	rowid, ok2 := cell.get_rowid(data, int(get_cell_ptr(data, page_id, idx, layout.stride)))
 	return ok2 && rowid == target_rowid
 }
 
@@ -799,6 +796,7 @@ foreach_recursive :: proc(
 tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 	node, err := load_node(t, page_id)
 	if err != .None { log.debugf("Error reading page %d", page_id); return }
+
 	log.debugf(
 		"Page %d (type=%v, cells=%d, off=%d, frag=%d)",
 		page_id,

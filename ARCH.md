@@ -585,20 +585,16 @@ execute(db, sql):
 
 #### 3f. Page Format Versioning — `btree/format.odin`
 
-A format registry supports up to 64 concurrent page layout versions:
+Cell layout is v2-only: 10-byte `Cell_Entry` values with an embedded 8-byte key,
+read directly with no body decode. The legacy v1 layout (2-byte `Cell_Pointer`
+offsets, keys decoded from the cell body) was removed; the layout registry
+retains its shape for a future v3.
 
-| Version | Cell pointer | Key decoding | Compat |
-|---------|-------------|--------------|--------|
-| v1 (legacy) | 2-byte `Cell_Pointer` (SQLite-compatible `u16le` offset) | Key decoded from cell body | Existing databases |
-| v2 (current) | 10-byte `Cell_Entry` with embedded 8-byte key | Key read from entry directly — no body decode | New databases |
-
-`page_format_version` is a **database-wide** value stored in the database header and applied to
-every page via `get_layout(pager.page_format_version)`. New databases are created with v2
-(`PAGE_FORMAT_VERSION :: 2`); existing databases retain whatever version is stored in their
-header. There is **no automatic v1→v2 migration**: a v1 database opened for writing stays v1
-(the header version is never bumped on write). The pager initializes `page_format_version` to
-`1`; `db.open` overrides it to `PAGE_FORMAT_VERSION` for new databases or reads it from the
-header for existing ones.
+`page_format_version` is a **database-wide** value stored in the database header
+(`PAGE_FORMAT_VERSION :: 2`). New databases are created with v2; the pager
+defaults to v2. Files stamped with any other version are rejected at open with
+`DB_Error.Unsupported_Format` (clean error, never a crash) — export with
+`.dump` under an older binary and reimport to migrate.
 
 #### 3g. Columnar Page Format — `cell/columnar.odin`
 
@@ -778,12 +774,12 @@ pointer. A rollforward log ring buffer (64 entries) tracks previous ref position
 gc(pager, latest_page, keep_count):
   live = {page_1}
   walk chain backward from latest_page for keep_count:
-    live += snapshot_page, manifest_page, schema_root
+    live += snapshot_page, manifest_page
+    btree.collect_pages(schema_root) → live += root + all sub-pages
     for each table root in manifest:
-      live += root
-      btree.collect_pages(root) → live += all sub-pages
-      if table has skip index: live += skip_index_root
-                                btree.collect_pages(skip_index_root)
+      btree.collect_pages(root) → live += root + all sub-pages
+      if table has skip index:
+        btree.collect_pages(skip_index_root)
   sweep:
     if page_bitmap exists:
       for each 64-bit word in bitmap:
@@ -792,11 +788,41 @@ gc(pager, latest_page, keep_count):
     else:
       for every page from 2..max_page:
         if page not in live: free
-  truncate file_len to highest live page
 ```
 
-After GC, the page bitmap is updated and `file_len` is truncated to the highest live
-page, shrinking the scan range for subsequent GC passes.
+Invariants (violations caused data loss / freelist corruption before the fix,
+see `test_gc_reclaims_cow_waste`):
+
+- Never pre-mark a root in `live` before `collect_pages`: it uses presence
+  as its visited guard, so a pre-marked root returns early and its subtree
+  is freed while still reachable.
+- `free_page` must persist the freelist link (next pointer + WAL frame) even
+  when the page is not cached; `alloc_from_freelist` reads WAL-first and
+  treats an out-of-range link as end-of-list.
+
+After GC the freelist is repopulated and later writes reuse it. Sweep never
+truncates the file: with append-COW allocation the live set almost always
+reaches the file top (measured `tail_dead=0` on bulk-load fixtures), so
+truncate-to-high-water reclaims nothing in steady state — middle holes are
+the norm and the freelist is their reclamation path.
+
+On-disk shrinking happens exactly once: rollback. Aborted transactions
+abandon their tail pages (never snapshotted, unreachable after roots
+restore), so `rollback_impl` persists the rewind via
+`pager.rewind_after_abort` (drop unpinned cache copies past the cut without
+writeback, clear tail bitmap bits, reset freelist head, `os.truncate` +
+`os.sync`, update `file_len`). Fail-closed: a pinned page past the cut or
+any I/O error leaves the file at its old size.
+
+Two companion guarantees make this crash-safe:
+
+- `wal_checkpoint` and `wal_abort_txn` copy/drop WAL frames only up to the
+  last commit marker (same `committed_upto` rule as `wal_recover`). Without
+  this, a checkpoint after rollback would copy aborted frames to main and
+  regrow the rewound file (observed: reopen footprint mismatch).
+- `db.open` self-heals a freelist head past EOF back to 0 (leaked space
+  until the next GC rebuilds it; links are validated on use, so it can
+  never misread). Covers the truncate→header-write crash window.
 
 ---
 
@@ -1016,20 +1042,34 @@ context.allocator)`).
 | `.exit` / `.quit` | Exit | `handle_dot_command` returns `true` |
 | `.help` | Show help | `print_help()` |
 | `.version` | Print version | `APP_VERSION` |
-| `.tables` | List tables | `db.list_tables()` |
-| `.schema` | Show DDL | `db.print_schema()` |
-| `.debug_schema` | Show verbose schema dump | `db.print_schema_debug()` |
-| `.tree_page <n>` | Print B-tree page structure | `db.print_tree_page()` |
-| `.dump <table>` | Dump rows | `db.dump_table()` |
-| `.desc <table>` | Describe columns | `db.describe_table()` |
-| `.stats` | DB statistics | `db.stats()` |
-| `.integrity` | Verify B-trees | `db.integrity_check()` |
-| `.checkpoint` | Flush + GC | `db.checkpoint()` |
-| `.snapshots` | Show chain | `db.print_snapshots()` |
+| `.tables` | List tables | `admin.list_tables()` |
+| `.schema` | Show DDL | `admin.print_schema()` → `schema.print_ddl()` |
+| `.debug_schema` | Show verbose schema dump | `admin.print_schema(debug)` → `schema.debug_print_all()` |
+| `.tree_page <n>` | Print B-tree page structure | `admin.print_tree_page()` (debug dump) |
+| `.dump <table>` | Dump rows | `admin.dump_table()` |
+| `.desc <table>` | Describe columns | `admin.describe_table()` |
+| `.stats` | DB statistics | `admin.stats()` |
+| `.integrity` | Verify B-trees | `admin.integrity_check()` |
+| `.checkpoint` | Flush + GC | `admin.checkpoint()` |
+| `.snapshots` | Show chain | `admin.print_snapshots()` ← `snapshot.chain_infos()` |
 | `.snapdiff <a> <b>` | Diff snapshots | `db.snapshot_diff()` |
 | `.snapshot tag <id> <lbl>` | Tag snapshot | `db.snapshot_tag()` |
 | `.snapshot restore <id>` | Restore | `db.snapshot_restore()` |
 | `.rollforward` | Advance to latest snapshot | `db.rollforward()` |
 | `.expire [keep]` | Expire old snapshots (default 20) | `db.expire_snapshots()` |
 | `.begin` / `.commit` / `.rollback` | Transaction control | `db.begin/commit/rollback()` |
-| `.snapshot_debug` | Verbose snapshot chain dump | `db.print_snapshot_debug()` |
+| `.snapshot_debug` | Verbose snapshot chain dump | `admin.print_snapshots(debug)` (stderr) |
+
+Output dialect: every tabular result (SELECT, `.snapshots`, `.snapdiff`,
+`.tables`, `.stats`, `.desc`, `.dump`) renders through the single shared
+`executor.render_table` markdown printer with an `(N rows)` footer; empty
+results print the header plus `(0 rows)`. Snapshot timestamps render as
+`YYYY-MM-DD HH:MM:SS` (raw micros stay in `.snapshot_debug`). Results go to
+stdout; diagnostics and errors go to stderr (the file logger) — never mixed.
+
+Dot-commands are dispatched by the shared `handle_dot_command` in every mode
+(REPL, `--eval`, `--file`, piped stdin): a dot-command is exactly one trimmed
+input line and `.exit`/`.quit` stops script processing. (Previously script
+modes sent dot lines to the SQL parser, where they died silently as
+`Parse_Error` — maintenance ops like `.expire` were unreachable outside the
+REPL.)

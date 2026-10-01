@@ -46,7 +46,6 @@ interior_lower_bound :: proc(
 	return left, true
 }
 
-
 @(private="file")
 find_interior_insert_index :: proc(
 	data: []u8,
