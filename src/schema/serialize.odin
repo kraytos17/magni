@@ -173,11 +173,13 @@ deserialize_value_from_blob :: proc(
 		return types.value_int(i64(val)), true
 	case 2:
 		if offset^ + 8 > len(src) { return {}, false }
+
 		val, _ := endian.get_f64(src[offset^:], .Big)
 		offset^ += 8
 		return types.value_real(val), true
 	case 3:
 		if offset^ + 4 > len(src) { return {}, false }
+
 		len_val, _ := endian.get_u32(src[offset^:], .Little)
 		offset^ += 4
 		if offset^ + int(len_val) > len(src) { return {}, false }
@@ -187,11 +189,12 @@ deserialize_value_from_blob :: proc(
 		return types.value_text(strings.clone(str_val, allocator)), true
 	case 4:
 		if offset^ + 4 > len(src) { return {}, false }
+
 		len_val, _ := endian.get_u32(src[offset^:], .Little)
 		offset^ += 4
 		if offset^ + int(len_val) > len(src) { return {}, false }
-		blob := make([]u8, int(len_val), allocator)
 
+		blob := make([]u8, int(len_val), allocator)
 		copy(blob, src[offset^:offset^ + int(len_val)])
 		offset^ += int(len_val)
 		return types.value_blob(blob), true

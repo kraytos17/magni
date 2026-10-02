@@ -1,6 +1,5 @@
 package executor
 
-import "core:fmt"
 import "core:strings"
 import "src:btree"
 import "src:parser"
@@ -12,6 +11,7 @@ execute :: proc(
 	stmt: parser.Statement,
 	out: ^Result = nil,
 	cache: ^schema.Table_Cache = nil,
+	pending: ^Pending_Roots = nil,
 ) -> (
 	ok: bool,
 	new_schema_root: u32,
@@ -22,9 +22,12 @@ execute :: proc(
 	case parser.Create_Stmt:
 		ok, new_root, mutated = exec_create(schema_tree, s, stmt.sql)
 		schema_tree.root = new_root
+		// Immediate publish bumps the root and wipes staged overlays —
+		// re-apply them onto the fresh generation.
+		if ok && pending != nil { pending_reoverlay(schema_tree, pending, cache) }
 		return ok, new_root, mutated
 	case parser.Insert_Stmt:
-		ok, new_root, mutated = exec_insert_cow(schema_tree, s, cache)
+		ok, new_root, mutated = exec_insert_cow(schema_tree, s, cache, pending)
 		schema_tree.root = new_root
 		return ok, new_root, mutated
 	case parser.Select_Stmt:
@@ -46,16 +49,22 @@ execute :: proc(
 		}
 		return q_ok, schema_tree.root, {}
 	case parser.Update_Stmt:
-		ok, new_root, mutated = exec_update_cow(schema_tree, s, cache)
+		ok, new_root, mutated = exec_update_cow(schema_tree, s, cache, pending)
 		schema_tree.root = new_root
 		return ok, new_root, mutated
 	case parser.Delete_Stmt:
-		ok, new_root, mutated = exec_delete_cow(schema_tree, s, cache)
+		ok, new_root, mutated = exec_delete_cow(schema_tree, s, cache, pending)
 		schema_tree.root = new_root
 		return ok, new_root, mutated
 	case parser.Drop_Stmt:
 		ok, new_root, mutated = exec_drop(schema_tree, s)
 		schema_tree.root = new_root
+		// A dropped table must never be resurrected by the COMMIT flush;
+		// other staged tables re-overlay onto the fresh generation.
+		if ok && pending != nil {
+			pending_drop(pending, s.table_name)
+			pending_reoverlay(schema_tree, pending, cache)
+		}
 		return ok, new_root, mutated
 	case parser.Explain_Stmt:
 		if out != nil {
@@ -92,20 +101,11 @@ render_result :: proc(out: Result) {
 	for c, i in cols { header[i] = c.name }
 
 	table_rows := make([dynamic][]string, context.temp_allocator)
-	row_count := 0
 	for entry in out.rows {
 		// Defensive: a producer bug yielding a short row must never panic
 		// the renderer — skip it instead.
 		if len(entry.values) != len(cols) { continue }
-		row_strs := make([]string, len(cols), context.temp_allocator)
-		for i in 0 ..< len(cols) {
-			row_strs[i] = types.value_to_string(entry.values[i])
-		}
-
-		append(&table_rows, row_strs)
-		row_count += 1
+		append(&table_rows, stringify_row(entry.values, context.temp_allocator))
 	}
-
-	render_table(header, table_rows[:])
-	fmt.printf("(%d rows)\n", row_count)
+	render_counted(header, table_rows[:])
 }

@@ -108,9 +108,9 @@ the conventions contributors must uphold.
    (insert/update/delete) or split triggers `ensure_row_major()` conversion back to row format.
 
 8. **Page format versioning** — A format registry (up to 64 versions) decouples page layout from
-   code. v1 uses SQLite-compatible 2-byte cell pointers; v2 uses 10-byte cell entries with
-   embedded 8-byte key, eliminating key re-decoding. Existing files remain readable regardless
-   of version.
+   code. Only v2 is registered: 10-byte cell entries with embedded 8-byte key, eliminating key
+   re-decoding. v1 files (SQLite-compatible 2-byte cell pointers) and the old single-header
+   snapshot layout are rejected at open with `.Unsupported_Format` — no migration, by policy.
 
 9. **Auto-built skip indexes** — When a table scan encounters `WHERE col = <int>` without an
    existing skip index, one is automatically built mapping integer value ranges to page ranges.

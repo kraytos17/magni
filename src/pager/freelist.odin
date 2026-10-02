@@ -51,9 +51,6 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 	}
 
 	next_free := (^u32)(raw_data(slot._data_buf[:]))^
-	// Validate the link: a torn/foreign pointer must end the list, never
-	// hand out an out-of-range page. (Heals DBs written by the old
-	// non-cached free path, which left stale content as links.)
 	max_page := u32(p.file_len / i64(p.page_size))
 	if next_free == free_page_num || next_free > max_page + 1 { next_free = 0 }
 
@@ -79,27 +76,16 @@ alloc_from_freelist :: proc(p: ^Pager) -> (^Page, Error) {
 rewind_after_abort :: proc(p: ^Pager, new_page_count: u32) -> (rewound: bool, err: Error) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	max_page := u32(p.file_len / i64(p.page_size))
-	if new_page_count >= max_page || new_page_count < 1 { return false, .None }
-
-	// Drop cached copies past the cut WITHOUT writeback: unreachable by
-	// construction (roots restored, WAL txn aborted). A pinned page past
-	// the cut contradicts that — abort instead of destroying it.
+	if new_page_count >= max_page || new_page_count < 1 {
+		return false, .None
+	}
 	for i in 0 ..< len(p.slots) {
 		slot := &p.slots[i]
 		pn := slot.page.page_num
 		if pn == 0 || pn <= new_page_count { continue }
 		if slot.page.pin_count > 0 { return false, .None }
-		cache_delete(p, pn)
-		if p.on_evict != nil { p.on_evict(p.stats, pn) }
-		slot.page = {}
-		slot.page.data = nil
-		slot.referenced = false
-		p.slot_count -= 1
-		append(&p.free_slots, slot)
+		evict_slot(p, slot, false)
 	}
-
-	// Bits for the abandoned tail: freed ones already clear; the rest
-	// (aborted-txn pages) clear here. No I/O involved.
 	for pn := new_page_count + 1; pn <= max_page; pn += 1 {
 		bit_array.unset(&p.page_bitmap, pn, p.allocator)
 	}
@@ -107,6 +93,7 @@ rewind_after_abort :: proc(p: ^Pager, new_page_count: u32) -> (rewound: bool, er
 	p.first_free_page = 0
 	new_len := i64(new_page_count) * i64(p.page_size)
 	if terr := os.truncate(p.file, new_len); terr != nil { return false, .IO_Error }
+
 	p.file_len = new_len
 	if serr := os.sync(p.file); serr != nil { return true, .IO_Error }
 	return true, .None
@@ -137,13 +124,11 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 
 	(^u32)(raw_data(slot._data_buf[:]))^ = p.first_free_page
 	slot.page.dirty = true
-
 	wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
-	cache_delete(p, page_num)
-	if p.on_evict != nil { p.on_evict(p.stats, page_num) }
-
-	slot.page.page_num = 0; slot.page.data = nil; p.slot_count -= 1
-	append(&p.free_slots, slot)
+	// Link frame already written above, so drop without a second writeback.
+	// evict_slot fully resets the slot (old code left dirty=true, which
+	// would make the next mark_slot_dirty skip dirty_pages tracking).
+	evict_slot(p, slot, false)
 	p.first_free_page = page_num
 	bit_array.unset(&p.page_bitmap, page_num, p.allocator)
 }

@@ -212,6 +212,7 @@ try_parse_between :: proc(
 	children := make([dynamic]^Where_Node, allocator)
 	append(&children, left)
 	append(&children, right)
+
 	node = new(Where_Node, allocator)
 	node^ = Where_Node{kind = kind, children = children}
 	return node, .Parsed

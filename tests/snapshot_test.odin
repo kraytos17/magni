@@ -492,3 +492,27 @@ test_snapshot_set_header_state :: proc(t: ^testing.T) {
 	bad := snapshot.set_header_state(p, p3, 999, .ABANDONED)
 	testing.expect(t, !bad, "set_header_state on nonexistent id fails")
 }
+
+@(test)
+test_headers_on_page_dispatch :: proc(t: ^testing.T) {
+	// Boundary semantics of the shared format dispatch: 1..MAX is packed,
+	// 0 / MAX+1 / garbage-magic counts are the old single-header layout.
+	context.logger.lowest_level = .Error
+	buf: [types.PAGE_SIZE]u8
+
+	testing.expect(t, snapshot.headers_on_page(buf[:]) == nil, "count 0 is old layout")
+
+	buf[0] = 1
+	one := snapshot.headers_on_page(buf[:])
+	testing.expect(t, one != nil && len(one) == 1, "count 1 gives 1 header")
+
+	buf[0] = 100 // MAX_HEADERS_PER_PAGE
+	full := snapshot.headers_on_page(buf[:])
+	testing.expect(t, full != nil && len(full) == 100, "count MAX gives MAX headers")
+
+	buf[0] = 101 // MAX_HEADERS_PER_PAGE + 1
+	testing.expect(t, snapshot.headers_on_page(buf[:]) == nil, "count MAX+1 is old layout")
+
+	copy(buf[:4], "MAGN") // old-format magic reads as a huge count
+	testing.expect(t, snapshot.headers_on_page(buf[:]) == nil, "magic garbage is old layout")
+}

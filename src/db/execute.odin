@@ -5,6 +5,7 @@ import "src:btree"
 import "src:executor"
 import "src:pager"
 import "src:parser"
+import "src:schema"
 import "src:snapshot"
 import "src:types"
 
@@ -38,8 +39,11 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 	}
 
 	result: executor.Result
-	exec_ok, new_root, _ := executor.execute(&st, stmt, &result, &db.table_cache)
-	if !ctx.as_of_override && !ctx.is_read {
+	// Inside an explicit txn DML stages roots instead of publishing; DDL
+	// still publishes immediately (its own path).
+	pending := &db.txn_pending if db.txn_state == .Active else nil
+	exec_ok, new_root, _ := executor.execute(&st, stmt, &result, &db.table_cache, pending)
+	if !ctx.as_of_override && !ctx.is_read && !stmt_defers_root(db, stmt) {
 		db.schema_root_page = new_root
 		update_header(db)
 	}
@@ -61,6 +65,18 @@ Exec_Ctx :: struct {
 	is_read:        bool,
 	as_of_override: bool,
 	snap_op:        snapshot.Snapshot_Operation,
+}
+
+// stmt_defers_root reports whether a statement's schema-root publication is
+// staged in-txn (DML). DDL publishes immediately even inside a txn so later
+// statements resolve the new structure.
+@(private="file")
+stmt_defers_root :: proc(db: ^Database, stmt: parser.Statement) -> bool {
+	if db.txn_state != .Active { return false }
+	_, is_ins := stmt.type.(parser.Insert_Stmt)
+	_, is_upd := stmt.type.(parser.Update_Stmt)
+	_, is_del := stmt.type.(parser.Delete_Stmt)
+	return is_ins || is_upd || is_del
 }
 
 // stmt_is_read reports whether a statement takes the shared (read) lock.
@@ -198,6 +214,11 @@ resolve_as_of :: proc(db: ^Database, st: ^btree.Tree, sel: parser.Select_Stmt) -
 			return false, .Snapshot_Failed
 		}
 
+		// The cache may hold an in-txn overlay staged against this exact
+		// root (pending content, not committed content). AS OF wants
+		// committed history — drop the generation so the table re-resolves
+		// from the snapshot's tree. Rare path; a cold schema re-read is fine.
+		schema.table_cache_clear(&db.table_cache)
 		st.root = snap_h.schema_root
 		return true, .None
 	} else if ts_val, has_ts := sel.as_of_timestamp.?; has_ts {
@@ -206,6 +227,7 @@ resolve_as_of :: proc(db: ^Database, st: ^btree.Tree, sel: parser.Select_Stmt) -
 			return false, .Snapshot_Not_Found
 		}
 
+		schema.table_cache_clear(&db.table_cache)
 		st.root = snap_h.schema_root
 		return true, .None
 	}

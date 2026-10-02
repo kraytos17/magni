@@ -38,6 +38,20 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 	defer sync.unlock(&database.mu)
 
 	st := db.Schema_Tree(database)
+	// In-txn staged roots must be published before the rebuild reads them:
+	// vacuum resolves tables from the committed schema tree and would
+	// otherwise rebuild (and clobber) pre-txn roots.
+	if len(database.txn_pending.roots) > 0 {
+		for name, root in database.txn_pending.roots {
+			nr, ok := schema.update_root_page_cow(&st, name, root)
+			if !ok {
+				return .Corrupted
+			}
+			st.root = nr
+		}
+		database.schema_root_page = st.root
+		executor.pending_clear(&database.txn_pending)
+	}
 	tables := schema.list_tables(&st, context.temp_allocator)
 	new_root := st.root
 	for table in tables {
@@ -108,13 +122,10 @@ list_tables :: proc(database: ^db.Database) -> db.DB_Error {
 	cols := []string{"name"}
 	rows := make([][]string, len(tables), context.temp_allocator)
 	for table, i in tables {
-		row := make([]string, 1, context.temp_allocator)
-		row[0] = table.name
-		rows[i] = row
+		rows[i] = executor.row_of(context.temp_allocator, table.name)
 	}
 
-	executor.render_table(cols, rows)
-	fmt.printf("(%d rows)\n", len(tables))
+	executor.render_counted(cols, rows)
 	return .None
 }
 
@@ -152,16 +163,17 @@ describe_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Erro
 
 		pk_str := "yes" if col.pk else ""
 		nn_str := "no" if col.not_null else ""
-		row := make([]string, 5, context.temp_allocator)
-		row[0] = col.name
-		row[1] = fmt.aprintf("%s", col.type, allocator = context.temp_allocator)
-		row[2] = pk_str
-		row[3] = nn_str
-		row[4] = def
-		table_rows[i] = row
+		table_rows[i] = executor.row_of(
+			context.temp_allocator,
+			col.name,
+			fmt.aprintf("%s", col.type, allocator = context.temp_allocator),
+			pk_str,
+			nn_str,
+			def,
+		)
 	}
 
-	executor.render_table(cols, table_rows)
+	executor.render_counted(cols, table_rows)
 	return .None
 }
 
@@ -216,7 +228,6 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	for i in 0 ..< len(table.columns) { cols[i] = table.columns[i].name }
 
 	table_rows := make([dynamic][]string, context.temp_allocator)
-	row_count := 0
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		defer cell.destroy(&c, context.temp_allocator)
@@ -225,18 +236,11 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 			continue
 		}
 
-		row_strs := make([]string, len(c.values), context.temp_allocator)
-		for vi in 0 ..< len(c.values) {
-			row_strs[vi] = types.value_to_string(c.values[vi], context.temp_allocator)
-		}
-
-		append(&table_rows, row_strs)
+		append(&table_rows, executor.stringify_row(c.values, context.temp_allocator))
 		btree.cursor_advance(&cursor)
-		row_count += 1
 	}
 
-	executor.render_table(cols, table_rows[:])
-	fmt.printf("(%d rows)\n", row_count)
+	executor.render_counted(cols, table_rows[:])
 	return .None
 }
 
@@ -285,17 +289,17 @@ print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 	cols := []string{"id", "op", "state", "timestamp", "tag"}
 	rows := make([][]string, len(infos), context.temp_allocator)
 	for info, i in infos {
-		row := make([]string, 5, context.temp_allocator)
-		row[0] = fmt.aprintf("%d", info.id, allocator = context.temp_allocator)
-		row[1] = fmt.aprintf("%s", info.operation, allocator = context.temp_allocator)
-		row[2] = fmt.aprintf("%s", info.state, allocator = context.temp_allocator)
-		row[3] = format_snapshot_ts(info.timestamp, context.temp_allocator)
-		row[4] = info.tag
-		rows[i] = row
+		rows[i] = executor.row_of(
+			context.temp_allocator,
+			fmt.aprintf("%d", info.id, allocator = context.temp_allocator),
+			fmt.aprintf("%s", info.operation, allocator = context.temp_allocator),
+			fmt.aprintf("%s", info.state, allocator = context.temp_allocator),
+			format_snapshot_ts(info.timestamp, context.temp_allocator),
+			info.tag,
+		)
 	}
 
-	executor.render_table(cols, rows)
-	fmt.printf("(%d rows)\n", len(infos))
+	executor.render_counted(cols, rows)
 	return .None
 }
 

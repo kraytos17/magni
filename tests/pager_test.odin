@@ -835,3 +835,37 @@ test_wal_abort_skips_pinned_pages :: proc(t: ^testing.T) {
 	testing.expect(t, pager.page_in_cache(p, pg.page_num), "pinned page survives abort")
 	pager.unpin_page(p, pg.page_num)
 }
+
+@(test)
+test_free_page_slot_reusable_tracks_dirty :: proc(t: ^testing.T) {
+	// evict_slot must fully reset a freed slot: the old free_page path left
+	// dirty=true on the pooled slot, so the next mark_slot_dirty saw it as
+	// already-dirty and skipped dirty_pages tracking — the reused page
+	// would never commit its image to WAL.
+	context.logger.lowest_level = .Error
+	p, file := create_test_pager_env(t, "free_reuse_dirty")
+	defer destroy_test_pager_env(p, file)
+
+	_, err1 := pager.allocate_page(p)
+	testing.expect(t, err1 == .None, "alloc 1 failed")
+	pg2, err2 := pager.allocate_page(p)
+	testing.expect(t, err2 == .None, "alloc 2 failed")
+	pn := pg2.page_num
+	testing.expect(t, pn > 1, "test page should be > 1")
+	pager.unpin_page(p, 1)
+	pager.unpin_page(p, pn)
+
+	pager.free_page(p, pn)
+	// Simulate a commit boundary so reuse must re-track dirtiness.
+	clear(&p.dirty_pages)
+
+	pg3, err3 := pager.allocate_page(p)
+	testing.expect(t, err3 == .None, "realloc failed")
+	testing.expect_value(t, pg3.page_num, pn)
+	found := false
+	for d in p.dirty_pages {
+		if d == pn { found = true; break }
+	}
+	testing.expect(t, found, "reused page must be tracked in dirty_pages")
+	pager.unpin_page(p, pn)
+}

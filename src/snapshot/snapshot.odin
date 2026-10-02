@@ -67,6 +67,24 @@ snapshot_state_from_u8 :: proc(v: u8) -> Snapshot_State {
 TAG_OFFSET :: HEADER_PREFIX_SIZE + MAX_HEADERS_PER_PAGE * size_of(Snapshot_Header)
 TAG_SIZE :: 64
 
+// headers_on_page returns the packed header slice when data holds the packed
+// format (leading count in 1..MAX_HEADERS_PER_PAGE), or nil for the old
+// single-header layout. The single decode rule for both layouts lives here so
+// the seven call sites can never fork it again. The slice aliases the page
+// buffer: callers must hold the page pin while using it. Short buffers that
+// cannot hold count headers read as nil (old layout), never a slice panic.
+headers_on_page :: proc(data: []u8) -> []Snapshot_Header {
+	count := int(endian.unchecked_get_u32le(data[:4]))
+	if count > 0 && count <= MAX_HEADERS_PER_PAGE {
+		end := HEADER_PREFIX_SIZE + count * size_of(Snapshot_Header)
+		if len(data) >= end {
+			headers := transmute([]Snapshot_Header)data[HEADER_PREFIX_SIZE:end]
+			return headers[:count]
+		}
+	}
+	return nil
+}
+
 // Snapshot_Query selects one chain link by id or by timestamp. The match
 // condition travels as data (not a closure) because walk callbacks are
 // proc literals and cannot capture locals.
@@ -105,10 +123,10 @@ create :: proc(
 	if prev_snapshot != 0 {
 		pg, pg_err := pager.get_page(p, prev_snapshot)
 		if pg_err == .None {
-			count := int(endian.unchecked_get_u32le(pg.data[:4]))
-			if count > 0 && count < MAX_HEADERS_PER_PAGE {
-				offset := HEADER_PREFIX_SIZE + count * size_of(Snapshot_Header)
-				h := (^Snapshot_Header)(raw_data(pg.data[offset:]))
+			// Room check composes on the shared dispatch: a full page
+			// (len == MAX) falls through to a fresh page below.
+			if hdrs := headers_on_page(pg.data); hdrs != nil && len(hdrs) < MAX_HEADERS_PER_PAGE {
+				h := (^Snapshot_Header)(raw_data(pg.data[HEADER_PREFIX_SIZE + len(hdrs) * size_of(Snapshot_Header):]))
 				copy(h.magic[:], SNAPSHOT_MAGIC)
 				h.snapshot_id = snapshot_id
 				h.timestamp =
@@ -119,9 +137,8 @@ create :: proc(
 				h.state = u8(Snapshot_State.COMMITTED)
 				h.operation = u8(operation)
 				// prev_snapshot inherits from the first header on this page
-				first := (^Snapshot_Header)(raw_data(pg.data[HEADER_PREFIX_SIZE:]))
-				h.prev_snapshot = first.prev_snapshot
-				endian.unchecked_put_u32le(pg.data[:4], u32(count + 1))
+				h.prev_snapshot = hdrs[0].prev_snapshot
+				endian.unchecked_put_u32le(pg.data[:4], u32(len(hdrs) + 1))
 				pager.mark_dirty(p, prev_snapshot)
 				pager.unpin_page(p, prev_snapshot)
 				return prev_snapshot, true
@@ -165,27 +182,18 @@ load :: proc(
 	page, err := pager.get_page(p, snapshot_page)
 	if err != .None { return {}, false }
 	defer pager.unpin_page(p, snapshot_page)
-
-	count := int(endian.unchecked_get_u32le(page.data[:4]))
-	if count > 0 && count <= MAX_HEADERS_PER_PAGE {
-		headers := transmute([]Snapshot_Header)page.data[HEADER_PREFIX_SIZE:HEADER_PREFIX_SIZE +
-		count * size_of(Snapshot_Header)]
+	if headers := headers_on_page(page.data); headers != nil {
 		if snapshot_id == 0 {
-			return headers[count - 1], true
+			return headers[len(headers) - 1], true
 		}
-		for i := count - 1; i >= 0; i -= 1 {
+		for i := len(headers) - 1; i >= 0; i -= 1 {
 			if headers[i].snapshot_id == snapshot_id {
 				return headers[i], true
 			}
 		}
 		return {}, false
 	}
-
-	h := (^Snapshot_Header)(raw_data(page.data))
-	if string(h.magic[:]) != SNAPSHOT_MAGIC {
-		return {}, false
-	}
-	return h^, true
+	return {}, false
 }
 
 set_tag :: proc(p: ^pager.Pager, snapshot_page: u32, tag: string) {
@@ -193,45 +201,28 @@ set_tag :: proc(p: ^pager.Pager, snapshot_page: u32, tag: string) {
 	if err != .None { return }
 	defer pager.unpin_page(p, snapshot_page)
 
-	count := int(endian.unchecked_get_u32le(page.data[:4]))
-	if count > 0 && count <= MAX_HEADERS_PER_PAGE {
-		if len(page.data) >= TAG_OFFSET + TAG_SIZE {
-			data := page.data[TAG_OFFSET:TAG_OFFSET + TAG_SIZE]
-			n := min(len(tag), TAG_SIZE - 1)
-			mem.set(raw_data(data), 0, TAG_SIZE)
-			copy(data, tag[:n])
-			pager.mark_dirty(p, snapshot_page)
-		}
-		return
+	// The tag slot sits past the packed-header region in both layouts, so no
+	// format dispatch is needed — only a bounds guard.
+	if len(page.data) >= TAG_OFFSET + TAG_SIZE {
+		data := page.data[TAG_OFFSET:TAG_OFFSET + TAG_SIZE]
+		n := min(len(tag), TAG_SIZE - 1)
+		mem.set(raw_data(data), 0, TAG_SIZE)
+		copy(data, tag[:n])
+		pager.mark_dirty(p, snapshot_page)
 	}
-
-	data := page.data[TAG_OFFSET:TAG_OFFSET + TAG_SIZE]
-	n := min(len(tag), TAG_SIZE - 1)
-	mem.set(raw_data(data), 0, TAG_SIZE)
-	copy(data, tag[:n])
-	pager.mark_dirty(p, snapshot_page)
 }
 
 get_tag :: proc(p: ^pager.Pager, snapshot_page: u32) -> string {
 	page, err := pager.get_page(p, snapshot_page)
 	if err != .None { return "" }
 	defer pager.unpin_page(p, snapshot_page)
-
-	count := int(endian.unchecked_get_u32le(page.data[:4]))
-	if count > 0 && count <= MAX_HEADERS_PER_PAGE {
-		if len(page.data) >= TAG_OFFSET + TAG_SIZE {
-			data := page.data[TAG_OFFSET:TAG_OFFSET + TAG_SIZE]
-			length := 0
-			for length < TAG_SIZE && data[length] != 0 { length += 1 }
-			return string(data[:length])
-		}
-		return ""
+	if len(page.data) >= TAG_OFFSET + TAG_SIZE {
+		data := page.data[TAG_OFFSET:TAG_OFFSET + TAG_SIZE]
+		length := 0
+		for length < TAG_SIZE && data[length] != 0 { length += 1 }
+		return string(data[:length])
 	}
-
-	data := page.data[TAG_OFFSET:TAG_OFFSET + TAG_SIZE]
-	length := 0
-	for length < TAG_SIZE && data[length] != 0 { length += 1 }
-	return string(data[:length])
+	return ""
 }
 
 @(private)
@@ -246,30 +237,18 @@ walk_chain :: proc(
 		pg, err := pager.get_page(p, page)
 		if err != .None { break }
 
-		count := int(endian.unchecked_get_u32le(pg.data[:4]))
 		next_page: u32
-		if count > 0 && count <= MAX_HEADERS_PER_PAGE {
-			headers := transmute([]Snapshot_Header)pg.data[HEADER_PREFIX_SIZE:HEADER_PREFIX_SIZE +
-			count * size_of(Snapshot_Header)]
+		if headers := headers_on_page(pg.data); headers != nil {
 			next_page = headers[0].prev_snapshot
-			for i := count - 1; i >= 0; i -= 1 {
+			for i := len(headers) - 1; i >= 0; i -= 1 {
 				if !callback(headers[i], page, data) {
 					pager.unpin_page(p, page)
 					return
 				}
 			}
 		} else {
-			h := (^Snapshot_Header)(raw_data(pg.data))
-			if string(h.magic[:]) != SNAPSHOT_MAGIC {
-				pager.unpin_page(p, page)
-				break
-			}
-
-			next_page = h.prev_snapshot
-			if !callback(h^, page, data) {
-				pager.unpin_page(p, page)
-				return
-			}
+			pager.unpin_page(p, page)
+			break
 		}
 
 		pager.unpin_page(p, page)
@@ -346,11 +325,15 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 			h.timestamp,
 		)
 
-		if tag != "" { buf = fmt.tprintf("%s  tag=%s", buf, tag) }
+		if tag != "" {
+			buf = fmt.tprintf("%s  tag=%s", buf, tag)
+		}
+
 		log.debug(buf)
 		d.count += 1
 		return true
 	})
+
 	if d.count == 0 { log.debug("  (empty)") }
 	log.debug("======================")
 }
@@ -397,7 +380,7 @@ chain_infos :: proc(p: ^pager.Pager, start_page: u32, allocator := context.alloc
 }
 
 // set_header_state modifies the state of a specific snapshot header on a page.
-// Handles both old format (single header per page) and packed format (multiple headers).
+// Packed format only; the old single-header layout is rejected at db.open.
 set_header_state :: proc(
 	p: ^pager.Pager,
 	page: u32,
@@ -407,13 +390,8 @@ set_header_state :: proc(
 	pg, err := pager.get_page(p, page)
 	if err != .None { return false }
 	defer pager.unpin_page(p, page)
-
-	count := int(endian.unchecked_get_u32le(pg.data[:4]))
-	if count > 0 && count <= MAX_HEADERS_PER_PAGE {
-		// Packed format: find the header with matching snapshot_id
-		headers := transmute([]Snapshot_Header)pg.data[HEADER_PREFIX_SIZE:HEADER_PREFIX_SIZE +
-		count * size_of(Snapshot_Header)]
-		for i in 0 ..< count {
+	if headers := headers_on_page(pg.data); headers != nil {
+		for i in 0 ..< len(headers) {
 			if headers[i].snapshot_id == snapshot_id {
 				headers[i].state = u8(state)
 				pager.mark_dirty(p, page)
@@ -422,12 +400,5 @@ set_header_state :: proc(
 		}
 		return false
 	}
-
-	// Old format: single header on page
-	h := (^Snapshot_Header)(raw_data(pg.data))
-	if string(h.magic[:]) != SNAPSHOT_MAGIC { return false }
-
-	h.state = u8(state)
-	pager.mark_dirty(p, page)
-	return true
+	return false
 }

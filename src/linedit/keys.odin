@@ -181,6 +181,7 @@ decode_utf8 :: proc(fd: posix.FD, first: u8) -> (ev: Key_Event, ok: bool) {
 		}
 		bytes[1 + i] = b
 	}
+
 	r, _ := utf8.decode_rune(bytes[:1 + n])
 	return Key_Event{key = .Char, char = r}, true
 }

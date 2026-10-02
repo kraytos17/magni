@@ -64,6 +64,7 @@ redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 			fmt.fprint(os.stdout, "\r\n")
 			col = 0
 		}
+
 		fmt.fprintf(os.stdout, "%c", r)
 		col += w
 	}
@@ -73,6 +74,7 @@ redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 			fmt.fprint(os.stdout, "\r\n")
 			col = 0
 		}
+
 		fmt.fprintf(os.stdout, "%c", r)
 		col += w
 	}

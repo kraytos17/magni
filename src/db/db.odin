@@ -1,6 +1,6 @@
 package db
 
-import "core:encoding/endian"
+import "src:executor"
 import "core:log"
 import "core:strings"
 import "core:sync"
@@ -99,6 +99,7 @@ Database :: struct {
 	snapshot_batch_threshold: int,
 	wal_size_threshold:       int, // 0 = disabled; auto-checkpoint when the WAL reaches this many frames
 	table_cache:              schema.Table_Cache, // in-memory catalog cache; invalidated on schema-root change
+	txn_pending:              executor.Pending_Roots, // staged data roots; flushed at COMMIT (explicit txn only)
 	mu:                       sync.RW_Mutex, // guards database state; see docs/concurrency.md (acquire before pager.mutex)
 }
 
@@ -197,23 +198,25 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 			if pg_err != .None { break }
 
 			next_page: u32
-			count := int(endian.unchecked_get_u32le(pg.data[:4]))
-			if count > 0 && count <= snapshot.MAX_HEADERS_PER_PAGE {
-				headers := transmute([]snapshot.Snapshot_Header)pg.data[snapshot.HEADER_PREFIX_SIZE:snapshot.HEADER_PREFIX_SIZE +
-				count * size_of(snapshot.Snapshot_Header)]
-				for i := 0; i < count; i += 1 {
+			if headers := snapshot.headers_on_page(pg.data); headers != nil {
+				for i := 0; i < len(headers); i += 1 {
 					db.snapshot_index[headers[i].snapshot_id] = page
 				}
 				next_page = headers[0].prev_snapshot
 			} else {
+				// Hard break: the old single-header layout is unsupported (no
+				// migration). Snapshot magic without a packed count is an
+				// old-format page — reject the file. Anything else is
+				// corruption mid-chain, still handled by stopping the walk.
 				h := (^snapshot.Snapshot_Header)(raw_data(pg.data))
-				if string(h.magic[:]) != snapshot.SNAPSHOT_MAGIC {
+				if string(h.magic[:]) == snapshot.SNAPSHOT_MAGIC {
 					pager.unpin_page(db.pager, page)
-					break
+					close(db)
+					return nil, .Unsupported_Format
 				}
 
-				db.snapshot_index[h.snapshot_id] = page
-				next_page = h.prev_snapshot
+				pager.unpin_page(db.pager, page)
+				break
 			}
 
 			pager.unpin_page(db.pager, page)
@@ -255,6 +258,7 @@ close :: proc(db: ^Database) {
 	}
 
 	schema.table_cache_free(&db.table_cache)
+	executor.pending_clear(&db.txn_pending)
 	delete(db.snapshot_index)
 	delete(db.path)
 	sync.rw_mutex_unlock(&db.mu)

@@ -1,6 +1,7 @@
 package executor
 
 import "core:log"
+import "core:sync"
 import "src:btree"
 import "src:cell"
 import "src:pager"
@@ -190,6 +191,7 @@ exec_insert_impl :: proc(
 	stmt: parser.Insert_Stmt,
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
+	pending: ^Pending_Roots = nil,
 ) -> (bool, u32, Mutated_Table_Info) {
 	is_direct := mode == .Direct
 	if is_direct {
@@ -222,12 +224,12 @@ exec_insert_impl :: proc(
 			log.infof("Inserted row %d", info.row_id)
 		}
 
-		new_schema_root, ok := schema.update_root_page_cow(t, stmt.table_name, data_root)
+		new_schema_root, info, ok := commit_cow_root(t, stmt.table_name, data_root, pending, cache)
 		if !ok {
 			log.error("Error: Failed to update schema root page")
 			return false, t.root, {}
 		}
-		return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = data_root}
+		return true, new_schema_root, info
 	}
 }
 
@@ -307,6 +309,7 @@ exec_update_impl :: proc(
 	stmt: parser.Update_Stmt,
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
+	pending: ^Pending_Roots = nil,
 ) -> (bool, u32, Mutated_Table_Info) {
 	tbl := table
 	update_map, ok := build_update_map(&tbl, stmt, context.temp_allocator)
@@ -321,10 +324,10 @@ exec_update_impl :: proc(
 	}
 
 	table_tree := btree.init(t.pager, tbl.root_page)
-	if done, ok1, root, info := update_by_pk(t, &plan, &table_tree); done {
+	if done, ok1, root, info := update_by_pk(t, &plan, &table_tree, pending, cache); done {
 		return ok1, root, info
 	}
-	return update_by_scan(t, &plan, &table_tree)
+	return update_by_scan(t, &plan, &table_tree, pending, cache)
 }
 
 // Update_Plan captures the resolved state for an UPDATE: target table,
@@ -370,12 +373,71 @@ pk_target_rowid :: proc(tbl: types.Table, filter: Maybe(parser.Where_Clause)) ->
 
 // commit_cow_root publishes a COW-mutated table root to the schema.
 // Shared tail for the COW write paths (pk + scan, update + delete);
-// callers log their own row counts.
+// callers log their own row counts. When pending != nil (explicit txn) the
+// root is staged instead of published: the map plus the table-cache overlay
+// (so in-txn readers see it) replace the per-statement schema-leaf COW, and
+// COMMIT flushes one COW per dirty table. Nil pending ⇒ immediate publish,
+// exactly as before.
 @(private="file")
-commit_cow_root :: proc(t: ^btree.Tree, table_name: string, nroot: u32) -> (u32, Mutated_Table_Info, bool) {
+commit_cow_root :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	nroot: u32,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	u32,
+	Mutated_Table_Info,
+	bool,
+) {
+	if pending != nil {
+		pending_stage(pending, table_name, nroot)
+		if cache != nil {
+			if tbl, ok := pending_cache_entry(cache, table_name); ok {
+				tbl.root_page = nroot
+			}
+		}
+		return t.root, Mutated_Table_Info{name = table_name, root = nroot}, true
+	}
+
 	new_schema_root, ok := schema.update_root_page_cow(t, table_name, nroot)
 	if !ok { return t.root, {}, false }
 	return new_schema_root, Mutated_Table_Info{name = table_name, root = nroot}, true
+}
+
+// pending_cache_entry finds the cached catalog entry for an overlay update.
+// The entry must exist: the table was just resolved through the cache to
+// compute the staged root. A miss means someone bypassed the cache — skip
+// the overlay (the next root-bump clears it) rather than fabricate state.
+@(private="file")
+pending_cache_entry :: proc(
+	cache: ^schema.Table_Cache,
+	table_name: string,
+) -> (
+	^types.Table,
+	bool,
+) {
+	sync.rw_mutex_lock(&cache.mu)
+	defer sync.rw_mutex_unlock(&cache.mu)
+	if cache.tables == nil { return nil, false }
+
+	tbl, ok := cache.tables[table_name]
+	if !ok { return nil, false }
+	return tbl, true
+}
+
+// pending_reoverlay re-applies staged roots onto a fresh cache generation.
+// Called after immediate publishers (DDL) bump the schema root and wipe the
+// overlays: each staged table re-resolves from the current tree, then takes
+// its pending root back. Dropped tables no longer resolve — skipped.
+@(private)
+pending_reoverlay :: proc(t: ^btree.Tree, pending: ^Pending_Roots, cache: ^schema.Table_Cache) {
+	if pending == nil || cache == nil { return }
+	for name, root in pending.roots {
+		if tbl, ok := schema.find_table_cached(t, name, cache); ok {
+			tbl.root_page = root
+		}
+	}
 }
 
 // update_by_pk handles the PK fast path. Returns handled=false to fall
@@ -385,6 +447,8 @@ update_by_pk :: proc(
 	t: ^btree.Tree,
 	plan: ^Update_Plan,
 	table_tree: ^btree.Tree,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	done: bool,
 	ok: bool,
@@ -421,7 +485,7 @@ update_by_pk :: proc(
 		return true, false, t.root, {}
 	}
 
-	new_schema_root, committed, ok1 := commit_cow_root(t, plan.table_name, nroot)
+	new_schema_root, committed, ok1 := commit_cow_root(t, plan.table_name, nroot, pending, cache)
 	if !ok1 { return true, false, t.root, {} }
 
 	log.info("Updated 1 row.")
@@ -434,6 +498,8 @@ update_by_scan :: proc(
 	t: ^btree.Tree,
 	plan: ^Update_Plan,
 	table_tree: ^btree.Tree,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	bool,
 	u32,
@@ -443,12 +509,11 @@ update_by_scan :: proc(
 	if cursor_err != .None { return false, t.root, {} }
 	defer btree.cursor_destroy(&cursor)
 
-	// Resolve the filter once, not per row.
 	resolve_mutation_filter(&plan.filt, plan.tbl.columns)
 	if plan.direct {
 		return update_scan_direct(t, plan, table_tree, &cursor)
 	}
-	return update_scan_cow(t, plan, table_tree, &cursor)
+	return update_scan_cow(t, plan, table_tree, &cursor, pending, cache)
 }
 
 // update_scan_direct collects matching ops, then applies them in place.
@@ -500,6 +565,8 @@ update_scan_cow :: proc(
 	plan: ^Update_Plan,
 	table_tree: ^btree.Tree,
 	cursor: ^btree.Cursor,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	bool,
 	u32,
@@ -530,7 +597,7 @@ update_scan_cow :: proc(
 		btree.cursor_advance(cursor)
 	}
 	if count > 0 {
-		new_schema_root, info, ok1 := commit_cow_root(t, plan.table_name, current_root)
+		new_schema_root, info, ok1 := commit_cow_root(t, plan.table_name, current_root, pending, cache)
 		if !ok1 { return false, t.root, {} }
 
 		log.infof("Updated %d rows.", count)
@@ -561,6 +628,7 @@ exec_delete_impl :: proc(
 	stmt: parser.Delete_Stmt,
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
+	pending: ^Pending_Roots = nil,
 ) -> (bool, u32, Mutated_Table_Info) {
 	plan := Delete_Plan {
 		tbl        = table,
@@ -570,12 +638,12 @@ exec_delete_impl :: proc(
 	}
 
 	table_tree := btree.init(t.pager, table.root_page)
-	if done, ok, root, info := delete_by_pk(t, &plan, &table_tree); done {
+	if done, ok, root, info := delete_by_pk(t, &plan, &table_tree, pending, cache); done {
 		return ok, root, info
 	}
 
 	targets := collect_delete_targets(&plan, &table_tree)
-	return apply_deletes(t, &plan, &table_tree, targets[:])
+	return apply_deletes(t, &plan, &table_tree, targets[:], pending, cache)
 }
 
 // Delete_Plan captures the resolved state for a DELETE: target table,
@@ -594,6 +662,8 @@ delete_by_pk :: proc(
 	t: ^btree.Tree,
 	plan: ^Delete_Plan,
 	table_tree: ^btree.Tree,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	done: bool,
 	ok: bool,
@@ -613,7 +683,7 @@ delete_by_pk :: proc(
 
 	nroot, del_err := btree.tree_delete_cow(table_tree, target_rowid)
 	if del_err == .None {
-		new_schema_root, info1, ok1 := commit_cow_root(t, plan.table_name, nroot)
+		new_schema_root, info1, ok1 := commit_cow_root(t, plan.table_name, nroot, pending, cache)
 		if !ok1 { return true, false, t.root, {} }
 
 		log.info("Deleted 1 row.")
@@ -661,6 +731,8 @@ apply_deletes :: proc(
 	plan: ^Delete_Plan,
 	table_tree: ^btree.Tree,
 	targets: []types.Row_ID,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
 ) -> (
 	bool,
 	u32,
@@ -689,7 +761,7 @@ apply_deletes :: proc(
 		}
 	}
 	if count > 0 {
-		new_schema_root, info, ok := commit_cow_root(t, plan.table_name, current_root)
+		new_schema_root, info, ok := commit_cow_root(t, plan.table_name, current_root, pending, cache)
 		if !ok { return false, t.root, {} }
 
 		log.infof("Deleted %d rows.", count)
@@ -733,6 +805,7 @@ exec_insert_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Insert_Stmt,
 	cache: ^schema.Table_Cache = nil,
+	pending: ^Pending_Roots = nil,
 ) -> (
 	bool,
 	u32,
@@ -743,7 +816,7 @@ exec_insert_cow :: proc(
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	return exec_insert_impl(t, table^, stmt, .COW, cache)
+	return exec_insert_impl(t, table^, stmt, .COW, cache, pending)
 }
 
 @(private)
@@ -751,6 +824,7 @@ exec_update_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Update_Stmt,
 	cache: ^schema.Table_Cache = nil,
+	pending: ^Pending_Roots = nil,
 ) -> (
 	bool,
 	u32,
@@ -761,7 +835,7 @@ exec_update_cow :: proc(
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	return exec_update_impl(t, table^, stmt, .COW, cache)
+	return exec_update_impl(t, table^, stmt, .COW, cache, pending)
 }
 
 @(private)
@@ -769,6 +843,7 @@ exec_delete_cow :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Delete_Stmt,
 	cache: ^schema.Table_Cache = nil,
+	pending: ^Pending_Roots = nil,
 ) -> (
 	bool,
 	u32,
@@ -779,5 +854,5 @@ exec_delete_cow :: proc(
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	return exec_delete_impl(t, table^, stmt, .COW, cache)
+	return exec_delete_impl(t, table^, stmt, .COW, cache, pending)
 }

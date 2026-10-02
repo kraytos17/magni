@@ -47,9 +47,15 @@ def build_asan() -> None:
 
 COV_TARGETS = {
     # flavor: (output binary, extra env for afl-clang-fast)
-    "cov": (config.FUZZ_TARGET_COV, {}),
-    "cmplog": (config.FUZZ_TARGET_CMPLOG, {"AFL_LLVM_CMPLOG": "1"}),
-    "laf": (config.FUZZ_TARGET_LAF, {"AFL_LLVM_LAF_ALL": "1"}),
+    # AFL_LLVM_INSTRUMENT=NATIVE on all flavors: the distro's AFL LLVM
+    # plugins (PCGUARD/classic) were built against older LLVM and fail to
+    # load on this toolchain (undefined llvm::DebugLoc::get). NATIVE uses
+    # clang's own SanitizerCoverage, which always matches the compiler.
+    "cov": (config.FUZZ_TARGET_COV, {"AFL_LLVM_INSTRUMENT": "NATIVE"}),
+    "cmplog": (config.FUZZ_TARGET_CMPLOG, {"AFL_LLVM_INSTRUMENT": "NATIVE",
+                                           "AFL_LLVM_CMPLOG": "1"}),
+    "laf": (config.FUZZ_TARGET_LAF, {"AFL_LLVM_INSTRUMENT": "NATIVE",
+                                     "AFL_LLVM_LAF_ALL": "1"}),
 }
 
 
@@ -91,11 +97,13 @@ def build_exec() -> None:
     """Build the executor/storage fuzz target (coverage + ASan combined).
 
     Storage bugs are memory bugs, so the exec target always carries
-    AddressSanitizer — there is no sanitizer-free variant.
+    AddressSanitizer — there is no sanitizer-free variant. NATIVE
+    instrumentation, same rationale as COV_TARGETS.
     """
     ll_files = llvm_ir_sources("fuzz_exec")
     run(["afl-clang-fast", "-fsanitize=address",
-         *ll_files, "-o", str(config.FUZZ_EXEC_TARGET)])
+         *ll_files, "-o", str(config.FUZZ_EXEC_TARGET)],
+        env={"AFL_LLVM_INSTRUMENT": "NATIVE"})
     log(f"Built {config.FUZZ_EXEC_TARGET} (AFL++ coverage + ASan)")
 
 

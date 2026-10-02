@@ -26,6 +26,7 @@ lb_save_undo :: proc(lb: ^Line_Buffer) {
 	s: Undo_State
 	s.runes = make([]rune, len(lb.runes))
 	copy(s.runes[:], lb.runes[:])
+
 	s.cursor = lb.cursor
 	append(&lb.undo_stack, s)
 }
@@ -122,7 +123,6 @@ lb_transpose :: proc(lb: ^Line_Buffer) {
 	lb_save_undo(lb)
 	left := lb.cursor - 1
 	right := lb.cursor
-
 	if lb.cursor == len(lb.runes) {
 		left = lb.cursor - 2
 		right = lb.cursor - 1
@@ -140,6 +140,7 @@ lb_undo :: proc(lb: ^Line_Buffer) {
 	s := pop(&lb.undo_stack)
 	clear(&lb.runes)
 	append(&lb.runes, ..s.runes)
+
 	lb.cursor = s.cursor
 	delete(s.runes)
 }

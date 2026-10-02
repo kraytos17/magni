@@ -1,4 +1,9 @@
 Odin:        dev-2026-09-nightly:a2fb372
 AFL++:        5.00c (afl-fuzz, afl-clang-fast, afl-tmin)
-Clang:       22.1.8
-LLVM:        22.1.8
+Clang:       23.1.1
+LLVM:        23.1.1
+AFL mode:    NATIVE (AFL_LLVM_INSTRUMENT, set in magni/build.py — see
+             fuzz/README.md Toolchain). The distro AFL LLVM plugins
+             (PCGUARD/classic/cmplog/laf) were built against older LLVM
+             and fail to load (undefined llvm:: symbols); cmplog/laf
+             roles stay broken until AFL++ is rebuilt from source.

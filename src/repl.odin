@@ -118,6 +118,7 @@ repl_fallback :: proc(database: ^db.Database) {
 				fmt.println()
 				break
 			}
+
 			log.errorf("Error reading input: %v", err)
 			break
 		}
@@ -141,37 +142,44 @@ repl_fallback :: proc(database: ^db.Database) {
 }
 
 @(private="file")
-Dot_Handler :: proc(database: ^db.Database, args: string) -> (exit: bool)
+Dot_Handler :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool)
 
 // Dot_Command maps a dot-command to its handler. Exact commands match the
 // full input line; prefix commands match a leading prefix (name includes the
 // trailing space, e.g. ".dump ") and receive the full line for arg parsing.
+// usage documents the arg shape once; handlers print cmd.usage on bad args
+// instead of hand-written literals.
+// Dot_Match selects how a table entry matches input: exact command word,
+// or leading-prefix (entry name includes the trailing space, e.g. ".dump ").
+Dot_Match :: enum { Exact, Prefix }
+
 Dot_Command :: struct {
 	name:    string,
-	prefix:  bool,
+	match:   Dot_Match,
 	handler: Dot_Handler,
+	usage:   string,
 }
 
 @(private="file")
-dot_cmd_exit :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_exit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	fmt.println("Goodbye.")
 	return true
 }
 
 @(private="file")
-dot_cmd_help :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_help :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	print_help()
 	return false
 }
 
 @(private="file")
-dot_cmd_version :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_version :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	fmt.printf("MagniDB v%s\n", APP_VERSION)
 	return false
 }
 
 @(private="file")
-dot_cmd_tables :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_tables :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.list_tables(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
@@ -179,7 +187,7 @@ dot_cmd_tables :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_schema :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.print_schema(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
@@ -187,7 +195,7 @@ dot_cmd_schema :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_debug_schema :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_debug_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.print_schema(database, debug = true); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
@@ -211,7 +219,7 @@ dot_uint_arg :: proc(parts: []string, idx: int) -> (u64, bool) {
 }
 
 @(private="file")
-dot_cmd_tree_page :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_tree_page :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
 	if len(parts) == 2 {
 		page_num, num_ok := dot_uint_arg(parts, 1)
@@ -221,13 +229,13 @@ dot_cmd_tree_page :: proc(database: ^db.Database, args: string) -> bool {
 			}
 		}
 	} else {
-		fmt.println("Usage: .tree_page <page_num>")
+		fmt.println(cmd.usage)
 	}
 	return false
 }
 
 @(private="file")
-dot_cmd_snapshot_debug :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_snapshot_debug :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.print_snapshots(database, debug = true); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
@@ -235,7 +243,7 @@ dot_cmd_snapshot_debug :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_stats :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_stats :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.stats(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
@@ -243,7 +251,7 @@ dot_cmd_stats :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_begin :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_begin :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.begin(database) == .None {
 		fmt.println("Transaction started.")
 	}
@@ -251,7 +259,7 @@ dot_cmd_begin :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_commit :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_commit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.commit(database) == .None {
 		fmt.println("Transaction committed.")
 	}
@@ -259,7 +267,7 @@ dot_cmd_commit :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_rollback :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_rollback :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.rollback(database) == .None {
 		fmt.println("Transaction rolled back.")
 	}
@@ -267,7 +275,7 @@ dot_cmd_rollback :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_snapshots :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_snapshots :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.print_snapshots(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
@@ -275,7 +283,7 @@ dot_cmd_snapshots :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_snapdiff :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_snapdiff :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
 	if len(parts) == 3 {
 		older, older_ok := dot_uint_arg(parts, 1)
@@ -284,17 +292,16 @@ dot_cmd_snapdiff :: proc(database: ^db.Database, args: string) -> bool {
 			if err := db.snapshot_diff(database, older, newer); err != .None {
 				log.errorf("%s", db.db_error_string(err))
 			}
-		} else {
-			fmt.println("Usage: .snapdiff <older_id> <newer_id>")
+			return false
 		}
-	} else {
-		fmt.println("Usage: .snapdiff <older_id> <newer_id>")
 	}
+
+	fmt.println(cmd.usage)
 	return false
 }
 
 @(private="file")
-dot_cmd_checkpoint :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_checkpoint :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.checkpoint(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	} else {
@@ -304,7 +311,7 @@ dot_cmd_checkpoint :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_vacuum :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_vacuum :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.vacuum(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	} else {
@@ -314,7 +321,7 @@ dot_cmd_vacuum :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_integrity :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_integrity :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.integrity_check(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	} else {
@@ -324,7 +331,7 @@ dot_cmd_integrity :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
 	if len(parts) >= 3 {
 		id, id_ok := dot_uint_arg(parts, 2)
@@ -335,17 +342,16 @@ dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string) -> bool {
 			} else {
 				fmt.printf("Tagged snapshot %d as '%s'\n", id, tag)
 			}
-		} else {
-			fmt.println("Usage: .snapshot tag <id> <label>")
+			return false
 		}
-	} else {
-		fmt.println("Usage: .snapshot tag <id> <label>")
 	}
+
+	fmt.println(cmd.usage)
 	return false
 }
 
 @(private="file")
-dot_cmd_snapshot_restore :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_snapshot_restore :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
 	if len(parts) == 3 {
 		id, id_ok := dot_uint_arg(parts, 2)
@@ -353,28 +359,20 @@ dot_cmd_snapshot_restore :: proc(database: ^db.Database, args: string) -> bool {
 			if err := db.snapshot_restore(database, id); err != .None {
 				log.errorf("%s", db.db_error_string(err))
 			}
-		} else {
-			fmt.println("Usage: .snapshot restore <id>")
+			return false
 		}
-	} else {
-		fmt.println("Usage: .snapshot restore <id>")
 	}
+
+	fmt.println(cmd.usage)
 	return false
 }
 
 @(private="file")
-dot_cmd_expire :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_expire :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
 	keep := db.DEFAULT_KEEP
 	if len(parts) >= 2 {
 		if v, ok := strconv.parse_i64(parts[1]); ok { keep = int(v) }
-	}
-	if keep < 1 {
-		// keep < 1 would mark nothing live (build_live_set walks zero
-		// snapshots) and sweep the whole database into the freelist.
-		// Clamp to default: fail-closed, warned, never silent.
-		log.warnf("expire keep %d invalid; using default %d", keep, db.DEFAULT_KEEP)
-		keep = db.DEFAULT_KEEP
 	}
 
 	db.expire_snapshots(database, keep)
@@ -382,7 +380,7 @@ dot_cmd_expire :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_rollforward :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_rollforward :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := db.rollforward(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
@@ -390,81 +388,78 @@ dot_cmd_rollforward :: proc(database: ^db.Database, args: string) -> bool {
 }
 
 @(private="file")
-dot_cmd_dump :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := strings.split(args, " ", context.temp_allocator)
 	if len(parts) == 2 {
 		if err := admin.dump_table(database, parts[1]); err != .None {
 			log.errorf("%s", db.db_error_string(err))
 		}
 	} else {
-		fmt.println("Usage: .dump <table_name>")
+		fmt.println(cmd.usage)
 	}
 	return false
 }
 
 @(private="file")
-dot_cmd_desc :: proc(database: ^db.Database, args: string) -> bool {
+dot_cmd_desc :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := strings.split(args, " ", context.temp_allocator)
 	if len(parts) == 2 {
 		if err := admin.describe_table(database, parts[1]); err != .None {
 			log.errorf("%s", db.db_error_string(err))
 		}
 	} else {
-		fmt.println("Usage: .desc <table_name>")
+		fmt.println(cmd.usage)
 	}
 	return false
 }
 
 // Exact-match commands (full input line must equal name).
 @(private="file")
-DOT_COMMANDS_EXACT := []Dot_Command{
-	{".exit", false, dot_cmd_exit},
-	{".quit", false, dot_cmd_exit},
-	{".help", false, dot_cmd_help},
-	{".version", false, dot_cmd_version},
-	{".tables", false, dot_cmd_tables},
-	{".schema", false, dot_cmd_schema},
-	{".debug_schema", false, dot_cmd_debug_schema},
-	{".tree_page", false, dot_cmd_tree_page},
-	{".snapshot_debug", false, dot_cmd_snapshot_debug},
-	{".stats", false, dot_cmd_stats},
-	{".begin", false, dot_cmd_begin},
-	{".commit", false, dot_cmd_commit},
-	{".rollback", false, dot_cmd_rollback},
-	{".snapshots", false, dot_cmd_snapshots},
-	{".snapdiff", false, dot_cmd_snapdiff},
-	{".checkpoint", false, dot_cmd_checkpoint},
-	{".vacuum", false, dot_cmd_vacuum},
-	{".integrity", false, dot_cmd_integrity},
-	{".rollforward", false, dot_cmd_rollforward},
-}
-
-// Prefix commands. Names include the trailing space except ".expire", which
-// also matches bare ".expire" (default keep count).
-@(private="file")
-DOT_COMMANDS_PREFIX := []Dot_Command{
-	{".snapshot tag ", true, dot_cmd_snapshot_tag},
-	{".snapshot restore ", true, dot_cmd_snapshot_restore},
-	{".expire", true, dot_cmd_expire},
-	{".dump ", true, dot_cmd_dump},
-	{".desc ", true, dot_cmd_desc},
+DOT_COMMANDS := []Dot_Command{
+	{".exit", .Exact, dot_cmd_exit, ""},
+	{".quit", .Exact, dot_cmd_exit, ""},
+	{".help", .Exact, dot_cmd_help, ""},
+	{".version", .Exact, dot_cmd_version, ""},
+	{".tables", .Exact, dot_cmd_tables, ""},
+	{".schema", .Exact, dot_cmd_schema, ""},
+	{".debug_schema", .Exact, dot_cmd_debug_schema, ""},
+	{".tree_page", .Exact, dot_cmd_tree_page, "Usage: .tree_page <page_num>"},
+	{".snapshot_debug", .Exact, dot_cmd_snapshot_debug, ""},
+	{".stats", .Exact, dot_cmd_stats, ""},
+	{".begin", .Exact, dot_cmd_begin, ""},
+	{".commit", .Exact, dot_cmd_commit, ""},
+	{".rollback", .Exact, dot_cmd_rollback, ""},
+	{".snapshots", .Exact, dot_cmd_snapshots, ""},
+	{".snapdiff", .Exact, dot_cmd_snapdiff, "Usage: .snapdiff <older_id> <newer_id>"},
+	{".checkpoint", .Exact, dot_cmd_checkpoint, ""},
+	{".vacuum", .Exact, dot_cmd_vacuum, ""},
+	{".integrity", .Exact, dot_cmd_integrity, ""},
+	{".rollforward", .Exact, dot_cmd_rollforward, ""},
+	{".snapshot tag ", .Prefix, dot_cmd_snapshot_tag, "Usage: .snapshot tag <id> <label>"},
+	{".snapshot restore ", .Prefix, dot_cmd_snapshot_restore, "Usage: .snapshot restore <id>"},
+	{".expire", .Prefix, dot_cmd_expire, ""},
+	{".dump ", .Prefix, dot_cmd_dump, "Usage: .dump <table_name>"},
+	{".desc ", .Prefix, dot_cmd_desc, "Usage: .desc <table_name>"},
 }
 
 handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	// ".tree_page" and ".snapdiff" take args but match exactly on the command
-	// word; split off args before the exact lookup.
+	// word; split it off once for the exact entries. Table order decides
+	// precedence: exact entries precede prefix entries, as before.
 	cmd_word := trimmed
 	if sp := strings.index_byte(trimmed, ' '); sp >= 0 {
 		cmd_word = trimmed[:sp]
 	}
-	for cmd in DOT_COMMANDS_EXACT {
-		if cmd_word == cmd.name {
-			return cmd.handler(database, trimmed)
+	for &cmd in DOT_COMMANDS {
+		hit := false
+		#partial switch cmd.match {
+		case .Exact:
+			hit = cmd_word == cmd.name
+		case .Prefix:
+			hit = strings.has_prefix(trimmed, cmd.name)
 		}
-	}
-	for cmd in DOT_COMMANDS_PREFIX {
-		if strings.has_prefix(trimmed, cmd.name) {
-			return cmd.handler(database, trimmed)
+		if hit {
+			return cmd.handler(database, trimmed, &cmd)
 		}
 	}
 

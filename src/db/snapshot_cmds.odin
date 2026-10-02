@@ -64,12 +64,13 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 			new_root = fmt.aprintf("%d", e.new_root, allocator = context.temp_allocator)
 		}
 
-		row := make([]string, 4, context.temp_allocator)
-		row[0] = e.table_name
-		row[1] = fmt.aprintf("%s", e.change, allocator = context.temp_allocator)
-		row[2] = old_root
-		row[3] = new_root
-		rows[i] = row
+		rows[i] = executor.row_of(
+			context.temp_allocator,
+			e.table_name,
+			fmt.aprintf("%s", e.change, allocator = context.temp_allocator),
+			old_root,
+			new_root,
+		)
 	}
 
 	executor.render_table(cols, rows)
@@ -199,6 +200,16 @@ expire_snapshots :: proc(db: ^Database, keep_count: int) -> DB_Error {
 }
 
 expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
+	keep := keep_count
+	if keep < 1 {
+		// keep < 1 would mark nothing live (the chain walk keeps zero
+		// snapshots) and sweep the whole database into the freelist.
+		// Clamp to default: fail-closed, warned, never silent. Lives here
+		// (not in callers) so API and dot paths share the choke point.
+		log.warnf("expire keep %d invalid; using default %d", keep, DEFAULT_KEEP)
+		keep = DEFAULT_KEEP
+	}
+
 	#partial switch reclaim_decision(db) {
 	case .Empty_No_Snapshots:
 		return .None
@@ -208,12 +219,12 @@ expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
 	case .Proceed:
 	}
 
-	expired_ids := snapshot.expire_and_collect(db.pager, db.latest_snapshot, keep_count)
+	expired_ids := snapshot.expire_and_collect(db.pager, db.latest_snapshot, keep)
 	for id in expired_ids {
 		delete_key(&db.snapshot_index, id)
 	}
 
 	wal_update_header(db)
-	fmt.printf("Expired snapshots older than last %d, garbage collected\n", keep_count)
+	fmt.printf("Expired snapshots older than last %d, garbage collected\n", keep)
 	return .None
 }

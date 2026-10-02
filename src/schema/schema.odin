@@ -43,8 +43,10 @@ schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator)
 
 schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 	if len(values) < 5 { return {}, false }
+	
 	name, ok1 := values[1].(string)
 	if !ok1 { return {}, false }
+	
 	kind_val, kind_ok := values[0].(i64)
 	if !kind_ok || kind_val != 0 { return {}, false }
 
@@ -205,6 +207,16 @@ table_cache_free :: proc(cache: ^Table_Cache) {
 
 	cache.tables = nil
 	cache.root = 0
+}
+
+// table_cache_clear drops every cached entry (keeping the map for reuse).
+// ROLLBACK needs this: staged in-txn roots never bumped the schema root, so
+// the root-change auto-invalidation won't fire and stale entries would leak
+// past the rollback without an explicit clear.
+table_cache_clear :: proc(cache: ^Table_Cache) {
+	sync.rw_mutex_lock(&cache.mu)
+	defer sync.rw_mutex_unlock(&cache.mu)
+	clear_table_cache(cache)
 }
 
 // find_table_cached returns a borrowed reference to the table's cached catalog

@@ -163,6 +163,29 @@ find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 	return slot
 }
 
+// evict_slot unlinks one cached slot and returns it to the free pool.
+// Caller MUST hold p.mutex (write-locked). writeback=true flushes a dirty
+// page to WAL first (clock eviction); false drops without I/O (abort/rewind
+// paths where the content is unreachable by construction, and free_page
+// which already wrote its link frame). On writeback I/O failure the slot is
+// left untouched and the error propagates.
+@(private)
+evict_slot :: proc(p: ^Pager, slot: ^Page_Slot, writeback: bool) -> Error {
+	if writeback && slot.page.dirty {
+		wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
+	}
+
+	cache_delete(p, slot.page.page_num)
+	if p.on_evict != nil { p.on_evict(p.stats, slot.page.page_num) }
+
+	slot.page = {}
+	slot.referenced = false
+	p.slot_count -= 1
+
+	append(&p.free_slots, slot)
+	return .None
+}
+
 @(private="file")
 evict_one_slot :: proc(p: ^Pager) -> Error {
 	n := len(p.slots)
@@ -178,18 +201,8 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 				slot.referenced = false
 				if pass == 0 { continue }
 			}
-			if slot.page.dirty {
-				wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
-			}
 
-			cache_delete(p, slot.page.page_num)
-			if p.on_evict != nil { p.on_evict(p.stats, slot.page.page_num) }
-
-			slot.page = {}
-			slot.referenced = false
-			p.slot_count -= 1
-
-			append(&p.free_slots, slot)
+			evict_slot(p, slot, true) or_return
 			return .None
 		}
 	}
@@ -214,6 +227,7 @@ evict_aborted :: proc(p: ^Pager, pages: []u32) -> (report: Evict_Report) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	for page_num in pages {
 		if page_num == 0 { continue }
+
 		slot := find_slot(p, page_num)
 		if slot == nil { continue }
 		if slot.page.pin_count > 0 {
@@ -221,15 +235,7 @@ evict_aborted :: proc(p: ^Pager, pages: []u32) -> (report: Evict_Report) {
 			continue
 		}
 
-		cache_delete(p, page_num)
-		if p.on_evict != nil { p.on_evict(p.stats, page_num) }
-
-		slot.page = {}
-		slot.page.data = nil
-		slot.referenced = false
-		p.slot_count -= 1
-
-		append(&p.free_slots, slot)
+		evict_slot(p, slot, false)
 		report.evicted += 1
 	}
 	return report

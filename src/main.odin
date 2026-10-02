@@ -45,7 +45,7 @@ main :: proc() {
 
 	log_level := resolve_log_level(cli.verbose, cli.v, cli.log_level)
 	Logger_Opts :: log.Options{.Level}
-	// File logger on stderr: keeps ALL log levels off stdout so query results stay clean.
+
 	context.logger = log.create_file_logger(os.stderr, log_level, Logger_Opts)
 	defer log.destroy_file_logger(context.logger)
 

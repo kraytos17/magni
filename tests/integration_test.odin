@@ -2608,3 +2608,414 @@ test_gc_reclaims_cow_waste :: proc(t: ^testing.T) {
 	testing.expect_value(t, q3.rows[0][1].(i64), i64(1))
 	testing.expect_value(t, q3.rows[0][2].(i64), i64(1400))
 }
+
+@(test)
+test_expire_zero_keep_clamps :: proc(t: ^testing.T) {
+	// API-level twin of the dot-layer keep guard: keep < 1 must clamp to
+	// default, never walk zero snapshots (which sweeps the whole database
+	// into the freelist). The second batch forces reuse of anything wrongly
+	// freed, so corruption can't hide behind intact-but-dead pages.
+	d := setup_db(t, "expire_zero")
+	defer teardown_db(d, "expire_zero")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	for i in 1 ..= 700 {
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) == .None,
+			"insert",
+		)
+	}
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
+	testing.expect(t, db.expire_snapshots(d, 0) == .None, "expire zero keep")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin2")
+	for i in 701 ..= 1400 {
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) == .None,
+			"insert2",
+		)
+	}
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit2")
+
+	q := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
+	testing.expect(t, q.ok && len(q.rows) == 1, "final query")
+	testing.expect_value(t, q.rows[0][0].(i64), i64(1400))
+	testing.expect_value(t, q.rows[0][1].(i64), i64(1))
+	testing.expect_value(t, q.rows[0][2].(i64), i64(1400))
+}
+
+// Old single-header snapshot pages are rejected at open with a clean error
+// (hard break, no migration): stamp snapshot magic over a packed page's
+// count prefix and reopen.
+@(test)
+test_db_rejects_old_snapshot_layout :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	filename := fmt.tprintf("test_int_%s.db", "old_snap_reject")
+	clean_db_files(filename)
+
+	d := setup_db(t, "old_snap_reject")
+	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT);") == .None, "fixture write failed")
+	testing.expect(t, d.latest_snapshot != 0, "fixture db must have a snapshot")
+	snap_page := d.latest_snapshot
+	db.close(d)
+	if snap_page == 0 {
+		clean_db_files(filename)
+		return
+	}
+	// Drop the WAL sidecar so the reopen reads the patched main file, not
+	// uncheckpointed frames.
+	os.remove(fmt.tprintf("%s-wal", filename))
+
+	raw, read_err := os.read_entire_file_from_path(filename, context.temp_allocator)
+	testing.expect(t, read_err == nil, "db file must be readable")
+	if read_err != nil {
+		clean_db_files(filename)
+		return
+	}
+	off := int(snap_page - 1) * types.PAGE_SIZE
+	testing.expect(t, len(raw) >= off + 8, "snapshot page must be in main file")
+	testing.expect(t, raw[off] == 1 && raw[off + 1] == 0, "snapshot page must be packed")
+	if len(raw) < off + 8 || raw[off] != 1 {
+		clean_db_files(filename)
+		return
+	}
+	copy(raw[off:off + 8], "MAGNISNP")
+	testing.expect(t, os.write_entire_file(filename, raw) == nil, "magic patch must write")
+
+	reopened, open_err := db.open(filename)
+	testing.expect(t, open_err == .Unsupported_Format, "old snapshot layout must be rejected cleanly")
+	testing.expect(t, reopened == nil, "rejected open must return nil db")
+	clean_db_files(filename)
+}
+
+// PK-seek agreement suite: single-table `pk = const` must return exactly
+// what the scan path returns, in every filter shape.
+@(test)
+test_pk_seek_hit_and_miss :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "pkseek_hit")
+	defer teardown_db(d, "pkseek_hit")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);")
+
+	hit := db.query(d, "SELECT id, v FROM t WHERE id = 3;")
+	testing.expect(t, hit.ok, "seek hit must succeed")
+	testing.expect_value(t, len(hit.rows), 1)
+	if len(hit.rows) == 1 {
+		testing.expect_value(t, hit.rows[0][0].(i64), 3)
+		testing.expect_value(t, hit.rows[0][1].(i64), 30)
+	}
+
+	miss := db.query(d, "SELECT id, v FROM t WHERE id = 99;")
+	testing.expect(t, miss.ok, "seek miss must succeed")
+	testing.expect_value(t, len(miss.rows), 0)
+
+	star := db.query(d, "SELECT * FROM t WHERE id = 1;")
+	testing.expect(t, star.ok, "seek star must succeed")
+	testing.expect_value(t, len(star.rows), 1)
+	if len(star.rows) == 1 {
+		testing.expect_value(t, star.rows[0][0].(i64), 1)
+		testing.expect_value(t, star.rows[0][1].(i64), 10)
+	}
+}
+
+@(test)
+test_pk_seek_filter_shapes :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "pkseek_shapes")
+	defer teardown_db(d, "pkseek_shapes")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);")
+
+	// Non-equality: scan path, unchanged results.
+	rng := db.query(d, "SELECT id FROM t WHERE id > 1;")
+	testing.expect(t, rng.ok, "range filter must succeed")
+	testing.expect_value(t, len(rng.rows), 2)
+
+	// Text literal vs int pk: the scan path drops the mismatched comparison
+	// (returns all rows); the seek falls back to scan, so identical.
+	txt := db.query(d, "SELECT id FROM t WHERE id = '2';")
+	testing.expect(t, txt.ok, "text rhs must succeed")
+	testing.expect_value(t, len(txt.rows), 3)
+
+	// NULL never matches.
+	nul := db.query(d, "SELECT id FROM t WHERE id = NULL;")
+	testing.expect(t, nul.ok, "null rhs must succeed")
+	testing.expect_value(t, len(nul.rows), 0)
+
+	// Qualified column: the scan path ignores the qualifier (returns all rows);
+	// the seek falls back to scan, so results stay identical.
+	qual := db.query(d, "SELECT id, v FROM t WHERE t.id = 2;")
+	testing.expect(t, qual.ok, "qualified filter must succeed")
+	testing.expect_value(t, len(qual.rows), 3)
+
+	// Extra conjunct: AND root is not a single COND, scan path, same row.
+	andc := db.query(d, "SELECT id, v FROM t WHERE id = 2 AND v = 20;")
+	testing.expect(t, andc.ok, "and filter must succeed")
+	testing.expect_value(t, len(andc.rows), 1)
+
+	andmiss := db.query(d, "SELECT id FROM t WHERE id = 2 AND v = 99;")
+	testing.expect(t, andmiss.ok, "and mismatch must succeed")
+	testing.expect_value(t, len(andmiss.rows), 0)
+}
+
+@(test)
+test_pk_seek_aggregates :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "pkseek_agg")
+	defer teardown_db(d, "pkseek_agg")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);")
+
+	cnt := db.query(d, "SELECT COUNT(*) FROM t WHERE id = 2;")
+	testing.expect(t, cnt.ok, "seek count must succeed")
+	testing.expect_value(t, len(cnt.rows), 1)
+	if len(cnt.rows) == 1 { testing.expect_value(t, cnt.rows[0][0].(i64), 1) }
+
+	sum := db.query(d, "SELECT SUM(v) FROM t WHERE id = 3;")
+	testing.expect(t, sum.ok, "seek sum must succeed")
+	if len(sum.rows) == 1 { testing.expect_value(t, sum.rows[0][0].(f64), 30) }
+
+	cntmiss := db.query(d, "SELECT COUNT(*) FROM t WHERE id = 99;")
+	testing.expect(t, cntmiss.ok, "seek count miss must succeed")
+	if len(cntmiss.rows) == 1 { testing.expect_value(t, cntmiss.rows[0][0].(i64), 0) }
+}
+
+@(test)
+test_pk_seek_as_of :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "pkseek_asof")
+	defer teardown_db(d, "pkseek_asof")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	snap_page := d.latest_snapshot
+	h, h_ok := snapshot.load(d.pager, snap_page)
+	testing.expect(t, h_ok, "should load snapshot")
+	snap_id := h.snapshot_id
+	db.execute(d, "UPDATE t SET v = 99 WHERE id = 1;")
+
+	cur := db.query(d, "SELECT v FROM t WHERE id = 1;")
+	testing.expect(t, cur.ok, "current seek must succeed")
+	if len(cur.rows) == 1 { testing.expect_value(t, cur.rows[0][0].(i64), 99) }
+
+	old := db.query(d, fmt.tprintf("SELECT v FROM t AS OF SNAPSHOT %d WHERE id = 1;", snap_id))
+	testing.expect(t, old.ok, "as-of seek must succeed")
+	testing.expect_value(t, len(old.rows), 1)
+	if len(old.rows) == 1 { testing.expect_value(t, old.rows[0][0].(i64), 10) }
+}
+
+@(test)
+test_pk_seek_no_pk_and_mutations :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "pkseek_nopk")
+	defer teardown_db(d, "pkseek_nopk")
+
+	// No pk: scan fallback, correct results.
+	db.execute(d, "CREATE TABLE u (id INTEGER, v INTEGER);")
+	db.execute(d, "INSERT INTO u VALUES (1, 10), (2, 20);")
+	plain := db.query(d, "SELECT v FROM u WHERE id = 2;")
+	testing.expect(t, plain.ok, "non-pk filter must succeed")
+	testing.expect_value(t, len(plain.rows), 1)
+
+	// Mutation agreement: update/delete by pk then seek sees it.
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20);")
+	db.execute(d, "UPDATE t SET v = 200 WHERE id = 2;")
+	upd := db.query(d, "SELECT v FROM t WHERE id = 2;")
+	testing.expect(t, upd.ok, "post-update seek must succeed")
+	if len(upd.rows) == 1 { testing.expect_value(t, upd.rows[0][0].(i64), 200) }
+
+	db.execute(d, "DELETE FROM t WHERE id = 1;")
+	del := db.query(d, "SELECT v FROM t WHERE id = 1;")
+	testing.expect(t, del.ok, "post-delete seek must succeed")
+	testing.expect_value(t, len(del.rows), 0)
+}
+
+// Txn-deferred schema roots: statements inside an explicit txn stage roots
+// instead of COW-publishing per statement. Results must be identical.
+@(test)
+test_txn_deferred_read_own_writes :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_read")
+	defer teardown_db(d, "txn_def_read")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20);")
+	q := db.query(d, "SELECT v FROM t WHERE id = 2;")
+	testing.expect(t, q.ok, "in-txn read must succeed")
+	testing.expect_value(t, len(q.rows), 1)
+	if len(q.rows) == 1 { testing.expect_value(t, q.rows[0][0].(i64), 20) }
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit failed")
+
+	after := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, after.ok, "post-commit read must succeed")
+	if len(after.rows) == 1 { testing.expect_value(t, after.rows[0][0].(i64), 2) }
+}
+
+@(test)
+test_txn_deferred_mixed_dml :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_mixed")
+	defer teardown_db(d, "txn_def_mixed")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "INSERT INTO t VALUES (4, 40);")
+	db.execute(d, "UPDATE t SET v = 200 WHERE id = 2;")
+	db.execute(d, "DELETE FROM t WHERE id = 1;")
+	mid := db.query(d, "SELECT id, v FROM t ORDER BY id;")
+	testing.expect_value(t, len(mid.rows), 3)
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit failed")
+
+	after := db.query(d, "SELECT id, v FROM t ORDER BY id;")
+	testing.expect_value(t, len(after.rows), 3)
+	if len(after.rows) == 3 {
+		testing.expect_value(t, after.rows[0][0].(i64), 2)
+		testing.expect_value(t, after.rows[0][1].(i64), 200)
+		testing.expect_value(t, after.rows[1][0].(i64), 3)
+		testing.expect_value(t, after.rows[2][0].(i64), 4)
+	}
+}
+
+@(test)
+test_txn_deferred_two_tables :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_2tab")
+	defer teardown_db(d, "txn_def_2tab")
+
+	db.execute(d, "CREATE TABLE a (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "CREATE TABLE b (id INTEGER PRIMARY KEY, v INTEGER);")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "INSERT INTO a VALUES (1, 10);")
+	db.execute(d, "INSERT INTO b VALUES (1, 100);")
+	db.execute(d, "INSERT INTO a VALUES (2, 20);")
+	db.execute(d, "UPDATE b SET v = 200 WHERE id = 1;")
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit failed")
+
+	qa := db.query(d, "SELECT COUNT(*) FROM a;")
+	qb := db.query(d, "SELECT v FROM b WHERE id = 1;")
+	if len(qa.rows) == 1 { testing.expect_value(t, qa.rows[0][0].(i64), 2) }
+	testing.expect_value(t, len(qb.rows), 1)
+	if len(qb.rows) == 1 { testing.expect_value(t, qb.rows[0][0].(i64), 200) }
+}
+
+@(test)
+test_txn_deferred_rollback_coherent :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_rb")
+	defer teardown_db(d, "txn_def_rb")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "INSERT INTO t VALUES (2, 20);")
+	db.execute(d, "UPDATE t SET v = 100 WHERE id = 1;")
+	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback failed")
+
+	// Rolled-back staged roots must not leak (data or cache): only row 1
+	// with its original value survives, and a fresh txn works.
+	q := db.query(d, "SELECT id, v FROM t ORDER BY id;")
+	testing.expect_value(t, len(q.rows), 1)
+	if len(q.rows) == 1 {
+		testing.expect_value(t, q.rows[0][0].(i64), 1)
+		testing.expect_value(t, q.rows[0][1].(i64), 10)
+	}
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "second begin failed")
+	db.execute(d, "INSERT INTO t VALUES (3, 30);")
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "second commit failed")
+	q2 := db.query(d, "SELECT COUNT(*) FROM t;")
+	if len(q2.rows) == 1 { testing.expect_value(t, q2.rows[0][0].(i64), 2) }
+}
+
+@(test)
+test_txn_deferred_ddl_mix :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_ddl")
+	defer teardown_db(d, "txn_def_ddl")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "INSERT INTO t VALUES (2, 20);")
+	// DDL mid-txn bumps the schema root and wipes overlays; the staged root
+	// for t must be re-applied, not lost.
+	db.execute(d, "CREATE TABLE u (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (3, 30);")
+	db.execute(d, "INSERT INTO u VALUES (1, 100);")
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit failed")
+
+	qt := db.query(d, "SELECT COUNT(*) FROM t;")
+	qu := db.query(d, "SELECT v FROM u WHERE id = 1;")
+	if len(qt.rows) == 1 { testing.expect_value(t, qt.rows[0][0].(i64), 3) }
+	testing.expect_value(t, len(qu.rows), 1)
+	if len(qu.rows) == 1 { testing.expect_value(t, qu.rows[0][0].(i64), 100) }
+}
+
+@(test)
+test_txn_deferred_drop_in_txn :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_drop")
+	defer teardown_db(d, "txn_def_drop")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "INSERT INTO t VALUES (2, 20);")
+	db.execute(d, "DROP TABLE t;")
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit failed")
+
+	// The staged root for t must not resurrect it at flush.
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	q := db.query(d, "SELECT COUNT(*) FROM t;")
+	context = restore_logger(saved)
+	testing.expect(t, !q.ok, "dropped table must stay dropped")
+}
+
+@(test)
+test_txn_deferred_vacuum_after_write :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_vac")
+	defer teardown_db(d, "txn_def_vac")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);")
+	db.execute(d, "DELETE FROM t WHERE id = 2;")
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "INSERT INTO t VALUES (4, 40);")
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum failed")
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit failed")
+
+	q := db.query(d, "SELECT id FROM t ORDER BY id;")
+	testing.expect_value(t, len(q.rows), 3)
+}
+
+@(test)
+test_txn_deferred_as_of_sees_committed :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "txn_def_asof")
+	defer teardown_db(d, "txn_def_asof")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	snap_page := d.latest_snapshot
+	h, h_ok := snapshot.load(d.pager, snap_page)
+	testing.expect(t, h_ok, "should load snapshot")
+	snap_id := h.snapshot_id
+
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin failed")
+	db.execute(d, "UPDATE t SET v = 99 WHERE id = 1;")
+	old := db.query(d, fmt.tprintf("SELECT v FROM t AS OF SNAPSHOT %d WHERE id = 1;", snap_id))
+	testing.expect(t, old.ok, "as-of in txn must succeed")
+	testing.expect_value(t, len(old.rows), 1)
+	if len(old.rows) == 1 { testing.expect_value(t, old.rows[0][0].(i64), 10) }
+	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback failed")
+}

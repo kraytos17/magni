@@ -41,6 +41,7 @@ create_refs_page :: proc(p: ^pager.Pager) -> u32 {
 
 	data := page.data
 	copy(data[:], REFS_MAGIC)
+
 	(^u32)(raw_data(data[len(REFS_MAGIC):]))^ = 0
 	pager.mark_dirty(p, page.page_num)
 	return page.page_num
@@ -63,8 +64,6 @@ set_ref :: proc(
 
 	offset := len(REFS_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += 4
-
-	// Skip log metadata
 	offset += 8
 	name_hash := hash.fnv64(transmute([]u8)name)
 	for _ in 0 ..< count {

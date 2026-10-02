@@ -132,7 +132,10 @@ lex_string :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 	start := l.pos + 1; l.pos += 1; token_line := l.line
 	for l.pos < len(l.sql) {
 		if l.sql[l.pos] == '\'' {
-			if l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '\'' { l.pos += 2; continue }
+			if l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '\'' {
+				l.pos += 2
+				continue
+			}
 			break
 		}
 		if l.sql[l.pos] == '\n' { l.line += 1 }
@@ -193,7 +196,6 @@ lex_number :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 			has_dot = true
 			l.pos += 1
 		} else if (ch == 'e' || ch == 'E') && l.pos + 1 < len(l.sql) {
-			// Only consume exponent if followed by [+-]digit or digit.
 			ep := l.pos + 1
 			if l.sql[ep] == '+' || l.sql[ep] == '-' {
 				if ep + 1 < len(l.sql) && is_digit_byte(l.sql[ep + 1]) {
@@ -327,6 +329,7 @@ peek :: proc(p: ^Parser) -> Token {
 
 advance :: proc(p: ^Parser) -> Token {
 	if p.current >= len(p.tokens) { return Token{.EOF, "", 0} }
+
 	token := p.tokens[p.current]
 	p.current += 1
 	return token
@@ -342,6 +345,7 @@ match :: proc(p: ^Parser, types: ..Token_Type) -> bool {
 expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 	token := peek(p)
 	if token.type != type { return token, false }
+
 	advance(p)
 	return token, true
 }

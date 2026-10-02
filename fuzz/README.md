@@ -158,7 +158,17 @@ Crashes land in `<out>/crashes/`, hangs in `<out>/hangs/`.
 ## Toolchain
 
 See `fuzz/toolchain-version.txt` (verified current: Odin
-`dev-2026-09-nightly:a2fb372`, AFL++ 5.00c, Clang/LLVM 22.1.8).
+`dev-2026-09-nightly:a2fb372`, AFL++ 5.00c, Clang/LLVM 23.1.1).
+
+Coverage builds set `AFL_LLVM_INSTRUMENT=NATIVE` (see `COV_TARGETS` /
+`build_exec` in `magni/build.py`): the distro's AFL LLVM plugins target an
+older LLVM and fail to load on LLVM 23 (`undefined symbol:
+llvm::DebugLoc::get()` and friends), so PCGUARD/classic linking is dead.
+NATIVE uses clang's own SanitizerCoverage — verified: clean links, 838
+exec tuples / ~110-190 parser tuples per seed with discriminating edge sets,
+421k execs in a 60s two-worker smoke with 0 crashes. `cmplog`/`laf` roles
+remain broken (their extra passes are equally stale); restoring them needs
+AFL++ rebuilt from source against LLVM 23.
 
 Dev-workstation env flags used by `magni.py fuzz`: `AFL_SKIP_CPUFREQ=1` (CPU
 governor check) and `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` (system

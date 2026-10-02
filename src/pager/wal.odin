@@ -29,6 +29,46 @@ WAL_Frame_Header :: struct #packed {
 
 WAL_FORMAT_VERSION :: 1
 
+// WAL_COMMIT_PAGE marks commit-marker frames: page_num 0 with a nonzero
+// db_size_after. The marker test lives here (not inline at the three scan
+// sites) so wal_abort_txn, wal_checkpoint, and wal_recover can never fork
+// the committed_upto rule again.
+WAL_COMMIT_PAGE :: 0
+
+// frame_is_commit reports whether a frame header is a commit marker as
+// opposed to a page image.
+frame_is_commit :: proc(fh: WAL_Frame_Header) -> bool {
+	return u32(fh.db_size_after) != 0
+}
+
+// wal_scan_committed_upto returns the end offset of the last commit marker
+// (WAL_HEADER_SIZE when there is none): frames past it are uncommitted. One
+// rule shared by abort (drop), checkpoint (don't copy), and recover (don't
+// replay) so the three can never fork it again. check_salt additionally
+// stops at the first foreign-generation frame (crash-torn tails); only
+// recover needs it, since abort/checkpoint run on a live WAL whose salts
+// cannot change mid-scan.
+@(private="file")
+wal_scan_committed_upto :: proc(ws: ^Wal_State, file_size: i64, check_salt: bool) -> i64 {
+	committed_upto := i64(types.WAL_HEADER_SIZE)
+	scan := i64(types.WAL_HEADER_SIZE)
+	for scan + types.WAL_FRAME_SIZE <= file_size {
+		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
+		_, read_err := os.read_at(ws.file, fh_buf[:], scan)
+		if read_err != nil { break }
+
+		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
+		if check_salt && (u32(fh.salt1) != ws.salt1 || u32(fh.salt2) != ws.salt2) {
+			break
+		}
+		if frame_is_commit(fh) {
+			committed_upto = scan + types.WAL_FRAME_SIZE
+		}
+		scan += types.WAL_FRAME_SIZE
+	}
+	return committed_upto
+}
+
 // page_index tracks committed frame locations (merged from txn_index on commit).
 // txn_index tracks uncommitted frame locations (discarded on abort).
 Wal_State :: struct {
@@ -113,6 +153,7 @@ wal_close :: proc(p: ^Pager) {
 		os.close(ws.file)
 		ws.file = nil
 	}
+
 	delete(ws.page_index)
 	delete(ws.txn_index)
 	delete(ws.wal_path)
@@ -135,13 +176,11 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 
 	clear(&p.dirty_pages)
 	commit_buf: [types.PAGE_SIZE]u8
-	wal_append_frame(p, 0, commit_buf[:], true, 0) or_return
+	wal_append_frame(p, WAL_COMMIT_PAGE, commit_buf[:], true, 0) or_return
 	if sync_err := os.sync(ws.file); sync_err != nil {
 		log.errorf("WAL: fsync failed: %v", sync_err)
 		return .IO_Error
 	}
-	// Merge uncommitted frame locations into the committed index.
-	// After fsync, these frames are durable and visible to readers.
 	for k, v in ws.txn_index {
 		ws.page_index[k] = v
 	}
@@ -160,20 +199,7 @@ wal_abort_txn :: proc(p: ^Pager) -> Evict_Report {
 	// legitimize them.
 	if ws.file != nil {
 		if file_size, serr := os.file_size(ws.file); serr == nil {
-			committed_upto := i64(types.WAL_HEADER_SIZE)
-			scan := i64(types.WAL_HEADER_SIZE)
-			for scan + types.WAL_FRAME_SIZE <= file_size {
-				fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
-				_, read_err := os.read_at(ws.file, fh_buf[:], scan)
-				if read_err != nil { break }
-
-				fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
-				if u32(fh.db_size_after) != 0 {
-					committed_upto = scan + types.WAL_FRAME_SIZE
-				}
-				scan += types.WAL_FRAME_SIZE
-			}
-
+			committed_upto := wal_scan_committed_upto(ws, file_size, false)
 			drop := make([dynamic]u32, context.temp_allocator)
 			for page_num, fo in ws.page_index {
 				if fo >= committed_upto { append(&drop, page_num) }
@@ -260,24 +286,10 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 
 	offset := i64(types.WAL_HEADER_SIZE)
 	frame_count := 0
-	// First pass: locate the last commit marker (same committed_upto rule
-	// as wal_recover). Frames past it are uncommitted — aborted-txn residue
-	// or in-flight txn pages still authoritative in cache — and must NOT be
-	// copied to main. Copying them resurrects aborted content and regrows
-	// files that rollback rewound.
-	committed_upto := i64(types.WAL_HEADER_SIZE)
-	scan := i64(types.WAL_HEADER_SIZE)
-	for scan + types.WAL_FRAME_SIZE <= file_size {
-		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
-		_, scan_err := os.read_at(ws.file, fh_buf[:], scan)
-		if scan_err != nil { break }
-
-		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
-		if u32(fh.db_size_after) != 0 {
-			committed_upto = scan + types.WAL_FRAME_SIZE
-		}
-		scan += types.WAL_FRAME_SIZE
-	}
+	// Frames past the last commit marker are uncommitted — aborted-txn
+	// residue or in-flight txn pages still authoritative in cache — and
+	// must NOT be copied to main. See wal_scan_committed_upto.
+	committed_upto := wal_scan_committed_upto(ws, file_size, false)
 	for offset + types.WAL_FRAME_SIZE <= committed_upto {
 		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
 		_, read_err := os.read_at(ws.file, fh_buf[:], offset)
@@ -285,11 +297,14 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
 		page_num := u32(fh.page_num)
-		if page_num == 0 { offset += types.WAL_FRAME_SIZE; frame_count += 1; continue }
+		if page_num == WAL_COMMIT_PAGE {
+			offset += types.WAL_FRAME_SIZE
+			frame_count += 1
+			continue
+		}
 
 		page_data: [types.PAGE_SIZE]u8
 		_, data_err := os.read_at(ws.file, page_data[:], offset + types.WAL_FRAME_HEADER_SIZE)
-
 		if data_err != nil { break }
 
 		db_offset := i64(page_num - 1) * i64(types.PAGE_SIZE)
@@ -299,11 +314,10 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 		offset += types.WAL_FRAME_SIZE
 		frame_count += 1
 	}
-
 	if err := os.sync(p.file); err != nil { return .IO_Error }
+
 	clear(&ws.page_index)
 	ws.frame_count = 0
-
 	nsec := u64(time.to_unix_nanoseconds(time.now()))
 	b1 := transmute([8]u8)nsec
 	b2 := transmute([8]u8)(nsec + 1)
@@ -342,23 +356,10 @@ wal_recover :: proc(p: ^Pager) -> Error {
 	}
 
 	valid_frames := make([dynamic]Page_Offset, context.temp_allocator)
-	committed_upto: i64
+	committed_upto := wal_scan_committed_upto(ws, file_size, true)
+	if committed_upto <= i64(types.WAL_HEADER_SIZE) { return .None }
+
 	offset := i64(types.WAL_HEADER_SIZE)
-	for offset + types.WAL_FRAME_SIZE <= file_size {
-		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
-		_, read_err := os.read_at(ws.file, fh_buf[:], offset)
-		if read_err != nil { break }
-
-		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
-		if u32(fh.salt1) != ws.salt1 || u32(fh.salt2) != ws.salt2 { break }
-		if u32(fh.db_size_after) != 0 {
-			committed_upto = offset + types.WAL_FRAME_SIZE
-		}
-		offset += types.WAL_FRAME_SIZE
-	}
-	if committed_upto == 0 { return .None }
-
-	offset = i64(types.WAL_HEADER_SIZE)
 	for offset < committed_upto {
 		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
 		if _, r_err := os.read_at(ws.file, fh_buf[:], offset); r_err != nil { break }
@@ -382,7 +383,7 @@ wal_recover :: proc(p: ^Pager) -> Error {
 		offset += types.WAL_FRAME_SIZE
 	}
 	for fo in valid_frames {
-		if fo.page_num == 0 { continue }
+		if fo.page_num == WAL_COMMIT_PAGE { continue }
 
 		page_data: [types.PAGE_SIZE]u8
 		_, data_err := os.read_at(ws.file, page_data[:], fo.offset + types.WAL_FRAME_HEADER_SIZE)

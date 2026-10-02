@@ -40,6 +40,7 @@ parse_insert :: proc(
 	rows := make([dynamic][]types.Value, allocator)
 	defer if !ok {
 		for r in rows { types.values_delete(r, allocator) }
+
 		delete(table_name, allocator)
 		delete(rows)
 	}
@@ -51,6 +52,7 @@ parse_insert :: proc(
 				allocator,
 			); if !val_ok {
 				for v in values { types.value_delete(v, allocator) }
+
 				delete(values)
 				return err(p, "Invalid value in INSERT")
 			}
@@ -61,6 +63,7 @@ parse_insert :: proc(
 				.RPAREN,
 			) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") {
 				for v in values { types.value_delete(v, allocator) }
+
 				delete(values)
 				return nil, false
 			}

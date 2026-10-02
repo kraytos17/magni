@@ -492,6 +492,10 @@ class TestDotCommands(MagniCLITestCase):
         p = self.run_eval(".snapdiff 1 2", self._t_db())
         self.assertHas(p, "change")
 
+    def test_snapdiff_bad_args_prints_table_usage(self):
+        p = self.run_eval(".snapdiff 1", self._t_db())
+        self.assertHas(p, "Usage: .snapdiff <older_id> <newer_id>")
+
     def test_expire_in_file_parses_keep(self):
         d = self._t_db()
         p = self.run_file(

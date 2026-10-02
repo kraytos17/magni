@@ -2,6 +2,7 @@ package db
 
 import "core:log"
 import "core:sync"
+import "src:executor"
 import "src:pager"
 import "src:schema"
 import "src:snapshot"
@@ -31,6 +32,21 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 	db.txn_snapshot_id += 1
 	snap_id := db.txn_snapshot_id
 	st := Schema_Tree(db)
+	// Flush staged data roots: one schema COW per dirty table (not per
+	// statement) against the current tree, so DDL published mid-txn is
+	// preserved and the snapshot below captures post-flush roots.
+	for name, root in db.txn_pending.roots {
+		new_r, flush_ok := schema.update_root_page_cow(&st, name, root)
+		if !flush_ok {
+			return .IO_Error
+		}
+		st.root = new_r
+	}
+	if len(db.txn_pending.roots) > 0 {
+		db.schema_root_page = st.root
+		update_header(db)
+	}
+	executor.pending_clear(&db.txn_pending)
 	schema_tables := schema.list_tables(&st, context.temp_allocator)
 	tables := make([dynamic]types.Table, context.temp_allocator)
 	for tbl in schema_tables {
@@ -88,6 +104,11 @@ rollback_impl :: proc(db: ^Database) -> DB_Error {
 		if snap_ok { db.schema_root_page = snap_h.schema_root }
 	}
 
+	// Staged roots die with the txn; the cache never saw a root bump (roots
+	// were overlaid, not published), so clear it explicitly — otherwise
+	// stale pending roots leak past the rollback.
+	executor.pending_clear(&db.txn_pending)
+	schema.table_cache_clear(&db.table_cache)
 	db.txn_state = .None
 	log.info("ROLLBACK transaction")
 	return .None

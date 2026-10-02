@@ -9,6 +9,7 @@ import "src:types"
 parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: string, ok: bool) {
 	tok := peek(p)
 	if tok.type != .IDENTIFIER && !is_keyword_token(tok.type) { return {}, false }
+
 	advance(p)
 	return strings.clone(tok.lexeme, allocator), true
 }
@@ -67,9 +68,6 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 		if !al3_ok { return {} }
 		return {source = tbl, alias = al3, success = true}
 	}
-	// No explicit alias: alias = "" means "same as source". The executor
-	// falls back to the table name, and statement_free skips empty aliases.
-	// (Sharing the tbl string header here would double-free.)
 	return {source = tbl, alias = "", success = true}
 }
 
@@ -108,6 +106,7 @@ parse_single_join :: proc(
 
 	parse_using := proc(p: ^Parser, left: string, right: string, alloc: mem.Allocator) -> (cl: Where_Clause, ok: bool) {
 		if !match(p, .LPAREN) { return {}, false }
+
 		cols := make([dynamic]string, alloc)
 		for {
 			col, col_ok := parse_identifier(p, alloc)
@@ -443,8 +442,6 @@ parse_from_clause :: proc(p: ^Parser, allocator := context.allocator) -> (fc: Fr
 	if !js.success { return {}, false }
 
 	fc.source, fc.alias = js.source, js.alias
-	// Resolve "" alias to table name for USING/ON desugar (the AST keeps
-	// "" to mean "same as source"; this local is only for name resolution).
 	left_name := fc.alias
 	if left_name == "" {
 		if tbl, is_tbl := js.source.(string); is_tbl { left_name = tbl }

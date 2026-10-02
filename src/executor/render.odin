@@ -1,7 +1,9 @@
 package executor
 
+import "core:fmt"
 import "core:os"
 import "core:text/table"
+import "src:types"
 
 // render_table prints a query/result command as a markdown table.
 // Cells are set via set_cell_value (which also sets alignment, required by the
@@ -59,4 +61,31 @@ is_ascii :: proc(s: string) -> bool {
 		if s[i] >= 0x80 { return false }
 	}
 	return true
+}
+
+// row_of allocates one fixed-width row filled from cells. Removes the
+// make/assign/store scaffolding at fixed-column sites (list_tables,
+// describe, snapshots, snapdiff).
+row_of :: proc(allocator := context.allocator, cells: ..string) -> []string {
+	row := make([]string, len(cells), allocator)
+	copy(row, cells)
+	return row
+}
+
+// stringify_row renders one result row's values to strings. Shared by the
+// SELECT, compound, and dump row loops.
+stringify_row :: proc(values: []types.Value, allocator := context.allocator) -> []string {
+	row := make([]string, len(values), allocator)
+	for v, i in values {
+		row[i] = types.value_to_string(v, allocator)
+	}
+	return row
+}
+
+// render_counted renders a table plus the standard "(N rows)" footer. The
+// result-printing sites share this so footers can never drift; sites with
+// custom footers (snapdiff) or none (stats) keep calling render_table.
+render_counted :: proc(cols: []string, rows: [][]string) {
+	render_table(cols, rows)
+	fmt.printf("(%d rows)\n", len(rows))
 }

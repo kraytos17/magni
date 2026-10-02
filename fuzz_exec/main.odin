@@ -24,14 +24,11 @@ main :: proc() {
 		os.exit(1)
 	}
 
-	// Mute below Error: db.open logs INFO per database, which would
-	// drown exec speed and disk under fuzzing.
 	context.logger.lowest_level = .Error
 	data, err := os.read_entire_file_from_path(os.args[1], context.allocator)
 	if err != nil { os.exit(1) }
 	defer delete(data)
 
-	// Fresh scratch DB per input (isolation between testcases).
 	db_path := fmt.tprintf("/tmp/opencode/magni_exec_%d.db", os.get_pid())
 	wal_path := fmt.tprintf("%s-wal", db_path)
 	defer os.remove(string(db_path))
@@ -41,8 +38,6 @@ main :: proc() {
 	if open_err != .None { return }
 	defer db.close(database)
 
-	// Execute as a script: DDL → DML → queries interplay is where the
-	// executor/storage bugs live. Errors are normal; only crashes matter.
 	for stmt in sqltext.split_statements(string(data), context.temp_allocator) {
 		trimmed := strings.trim_space(stmt)
 		if len(trimmed) <= 1 { continue }

@@ -1,6 +1,5 @@
 package executor
 
-import "core:fmt"
 import "src:btree"
 import "src:parser"
 import "src:schema"
@@ -352,13 +351,10 @@ exec_compound :: proc(t: ^btree.Tree, compound: parser.Compound_Stmt) -> bool {
 	for c, i in acc_cols { col_names[i] = c.name }
 
 	table_rows := make([][]string, len(rows), context.temp_allocator)
-	for ri in 0 ..< len(rows) {
-		row_strs := make([]string, len(rows[ri].values), context.temp_allocator)
-		for v, vi in rows[ri].values { row_strs[vi] = types.value_to_string(v) }
-		table_rows[ri] = row_strs
+	for r, ri in rows {
+		table_rows[ri] = stringify_row(r.values, context.temp_allocator)
 	}
 
-	render_table(col_names, table_rows)
-	fmt.printf("(%d rows)\n", len(rows))
+	render_counted(col_names, table_rows)
 	return true
 }

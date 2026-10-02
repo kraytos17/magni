@@ -1,5 +1,7 @@
 package executor
 
+import "core:mem"
+import "core:strings"
 import "src:btree"
 import "src:parser"
 import "src:types"
@@ -60,6 +62,54 @@ Update_Op :: struct #all_or_none {
 Mutated_Table_Info :: struct #all_or_none {
 	name: string,
 	root: u32,
+}
+
+// Pending_Roots stages unpublished data roots inside an explicit txn: DML
+// updates the map (plus the table-cache overlay) instead of COW-writing the
+// schema leaf per statement, and COMMIT flushes one schema COW per dirty
+// table. Readers need no changes — the overlay keeps find_table_cached
+// serving pending roots transparently. Autocommit never stages (nil pending
+// ⇒ immediate publish, exactly as before).
+Pending_Roots :: struct {
+	roots: map[string]u32, // table name → pending data root
+	alloc: mem.Allocator, // owns key clones + map; set on first stage
+}
+
+// pending_stage records a new data root. The name is cloned: callers pass
+// statement-borrowed strings but the map outlives the statement. Re-staging
+// the same table overwrites the value without a second clone.
+pending_stage :: proc(p: ^Pending_Roots, table_name: string, root: u32, allocator := context.allocator) {
+	if p.roots == nil {
+		p.roots = make(map[string]u32, 8, allocator)
+		p.alloc = allocator
+	}
+	if table_name in p.roots {
+		p.roots[table_name] = root
+		return
+	}
+	p.roots[strings.clone(table_name, p.alloc)] = root
+}
+
+// pending_drop forgets a staged root (DROP TABLE in txn). No-op when absent.
+pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
+	if p.roots == nil { return }
+	for k in p.roots {
+		if k == table_name {
+			delete(k, p.alloc)
+			delete_key(&p.roots, k)
+			return
+		}
+	}
+}
+
+// pending_clear frees all staged entries. Called at COMMIT (after flush) and
+// ROLLBACK (discard).
+pending_clear :: proc(p: ^Pending_Roots) {
+	if p.roots == nil { return }
+	for k in p.roots { delete(k, p.alloc) }
+
+	delete(p.roots)
+	p.roots = nil
 }
 
 // Result captures the outcome of executing a statement: a result set for

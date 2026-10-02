@@ -118,6 +118,21 @@ fetch_single_rows :: proc(
 		len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil
 
 	max_rows := stmt.limit if pushable else nil
+	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
+	single_range := []Table_Col_Range {
+		{table_name = from_name, start_col = 0, col_count = len(tbl.columns)},
+	}
+
+	// PK-seek fast path: a lone `pk = const` filter resolves to one tree_find
+	// instead of a full scan. A miss yields zero rows; downstream
+	// (sort/project/dedup/limit/aggregates) is shared with the scan path, so
+	// result shape is identical. Anything else falls through to scan_table.
+	if wc, has_wc := stmt.where_clause.?; has_wc {
+		if rowid, seek_ok := try_pk_lookup(tbl, wc); seek_ok {
+			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
+		}
+	}
+
 	rows, scan_err := scan_table(
 		&table_tree,
 		&tbl,
@@ -128,12 +143,31 @@ fetch_single_rows :: proc(
 		cache,
 	)
 	if scan_err { return nil, nil, nil, false }
-
-	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
-	single_range := []Table_Col_Range {
-		{table_name = from_name, start_col = 0, col_count = len(tbl.columns)},
-	}
 	return rows, tbl.columns, single_range, true
+}
+
+// seek_single_row fetches one row by Row_ID for the PK-seek fast path.
+// A miss yields zero rows with success=true (same shape as a scan miss).
+// Cell ownership mirrors the scan loop: values transfer to the entry and the
+// deferred destroy is disarmed, so neither a double free nor a leak.
+@(private)
+seek_single_row :: proc(
+	table_tree: ^btree.Tree,
+	rowid: types.Row_ID,
+	cols: []types.Column,
+	single_range: []Table_Col_Range,
+	allocator := context.allocator,
+) -> ([]Row_Entry, []types.Column, []Table_Col_Range, bool) {
+	r := make([dynamic]Row_Entry, allocator)
+	c, find_err := btree.tree_find(table_tree, rowid, allocator)
+	if find_err == .None {
+		defer cell.destroy(&c, allocator)
+		append(&r, Row_Entry{c.rowid, c.values})
+		c.values = nil
+	} else if find_err != .Cell_Not_Found {
+		return nil, nil, nil, false
+	}
+	return r[:], cols, single_range, true
 }
 
 exec_select_single_data :: proc(
