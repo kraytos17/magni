@@ -4,10 +4,10 @@ import "core:os"
 import "core:strings"
 
 History :: struct {
-	entries:    [dynamic]string,
-	nav_index:  int,
+	entries   : [dynamic]string,
+	nav_index : int,
 	saved_line: string,
-	path:       string,
+	path      : string,
 }
 
 history_add :: proc(h: ^History, line: string) {

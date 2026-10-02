@@ -17,12 +17,12 @@ init :: proc(t: ^btree.Tree) -> bool {
 
 // Schema_Row is the canonical representation of a schema b-tree entry.
 Schema_Row :: struct {
-	kind:         string, // always "table"
-	name:         string,
-	root_page:    u32,
-	sql:          string,
+	kind        : string, // always "table"
+	name        : string,
+	root_page   : u32,
+	sql         : string,
 	columns_blob: []u8,
-	skip_root:    u32,
+	skip_root   : u32,
 }
 
 schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator) -> []types.Value {
@@ -43,10 +43,10 @@ schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator)
 
 schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 	if len(values) < 5 { return {}, false }
-	
+
 	name, ok1 := values[1].(string)
 	if !ok1 { return {}, false }
-	
+
 	kind_val, kind_ok := values[0].(i64)
 	if !kind_ok || kind_val != 0 { return {}, false }
 
@@ -181,14 +181,14 @@ find_table :: proc(
 // changes the root and implicitly invalidates it. Cached tables are owned by the
 // cache and must not be freed by callers.
 Table_Cache :: struct {
-	root:      u32,
-	tables:    map[string]^types.Table,
+	root     : u32,
+	tables   : map[string]^types.Table,
 	allocator: mem.Allocator,
-	mu:        sync.RW_Mutex, // guards the cache; taken under db.mu, before pager.mutex
+	mu       : sync.RW_Mutex, // guards the cache; taken under db.mu, before pager.mutex
 }
 
 // clear_table_cache frees every cached table entry; caller must hold cache.mu.
-@(private="file")
+@(private = "file")
 clear_table_cache :: proc(cache: ^Table_Cache) {
 	for _, tbl in cache.tables {
 		table_free(tbl^, cache.allocator)
@@ -321,7 +321,7 @@ table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
 	return false
 }
 
-@(private="file")
+@(private = "file")
 table_from_values :: proc(
 	values: []types.Value,
 	allocator := context.allocator,
@@ -366,19 +366,25 @@ update_root_page_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	return update_schema_root_cow(t, table_name, new_root_page, set_data_root, "update_root_page_cow")
+	return update_schema_root_cow(
+		t,
+		table_name,
+		new_root_page,
+		set_data_root,
+		"update_root_page_cow",
+	)
 }
 
-@(private="file")
+@(private = "file")
 set_data_root :: proc(sr: ^Schema_Row, root: u32) { sr.root_page = root }
 
-@(private="file")
+@(private = "file")
 set_skip_root :: proc(sr: ^Schema_Row, root: u32) { sr.skip_root = root }
 
 // update_schema_root_cow is the shared core behind update_root_page_cow and
 // update_skip_root_cow: fetch the schema row, apply the field setter, and
 // commit it copy-on-write. Callers keep their names, so no call-site churn.
-@(private="file")
+@(private = "file")
 update_schema_root_cow :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -405,11 +411,7 @@ update_schema_root_cow :: proc(
 
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {
-		log.errorf(
-			"[schema] %s: schema_row_from_values failed for '%s'",
-			op_name,
-			table_name,
-		)
+		log.errorf("[schema] %s: schema_row_from_values failed for '%s'", op_name, table_name)
 		return t.root, false
 	}
 
@@ -436,7 +438,13 @@ update_skip_root_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	return update_schema_root_cow(t, table_name, new_skip_root, set_skip_root, "update_skip_root_cow")
+	return update_schema_root_cow(
+		t,
+		table_name,
+		new_skip_root,
+		set_skip_root,
+		"update_skip_root_cow",
+	)
 }
 
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {
@@ -479,15 +487,15 @@ get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
 	return -1, false
 }
 
-@(private="file")
+@(private = "file")
 debug_print_entry :: proc(table: types.Table) {
 	fmt.printf("Table: %s (Root: %d)\n", table.name, table.root_page)
 	fmt.printf("SQL:   %s\n", table.sql)
 	fmt.println("Columns:")
 	for col, i in table.columns {
 		flags := make([dynamic]string, context.temp_allocator)
-		if col.pk do append(&flags, "PK")
-		if col.not_null do append(&flags, "NN")
+		if col.pk { append(&flags, "PK") }
+		if col.not_null { append(&flags, "NN") }
 
 		flags_str := strings.join(flags[:], ", ", context.temp_allocator)
 		type_str: string
@@ -517,7 +525,7 @@ debug_print_all :: proc(t: ^btree.Tree) {
 		return
 	}
 	for table, i in tables {
-		if i > 0 do fmt.println("-----------------------")
+		if i > 0 { fmt.println("-----------------------") }
 		debug_print_entry(table)
 	}
 	fmt.println("=======================")

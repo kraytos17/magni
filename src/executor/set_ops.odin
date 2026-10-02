@@ -8,7 +8,7 @@ import "src:types"
 // exec_select_data evaluates a SELECT and returns its result rows and columns
 // WITHOUT printing, covering FROM-less literals, single-table selects, subqueries,
 // joins, and aggregates. This is the operand evaluator for set operations.
-@(private="file")
+@(private = "file")
 exec_select_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -36,7 +36,7 @@ exec_select_data :: proc(
 }
 
 // union_all_op appends b to a without dedup.
-@(private="file")
+@(private = "file")
 union_all_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 	append(a, ..b)
 }
@@ -45,7 +45,7 @@ union_all_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 // Uses fingerprint buckets with values_equal verification (same pattern as
 // intersect/except) — a bare map[u64]bool would silently drop distinct rows
 // on hash collision.
-@(private="file")
+@(private = "file")
 union_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 	// The accumulator may start with duplicates (e.g. UNION of {1,1,2}).
 	// Dedup it first so the incremental logic below only handles b rows.
@@ -103,7 +103,7 @@ intersect :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 // min(count_a, count_b) times. Matches are verified with values_equal and each
 // b row is consumed at most once — fingerprint-only counting would inflate
 // caps on hash collision.
-@(private="file")
+@(private = "file")
 intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	seen_b := fp_buckets_make(len(b), context.temp_allocator)
 	defer fp_buckets_destroy(&seen_b)
@@ -156,7 +156,7 @@ except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 // except_all keeps the multiset difference: each distinct row repeated
 // max(count_a - count_b, 0) times. Skips are verified with values_equal —
 // fingerprint-only comparison would wrongly drop distinct rows on collision.
-@(private="file")
+@(private = "file")
 except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	seen_b := fp_buckets_make(len(b), context.temp_allocator)
 	defer fp_buckets_destroy(&seen_b)
@@ -186,12 +186,8 @@ except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 }
 
 // apply_set_op reduces the accumulator with one operand per its operator.
-@(private="file")
-apply_set_op :: proc(
-	acc: ^[dynamic]Row_Entry,
-	op: parser.Set_Op,
-	other: []Row_Entry,
-) {
+@(private = "file")
+apply_set_op :: proc(acc: ^[dynamic]Row_Entry, op: parser.Set_Op, other: []Row_Entry) {
 	switch op {
 	case .UNION:
 		union_op(acc, other)
@@ -243,7 +239,11 @@ exec_compound_data :: proc(
 	i := 0
 	for i < len(compound.operands) {
 		op := compound.operands[i].op
-		other_rows, other_cols, other_ok := exec_select_data(t, compound.operands[i].select^, cache)
+		other_rows, other_cols, other_ok := exec_select_data(
+			t,
+			compound.operands[i].select^,
+			cache,
+		)
 		if !other_ok { return nil, nil, false }
 		// Set operations require equal column counts across operands.
 		if len(other_cols) != len(acc_cols) {
@@ -285,7 +285,7 @@ exec_compound_data :: proc(
 	rows := acc[:]
 	// Compound-level ORDER BY / LIMIT / OFFSET.
 	if order_clause, has_o := compound.order_by.?; has_o && len(order_clause) > 0 {
-		range0 := []Table_Col_Range {{table_name = "", start_col = 0, col_count = len(acc_cols)}}
+		range0 := []Table_Col_Range{{table_name = "", start_col = 0, col_count = len(acc_cols)}}
 		if !sort_rows(rows, order_clause, acc_cols, range0) { return nil, nil, false }
 	}
 	if limit, has_limit := compound.limit.?; has_limit {
@@ -300,7 +300,7 @@ exec_compound_data :: proc(
 }
 
 // exec_compound evaluates a compound SELECT and prints the result.
-@(private="file")
+@(private = "file")
 exec_compound :: proc(t: ^btree.Tree, compound: parser.Compound_Stmt) -> bool {
 	rows, acc_cols, ok := exec_compound_data(t, compound)
 	if !ok { return false }

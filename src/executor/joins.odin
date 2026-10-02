@@ -6,7 +6,7 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
-@(private="file")
+@(private = "file")
 join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[dynamic]Row_Entry) {
 	combined := make([]types.Value, len(outer.values) + len(inner), context.temp_allocator)
 	copy(combined[:len(outer.values)], outer.values)
@@ -14,7 +14,7 @@ join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[d
 	append(new_rows, Row_Entry{0, combined})
 }
 
-@(private="file")
+@(private = "file")
 join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[dynamic]Row_Entry) {
 	null_row := make([]types.Value, len(outer.values) + right_col_count, context.temp_allocator)
 	copy(null_row[:len(outer.values)], outer.values)
@@ -24,8 +24,12 @@ join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[d
 	append(new_rows, Row_Entry{0, null_row})
 }
 
-@(private="file")
-join_emit_null_left_row :: proc(right_row: Row_Entry, left_col_count: int, new_rows: ^[dynamic]Row_Entry) {
+@(private = "file")
+join_emit_null_left_row :: proc(
+	right_row: Row_Entry,
+	left_col_count: int,
+	new_rows: ^[dynamic]Row_Entry,
+) {
 	null_row := make([]types.Value, left_col_count + len(right_row.values), context.temp_allocator)
 	for k in 0 ..< left_col_count {
 		null_row[k] = types.value_null()
@@ -38,7 +42,7 @@ join_emit_null_left_row :: proc(right_row: Row_Entry, left_col_count: int, new_r
 // emit_unmatched_outer null-extends every row of an outer join side when the
 // ON clause is unresolvable (matches nothing): LEFT pads each left row with
 // nulls, RIGHT pads each right row.
-@(private="file")
+@(private = "file")
 emit_unmatched_outer :: proc(
 	is_left, is_right: bool,
 	rows, right_rows: []Row_Entry,
@@ -61,21 +65,21 @@ emit_unmatched_outer :: proc(
 // (absolute index into the combined row), and the side's full row width
 // (for the OOB guard and null-extended outer rows).
 Join_Side :: struct {
-	rows:  []Row_Entry,
-	col:   int,
+	rows : []Row_Entry,
+	col  : int,
 	width: int,
 }
 
 // Join_Outer marks which unmatched sides emit null-extended rows.
 Join_Outer :: struct {
-	left:  bool,
+	left : bool,
 	right: bool,
 }
 
 // join_key_i64 fingerprints an integer join key (bijective, so hits need no
 // verification). Non-i64 values — including NULLs — report false and never
 // match, mirroring the old dedicated i64 path.
-@(private="file")
+@(private = "file")
 join_key_i64 :: proc(v: types.Value) -> (u64, bool) {
 	key, ok := v.(i64)
 	if !ok { return 0, false }
@@ -84,16 +88,16 @@ join_key_i64 :: proc(v: types.Value) -> (u64, bool) {
 
 // join_key_fingerprint hashes any non-NULL key (no per-row string
 // allocation). Collisions fall back to value_compare at the call site.
-@(private="file")
+@(private = "file")
 join_key_fingerprint :: proc(v: types.Value) -> (u64, bool) {
 	if types.is_null(v) { return 0, false }
 	return hash_value(v), true
 }
 
-@(private="file")
+@(private = "file")
 join_match_any :: proc(a, b: types.Value) -> bool { return true }
 
-@(private="file")
+@(private = "file")
 join_match_compare :: proc(a, b: types.Value) -> bool {
 	return types.value_compare(a, b)
 }
@@ -102,7 +106,7 @@ join_match_compare :: proc(a, b: types.Value) -> bool {
 // join_hash_i64 / join_hash_string twins. key_of fingerprints one key value
 // (false = skip); verify confirms a fingerprint hit. The smaller side is built
 // into the bucket table; the other probes it.
-@(private="file")
+@(private = "file")
 join_hash_probe :: proc(
 	left, right: Join_Side,
 	outer: Join_Outer,
@@ -150,7 +154,7 @@ join_hash_probe :: proc(
 			}
 		}
 	}
-	for _, bucket in ht do delete(bucket)
+	for _, bucket in ht { delete(bucket) }
 
 	delete(ht)
 	matched_left := matched_build if build_left else matched_probe
@@ -172,7 +176,7 @@ join_hash_probe :: proc(
 	delete(matched_probe)
 }
 
-@(private="file")
+@(private = "file")
 resolve_from_source :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -208,7 +212,7 @@ resolve_from_source :: proc(
 	return false
 }
 
-@(private="file")
+@(private = "file")
 resolve_join_source :: proc(
 	t: ^btree.Tree,
 	join: parser.Join_Clause,
@@ -253,7 +257,7 @@ resolve_join_source :: proc(
 
 // execute_single_join runs one JOIN clause: materializes the right side,
 // picks hash vs nested-loop, and returns the combined rows.
-@(private="file")
+@(private = "file")
 execute_single_join :: proc(
 	t: ^btree.Tree,
 	jb: ^Join_Build,
@@ -288,7 +292,7 @@ execute_single_join :: proc(
 
 // try_hash_join attempts the hash-join fast path for single-COND equi-joins
 // with a column RHS. Returns false to fall back to nested loop.
-@(private="file")
+@(private = "file")
 try_hash_join :: proc(
 	jb: ^Join_Build,
 	jc: parser.Join_Clause,
@@ -324,8 +328,10 @@ try_hash_join :: proc(
 	// for the current table's start_col. Multi-JOIN or junk ON clauses can
 	// resolve to indices outside the table's range; the nested-loop path
 	// resolves per-table correctly, so fall through here instead of OOB-ing.
-	if left_idx < 0 || left_idx >= lcc ||
-	   right_idx < right_adjust || right_idx >= right_adjust + rcc {
+	if left_idx < 0 ||
+	   left_idx >= lcc ||
+	   right_idx < right_adjust ||
+	   right_idx >= right_adjust + rcc {
 		return false
 	}
 
@@ -359,7 +365,7 @@ try_hash_join :: proc(
 
 // nested_loop_join is the fallback for non-equi and multi-conjunct joins:
 // pair-wise ON evaluation with null extension for outer joins.
-@(private="file")
+@(private = "file")
 nested_loop_join :: proc(
 	jb: ^Join_Build,
 	jc: parser.Join_Clause,
@@ -380,7 +386,15 @@ nested_loop_join :: proc(
 	if on_cl, has := jc.on_clause.?; has {
 		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, nil, context.temp_allocator)
 		if _, ok := filter.?; !ok {
-			emit_unmatched_outer(is_left, is_right, rows, right_rows, left_col_count, right_col_count, new_rows)
+			emit_unmatched_outer(
+				is_left,
+				is_right,
+				rows,
+				right_rows,
+				left_col_count,
+				right_col_count,
+				new_rows,
+			)
 			return
 		}
 	}
@@ -390,13 +404,7 @@ nested_loop_join :: proc(
 		for outer_row in rows {
 			matched := false
 			for right_row, ri in right_rows {
-				try_join_match(
-					outer_row,
-					right_row.values,
-					filter,
-					new_rows,
-					&matched,
-				)
+				try_join_match(outer_row, right_row.values, filter, new_rows, &matched)
 				if matched { matched_right[ri] = true }
 			}
 			if is_left && !matched {
@@ -407,13 +415,7 @@ nested_loop_join :: proc(
 		for r_row, r_idx in right_rows {
 			for l_row in rows {
 				dummy := false
-				try_join_match(
-					l_row,
-					r_row.values,
-					filter,
-					new_rows,
-					&dummy,
-				)
+				try_join_match(l_row, r_row.values, filter, new_rows, &dummy)
 				if dummy { matched_right[r_idx] = true }
 			}
 		}
@@ -429,7 +431,7 @@ nested_loop_join :: proc(
 
 // resolve_join_tables resolves the FROM source and every JOIN source into
 // parallel context/range arrays. Returns false (already logged) on failure.
-@(private="file")
+@(private = "file")
 resolve_join_tables :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -454,7 +456,7 @@ resolve_join_tables :: proc(
 
 // assemble_combined_cols lays every table's columns into one array at their
 // range offsets. Returns the array and the total column count.
-@(private="file")
+@(private = "file")
 assemble_combined_cols :: proc(
 	table_ctxs: []Table_Context,
 	table_count: int,
@@ -480,7 +482,7 @@ assemble_combined_cols :: proc(
 // scan_first_table materializes the FROM side: a btree scan with its
 // pushdown filter, or the virtual rows for a subquery source. Returns
 // (nil, true) when the first source yields no rows without error.
-@(private="file")
+@(private = "file")
 scan_first_table :: proc(
 	t: ^btree.Tree,
 	table_ctxs: []Table_Context,
@@ -510,7 +512,7 @@ scan_first_table :: proc(
 
 // run_join_chain executes each JOIN clause in order, then applies the
 // residual post-join WHERE filter over the combined rows.
-@(private="file")
+@(private = "file")
 run_join_chain :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -589,7 +591,7 @@ exec_select_join_data :: proc(
 	return finish_select(stmt, rows, combined_cols, table_ranges)
 }
 
-@(private="file")
+@(private = "file")
 try_join_match :: proc(
 	outer_row: Row_Entry,
 	inner_values: []types.Value,

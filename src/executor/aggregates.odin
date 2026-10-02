@@ -22,11 +22,7 @@ find_existing_group :: proc(
 	if !ok { return -1, false }
 	for n := h; n != -1; n = buckets.next[n] {
 		gi := buckets.rows[n]
-		if values_equal_by_indices(
-			row_entry.values,
-			groups[gi].key_values,
-			group_by_indices,
-		) {
+		if values_equal_by_indices(row_entry.values, groups[gi].key_values, group_by_indices) {
 			return gi, true
 		}
 	}
@@ -145,7 +141,12 @@ exec_select_aggregate_data :: proc(
 			) { continue }
 		}
 
-		out, proj_ok := project_group_row(stmt, groups[gi].key_values, agg_vals, len(group_by_indices))
+		out, proj_ok := project_group_row(
+			stmt,
+			groups[gi].key_values,
+			agg_vals,
+			len(group_by_indices),
+		)
 		if !proj_ok { return nil, nil, false }
 		append(&result, Row_Entry{rowid = types.Row_ID(gi), values = out})
 	}
@@ -162,7 +163,10 @@ exec_select_aggregate_data :: proc(
 		   stmt.col_literal_idx[i] < len(stmt.literal_values) {
 			col_type = literal_column_type(stmt.literal_values[stmt.col_literal_idx[i]])
 		}
-		cols[i] = types.Column{name = display, type = col_type}
+		cols[i] = types.Column {
+			name = display,
+			type = col_type,
+		}
 	}
 	return result[:], cols, true
 }
@@ -170,7 +174,7 @@ exec_select_aggregate_data :: proc(
 // Group_Proj_Cursor walks the two independent value streams a grouped
 // projection consumes: aggregate results and group keys.
 Group_Proj_Cursor :: struct {
-	agg:   int,
+	agg  : int,
 	group: int,
 }
 
@@ -180,7 +184,7 @@ Group_Proj_Cursor :: struct {
 // in order (select-list aggregates first; HAVING-only aggregates appended
 // after), COLUMN slots take the next group key. Hand-built statements without
 // kinds fall back to the legacy positional path (first N slots are group keys).
-@(private="file")
+@(private = "file")
 project_group_row :: proc(
 	stmt: parser.Select_Stmt,
 	key_values: []types.Value,
@@ -192,8 +196,8 @@ project_group_row :: proc(
 ) {
 	out = make([]types.Value, len(stmt.columns), context.temp_allocator)
 	cur := Group_Proj_Cursor{}
-	use_kinds := len(stmt.col_kinds) == len(stmt.columns) &&
-		len(stmt.col_literal_idx) == len(stmt.columns)
+	use_kinds :=
+		len(stmt.col_kinds) == len(stmt.columns) && len(stmt.col_literal_idx) == len(stmt.columns)
 	for i in 0 ..< len(stmt.columns) {
 		if use_kinds {
 			#partial switch stmt.col_kinds[i] {
@@ -237,14 +241,14 @@ project_group_row :: proc(
 
 // mix_error logs the non-aggregate-column-beside-aggregates error and reports
 // the shared failure code (always false).
-@(private="file")
+@(private = "file")
 mix_error :: proc(col: string) -> bool {
 	log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", col)
 	return false
 }
 
 // literal_column_type maps a literal value to its display column type.
-@(private="file")
+@(private = "file")
 literal_column_type :: proc(v: types.Value) -> types.Column_Type {
 	#partial switch _ in v {
 	case i64:
@@ -269,33 +273,33 @@ group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
 @(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
 @(private)
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
-	if types.is_null(a) && types.is_null(b) do return 0
-	if types.is_null(a) do return -1
-	if types.is_null(b) do return 1
+	if types.is_null(a) && types.is_null(b) { return 0 }
+	if types.is_null(a) { return -1 }
+	if types.is_null(b) { return 1 }
 
 	ra, rb := value_rank(a), value_rank(b)
-	if ra != rb do return -1 if ra < rb else 1
+	if ra != rb { return -1 if ra < rb else 1 }
 	#partial switch va in a {
 	case i64:
 		#partial switch vb in b {
 		case i64:
-			if va < vb do return -1
-			if va > vb do return 1
+			if va < vb { return -1 }
+			if va > vb { return 1 }
 			return 0
 		case f64:
-			if f64(va) < vb do return -1
-			if f64(va) > vb do return 1
+			if f64(va) < vb { return -1 }
+			if f64(va) > vb { return 1 }
 			return 0
 		}
 	case f64:
 		#partial switch vb in b {
 		case f64:
-			if va < vb do return -1
-			if va > vb do return 1
+			if va < vb { return -1 }
+			if va > vb { return 1 }
 			return 0
 		case i64:
-			if va < f64(vb) do return -1
-			if va > f64(vb) do return 1
+			if va < f64(vb) { return -1 }
+			if va > f64(vb) { return 1 }
 			return 0
 		}
 	case string:
@@ -313,7 +317,7 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 // value_rank orders storage classes for compare_values. Null never reaches
 // here (handled above); the fallback keeps the order total for any future
 // variant without ever equating distinct classes.
-@(private="file")
+@(private = "file")
 value_rank :: proc(v: types.Value) -> int {
 	if _, ok := v.(i64); ok { return 0 }
 	if _, ok := v.(f64); ok { return 0 }
@@ -352,12 +356,12 @@ build_display_indices :: proc(
 // Agg_Input is one resolved aggregate argument: the group's rows plus the
 // column index (-1 for COUNT(*) or unresolvable columns).
 Agg_Input :: struct {
-	rows:    [][]types.Value,
+	rows   : [][]types.Value,
 	col_idx: int,
 }
 
 // resolve_agg_input maps an aggregate's column name to its index.
-@(private="file")
+@(private = "file")
 resolve_agg_input :: proc(
 	rows: [][]types.Value,
 	agg: parser.Aggregate_Expr,
@@ -381,7 +385,7 @@ resolve_agg_input :: proc(
 	.Allow_Contract,
 	.Approx_Func,
 })
-@(private="file")
+@(private = "file")
 sum_count :: proc(ai: Agg_Input) -> (sum: f64, count: int) {
 	for row_vals in ai.rows {
 		if ai.col_idx >= 0 && !types.is_null(row_vals[ai.col_idx]) {
@@ -403,7 +407,7 @@ Extremum_Dir :: enum u8 {
 
 // extremum returns the MIN/MAX non-NULL value of one column, or NULL when
 // the group is empty or the column is unresolvable.
-@(private="file")
+@(private = "file")
 extremum :: proc(ai: Agg_Input, dir: Extremum_Dir) -> types.Value {
 	if len(ai.rows) == 0 || ai.col_idx < 0 {
 		return types.value_null()
@@ -482,7 +486,7 @@ evaluate_where_having :: proc(
 
 // aggregate_func_name maps an aggregate to its HAVING reference name
 // (lowercase; HAVING count and HAVING COUNT both match via equal_fold).
-@(private="file")
+@(private = "file")
 aggregate_func_name :: proc(func: parser.Aggregate_Func) -> string {
 	switch func {
 	case .COUNT:
@@ -501,12 +505,15 @@ aggregate_func_name :: proc(func: parser.Aggregate_Func) -> string {
 
 // find_having_aggregate returns the computed value of the aggregate a HAVING
 // condition names (case-insensitive), or false.
-@(private="file")
+@(private = "file")
 find_having_aggregate :: proc(
 	column: string,
 	aggregates: []parser.Aggregate_Expr,
 	agg_values: []types.Value,
-) -> (types.Value, bool) {
+) -> (
+	types.Value,
+	bool,
+) {
 	for agg, i in aggregates {
 		if strings.equal_fold(column, aggregate_func_name(agg.func)) {
 			return agg_values[i], true
@@ -518,14 +525,17 @@ find_having_aggregate :: proc(
 // resolve_having_value finds the group-key or aggregate value a HAVING
 // condition names, without requiring an rhs. Shared lookup for the IS NULL
 // branch; the comparison path keeps its inline form.
-@(private="file")
+@(private = "file")
 resolve_having_value :: proc(
 	cond: parser.Condition,
 	group_keys: []types.Value,
 	agg_values: []types.Value,
 	group_cols: []string,
 	aggregates: []parser.Aggregate_Expr,
-) -> (types.Value, bool) {
+) -> (
+	types.Value,
+	bool,
+) {
 	for col, i in group_cols {
 		if col == cond.column {
 			return group_keys[i], true
@@ -534,7 +544,7 @@ resolve_having_value :: proc(
 	return find_having_aggregate(cond.column, aggregates, agg_values)
 }
 
-@(private="file")
+@(private = "file")
 evaluate_having_node :: proc(
 	node: ^parser.Where_Node,
 	group_keys: []types.Value,
@@ -568,7 +578,7 @@ evaluate_having_node :: proc(
 	return false
 }
 
-@(private="file")
+@(private = "file")
 evaluate_having_condition :: proc(
 	cond: parser.Condition,
 	group_keys: []types.Value,
@@ -580,7 +590,8 @@ evaluate_having_condition :: proc(
 	// comparing against an rhs (which IS conditions never carry).
 	if cond.operator == .IS {
 		cond_result := false
-		if v, ok := resolve_having_value(cond, group_keys, agg_values, group_cols, aggregates); ok {
+		if v, ok := resolve_having_value(cond, group_keys, agg_values, group_cols, aggregates);
+		   ok {
 			cond_result = types.is_null(v)
 		}
 		if cond.negated { cond_result = !cond_result }

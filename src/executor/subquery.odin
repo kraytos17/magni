@@ -11,7 +11,10 @@ exec_subquery :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
 	cache: ^schema.Table_Cache = nil,
-) -> ([]Row_Entry, []types.Column) {
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+) {
 	tbl_name, name_ok := stmt.from.(string)
 	if !name_ok { return nil, nil }
 
@@ -59,7 +62,10 @@ exec_subquery :: proc(
 		proj_cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 		for col_name, i in stmt.columns {
 			// Borrow: stmt strings share the temp lifetime of the output.
-			proj_cols[i] = types.Column{name = col_name, type = .TEXT}
+			proj_cols[i] = types.Column {
+				name = col_name,
+				type = .TEXT,
+			}
 		}
 		return projected[:], proj_cols
 	}
@@ -75,7 +81,10 @@ materialize_subquery_rows :: proc(
 	inner_rows: []Row_Entry,
 	virtual_cols: []types.Column,
 	stmt: parser.Select_Stmt,
-) -> (rows: [dynamic]Row_Entry, single_range: []Table_Col_Range) {
+) -> (
+	rows: [dynamic]Row_Entry,
+	single_range: []Table_Col_Range,
+) {
 	rows = make([dynamic]Row_Entry, 0, len(inner_rows), context.temp_allocator)
 	append(&rows, ..inner_rows)
 
@@ -84,7 +93,11 @@ materialize_subquery_rows :: proc(
 	// slice-of-struct literals with runtime fields miscompile on odin
 	// dev-2026-09-nightly at -o:none (verified segfault; struct literal + make
 	// is exact and stable). Don't "simplify" this back to a literal.
-	tr := Table_Col_Range{table_name = alias, start_col = 0, col_count = len(virtual_cols)}
+	tr := Table_Col_Range {
+		table_name = alias,
+		start_col  = 0,
+		col_count  = len(virtual_cols),
+	}
 	sr := make([]Table_Col_Range, 1, context.temp_allocator)
 	sr[0] = tr
 	if where_clause, has_where := stmt.where_clause.?; has_where {

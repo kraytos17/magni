@@ -32,7 +32,7 @@ parse_qualified_identifier :: proc(
 	return first, true
 }
 
-@(private="file")
+@(private = "file")
 parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_Source_Result {
 	if is_subquery_start(p) {
 		advance(p); advance(p)
@@ -78,7 +78,7 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 	return {source = tbl, alias = "", success = true}
 }
 
-@(private="file")
+@(private = "file")
 is_subquery_start :: proc(p: ^Parser) -> bool {
 	return(
 		peek(p).type == .LPAREN &&
@@ -87,12 +87,12 @@ is_subquery_start :: proc(p: ^Parser) -> bool {
 	)
 }
 
-@(private="file")
+@(private = "file")
 is_alias :: proc(p: ^Parser) -> bool {
 	return peek(p).type == .IDENTIFIER && peek(p).lexeme != "("
 }
 
-@(private="file")
+@(private = "file")
 parse_single_join :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -111,7 +111,15 @@ parse_single_join :: proc(
 		if tbl, is_tbl := js.source.(string); is_tbl { right_alias = tbl }
 	}
 
-	parse_using := proc(p: ^Parser, left: string, right: string, alloc: mem.Allocator) -> (cl: Where_Clause, ok: bool) {
+	parse_using := proc(
+		p: ^Parser,
+		left: string,
+		right: string,
+		alloc: mem.Allocator,
+	) -> (
+		cl: Where_Clause,
+		ok: bool,
+	) {
 		if !match(p, .LPAREN) { return {}, false }
 
 		cols := make([dynamic]string, alloc)
@@ -130,9 +138,16 @@ parse_single_join :: proc(
 			c := cols[i]
 			left_col := strings.concatenate({left, ".", c}, alloc)
 			right_col := strings.concatenate({right, ".", c}, alloc)
-			cond := Condition { column = left_col, operator = .EQUALS, rhs = right_col }
+			cond := Condition {
+				column   = left_col,
+				operator = .EQUALS,
+				rhs      = right_col,
+			}
 			node := new(Where_Node, alloc)
-			node^ = Where_Node{kind = .COND, cond = cond}
+			node^ = Where_Node {
+				kind = .COND,
+				cond = cond,
+			}
 			if i == 0 {
 				root = node
 			} else {
@@ -141,7 +156,10 @@ parse_single_join :: proc(
 				append(&children, node)
 
 				wrapper := new(Where_Node, alloc)
-				wrapper^ = Where_Node{kind = .AND, children = children}
+				wrapper^ = Where_Node {
+					kind     = .AND,
+					children = children,
+				}
 				root = wrapper
 			}
 		}
@@ -179,7 +197,7 @@ parse_single_join :: proc(
 		true
 }
 
-@(private="file")
+@(private = "file")
 parse_select_columns :: proc(
 	p: ^Parser,
 	b: ^Select_Builder,
@@ -208,7 +226,7 @@ parse_select_columns :: proc(
 // arrays (columns/col_kinds/col_literal_idx stay in lockstep through this
 // single choke point). For LITERAL slots the caller appends to literal_values
 // first and passes its index.
-@(private="file")
+@(private = "file")
 builder_emit_column :: proc(
 	b: ^Select_Builder,
 	display: string,
@@ -220,7 +238,7 @@ builder_emit_column :: proc(
 	append(&b.col_literal_idx, lit_idx)
 }
 
-@(private="file")
+@(private = "file")
 parse_column_or_aggregate :: proc(
 	p: ^Parser,
 	b: ^Select_Builder,
@@ -257,7 +275,7 @@ parse_column_or_aggregate :: proc(
 
 // parse_column_or_literal handles a non-`name(` column slot: a literal token
 // (captured for materialization) or a (possibly qualified) column.
-@(private="file")
+@(private = "file")
 parse_column_or_literal :: proc(
 	p: ^Parser,
 	b: ^Select_Builder,
@@ -274,7 +292,12 @@ parse_column_or_literal :: proc(
 		if !vok { return false }
 
 		append(&b.literal_values, val)
-		builder_emit_column(b, strings.clone(tok.lexeme, allocator), .LITERAL, len(b.literal_values) - 1)
+		builder_emit_column(
+			b,
+			strings.clone(tok.lexeme, allocator),
+			.LITERAL,
+			len(b.literal_values) - 1,
+		)
 	case:
 		col, cok := parse_qualified_identifier(p, allocator)
 		if !cok { return false }
@@ -284,7 +307,7 @@ parse_column_or_literal :: proc(
 }
 
 // eq_fold compares ASCII case-insensitively without allocation.
-@(private="file")
+@(private = "file")
 eq_fold :: proc(s: string, target: string) -> bool {
 	if len(s) != len(target) { return false }
 	for i in 0 ..< len(s) {
@@ -298,7 +321,7 @@ eq_fold :: proc(s: string, target: string) -> bool {
 // resolve_aggregate_name maps a function name (case-insensitive) to its
 // aggregate func, or false if it is not a supported aggregate.
 // Zero-alloc: ASCII case-fold per byte, no temp_allocator round-trip.
-@(private="file")
+@(private = "file")
 resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
 	switch len(name) {
 	case 3:
@@ -318,7 +341,7 @@ resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
 // references are appended (deduped) and their column arg is cloned because
 // the HAVING tree and the aggregate list are freed independently (the clone
 // keeps each owner holding its own string).
-@(private="file")
+@(private = "file")
 collect_having_aggregates :: proc(
 	node: ^Where_Node,
 	out: ^[dynamic]Aggregate_Expr,
@@ -335,10 +358,13 @@ collect_having_aggregates :: proc(
 			}
 		}
 
-		append(out, Aggregate_Expr {
-			func = agg_func,
-			column = strings.clone(node.cond.agg_column, allocator),
-		})
+		append(
+			out,
+			Aggregate_Expr {
+				func = agg_func,
+				column = strings.clone(node.cond.agg_column, allocator),
+			},
+		)
 	case .AND, .OR, .NOT:
 		for child in node.children {
 			collect_having_aggregates(child, out, allocator)
@@ -351,12 +377,8 @@ collect_having_aggregates :: proc(
 // words tokenize as keywords (not IDENTIFIER), so FROM/WHERE/GROUP/ORDER/COMMA
 // can never be mistaken for a bare alias. `AS` in a SELECT column list is always
 // an alias marker (AS OF appears only after the FROM clause).
-@(private="file")
-consume_column_alias :: proc(
-	p: ^Parser,
-	aliases: ^[dynamic]string,
-	allocator: mem.Allocator,
-) {
+@(private = "file")
+consume_column_alias :: proc(p: ^Parser, aliases: ^[dynamic]string, allocator: mem.Allocator) {
 	append(aliases, "")
 	if match(p, .AS) {
 		if al, ok := parse_identifier(p, allocator); ok {
@@ -371,10 +393,16 @@ consume_column_alias :: proc(
 	}
 }
 
-@(private="file")
-parse_join_clauses :: proc(p: ^Parser, left_alias: string, allocator := context.allocator) -> [dynamic]Join_Clause {
+@(private = "file")
+parse_join_clauses :: proc(
+	p: ^Parser,
+	left_alias: string,
+	allocator := context.allocator,
+) -> [dynamic]Join_Clause {
 	joins := make([dynamic]Join_Clause, allocator)
-	state := Join_Parse_State{left = left_alias}
+	state := Join_Parse_State {
+		left = left_alias,
+	}
 	for {
 		jt, explicit, matched := match_join_keyword(p)
 		if !matched { break }
@@ -398,7 +426,7 @@ Join_Parse_State :: struct {
 // whether an ON clause is permitted (inner/cross are implicit-on). Returns
 // matched=false when the next token does not start a join clause. A dangling
 // INNER/CROSS/LEFT/RIGHT without JOIN is treated as no-join (matched=false).
-@(private="file")
+@(private = "file")
 match_join_keyword :: proc(p: ^Parser) -> (jt: Join_Type, explicit: bool, matched: bool) {
 	switch {
 	case match(p, .COMMA):
@@ -433,30 +461,30 @@ MAX_PARSE_NESTING :: 512
 // stay in lockstep; finalize slices them into the statement, abandon frees
 // them after a parse failure.
 Select_Builder :: struct {
-	columns:         [dynamic]string,
-	aliases:         [dynamic]string,
-	literal_values:  [dynamic]types.Value,
-	col_kinds:       [dynamic]Select_Column_Kind,
+	columns        : [dynamic]string,
+	aliases        : [dynamic]string,
+	literal_values : [dynamic]types.Value,
+	col_kinds      : [dynamic]Select_Column_Kind,
 	col_literal_idx: [dynamic]int,
-	aggregates:      [dynamic]Aggregate_Expr,
+	aggregates     : [dynamic]Aggregate_Expr,
 }
 
-@(private="file")
+@(private = "file")
 builder_new :: proc(allocator := context.allocator) -> Select_Builder {
 	return {
-		columns         = make([dynamic]string, allocator),
-		aliases         = make([dynamic]string, allocator),
-		literal_values  = make([dynamic]types.Value, allocator),
-		col_kinds       = make([dynamic]Select_Column_Kind, allocator),
+		columns = make([dynamic]string, allocator),
+		aliases = make([dynamic]string, allocator),
+		literal_values = make([dynamic]types.Value, allocator),
+		col_kinds = make([dynamic]Select_Column_Kind, allocator),
 		col_literal_idx = make([dynamic]int, allocator),
-		aggregates      = make([dynamic]Aggregate_Expr, allocator),
+		aggregates = make([dynamic]Aggregate_Expr, allocator),
 	}
 }
 
 // builder_abandon frees a builder after a parse failure. The allocator must
 // be the one the builder was made with: element frees are only valid there
 // (a temp-arena string freed with the heap allocator aborts).
-@(private="file")
+@(private = "file")
 builder_abandon :: proc(b: ^Select_Builder, allocator := context.allocator) {
 	delete(b.columns)
 	delete(b.aliases)
@@ -472,12 +500,18 @@ builder_abandon :: proc(b: ^Select_Builder, allocator := context.allocator) {
 // source No_From{} with no joins (FROM-less literal SELECT).
 From_Clause :: struct {
 	source: From_Source,
-	alias:  string,
-	joins:  [dynamic]Join_Clause,
+	alias : string,
+	joins : [dynamic]Join_Clause,
 }
 
-@(private="file")
-parse_from_clause :: proc(p: ^Parser, allocator := context.allocator) -> (fc: From_Clause, ok: bool) {
+@(private = "file")
+parse_from_clause :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	fc: From_Clause,
+	ok: bool,
+) {
 	fc.source = No_From{}
 	if !match(p, .FROM) { return fc, true }
 
@@ -496,11 +530,11 @@ parse_from_clause :: proc(p: ^Parser, allocator := context.allocator) -> (fc: Fr
 
 // As_Of holds an optional AS OF SNAPSHOT/TIMESTAMP time-travel clause.
 As_Of :: struct {
-	snapshot:  Maybe(u64),
+	snapshot : Maybe(u64),
 	timestamp: Maybe(u64),
 }
 
-@(private="file")
+@(private = "file")
 parse_as_of :: proc(p: ^Parser) -> (as_of: As_Of, ok: bool) {
 	if match(p, .AS) && match(p, .OF) {
 		if match(p, .SNAPSHOT) {
@@ -514,8 +548,14 @@ parse_as_of :: proc(p: ^Parser) -> (as_of: As_Of, ok: bool) {
 	return as_of, true
 }
 
-@(private="file")
-parse_group_by :: proc(p: ^Parser, allocator := context.allocator) -> (group_by: [dynamic]string, ok: bool) {
+@(private = "file")
+parse_group_by :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	group_by: [dynamic]string,
+	ok: bool,
+) {
 	group_by = make([dynamic]string, allocator)
 	if match(p, .GROUP) {
 		if !match(p, .BY) {
@@ -552,7 +592,7 @@ parse_select :: proc(
 	}
 
 	b := builder_new(allocator)
-	defer if !ok do builder_abandon(&b, allocator)
+	defer if !ok { builder_abandon(&b, allocator) }
 
 	is_distinct := match(p, .DISTINCT)
 	if !parse_select_columns(p, &b, allocator) {
@@ -563,7 +603,7 @@ parse_select :: proc(
 	// (e.g. `SELECT 1, 'a'`) producing a single row.
 	fc, fc_ok := parse_from_clause(p, allocator)
 	if !fc_ok { return nil, false }
-	defer if !ok do delete(fc.joins)
+	defer if !ok { delete(fc.joins) }
 
 	as_of := parse_as_of(p) or_return
 	where_clause: Maybe(Where_Clause)
@@ -571,7 +611,7 @@ parse_select :: proc(
 
 	group_by, gb_ok := parse_group_by(p, allocator)
 	if !gb_ok { return nil, false }
-	defer if !ok do delete(group_by)
+	defer if !ok { delete(group_by) }
 
 	having_cl: Maybe(Where_Clause)
 	if match(p, .HAVING) { having_cl = parse_where_clause(p, allocator) or_return }
@@ -612,7 +652,7 @@ parse_select :: proc(
 
 // parse_order_limit parses a trailing `ORDER BY ... LIMIT n OFFSET m` clause.
 // Used by both single SELECTs and compound (set-operation) statements.
-@(private="file")
+@(private = "file")
 parse_order_limit :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -625,7 +665,7 @@ parse_order_limit :: proc(
 	if match(p, .ORDER) {
 		if !match(p, .BY) { return {}, {}, {}, false }
 		order_cols := make([dynamic]Order_By_Column, allocator)
-		defer if !ok do delete(order_cols)
+		defer if !ok { delete(order_cols) }
 		for {
 			col := parse_qualified_identifier(p, allocator) or_return
 			desc := false; nulls_first := false
@@ -665,7 +705,7 @@ parse_order_limit :: proc(
 }
 
 // parse_set_op reads a single set-operation keyword, consuming `ALL` when present.
-@(private="file")
+@(private = "file")
 parse_set_op :: proc(p: ^Parser) -> (op: Set_Op, ok: bool) {
 	if match(p, .UNION) {
 		return .UNION_ALL if match(p, .ALL) else .UNION, true
@@ -685,7 +725,7 @@ parse_set_op :: proc(p: ^Parser) -> (op: Set_Op, ok: bool) {
 // parse_compound_operand parses one `SELECT ...` operand after a set
 // operator (already consumed) and binds it to that operator. Operands never
 // consume a trailing ORDER BY/LIMIT (the compound tail owns those).
-@(private="file")
+@(private = "file")
 parse_compound_operand :: proc(
 	p: ^Parser,
 	op: Set_Op,
@@ -742,11 +782,11 @@ parse_compound_select :: proc(
 		return nil, false
 	}
 	return Compound_Stmt {
-			first    = first_ptr,
+			first = first_ptr,
 			operands = operands[:],
 			order_by = order_by,
-			limit    = limit,
-			offset   = offset,
+			limit = limit,
+			offset = offset,
 		},
 		true
 }

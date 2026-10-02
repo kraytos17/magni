@@ -14,7 +14,10 @@ import "src:types"
 // make_where_clause wraps a single condition in a WHERE clause tree node.
 make_where_clause :: proc(cond: parser.Condition) -> parser.Where_Clause {
 	node := new(parser.Where_Node, context.temp_allocator)
-	node^ = parser.Where_Node{kind = .COND, cond = cond}
+	node^ = parser.Where_Node {
+		kind = .COND,
+		cond = cond,
+	}
 	return parser.Where_Clause{root = node}
 }
 
@@ -201,7 +204,7 @@ test_exec_delete :: proc(t: ^testing.T) {
 		rhs      = types.value_text("Log A"),
 	}
 	variant := parser.Delete_Stmt {
-		table_name = "logs",
+		table_name   = "logs",
 		where_clause = make_where_clause(cond),
 	}
 	stmt := parser.Statement {
@@ -822,7 +825,7 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 			rhs      = types.value_int(i64(i)),
 		}
 		del := parser.Delete_Stmt {
-			table_name = "t",
+			table_name   = "t",
 			where_clause = make_where_clause(cond),
 		}
 		executor.execute(&tree, parser.Statement{type = del, sql = ""})
@@ -1029,7 +1032,9 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 		v := parser.Insert_Stmt {
 			table_name = "codes",
-			values     = {{types.value_text(name), types.value_text(fmt.tprintf("label_%s", name))}},
+			values     = {
+				{types.value_text(name), types.value_text(fmt.tprintf("label_%s", name))},
+			},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
 	}
@@ -1331,8 +1336,16 @@ test_exec_subquery_order_nonprojected :: proc(t: ^testing.T) {
 	testing.expect(t, data_ok, "ORDER BY non-projected column must succeed")
 	if data_ok {
 		testing.expect_value(t, len(data_rows), 3)
-		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_text("a")), "row 0 in id order")
-		testing.expect(t, types.value_compare(data_rows[2].values[0], types.value_text("c")), "row 2 in id order")
+		testing.expect(
+			t,
+			types.value_compare(data_rows[0].values[0], types.value_text("a")),
+			"row 0 in id order",
+		)
+		testing.expect(
+			t,
+			types.value_compare(data_rows[2].values[0], types.value_text("c")),
+			"row 2 in id order",
+		)
 	}
 }
 
@@ -1381,7 +1394,11 @@ test_exec_count_fast_path :: proc(t: ^testing.T) {
 	testing.expect(t, data_ok, "COUNT(*) fast path should succeed")
 	if data_ok {
 		testing.expect_value(t, len(data_rows), 1)
-		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_int(3)), "count is 3")
+		testing.expect(
+			t,
+			types.value_compare(data_rows[0].values[0], types.value_int(3)),
+			"count is 3",
+		)
 	}
 }
 
@@ -1406,7 +1423,11 @@ test_exec_subquery_limit_offset :: proc(t: ^testing.T) {
 	testing.expect(t, data_ok, "subquery LIMIT/OFFSET should succeed")
 	if data_ok {
 		testing.expect_value(t, len(data_rows), 2)
-		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_int(2)), "offset row is id 2")
+		testing.expect(
+			t,
+			types.value_compare(data_rows[0].values[0], types.value_int(2)),
+			"offset row is id 2",
+		)
 	}
 }
 
@@ -1433,8 +1454,16 @@ test_exec_single_distinct_dedups_projected :: proc(t: ^testing.T) {
 	testing.expect(t, data_ok, "DISTINCT should succeed")
 	if data_ok {
 		testing.expect_value(t, len(data_rows), 2)
-		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_text("a")), "row 0 is a")
-		testing.expect(t, types.value_compare(data_rows[1].values[0], types.value_text("b")), "row 1 is b")
+		testing.expect(
+			t,
+			types.value_compare(data_rows[0].values[0], types.value_text("a")),
+			"row 0 is a",
+		)
+		testing.expect(
+			t,
+			types.value_compare(data_rows[1].values[0], types.value_text("b")),
+			"row 1 is b",
+		)
 	}
 }
 
@@ -1461,8 +1490,16 @@ test_exec_single_distinct_limit_applies_after_dedup :: proc(t: ^testing.T) {
 	testing.expect(t, data_ok, "DISTINCT LIMIT should succeed")
 	if data_ok {
 		testing.expect_value(t, len(data_rows), 2)
-		testing.expect(t, types.value_compare(data_rows[0].values[0], types.value_text("a")), "row 0 is a")
-		testing.expect(t, types.value_compare(data_rows[1].values[0], types.value_text("b")), "row 1 is b")
+		testing.expect(
+			t,
+			types.value_compare(data_rows[0].values[0], types.value_text("a")),
+			"row 0 is a",
+		)
+		testing.expect(
+			t,
+			types.value_compare(data_rows[1].values[0], types.value_text("b")),
+			"row 1 is b",
+		)
 	}
 }
 
@@ -1483,61 +1520,128 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 	if ok {
 		testing.expect_value(t, len(rows), 1)
 		if len(rows) == 1 {
-			testing.expect(t, types.value_compare(rows[0].values[0], types.value_int(0)), "literal repeats")
-			testing.expect(t, types.value_compare(rows[0].values[1], types.value_int(2)), "count is 2")
+			testing.expect(
+				t,
+				types.value_compare(rows[0].values[0], types.value_int(0)),
+				"literal repeats",
+			)
+			testing.expect(
+				t,
+				types.value_compare(rows[0].values[1], types.value_int(2)),
+				"count is 2",
+			)
 		}
 	}
 
 	rows2, _, ok2 := executor.exec_query(&tree, must_parse_select(t, "SELECT COUNT(*), 0 FROM t;"))
 	testing.expect(t, ok2, "literal-second aggregate must succeed")
 	if ok2 && len(rows2) == 1 {
-		testing.expect(t, types.value_compare(rows2[0].values[0], types.value_int(2)), "count is 2")
-		testing.expect(t, types.value_compare(rows2[0].values[1], types.value_int(0)), "literal repeats")
+		testing.expect(
+			t,
+			types.value_compare(rows2[0].values[0], types.value_int(2)),
+			"count is 2",
+		)
+		testing.expect(
+			t,
+			types.value_compare(rows2[0].values[1], types.value_int(0)),
+			"literal repeats",
+		)
 	}
 
-	rows3, _, ok3 := executor.exec_query(&tree, must_parse_select(t, "SELECT 0, COUNT(*), SUM(score) FROM t;"))
+	rows3, _, ok3 := executor.exec_query(
+		&tree,
+		must_parse_select(t, "SELECT 0, COUNT(*), SUM(score) FROM t;"),
+	)
 	testing.expect(t, ok3, "multi-aggregate with literal must succeed")
 	if ok3 && len(rows3) == 1 {
-		testing.expect(t, types.value_compare(rows3[0].values[0], types.value_int(0)), "literal repeats")
-		testing.expect(t, types.value_compare(rows3[0].values[1], types.value_int(2)), "count is 2")
-		testing.expect(t, types.value_compare(rows3[0].values[2], types.value_real(3.0)), "sum is 3.0")
+		testing.expect(
+			t,
+			types.value_compare(rows3[0].values[0], types.value_int(0)),
+			"literal repeats",
+		)
+		testing.expect(
+			t,
+			types.value_compare(rows3[0].values[1], types.value_int(2)),
+			"count is 2",
+		)
+		testing.expect(
+			t,
+			types.value_compare(rows3[0].values[2], types.value_real(3.0)),
+			"sum is 3.0",
+		)
 	}
 
 	// String literal keeps its value and TEXT typing beside aggregates.
-	rows4, cols4, ok4 := executor.exec_query(&tree, must_parse_select(t, "SELECT 'x', COUNT(*) FROM t;"))
+	rows4, cols4, ok4 := executor.exec_query(
+		&tree,
+		must_parse_select(t, "SELECT 'x', COUNT(*) FROM t;"),
+	)
 	testing.expect(t, ok4, "string literal beside aggregate must succeed")
 	if ok4 && len(rows4) == 1 {
-		testing.expect(t, types.value_compare(rows4[0].values[0], types.value_text("x")), "string literal repeats")
-		testing.expect(t, types.value_compare(rows4[0].values[1], types.value_int(2)), "count is 2")
+		testing.expect(
+			t,
+			types.value_compare(rows4[0].values[0], types.value_text("x")),
+			"string literal repeats",
+		)
+		testing.expect(
+			t,
+			types.value_compare(rows4[0].values[1], types.value_int(2)),
+			"count is 2",
+		)
 		if len(cols4) == 2 {
 			testing.expect(t, cols4[0].type == .TEXT, "literal column types as TEXT")
 		}
 	}
 
 	// GROUP BY: the literal repeats per group.
-	rows5, _, ok5 := executor.exec_query(&tree, must_parse_select(t, "SELECT 0, COUNT(*) FROM t GROUP BY name;"))
+	rows5, _, ok5 := executor.exec_query(
+		&tree,
+		must_parse_select(t, "SELECT 0, COUNT(*) FROM t GROUP BY name;"),
+	)
 	testing.expect(t, ok5, "grouped literal+aggregate must succeed")
 	if ok5 {
 		testing.expect_value(t, len(rows5), 2)
 		for r in rows5 {
-			testing.expect(t, types.value_compare(r.values[0], types.value_int(0)), "literal repeats per group")
-			testing.expect(t, types.value_compare(r.values[1], types.value_int(1)), "per-group count is 1")
+			testing.expect(
+				t,
+				types.value_compare(r.values[0], types.value_int(0)),
+				"literal repeats per group",
+			)
+			testing.expect(
+				t,
+				types.value_compare(r.values[1], types.value_int(1)),
+				"per-group count is 1",
+			)
 		}
 	}
 
 	// Empty table: the single implicit group still carries the literal.
 	executor.execute(&tree, make_create_stmt("t2"))
-	rows6, _, ok6 := executor.exec_query(&tree, must_parse_select(t, "SELECT 0, COUNT(*) FROM t2;"))
+	rows6, _, ok6 := executor.exec_query(
+		&tree,
+		must_parse_select(t, "SELECT 0, COUNT(*) FROM t2;"),
+	)
 	testing.expect(t, ok6, "empty-table literal+aggregate must succeed")
 	if ok6 && len(rows6) == 1 {
-		testing.expect(t, types.value_compare(rows6[0].values[0], types.value_int(0)), "literal present on empty table")
-		testing.expect(t, types.value_compare(rows6[0].values[1], types.value_int(0)), "count is 0")
+		testing.expect(
+			t,
+			types.value_compare(rows6[0].values[0], types.value_int(0)),
+			"literal present on empty table",
+		)
+		testing.expect(
+			t,
+			types.value_compare(rows6[0].values[1], types.value_int(0)),
+			"count is 0",
+		)
 	}
 
 	// A bare column beside aggregates is still a clean error, not a crash.
 	saved, ctx := suppress_expected_errors()
 	context = ctx
-	_, _, bare_ok := executor.exec_query(&tree, must_parse_select(t, "SELECT name, COUNT(*) FROM t;"))
+	_, _, bare_ok := executor.exec_query(
+		&tree,
+		must_parse_select(t, "SELECT name, COUNT(*) FROM t;"),
+	)
 	context = restore_logger(saved)
 	testing.expect(t, !bare_ok, "bare column beside aggregates must error cleanly")
 }
@@ -1554,7 +1658,7 @@ test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
 
 	executor.execute(&tree, make_create_stmt("t"))
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
-	queries := [4]string{
+	queries := [4]string {
 		"SELECT MAX(nosuchcol) FROM t;",
 		"SELECT MIN(nosuchcol) FROM t;",
 		"SELECT SUM(nosuchcol) FROM t;",
@@ -1583,13 +1687,17 @@ test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
 		testing.expect(t, ok, "COUNT(*) must still succeed")
 		if ok {
 			testing.expect_value(t, len(rows), 1)
-			testing.expect(t, types.value_compare(rows[0].values[0], types.value_int(1)), "count is 1")
+			testing.expect(
+				t,
+				types.value_compare(rows[0].values[0], types.value_int(1)),
+				"count is 1",
+			)
 		}
 	}
 }
 
 // ids_of_query runs a single-column id SELECT and returns the ids.
-@(private="file")
+@(private = "file")
 ids_of_query :: proc(t: ^testing.T, tree: ^btree.Tree, sql: string) -> ([]i64, bool) {
 	stmt, pok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, pok, "query must parse")
@@ -1618,7 +1726,7 @@ test_exec_is_null_filtering :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-	inserts := [3]string{
+	inserts := [3]string {
 		"INSERT INTO t VALUES (1, 'a', 1.0);",
 		"INSERT INTO t VALUES (2, NULL, 2.0);",
 		"INSERT INTO t VALUES (3, 'b', 3.0);",
@@ -1678,7 +1786,7 @@ test_exec_is_null_keyword_column :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "is_col")
 	defer teardown_executor_env(tree, file)
 
-	setup_k := [3]string{
+	setup_k := [3]string {
 		"CREATE TABLE k (is INT);",
 		"INSERT INTO k VALUES (1);",
 		"INSERT INTO k VALUES (NULL);",
@@ -1692,8 +1800,7 @@ test_exec_is_null_keyword_column :: proc(t: ^testing.T) {
 		testing.expect(t, sok, "setup SQL must execute")
 	}
 
-	stmt, pok, _ := parser.parse(
-		"SELECT is FROM k WHERE is IS NULL;", context.temp_allocator)
+	stmt, pok, _ := parser.parse("SELECT is FROM k WHERE is IS NULL;", context.temp_allocator)
 	testing.expect(t, pok, "column named `is` with IS NULL must parse")
 	if !pok { return }
 
@@ -1712,7 +1819,7 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-	setup_agg_limit := [3]string{
+	setup_agg_limit := [3]string {
 		"INSERT INTO t VALUES (1, 'a', 1.0);",
 		"INSERT INTO t VALUES (2, 'b', 2.0);",
 		"INSERT INTO t VALUES (3, 'c', 3.0);",
@@ -1726,8 +1833,7 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 	}
 
 	// score column holds 1.0/2.0/3.0; SUM over all three is 6.0.
-	stmt, pok, _ := parser.parse(
-		"SELECT SUM(score) FROM t LIMIT 2;", context.temp_allocator)
+	stmt, pok, _ := parser.parse("SELECT SUM(score) FROM t LIMIT 2;", context.temp_allocator)
 	testing.expect(t, pok, "SUM LIMIT should parse")
 	sel := stmt.type.(parser.Select_Stmt)
 	rows, _, ok := executor.exec_query(&tree, sel)
@@ -1735,12 +1841,15 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 	if ok {
 		testing.expect_value(t, len(rows), 1)
 		if len(rows) == 1 {
-			testing.expect(t, types.value_compare(rows[0].values[0], types.value_real(6.0)), "SUM runs over all rows, not the LIMIT prefix")
+			testing.expect(
+				t,
+				types.value_compare(rows[0].values[0], types.value_real(6.0)),
+				"SUM runs over all rows, not the LIMIT prefix",
+			)
 		}
 	}
 
-	stmt2, pok2, _ := parser.parse(
-		"SELECT COUNT(*) FROM t LIMIT 2;", context.temp_allocator)
+	stmt2, pok2, _ := parser.parse("SELECT COUNT(*) FROM t LIMIT 2;", context.temp_allocator)
 	testing.expect(t, pok2, "COUNT LIMIT should parse")
 	sel2 := stmt2.type.(parser.Select_Stmt)
 	rows2, _, ok2 := executor.exec_query(&tree, sel2)
@@ -1748,7 +1857,11 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 	if ok2 {
 		testing.expect_value(t, len(rows2), 1)
 		if len(rows2) == 1 {
-			testing.expect(t, types.value_compare(rows2[0].values[0], types.value_int(3)), "COUNT runs over all rows")
+			testing.expect(
+				t,
+				types.value_compare(rows2[0].values[0], types.value_int(3)),
+				"COUNT runs over all rows",
+			)
 		}
 	}
 }
@@ -1762,7 +1875,7 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-	setup_having := [3]string{
+	setup_having := [3]string {
 		"INSERT INTO t VALUES (1, 'a', 1.0);",
 		"INSERT INTO t VALUES (2, NULL, 2.0);",
 		"INSERT INTO t VALUES (3, 'b', 3.0);",
@@ -1777,7 +1890,8 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 
 	stmt, pok, _ := parser.parse(
 		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING name IS NULL;",
-		context.temp_allocator)
+		context.temp_allocator,
+	)
 	testing.expect(t, pok, "HAVING IS NULL should parse")
 	sel := stmt.type.(parser.Select_Stmt)
 	rows, _, ok := executor.exec_query(&tree, sel)
@@ -1786,7 +1900,8 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 
 	stmt2, pok2, _ := parser.parse(
 		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING name IS NOT NULL;",
-		context.temp_allocator)
+		context.temp_allocator,
+	)
 	testing.expect(t, pok2, "HAVING IS NOT NULL should parse")
 	sel2 := stmt2.type.(parser.Select_Stmt)
 	rows2, _, ok2 := executor.exec_query(&tree, sel2)
@@ -1795,7 +1910,8 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 
 	stmt3, pok3, _ := parser.parse(
 		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING COUNT(*) IS NOT NULL;",
-		context.temp_allocator)
+		context.temp_allocator,
+	)
 	testing.expect(t, pok3, "HAVING agg IS NOT NULL should parse")
 	sel3 := stmt3.type.(parser.Select_Stmt)
 	rows3, _, ok3 := executor.exec_query(&tree, sel3)
@@ -1818,7 +1934,7 @@ test_exec_join_on_index_oob_crashers :: proc(t: ^testing.T) {
 	// "no crash", which the calls themselves prove.
 	saved, ctx := suppress_expected_errors()
 	context = ctx
-	crashers := [3]string{
+	crashers := [3]string {
 		"CREATE TABLE a(id INT,v TEXT);CREATE TABLE b(d INT,w TEXT);INSERT INTO b VALUES(0,'')'';SELECT*FROM a JOIN b ON d=id",
 		"CREATE TABLE a(d INT,v TEXT);CREATE TABLE b(id INT,w TEXT);INSERT INTO b VALUES(0,'')'';SELECT*FROM a JOIN b ON d=0JOIN b ON d=b.id",
 		"SELECT * FROM a JOIN b ON d=0 JOIN b ON d=b.id",
@@ -1838,7 +1954,7 @@ test_exec_join_on_index_oob_crashers :: proc(t: ^testing.T) {
 	context = restore_logger(saved)
 
 	// Hash path still works for correct ON columns, even with two joins.
-	stmts := [4]string{
+	stmts := [4]string {
 		"CREATE TABLE m(id INT, v TEXT);",
 		"CREATE TABLE n(id INT, w TEXT);",
 		"INSERT INTO m VALUES (1,'x'),(2,'y');",
@@ -1852,7 +1968,8 @@ test_exec_join_on_index_oob_crashers :: proc(t: ^testing.T) {
 
 	join_stmt, _, _ := parser.parse(
 		"SELECT * FROM m JOIN n ON m.id = n.id JOIN n AS n2 ON m.id = n2.id;",
-		context.temp_allocator)
+		context.temp_allocator,
+	)
 	sel, ok := join_stmt.type.(parser.Select_Stmt)
 	testing.expect(t, ok, "three-table join must parse")
 	if ok {
@@ -1874,7 +1991,7 @@ test_exec_chained_right_join_width :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "right_chain")
 	defer teardown_executor_env(tree, file)
 
-	stmts := [5]string{
+	stmts := [5]string {
 		"CREATE TABLE a(d INT);",
 		"CREATE TABLE b(d INT);",
 		"CREATE TABLE c(d INT);",
@@ -1889,7 +2006,8 @@ test_exec_chained_right_join_width :: proc(t: ^testing.T) {
 	// a is empty: RIGHT JOINs null-extend across the accumulated width.
 	join_stmt, _, _ := parser.parse(
 		"SELECT * FROM a JOIN b ON b.d = 0 RIGHT JOIN c ON c.d = 0;",
-		context.temp_allocator)
+		context.temp_allocator,
+	)
 	sel, ok := join_stmt.type.(parser.Select_Stmt)
 	testing.expect(t, ok, "chained RIGHT JOIN must parse")
 	if ok {
@@ -1907,7 +2025,8 @@ test_exec_chained_right_join_width :: proc(t: ^testing.T) {
 	// Minimized AFL crasher: duplicate table + RIGHT OUTER JOIN + literal ON.
 	dup_stmt, _, _ := parser.parse(
 		"SELECT*FROM a JOIN b ON b.d=0 RIGHT OUTER JOIN b ON b.d=0;",
-		context.temp_allocator)
+		context.temp_allocator,
+	)
 	dsel, dok := dup_stmt.type.(parser.Select_Stmt)
 	testing.expect(t, dok, "dup-table RIGHT JOIN must parse")
 	if dok {
@@ -1920,7 +2039,7 @@ test_exec_chained_right_join_width :: proc(t: ^testing.T) {
 }
 
 // must_parse_select parses a SELECT or fails the test outright.
-@(private="file")
+@(private = "file")
 must_parse_select :: proc(t: ^testing.T, sql: string) -> parser.Select_Stmt {
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
 	testing.expect(t, ok, "query must parse")
@@ -1937,7 +2056,7 @@ test_exec_update_check_enforcement :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "update_check")
 	defer teardown_executor_env(tree, file)
 
-	setup_chk := [2]string{
+	setup_chk := [2]string {
 		"CREATE TABLE products (price INT CHECK (price > 0));",
 		"INSERT INTO products VALUES (10);",
 	}
@@ -1949,8 +2068,7 @@ test_exec_update_check_enforcement :: proc(t: ^testing.T) {
 		testing.expect(t, sok, "setup SQL must execute")
 	}
 
-	bad_stmt, pok, _ := parser.parse(
-		"UPDATE products SET price = -5;", context.temp_allocator)
+	bad_stmt, pok, _ := parser.parse("UPDATE products SET price = -5;", context.temp_allocator)
 	testing.expect(t, pok, "violating UPDATE should parse")
 	if pok {
 		saved, ctx := suppress_expected_errors()
@@ -1967,27 +2085,43 @@ test_exec_update_check_enforcement :: proc(t: ^testing.T) {
 	if ok {
 		testing.expect_value(t, len(rows), 1)
 		if len(rows) == 1 {
-			testing.expect(t, types.value_compare(rows[0].values[0], types.value_int(10)), "row unchanged after rejected UPDATE")
+			testing.expect(
+				t,
+				types.value_compare(rows[0].values[0], types.value_int(10)),
+				"row unchanged after rejected UPDATE",
+			)
 		}
 	}
 
-	good_stmt, pok2, _ := parser.parse(
-		"UPDATE products SET price = 20;", context.temp_allocator)
+	good_stmt, pok2, _ := parser.parse("UPDATE products SET price = 20;", context.temp_allocator)
 	testing.expect(t, pok2, "valid UPDATE should parse")
 	if pok2 {
 		gok, _, _ := executor.execute(&tree, good_stmt)
 		testing.expect(t, gok, "valid UPDATE must succeed")
-		rows2, _, ok2 := executor.exec_query(&tree, must_parse_select(t, "SELECT price FROM products;"))
+		rows2, _, ok2 := executor.exec_query(
+			&tree,
+			must_parse_select(t, "SELECT price FROM products;"),
+		)
 		if ok2 && len(rows2) == 1 {
-			testing.expect(t, types.value_compare(rows2[0].values[0], types.value_int(20)), "valid UPDATE applies")
+			testing.expect(
+				t,
+				types.value_compare(rows2[0].values[0], types.value_int(20)),
+				"valid UPDATE applies",
+			)
 		}
 	}
 }
 
 @(test)
 test_collect_needed_cols_filter_only :: proc(t: ^testing.T) {
-	cond := executor.Resolved_Condition{col_idx = 2, operator = .EQUALS}
-	node := executor.Resolved_Node{kind = .COND, cond = cond}
+	cond := executor.Resolved_Condition {
+		col_idx  = 2,
+		operator = .EQUALS,
+	}
+	node := executor.Resolved_Node {
+		kind = .COND,
+		cond = cond,
+	}
 	needed := executor.collect_needed_cols(&node, nil, nil, 4)
 	testing.expect(t, len(needed) == 4, "mask length = total cols")
 	testing.expect(t, needed[2], "filter col marked")
@@ -2002,7 +2136,7 @@ test_collect_needed_cols_unions :: proc(t: ^testing.T) {
 	}
 	c1 := executor.Resolved_Node {
 		kind = .COND,
-		cond = executor.Resolved_Condition{
+		cond = executor.Resolved_Condition {
 			col_idx = 3,
 			operator = .GREATER_THAN,
 			has_right_col = true,
@@ -2010,7 +2144,10 @@ test_collect_needed_cols_unions :: proc(t: ^testing.T) {
 		},
 	}
 	kids := []^executor.Resolved_Node{&c0, &c1}
-	root := executor.Resolved_Node{kind = .AND, children = kids}
+	root := executor.Resolved_Node {
+		kind     = .AND,
+		children = kids,
+	}
 	needed := executor.collect_needed_cols(&root, []int{3}, []int{0}, 4)
 	testing.expect(t, needed[0] && needed[1] && needed[3], "filter+proj+sort union")
 	testing.expect(t, !needed[2], "unreferenced clear")
@@ -2022,7 +2159,10 @@ test_collect_needed_cols_or_not_and_oob :: proc(t: ^testing.T) {
 		kind = .COND,
 		cond = executor.Resolved_Condition{col_idx = 1, operator = .EQUALS},
 	}
-	or_node := executor.Resolved_Node{kind = .OR, children = []^executor.Resolved_Node{&inner}}
+	or_node := executor.Resolved_Node {
+		kind     = .OR,
+		children = []^executor.Resolved_Node{&inner},
+	}
 	not_node := executor.Resolved_Node {
 		kind     = .NOT,
 		children = []^executor.Resolved_Node{&or_node},
@@ -2033,7 +2173,10 @@ test_collect_needed_cols_or_not_and_oob :: proc(t: ^testing.T) {
 		cond = executor.Resolved_Condition{col_idx = 99, operator = .EQUALS},
 	}
 	kids := []^executor.Resolved_Node{&not_node, &bad}
-	root := executor.Resolved_Node{kind = .AND, children = kids}
+	root := executor.Resolved_Node {
+		kind     = .AND,
+		children = kids,
+	}
 	needed := executor.collect_needed_cols(&root, []int{99, -1}, []int{100}, 4)
 	testing.expect(t, needed[1], "nested OR/NOT col collected")
 	testing.expect(t, !needed[0] && !needed[2] && !needed[3], "nothing else marked")

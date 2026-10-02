@@ -31,7 +31,6 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 		}
 	}
 	if len(handles) == 0 {
-		// Empty tree: a single fresh empty leaf is the new root.
 		page, a_err := pager.allocate_page(t.pager)
 		if a_err != .None { return 0, .Page_Full }
 
@@ -54,7 +53,13 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 			init_interior_page(page.data, page.page_num)
 			j := i
 			for j < len(level) - 1 {
-				if !insert_interior_cell(page.data, page.page_num, level[j].id, level[j].max_key, layout) {
+				if !insert_interior_cell(
+					page.data,
+					page.page_num,
+					level[j].id,
+					level[j].max_key,
+					layout,
+				) {
 					break
 				}
 				j += 1
@@ -64,7 +69,7 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 			max_key := level[j].max_key
 			page_id := page.page_num
 			pager.unpin_page(t.pager, page_id)
-			append(&next, Node_Handle {id = page_id, max_key = max_key})
+			append(&next, Node_Handle{id = page_id, max_key = max_key})
 			i = j + 1
 		}
 		level = next
@@ -76,20 +81,20 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 // used while building the new interior levels of a vacuumed tree.
 @(private)
 Node_Handle :: struct {
-	id:      u32,
+	id     : u32,
 	max_key: types.Row_ID,
 }
 
 // vacuum_ctx carries the bulk-loader state across tree_foreach callbacks.
 @(private)
 vacuum_ctx :: struct {
-	t:          ^Tree,
-	layout:     ^Cell_Layout,
-	leaf:       Node,
+	t         : ^Tree,
+	layout    : ^Cell_Layout,
+	leaf      : Node,
 	leaf_empty: bool,
-	handles:    ^[dynamic]Node_Handle,
-	leaf_max:   types.Row_ID,
-	failed:     bool,
+	handles   : ^[dynamic]Node_Handle,
+	leaf_max  : types.Row_ID,
+	failed    : bool,
 }
 
 // vacuum_collect_cb serializes each row into the current packed leaf, starting
@@ -147,7 +152,7 @@ vacuum_start_leaf :: proc(vc: ^vacuum_ctx) -> Error {
 vacuum_finish_leaf :: proc(vc: ^vacuum_ctx) -> Error {
 	if vc.leaf_empty { return .None }
 
-	append(vc.handles, Node_Handle {id = vc.leaf.id, max_key = vc.leaf_max})
+	append(vc.handles, Node_Handle{id = vc.leaf.id, max_key = vc.leaf_max})
 	pager.unpin_page(vc.t.pager, vc.leaf.id)
 	vc.leaf_empty = true
 	return .None

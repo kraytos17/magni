@@ -20,11 +20,11 @@ foreign lib {
 }
 
 Term :: struct {
-	fd:            posix.FD,
-	orig:          posix.termios,
-	is_raw:        bool,
-	width:         int,
-	height:        int,
+	fd            : posix.FD,
+	orig          : posix.termios,
+	is_raw        : bool,
+	width         : int,
+	height        : int,
 	window_resized: bool,
 }
 
@@ -35,8 +35,8 @@ Term :: struct {
 global_term_ptr: ^Term
 
 Winsize :: struct {
-	ws_row:    u16,
-	ws_col:    u16,
+	ws_row   : u16,
+	ws_col   : u16,
 	ws_xpixel: u16,
 	ws_ypixel: u16,
 }
@@ -89,7 +89,7 @@ term_restore :: proc(t: ^Term) {
 	}
 }
 
-@(private="file")
+@(private = "file")
 install_restore_handler :: proc(t: ^Term) {
 	global_term_ptr = t
 	action: posix.sigaction_t
@@ -102,7 +102,7 @@ install_restore_handler :: proc(t: ^Term) {
 	posix.sigaction(posix.Signal(posix.SIGWINCH), &winch_action, nil)
 }
 
-@(private="file")
+@(private = "file")
 restore_and_reraise :: proc "c" (sig: posix.Signal) {
 	if global_term_ptr != nil && global_term_ptr.is_raw {
 		posix.tcsetattr(global_term_ptr.fd, .TCSAFLUSH, &global_term_ptr.orig)
@@ -113,7 +113,7 @@ restore_and_reraise :: proc "c" (sig: posix.Signal) {
 	posix.raise(sig)
 }
 
-@(private="file")
+@(private = "file")
 sigwinch_handler :: proc "c" (sig: posix.Signal) {
 	global_term_ptr.window_resized = true
 }

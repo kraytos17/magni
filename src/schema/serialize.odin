@@ -5,7 +5,7 @@ import "core:strings"
 import "src:types"
 import "src:util/varint"
 
-COL_BLOB_MARKER :: 0xFE
+COL_BLOB_MARKER  :: 0xFE
 COL_BLOB_VERSION :: 1
 
 serialize_columns_to_blob :: proc(
@@ -115,7 +115,7 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 // Write a Value in a simple binary format:
 //	[type_byte(1)] + [payload]
 //	type_byte: 0=null, 1=i64(8LE), 2=f64(8BE), 3=string(4LE+data), 4=blob(4LE+data)
-@(private="file")
+@(private = "file")
 serialize_value_to_blob :: proc(dest: []u8, offset: ^int, val: types.Value) {
 	v := val
 	#partial switch vv in v {
@@ -149,7 +149,7 @@ serialize_value_to_blob :: proc(dest: []u8, offset: ^int, val: types.Value) {
 	}
 }
 
-@(private="file")
+@(private = "file")
 deserialize_value_from_blob :: proc(
 	src: []u8,
 	offset: ^int,

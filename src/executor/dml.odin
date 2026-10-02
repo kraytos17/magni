@@ -88,7 +88,11 @@ Row_Check :: enum u8 {
 // INSERT-vs-UPDATE message vocabulary; check_constraints_resolved logs its
 // own specifics on failure.
 @(private)
-check_row :: proc(values: []types.Value, table: types.Table, checks: []Resolved_Check) -> Row_Check {
+check_row :: proc(
+	values: []types.Value,
+	table: types.Table,
+	checks: []Resolved_Check,
+) -> Row_Check {
 	if !cell.validate(values, table.columns) { return .Type_Error }
 	if !check_constraints_resolved(values, checks) { return .Check_Error }
 	return .Ok
@@ -97,8 +101,8 @@ check_row :: proc(values: []types.Value, table: types.Table, checks: []Resolved_
 // Insert_Row_Info holds the validated, column-ordered values and row ID for a
 // single INSERT row. Shared by the direct and COW insert paths.
 Insert_Row_Info :: struct {
-	values:     []types.Value,
-	row_id:     types.Row_ID,
+	values    : []types.Value,
+	row_id    : types.Row_ID,
 	table_tree: btree.Tree,
 }
 
@@ -116,7 +120,10 @@ prepare_insert_row :: proc(
 	t: ^btree.Tree,
 	root_page: u32,
 	checks: []Resolved_Check,
-) -> (Insert_Row_Info, bool) {
+) -> (
+	Insert_Row_Info,
+	bool,
+) {
 	values, v_ok := reorder_insert_values(table, columns, row_values)
 	if !v_ok { return {}, false }
 	if check := check_row(values, table, checks); check != .Ok {
@@ -136,7 +143,7 @@ prepare_insert_row :: proc(
 // reorder_insert_values maps the INSERT's column list / values onto the table's
 // full column order, filling omitted columns with their DEFAULT (cloned) or
 // NULL. With an empty column list, row_values must already be full-width.
-@(private="file")
+@(private = "file")
 reorder_insert_values :: proc(
 	table: types.Table,
 	columns: []string,
@@ -192,7 +199,7 @@ reorder_insert_values :: proc(
 
 // assign_insert_rowid picks the row's Row_ID: an explicit integer PK value, else
 // the next tree rowid (which fills an implicit/missing PK slot in place).
-@(private="file")
+@(private = "file")
 assign_insert_rowid :: proc(
 	table: types.Table,
 	values: []types.Value,
@@ -224,7 +231,11 @@ exec_insert_impl :: proc(
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 	pending: ^Pending_Roots = nil,
-) -> (bool, u32, Mutated_Table_Info) {
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
 	is_direct := mode == .Direct
 	checks: []Resolved_Check
 	if len(stmt.values) > 0 {
@@ -234,7 +245,14 @@ exec_insert_impl :: proc(
 	}
 	if is_direct {
 		for row_values in stmt.values {
-			info, ok := prepare_insert_row(table, stmt.columns, row_values, t, table.root_page, checks)
+			info, ok := prepare_insert_row(
+				table,
+				stmt.columns,
+				row_values,
+				t,
+				table.root_page,
+				checks,
+			)
 			if !ok { return false, t.root, {} }
 
 			err := btree.tree_insert(&info.table_tree, info.row_id, info.values)
@@ -271,7 +289,7 @@ exec_insert_impl :: proc(
 	}
 }
 
-@(private="file")
+@(private = "file")
 exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -292,7 +310,10 @@ build_update_map :: proc(
 	table: ^types.Table,
 	stmt: parser.Update_Stmt,
 	allocator := context.allocator,
-) -> (map[int]types.Value, bool) {
+) -> (
+	map[int]types.Value,
+	bool,
+) {
 	if len(stmt.update_columns) != len(stmt.update_values) {
 		log.error("Error: Column/Value count mismatch in UPDATE")
 		return nil, false
@@ -322,7 +343,10 @@ apply_update :: proc(
 	update_map: map[int]types.Value,
 	plan: ^Update_Plan,
 	policy: Violation_Policy,
-) -> ([]types.Value, bool) {
+) -> (
+	[]types.Value,
+	bool,
+) {
 	if !plan.checks_built {
 		plan.checks_built = true
 		if rc, rc_ok := resolve_table_checks(plan.tbl); rc_ok {
@@ -337,7 +361,8 @@ apply_update :: proc(
 		new_row[idx] = val
 	}
 	if check := check_row(new_row, plan.tbl, plan.checks); check != .Ok {
-		reason := "violates column constraints" if check == .Type_Error else "violates CHECK constraint"
+		reason :=
+			"violates column constraints" if check == .Type_Error else "violates CHECK constraint"
 		if policy == .Skip {
 			log.warn("Skipping UPDATE row", c.rowid, "—", reason)
 		} else {
@@ -359,17 +384,21 @@ exec_update_impl :: proc(
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 	pending: ^Pending_Roots = nil,
-) -> (bool, u32, Mutated_Table_Info) {
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
 	tbl := table
 	update_map, ok := build_update_map(&tbl, stmt, context.temp_allocator)
 	if !ok { return false, t.root, {} }
 
 	plan := Update_Plan {
-		tbl        = tbl,
+		tbl = tbl,
 		table_name = stmt.table_name,
 		update_map = update_map,
-		filt       = {filter = stmt.where_clause},
-		direct     = mode == .Direct,
+		filt = {filter = stmt.where_clause},
+		direct = mode == .Direct,
 	}
 
 	table_tree := btree.init(t.pager, tbl.root_page)
@@ -385,19 +414,19 @@ exec_update_impl :: proc(
 // statement-resolved CHECK constraints, built lazily by apply_update on the
 // first updated row (so zero-match UPDATEs never resolve them).
 Update_Plan :: struct {
-	tbl:          types.Table,
-	table_name:   string,
-	update_map:   map[int]types.Value,
-	using filt:   Mutation_Filter,
-	direct:       bool,
-	checks:       []Resolved_Check,
+	tbl         : types.Table,
+	table_name  : string,
+	update_map  : map[int]types.Value,
+	using filt  : Mutation_Filter,
+	direct      : bool,
+	checks      : []Resolved_Check,
 	checks_built: bool,
 }
 
 // eval_mutation_filter evaluates a mutation plan's pre-resolved filter
 // against one row. No filter → true; unresolvable filter → false (mirrors
 // evaluate_where). Shared by UPDATE and DELETE.
-@(private="file")
+@(private = "file")
 eval_mutation_filter :: proc(f: ^Mutation_Filter, values: []types.Value) -> bool {
 	if _, has_wc := f.filter.?; !has_wc { return true }
 	if ctx, ok := f.filter_ctx.?; ok {
@@ -408,7 +437,7 @@ eval_mutation_filter :: proc(f: ^Mutation_Filter, values: []types.Value) -> bool
 
 // resolve_mutation_filter resolves the plan filter once per scan (not per
 // row). Shared by update_by_scan and collect_delete_targets.
-@(private="file")
+@(private = "file")
 resolve_mutation_filter :: proc(f: ^Mutation_Filter, cols: []types.Column) {
 	if wc, has_wc := f.filter.?; has_wc {
 		f.filter_ctx = init_where_ctx(&wc, cols, nil, nil, context.temp_allocator)
@@ -418,7 +447,7 @@ resolve_mutation_filter :: proc(f: ^Mutation_Filter, cols: []types.Column) {
 // pk_target_rowid extracts a PK rowid from an equality filter, if usable.
 // Shared prologue for update_by_pk and delete_by_pk. table_name lets a
 // qualified `t.pk` / alias filter resolve to the same seek.
-@(private="file")
+@(private = "file")
 pk_target_rowid :: proc(
 	tbl: types.Table,
 	table_name: string,
@@ -439,7 +468,7 @@ pk_target_rowid :: proc(
 // (so in-txn readers see it) replace the per-statement schema-leaf COW, and
 // COMMIT flushes one COW per dirty table. Nil pending ⇒ immediate publish,
 // exactly as before.
-@(private="file")
+@(private = "file")
 commit_cow_root :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -470,7 +499,7 @@ commit_cow_root :: proc(
 // The entry must exist: the table was just resolved through the cache to
 // compute the staged root. A miss means someone bypassed the cache — skip
 // the overlay (the next root-bump clears it) rather than fabricate state.
-@(private="file")
+@(private = "file")
 pending_cache_entry :: proc(
 	cache: ^schema.Table_Cache,
 	table_name: string,
@@ -503,7 +532,7 @@ pending_reoverlay :: proc(t: ^btree.Tree, pending: ^Pending_Roots, cache: ^schem
 
 // update_by_pk handles the PK fast path. Returns handled=false to fall
 // through to the full scan when no usable PK lookup exists.
-@(private="file")
+@(private = "file")
 update_by_pk :: proc(
 	t: ^btree.Tree,
 	plan: ^Update_Plan,
@@ -535,7 +564,11 @@ update_by_pk :: proc(
 		return true, true, t.root, {}
 	}
 	if plan.direct {
-		btree.tree_update(table_tree, target_rowid, new_row)
+		if u_err := btree.tree_update(table_tree, target_rowid, new_row); u_err != .None {
+			log.error("Error: Failed to update row")
+			return true, false, t.root, {}
+		}
+
 		log.info("Updated 1 row.")
 		return true, true, t.root, {}
 	}
@@ -554,7 +587,7 @@ update_by_pk :: proc(
 }
 
 // update_by_scan runs the cursor scan, dispatching on write mode.
-@(private="file")
+@(private = "file")
 update_by_scan :: proc(
 	t: ^btree.Tree,
 	plan: ^Update_Plan,
@@ -578,7 +611,7 @@ update_by_scan :: proc(
 }
 
 // update_scan_direct collects matching ops, then applies them in place.
-@(private="file")
+@(private = "file")
 update_scan_direct :: proc(
 	t: ^btree.Tree,
 	plan: ^Update_Plan,
@@ -622,7 +655,7 @@ update_scan_direct :: proc(
 }
 
 // update_scan_cow applies COW updates as the cursor advances.
-@(private="file")
+@(private = "file")
 update_scan_cow :: proc(
 	t: ^btree.Tree,
 	plan: ^Update_Plan,
@@ -662,7 +695,13 @@ update_scan_cow :: proc(
 		btree.cursor_advance(cursor)
 	}
 	if count > 0 {
-		new_schema_root, info, ok1 := commit_cow_root(t, plan.table_name, current_root, pending, cache)
+		new_schema_root, info, ok1 := commit_cow_root(
+			t,
+			plan.table_name,
+			current_root,
+			pending,
+			cache,
+		)
 		if !ok1 { return false, t.root, {} }
 
 		log.infof("Updated %d rows.", count)
@@ -673,7 +712,7 @@ update_scan_cow :: proc(
 	return true, t.root, {}
 }
 
-@(private="file")
+@(private = "file")
 exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {
@@ -694,12 +733,16 @@ exec_delete_impl :: proc(
 	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 	pending: ^Pending_Roots = nil,
-) -> (bool, u32, Mutated_Table_Info) {
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
 	plan := Delete_Plan {
-		tbl        = table,
+		tbl = table,
 		table_name = stmt.table_name,
-		filt       = {filter = stmt.where_clause},
-		direct     = mode == .Direct,
+		filt = {filter = stmt.where_clause},
+		direct = mode == .Direct,
 	}
 
 	table_tree := btree.init(t.pager, table.root_page)
@@ -714,15 +757,15 @@ exec_delete_impl :: proc(
 // Delete_Plan captures the resolved state for a DELETE: target table,
 // optional filter, and write mode. Built once by exec_delete_impl.
 Delete_Plan :: struct {
-	tbl:        types.Table,
+	tbl       : types.Table,
 	table_name: string,
 	using filt: Mutation_Filter,
-	direct:     bool,
+	direct    : bool,
 }
 
 // delete_by_pk handles the PK fast path. Returns handled=false to fall
 // through to the full scan when no usable PK lookup exists.
-@(private="file")
+@(private = "file")
 delete_by_pk :: proc(
 	t: ^btree.Tree,
 	plan: ^Delete_Plan,
@@ -760,7 +803,7 @@ delete_by_pk :: proc(
 }
 
 // collect_delete_targets scans for rowids matching the filter.
-@(private="file")
+@(private = "file")
 collect_delete_targets :: proc(
 	plan: ^Delete_Plan,
 	table_tree: ^btree.Tree,
@@ -792,7 +835,7 @@ collect_delete_targets :: proc(
 }
 
 // apply_deletes removes the collected targets, direct or COW.
-@(private="file")
+@(private = "file")
 apply_deletes :: proc(
 	t: ^btree.Tree,
 	plan: ^Delete_Plan,
@@ -828,7 +871,13 @@ apply_deletes :: proc(
 		}
 	}
 	if count > 0 {
-		new_schema_root, info, ok := commit_cow_root(t, plan.table_name, current_root, pending, cache)
+		new_schema_root, info, ok := commit_cow_root(
+			t,
+			plan.table_name,
+			current_root,
+			pending,
+			cache,
+		)
 		if !ok { return false, t.root, {} }
 
 		log.infof("Deleted %d rows.", count)
@@ -839,7 +888,7 @@ apply_deletes :: proc(
 	return true, t.root, {}
 }
 
-@(private="file")
+@(private = "file")
 exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
 	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
 	if !found {

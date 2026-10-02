@@ -128,8 +128,12 @@ resolve_sort_indices :: proc(
 // sort_rows_int_fast sorts by a single integer column via a precomputed key
 // array (no per-comparison union dispatch). Returns false when any value is a
 // non-int (or there are no rows), letting the general comparator handle it.
-@(private="file")
-sort_rows_int_fast :: proc(rows: []Row_Entry, order: parser.Order_By_Column, sort_idx: int) -> bool {
+@(private = "file")
+sort_rows_int_fast :: proc(
+	rows: []Row_Entry,
+	order: parser.Order_By_Column,
+	sort_idx: int,
+) -> bool {
 	keys := make([]i64, len(rows), context.temp_allocator)
 	for row, i in rows {
 		iv, ok := row.values[sort_idx].(i64)

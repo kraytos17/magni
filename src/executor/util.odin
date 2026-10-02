@@ -10,10 +10,10 @@ import "src:schema"
 import "src:types"
 
 // FNV-1a constants shared by hash_values.
-@(private="file")
+@(private = "file")
 FNV_OFFSET_BASIS :: u64(0xcbf29ce484222325)
 
-@(private="file")
+@(private = "file")
 FNV_PRIME :: u64(0x100000001b3)
 
 // hash_values computes a single FNV-1a hash over a row's values (or a subset
@@ -37,7 +37,7 @@ hash_values :: proc(values: []types.Value, indices: []int = nil) -> u64 {
 	return h
 }
 
-@(private="file")
+@(private = "file")
 fnv_mix :: proc(h, w: u64) -> u64 {
 	return (h ~ w) * FNV_PRIME
 }
@@ -83,9 +83,9 @@ hash_value :: proc(v: types.Value) -> u64 {
 // original "a qualifier that names no known table/alias does not resolve"
 // behavior.
 Column_Resolver :: struct {
-	cols:   []types.Column,
+	cols  : []types.Column,
 	ranges: []Table_Col_Range,
-	index:  map[string]int, // unqualified name → first matching index
+	index : map[string]int, // unqualified name → first matching index
 }
 
 // build_column_resolver indexes the combined columns for fast resolution.
@@ -184,7 +184,7 @@ try_pk_lookup :: proc(
 }
 
 // split_qualifier splits "t.col" into ("t", "col"); has=false when unqualified.
-@(private="file")
+@(private = "file")
 split_qualifier :: proc(name: string) -> (qual: string, col: string, has: bool) {
 	if i := strings.last_index_byte(name, '.'); i >= 0 {
 		return name[:i], name[i + 1:], true
@@ -222,12 +222,12 @@ values_equal_by_indices :: proc(
 // (groups). Walk a probe hit with b.next[h] (-1 ends), reading positions
 // from b.rows[h].
 Fp_Buckets :: struct {
-	slots:     []u64, // slot fingerprint (valid when head[i] >= 0)
-	head:      []int, // head position-node, -1 = empty slot
-	rows:      [dynamic]int, // row positions in insertion order
-	fps:       [dynamic]u64, // entry fingerprints parallel to rows (rehash)
-	next:      [dynamic]int, // chain links parallel to rows, -1 = end
-	mask:      int,
+	slots    : []u64, // slot fingerprint (valid when head[i] >= 0)
+	head     : []int, // head position-node, -1 = empty slot
+	rows     : [dynamic]int, // row positions in insertion order
+	fps      : [dynamic]u64, // entry fingerprints parallel to rows (rehash)
+	next     : [dynamic]int, // chain links parallel to rows, -1 = end
+	mask     : int,
 	allocator: mem.Allocator,
 }
 
@@ -236,7 +236,10 @@ fp_buckets_make :: proc(n: int, allocator: mem.Allocator) -> Fp_Buckets {
 	cap := 16
 	for cap < 2 * (n + 1) { cap *= 2 }
 
-	b := Fp_Buckets{mask = cap - 1, allocator = allocator}
+	b := Fp_Buckets {
+		mask      = cap - 1,
+		allocator = allocator,
+	}
 	b.slots = make([]u64, cap, allocator)
 	b.head = make([]int, cap, allocator)
 	for i in 0 ..< cap { b.head[i] = -1 }
@@ -249,7 +252,7 @@ fp_buckets_make :: proc(n: int, allocator: mem.Allocator) -> Fp_Buckets {
 
 // fp_slot spreads a fingerprint over the slot mask (splitmix64 finalizer;
 // FNV's own low bits are too weak to index with directly).
-@(private="file")
+@(private = "file")
 fp_slot :: proc(fp: u64, mask: int) -> int {
 	h := fp + 0x9E3779B97F4A7C15
 	h = (h ~ (h >> 30)) * 0xBF58476D1CE4E5B9
@@ -259,7 +262,7 @@ fp_slot :: proc(fp: u64, mask: int) -> int {
 
 // fp_buckets_insert_slot links (fp, pos) at a known-empty slot; rows/next/
 // fps stay parallel by construction.
-@(private="file")
+@(private = "file")
 fp_buckets_insert_slot :: proc(b: ^Fp_Buckets, s: int, fp: u64, pos: int) {
 	b.slots[s] = fp
 	b.head[s] = len(b.rows)
@@ -270,7 +273,7 @@ fp_buckets_insert_slot :: proc(b: ^Fp_Buckets, s: int, fp: u64, pos: int) {
 }
 
 // fp_buckets_grow doubles the slot table and reinserts every entry.
-@(private="file")
+@(private = "file")
 fp_buckets_grow :: proc(b: ^Fp_Buckets) {
 	old_slots, old_head := b.slots, b.head
 	old_rows, old_fps := b.rows[:], b.fps[:]
@@ -347,8 +350,8 @@ deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 // evaluator is a clean comparison instead of an inline string split.
 Parsed_Check :: struct {
 	col_name: string, // resolved against the table's columns
-	op:       Check_Op,
-	val:      i64,
+	op      : Check_Op,
+	val     : i64,
 }
 
 Check_Op :: enum u8 {
@@ -384,7 +387,7 @@ parse_check_predicate :: proc(chk: string) -> (Parsed_Check, bool) {
 	return Parsed_Check{col_name = parts[0], op = op, val = val}, true
 }
 
-@(private="file")
+@(private = "file")
 check_op_from_token :: proc(tok: string) -> (Check_Op, bool) {
 	switch tok {
 	case ">":
@@ -403,7 +406,7 @@ check_op_from_token :: proc(tok: string) -> (Check_Op, bool) {
 	return .EQ, false
 }
 
-@(private="file")
+@(private = "file")
 check_op_eval :: proc(op: Check_Op, left, right: i64) -> bool {
 	switch op {
 	case .GT:
@@ -427,9 +430,9 @@ check_op_eval :: proc(op: Check_Op, left, right: i64) -> bool {
 // keeps the original expression for error messages (borrowed from the table).
 Resolved_Check :: struct {
 	col_idx: int,
-	op:      Check_Op,
-	val:     i64,
-	src:     string,
+	op     : Check_Op,
+	val    : i64,
+	src    : string,
 }
 
 // resolve_table_checks parses and resolves every CHECK constraint on the
@@ -459,7 +462,12 @@ resolve_table_checks :: proc(table: types.Table) -> ([]Resolved_Check, bool) {
 			return nil, false
 		}
 
-		checks[i] = Resolved_Check{col_idx = col_idx, op = parsed.op, val = parsed.val, src = chk}
+		checks[i] = Resolved_Check {
+			col_idx = col_idx,
+			op      = parsed.op,
+			val     = parsed.val,
+			src     = chk,
+		}
 		i += 1
 	}
 	return checks, true

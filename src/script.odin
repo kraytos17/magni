@@ -7,7 +7,11 @@ import "src:db"
 import "src:sqltext"
 
 @(private)
-execute_script_file :: proc(database: ^db.Database, path: string, stop_on_error: bool = false) -> bool {
+execute_script_file :: proc(
+	database: ^db.Database,
+	path: string,
+	stop_on_error: bool = false,
+) -> bool {
 	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
 	if err != nil {
 		log.errorf("Could not read file '%s'", path)
@@ -52,7 +56,7 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 	return ok
 }
 
-@(private="file")
+@(private = "file")
 execute_sql_chunk :: proc(database: ^db.Database, chunk: string, stop_on_error: bool) -> bool {
 	statements := sqltext.split_statements(chunk)
 	defer delete(statements)

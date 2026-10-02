@@ -33,15 +33,15 @@ fail :: proc(msg: string) -> ! {
 // count only successful operations. No allocations happen in here (counters
 // are fixed fields on the struct), so it is safe to wrap any allocator.
 Census :: struct {
-	backing:    mem.Allocator,
-	allocs:     u64,
-	bytes:      u64,
-	frees:      u64,
-	freed:      u64,
-	live:       i64,
-	peak:       i64,
-	free_alls:  u64,
-	hist:       [7]u64,
+	backing   : mem.Allocator,
+	allocs    : u64,
+	bytes     : u64,
+	frees     : u64,
+	freed     : u64,
+	live      : i64,
+	peak      : i64,
+	free_alls : u64,
+	hist      : [7]u64,
 	hist_bytes: [7]u64,
 }
 
@@ -121,14 +121,14 @@ census_proc :: proc(
 }
 
 Snap :: struct {
-	allocs:     u64,
-	bytes:      u64,
-	frees:      u64,
-	freed:      u64,
-	live:       i64,
-	peak:       i64,
-	free_alls:  u64,
-	hist:       [7]u64,
+	allocs    : u64,
+	bytes     : u64,
+	frees     : u64,
+	freed     : u64,
+	live      : i64,
+	peak      : i64,
+	free_alls : u64,
+	hist      : [7]u64,
 	hist_bytes: [7]u64,
 }
 
@@ -259,8 +259,14 @@ main :: proc() {
 	heap.backing = orig_heap
 	temp: Census
 	temp.backing = orig_temp
-	context.allocator = mem.Allocator{procedure = census_proc, data = &heap}
-	context.temp_allocator = mem.Allocator{procedure = census_proc, data = &temp}
+	context.allocator = mem.Allocator {
+		procedure = census_proc,
+		data      = &heap,
+	}
+	context.temp_allocator = mem.Allocator {
+		procedure = census_proc,
+		data      = &temp,
+	}
 	fmt.printf(
 		"sizes: Value=%dB Row_Entry=%dB Cell=%dB Column=%dB\n",
 		size_of(types.Value),

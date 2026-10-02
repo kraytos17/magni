@@ -5,10 +5,7 @@ import "src:sqltext"
 
 @(test)
 test_split_statements_basic :: proc(t: ^testing.T) {
-	parts := sqltext.split_statements(
-		"SELECT 1; SELECT 2;",
-		context.temp_allocator,
-	)
+	parts := sqltext.split_statements("SELECT 1; SELECT 2;", context.temp_allocator)
 	testing.expect_value(t, len(parts), 2)
 	if len(parts) == 2 {
 		testing.expect_value(t, parts[0], "SELECT 1;")

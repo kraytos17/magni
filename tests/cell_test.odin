@@ -78,7 +78,8 @@ test_zero_copy_mechanics :: proc(t: T) {
 	defer delete(buffer)
 
 	ci := cell.compute_info(10, values)
-	cell.serialize(buffer, 10, values, ci)
+	_, ser_ok := cell.serialize(buffer, 10, values, ci)
+	testing.expect(t, ser_ok, "serialize succeeds")
 	cfg := cell.Config {
 		allocator = context.allocator,
 		zero_copy = true,
@@ -356,7 +357,7 @@ test_deserialize_needed_all_parity :: proc(t: T) {
 	defer delete(buffer)
 
 	ci := cell.compute_info(7, original_values)
-	written, wok := cell.serialize(buffer, 7, original_values, ci)
+	_, wok := cell.serialize(buffer, 7, original_values, ci)
 	testing.expect(t, wok, "serialize failed")
 
 	full, consumed_full, fok := cell.deserialize(buffer, 0)

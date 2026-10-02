@@ -14,7 +14,7 @@ import "src:linedit"
 import "src:pager"
 import "src:schema"
 
-PROMPT :: "magni> "
+PROMPT      :: "magni> "
 CONT_PROMPT :: "   ...> "
 
 @(private)
@@ -97,7 +97,7 @@ repl :: proc(database: ^db.Database) {
 	}
 }
 
-@(private="file")
+@(private = "file")
 repl_fallback :: proc(database: ^db.Database) {
 	reader: bufio.Reader
 	bufio.reader_init(&reader, os.to_stream(os.stdin))
@@ -142,7 +142,7 @@ repl_fallback :: proc(database: ^db.Database) {
 	}
 }
 
-@(private="file")
+@(private = "file")
 Dot_Handler :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool)
 
 // Dot_Command maps a dot-command to its handler. Exact commands match the
@@ -152,34 +152,37 @@ Dot_Handler :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> 
 // instead of hand-written literals.
 // Dot_Match selects how a table entry matches input: exact command word,
 // or leading-prefix (entry name includes the trailing space, e.g. ".dump ").
-Dot_Match :: enum u8 { Exact, Prefix }
-
-Dot_Command :: struct {
-	name:    string,
-	match:   Dot_Match,
-	handler: Dot_Handler,
-	usage:   string,
+Dot_Match :: enum u8 {
+	Exact,
+	Prefix,
 }
 
-@(private="file")
+Dot_Command :: struct {
+	name   : string,
+	match  : Dot_Match,
+	handler: Dot_Handler,
+	usage  : string,
+}
+
+@(private = "file")
 dot_cmd_exit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	fmt.println("Goodbye.")
 	return true
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_help :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	print_help()
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_version :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	fmt.printf("MagniDB v%s\n", APP_VERSION)
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_tables :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.list_tables(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
@@ -187,7 +190,7 @@ dot_cmd_tables :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 	return false
 }
 
-@(private="file")
+@(private = "file")
 report_result :: proc(err: db.DB_Error, success_msg: string = "") {
 	if err != .None {
 		log.errorf("%s", db.db_error_string(err))
@@ -196,36 +199,48 @@ report_result :: proc(err: db.DB_Error, success_msg: string = "") {
 	}
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	report_result(admin.print_schema(database))
 	return false
 }
 
-@(private="file")
-dot_cmd_debug_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_debug_schema :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	report_result(admin.print_schema(database, debug = true))
 	return false
 }
 
 // dot_parts splits dot-command args on spaces (temp-scoped). Every numeric
 // handler shared this split by hand; one choke point, one convention.
-@(private="file")
+@(private = "file")
 dot_parts :: proc(args: string) -> []string {
 	return strings.split(args, " ", context.temp_allocator)
 }
 
 // dot_uint_arg parses parts[idx] as u64. Single choke point for all numeric
 // dot args (expire keep stays i64: it must SEE negatives to clamp them).
-@(private="file")
+@(private = "file")
 dot_uint_arg :: proc(parts: []string, idx: int) -> (u64, bool) {
 	if len(parts) <= idx { return 0, false }
 	v, ok := strconv.parse_u64(parts[idx])
 	return v, ok
 }
 
-@(private="file")
-dot_cmd_tree_page :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_tree_page :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	parts := dot_parts(args)
 	if len(parts) == 2 {
 		page_num, num_ok := dot_uint_arg(parts, 1)
@@ -240,19 +255,25 @@ dot_cmd_tree_page :: proc(database: ^db.Database, args: string, cmd: ^Dot_Comman
 	return false
 }
 
-@(private="file")
-dot_cmd_snapshot_debug :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_snapshot_debug :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	report_result(admin.print_snapshots(database, debug = true))
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_stats :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	report_result(admin.stats(database))
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_begin :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.begin(database) == .None {
 		fmt.println("Transaction started.")
@@ -260,7 +281,7 @@ dot_cmd_begin :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_commit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.commit(database) == .None {
 		fmt.println("Transaction committed.")
@@ -268,7 +289,7 @@ dot_cmd_commit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_rollback :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.rollback(database) == .None {
 		fmt.println("Transaction rolled back.")
@@ -276,13 +297,19 @@ dot_cmd_rollback :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command
 	return false
 }
 
-@(private="file")
-dot_cmd_snapshots :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_snapshots :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	report_result(admin.print_snapshots(database))
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_snapdiff :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
 	if len(parts) == 3 {
@@ -298,36 +325,66 @@ dot_cmd_snapdiff :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command
 	return false
 }
 
-@(private="file")
-dot_cmd_checkpoint :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_checkpoint :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	report_result(admin.checkpoint(database), "Database flushed to disk.")
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_vacuum :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	report_result(admin.vacuum(database), "Database rebuilt into packed pages.")
 	return false
 }
 
-@(private="file")
-dot_cmd_integrity :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_integrity :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	report_result(admin.integrity_check(database), "OK")
 	return false
 }
 
-dot_cmd_pager_stats :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+dot_cmd_pager_stats :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	pager.pager_stats_report(database.pager)
 	return false
 }
 
-dot_cmd_pager_layout :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+dot_cmd_pager_layout :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	pager.pager_layout_report()
 	return false
 }
 
-@(private="file")
-dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_snapshot_tag :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	parts := dot_parts(args)
 	if len(parts) >= 3 {
 		id, id_ok := dot_uint_arg(parts, 2)
@@ -346,8 +403,14 @@ dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string, cmd: ^Dot_Com
 	return false
 }
 
-@(private="file")
-dot_cmd_snapshot_restore :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_snapshot_restore :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	parts := dot_parts(args)
 	if len(parts) == 3 {
 		id, id_ok := dot_uint_arg(parts, 2)
@@ -363,7 +426,7 @@ dot_cmd_snapshot_restore :: proc(database: ^db.Database, args: string, cmd: ^Dot
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_expire :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
 	keep := db.DEFAULT_KEEP
@@ -375,15 +438,21 @@ dot_cmd_expire :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 	return false
 }
 
-@(private="file")
-dot_cmd_rollforward :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+@(private = "file")
+dot_cmd_rollforward :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+) -> (
+	exit: bool,
+) {
 	if err := db.rollforward(database); err != .None {
 		log.errorf("%s", db.db_error_string(err))
 	}
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := strings.split(args, " ", context.temp_allocator)
 	if len(parts) == 2 {
@@ -396,7 +465,7 @@ dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) ->
 	return false
 }
 
-@(private="file")
+@(private = "file")
 dot_cmd_desc :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := strings.split(args, " ", context.temp_allocator)
 	if len(parts) == 2 {
@@ -410,8 +479,8 @@ dot_cmd_desc :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) ->
 }
 
 // Exact-match commands (full input line must equal name).
-@(private="file")
-DOT_COMMANDS := []Dot_Command{
+@(private = "file")
+DOT_COMMANDS := []Dot_Command {
 	{".exit", .Exact, dot_cmd_exit, ""},
 	{".quit", .Exact, dot_cmd_exit, ""},
 	{".help", .Exact, dot_cmd_help, ""},

@@ -3,12 +3,12 @@ package cell
 
 import "core:fmt"
 import "core:mem"
-import "src:util/varint"
 import "src:types"
+import "src:util/varint"
 
 Cell :: struct {
-	rowid:     types.Row_ID,
-	values:    []types.Value,
+	rowid    : types.Row_ID,
+	values   : []types.Value,
 	owns_data: bool,
 }
 
@@ -56,6 +56,7 @@ destroy :: proc(c: ^Cell, allocator := context.allocator) {
 	c.values = nil
 }
 
+@(require_results)
 get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	if offset >= len(src) { return 0, false }
 
@@ -69,6 +70,7 @@ get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	return types.Row_ID(rowid), true
 }
 
+@(require_results)
 get_size :: proc(src: []u8, offset := 0) -> (int, bool) {
 	if offset >= len(src) { return 0, false }
 

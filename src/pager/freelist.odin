@@ -28,7 +28,7 @@ read_page_into :: proc(p: ^Pager, slot: ^Page_Slot, page_num: u32) -> bool {
 
 // release_slot returns a popped slot to the pool after a failed fill.
 // Caller MUST hold p.mutex (write-locked).
-@(private="file")
+@(private = "file")
 release_slot :: proc(p: ^Pager, slot: ^Page_Slot) {
 	slot.page = {}
 	slot.page.data = nil
@@ -110,7 +110,7 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 		// written to storage. Skipping the write leaves stale content on
 		// disk, which alloc_from_freelist would misread as a next pointer.
 		slot = find_empty_slot(p)
-		if slot == nil { return } // Cache exhausted: leave allocated; retry next GC.
+		if slot == nil { return } 	// Cache exhausted: leave allocated; retry next GC.
 		if !read_page_into(p, slot, page_num) {
 			release_slot(p, slot)
 			return

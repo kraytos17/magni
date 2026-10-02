@@ -16,10 +16,10 @@ Tab_Complete_Callback :: #type proc(
 ) -> []string
 
 Editor :: struct {
-	term:            Term,
-	history:         History,
-	complete_fn:     Tab_Complete_Callback,
-	complete_ud:     rawptr,
+	term            : Term,
+	history         : History,
+	complete_fn     : Tab_Complete_Callback,
+	complete_ud     : rawptr,
 	prev_render_rows: int,
 	prev_search_rows: int,
 }
@@ -118,7 +118,7 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 	}
 }
 
-@(private="file")
+@(private = "file")
 run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	query := strings.builder_make()
 	defer strings.builder_destroy(&query)
@@ -354,7 +354,7 @@ run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 	fmt.fprint(os.stdout, "\r\n")
 }
 
-@(private="file")
+@(private = "file")
 read_pasted_text :: proc(fd: posix.FD, lb: ^Line_Buffer) {
 	buf: [dynamic]u8
 	defer delete(buf)

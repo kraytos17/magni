@@ -295,7 +295,7 @@ test_parse_error_syntax :: proc(t: ^testing.T) {
 @(test)
 test_parse_error_messages :: proc(t: ^testing.T) {
 	tests := []struct {
-		sql:      string,
+		sql     : string,
 		contains: string,
 	} {
 		{"CREATE TABLE test;", "column definition"},
@@ -685,7 +685,11 @@ test_parse_like_where :: proc(t: ^testing.T) {
 	testing.expect(t, is_sel, "Expected Select_Stmt")
 	wc, has_where := sel.where_clause.?
 	testing.expect(t, has_where, "should have WHERE")
-	testing.expect(t, wc.root != nil && wc.root.kind == .COND, "WHERE should be a single condition")
+	testing.expect(
+		t,
+		wc.root != nil && wc.root.kind == .COND,
+		"WHERE should be a single condition",
+	)
 	testing.expect_value(t, wc.root.cond.operator, parser.Token_Type.LIKE)
 	pattern_val, val_ok := wc.root.cond.rhs.(types.Value)
 	testing.expect(t, val_ok, "LIKE value should be Value")
@@ -831,7 +835,11 @@ test_parse_inner_join :: proc(t: ^testing.T) {
 	testing.expect_value(t, tbl_name, "t2")
 	on_cl, has_on := sel.joins[0].on_clause.?
 	testing.expect(t, has_on, "INNER JOIN should have ON clause")
-	testing.expect(t, on_cl.root != nil && on_cl.root.kind == .COND, "ON should be a single condition")
+	testing.expect(
+		t,
+		on_cl.root != nil && on_cl.root.kind == .COND,
+		"ON should be a single condition",
+	)
 	testing.expect_value(t, on_cl.root.cond.column, "t1.id")
 	testing.expect(t, on_cl.root.cond.operator == .EQUALS, "Expected = operator")
 }
@@ -860,7 +868,11 @@ test_parse_equi_join :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(sel.joins), 1)
 	on_cl, has_on := sel.joins[0].on_clause.?
 	testing.expect(t, has_on, "Equi-join should have ON clause")
-	testing.expect(t, on_cl.root != nil && on_cl.root.kind == .COND, "ON should be a single condition")
+	testing.expect(
+		t,
+		on_cl.root != nil && on_cl.root.kind == .COND,
+		"ON should be a single condition",
+	)
 	cond := on_cl.root.cond
 	testing.expect_value(t, cond.column, "t1.x")
 	testing.expect(t, cond.operator == .EQUALS, "Expected = operator")
@@ -1115,7 +1127,10 @@ test_parse_union :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_union_all :: proc(t: ^testing.T) {
-	stmt, ok, _ := parser.parse("SELECT x FROM a UNION ALL SELECT y FROM b;", context.temp_allocator)
+	stmt, ok, _ := parser.parse(
+		"SELECT x FROM a UNION ALL SELECT y FROM b;",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok, "UNION ALL should parse")
 	comp, is_comp := stmt.type.(parser.Compound_Stmt)
 	testing.expect(t, is_comp, "Expected Compound_Stmt")
@@ -1124,7 +1139,10 @@ test_parse_union_all :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_intersect_except :: proc(t: ^testing.T) {
-	stmt, ok, _ := parser.parse("SELECT x FROM a INTERSECT SELECT y FROM b EXCEPT SELECT z FROM c;", context.temp_allocator)
+	stmt, ok, _ := parser.parse(
+		"SELECT x FROM a INTERSECT SELECT y FROM b EXCEPT SELECT z FROM c;",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok, "INTERSECT/EXCEPT chain should parse")
 	comp, is_comp := stmt.type.(parser.Compound_Stmt)
 	testing.expect(t, is_comp, "Expected Compound_Stmt")
@@ -1135,7 +1153,10 @@ test_parse_intersect_except :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_compound_order_limit :: proc(t: ^testing.T) {
-	stmt, ok, _ := parser.parse("SELECT x FROM a UNION SELECT y FROM b ORDER BY x LIMIT 5;", context.temp_allocator)
+	stmt, ok, _ := parser.parse(
+		"SELECT x FROM a UNION SELECT y FROM b ORDER BY x LIMIT 5;",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok, "compound ORDER BY LIMIT should parse")
 	comp, is_comp := stmt.type.(parser.Compound_Stmt)
 	testing.expect(t, is_comp, "Expected Compound_Stmt")
@@ -1231,7 +1252,10 @@ test_tokenizer_keyword_length_guard :: proc(t: ^testing.T) {
 	testing.expect(t, true, "over-long identifier must not crash the tokenizer")
 
 	// "references" must still tokenize as a keyword (FOREIGN KEY REFERENCES).
-	_, ok, _ := parser.parse("CREATE TABLE a (x INT, FOREIGN KEY (x) REFERENCES b(id));", context.temp_allocator)
+	_, ok, _ := parser.parse(
+		"CREATE TABLE a (x INT, FOREIGN KEY (x) REFERENCES b(id));",
+		context.temp_allocator,
+	)
 	testing.expect(t, ok, "FOREIGN KEY ... REFERENCES still parses")
 }
 
@@ -1302,7 +1326,11 @@ test_tokenize_block_comment_unterminated :: proc(t: ^testing.T) {
 	// Valid block comments still parse.
 	tokens, ok4 := parser.tokenize("SELECT 1 /* ok */ 2", context.temp_allocator)
 	testing.expect(t, ok4, "valid block comment must succeed")
-	testing.expect(t, len(tokens) == 4, fmt.tprintf("Expected 4 tokens (SELECT 1 2 EOF), got %d", len(tokens)))
+	testing.expect(
+		t,
+		len(tokens) == 4,
+		fmt.tprintf("Expected 4 tokens (SELECT 1 2 EOF), got %d", len(tokens)),
+	)
 }
 
 @(test)
@@ -1456,8 +1484,7 @@ test_is_null_keyword :: proc(t: ^testing.T) {
 
 @(test)
 test_is_null_parse_shape :: proc(t: ^testing.T) {
-	stmt, ok, _ := parser.parse(
-		"SELECT * FROM t WHERE b IS NULL;", context.temp_allocator)
+	stmt, ok, _ := parser.parse("SELECT * FROM t WHERE b IS NULL;", context.temp_allocator)
 	testing.expect(t, ok, "IS NULL should parse")
 	sel := stmt.type.(parser.Select_Stmt)
 	clause, has_where := sel.where_clause.?
@@ -1468,8 +1495,7 @@ test_is_null_parse_shape :: proc(t: ^testing.T) {
 	testing.expect(t, clause.root.cond.operator == .IS, "expected IS operator")
 	testing.expect(t, !clause.root.cond.negated, "IS NULL is not negated")
 
-	stmt2, ok2, _ := parser.parse(
-		"SELECT * FROM t WHERE b IS NOT NULL;", context.temp_allocator)
+	stmt2, ok2, _ := parser.parse("SELECT * FROM t WHERE b IS NOT NULL;", context.temp_allocator)
 	testing.expect(t, ok2, "IS NOT NULL should parse")
 	sel2 := stmt2.type.(parser.Select_Stmt)
 	clause2, _ := sel2.where_clause.?
@@ -1477,7 +1503,10 @@ test_is_null_parse_shape :: proc(t: ^testing.T) {
 	testing.expect(t, clause2.root.cond.negated, "IS NOT NULL is negated")
 
 	// Invalid forms must fail cleanly, not parse.
-	bad_queries := [2]string{"SELECT * FROM t WHERE b IS 5;", "SELECT * FROM t WHERE b NOT IS NULL;"}
+	bad_queries := [2]string {
+		"SELECT * FROM t WHERE b IS 5;",
+		"SELECT * FROM t WHERE b NOT IS NULL;",
+	}
 	for bad in bad_queries {
 		_, bok, _ := parser.parse(bad, context.temp_allocator)
 		testing.expect(t, !bok, "invalid IS form must not parse")
@@ -1488,14 +1517,27 @@ test_is_null_parse_shape :: proc(t: ^testing.T) {
 test_keyword_bucket_offsets :: proc(t: ^testing.T) {
 	// Every keyword_table word must resolve to its token (guards the
 	// length-bucket offsets against desync when keywords are added).
-	keywords := [][2]string{
-		{"in", "IN"}, {"of", "OF"}, {"is", "IS"}, {"int", "INTEGER"}, {"not", "NOT"},
-		{"from", "FROM"}, {"null", "NULL"}, {"table", "TABLE"},
-		{"where", "WHERE"}, {"begin", "BEGIN"}, {"commit", "COMMIT"},
-		{"select", "SELECT"}, {"except", "EXCEPT"}, {"default", "DEFAULT"},
-		{"between", "BETWEEN"}, {"distinct", "DISTINCT"},
-		{"rollback", "ROLLBACK"}, {"timestamp", "TIMESTAMP"},
-		{"intersect", "INTERSECT"}, {"references", "REFERENCES"},
+	keywords := [][2]string {
+		{"in", "IN"},
+		{"of", "OF"},
+		{"is", "IS"},
+		{"int", "INTEGER"},
+		{"not", "NOT"},
+		{"from", "FROM"},
+		{"null", "NULL"},
+		{"table", "TABLE"},
+		{"where", "WHERE"},
+		{"begin", "BEGIN"},
+		{"commit", "COMMIT"},
+		{"select", "SELECT"},
+		{"except", "EXCEPT"},
+		{"default", "DEFAULT"},
+		{"between", "BETWEEN"},
+		{"distinct", "DISTINCT"},
+		{"rollback", "ROLLBACK"},
+		{"timestamp", "TIMESTAMP"},
+		{"intersect", "INTERSECT"},
+		{"references", "REFERENCES"},
 	}
 
 	for kw in keywords {

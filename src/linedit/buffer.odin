@@ -3,19 +3,19 @@ package linedit
 import "core:unicode/utf8"
 
 Undo_State :: struct {
-	runes:  []rune,
+	runes : []rune,
 	cursor: int,
 }
 
 UNDO_LIMIT :: 100
 
 Line_Buffer :: struct {
-	runes:      [dynamic]rune,
-	cursor:     int,
+	runes     : [dynamic]rune,
+	cursor    : int,
 	undo_stack: [dynamic]Undo_State,
 }
 
-@(private="file")
+@(private = "file")
 lb_save_undo :: proc(lb: ^Line_Buffer) {
 	if len(lb.undo_stack) >= UNDO_LIMIT {
 		s := lb.undo_stack[0]

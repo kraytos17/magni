@@ -8,7 +8,7 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 
-PAGE_SIZE :: 4096
+PAGE_SIZE            :: 4096
 DATABASE_HEADER_SIZE :: 100
 
 // MAX_COLS is the maximum number of columns a table can have. It's constrained by
@@ -23,14 +23,14 @@ Storage_Config :: struct {
 	zero_copy: bool,
 }
 
-MAGIC_STRING :: "MAGNI_DB"
-SCHEMA_VERSION :: 2
-PAGE_FORMAT_VERSION :: 2
-WAL_MAGIC :: "MAGNIWAL"
-WAL_HEADER_SIZE :: 32
+MAGIC_STRING          :: "MAGNI_DB"
+SCHEMA_VERSION        :: 2
+PAGE_FORMAT_VERSION   :: 2
+WAL_MAGIC             :: "MAGNIWAL"
+WAL_HEADER_SIZE       :: 32
 WAL_FRAME_HEADER_SIZE :: 24
-WAL_FRAME_SIZE :: WAL_FRAME_HEADER_SIZE + PAGE_SIZE // 24 + 4096 = 4120
-NANOS_PER_MICRO :: 1000
+WAL_FRAME_SIZE        :: WAL_FRAME_HEADER_SIZE + PAGE_SIZE // 24 + 4096 = 4120
+NANOS_PER_MICRO       :: 1000
 
 // Serial types used for encoding values in cells
 Serial_Type :: enum u64 {
@@ -93,6 +93,7 @@ is_null :: proc(v: Value) -> bool {
 	return ok
 }
 
+@(require_results)
 value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.Allocator_Error) {
 	#partial switch val in v {
 	case string:
@@ -196,12 +197,12 @@ serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
 Row_ID :: distinct i64
 
 Column :: struct {
-	name:          string,
-	type:          Column_Type,
-	not_null:      bool,
-	pk:            bool,
+	name         : string,
+	type         : Column_Type,
+	not_null     : bool,
+	pk           : bool,
 	default_value: Maybe(Value),
-	check_expr:    Maybe(string),
+	check_expr   : Maybe(string),
 }
 
 hash_string :: proc(s: string) -> u64 {
@@ -209,16 +210,16 @@ hash_string :: proc(s: string) -> u64 {
 }
 
 Table :: struct {
-	name:         string,
-	columns:      []Column,
-	root_page:    u32,
-	sql:          string,
+	name        : string,
+	columns     : []Column,
+	root_page   : u32,
+	sql         : string,
 	foreign_keys: []Foreign_Key,
-	skip_root:    u32, // root page of the skip index for this table (0 = none)
+	skip_root   : u32, // root page of the skip index for this table (0 = none)
 }
 
 Foreign_Key :: struct {
-	col:       string,
+	col      : string,
 	ref_table: string,
-	ref_col:   string,
+	ref_col  : string,
 }

@@ -30,29 +30,29 @@ CACHE_TABLE_SIZE :: 2048
 // page_num == 0 marks an empty bucket (page numbers are 1-indexed).
 Cache_Entry :: struct {
 	page_num: u32,
-	slot:     ^Page_Slot,
+	slot    : ^Page_Slot,
 }
 
 // The index entry is hot: keep it one cache-line-friendly word pair.
 #assert(size_of(Cache_Entry) == 16)
 
 Page :: struct {
-	data:      []u8,
-	page_num:  u32,
-	dirty:     bool,
+	data     : []u8,
+	page_num : u32,
+	dirty    : bool,
 	pin_count: u32,
 }
 
 Page_Slot :: struct {
-	page:       Page,
-	_data_buf:  [types.PAGE_SIZE]u8,
+	page      : Page,
+	_data_buf : [types.PAGE_SIZE]u8,
 	referenced: bool,
 }
 
 Page_Int_Range :: struct {
 	col_index: u8,
-	min_int:   i64,
-	max_int:   i64,
+	min_int  : i64,
+	max_int  : i64,
 }
 
 // is_special_page reports whether a page carries a fixed-size leading header
@@ -68,30 +68,30 @@ is_special_page :: proc(page_num: u32) -> bool {
 PROBE_HIST_BUCKETS :: 8 // 1, 2-3, 4-7, 8-15, 16-31, 32-63, 64-127, 128+
 
 Pager_Stats :: struct {
-	get_page_calls:   u64,
-	get_page_hits:    u64,
-	get_page_misses:  u64,
-	unpin_calls:      u64,
-	evict_calls:      u64, // evict_one_slot invocations
-	evict_steps:      u64, // slot probes across all eviction scans
-	evict_deferred:   u64, // referenced-bit clears on pass 0 (second-chance)
+	get_page_calls  : u64,
+	get_page_hits   : u64,
+	get_page_misses : u64,
+	unpin_calls     : u64,
+	evict_calls     : u64, // evict_one_slot invocations
+	evict_steps     : u64, // slot probes across all eviction scans
+	evict_deferred  : u64, // referenced-bit clears on pass 0 (second-chance)
 	evict_writebacks: u64, // dirty slots flushed during eviction
-	cache_probes:     u64, // cache_lookup iterations (both hit + miss chains)
+	cache_probes    : u64, // cache_lookup iterations (both hit + miss chains)
 	// Probe-length distribution: histogram[b] counts lookups whose chain
 	// length fell in bucket b (1, 2-3, 4-7, ... 128+). Split hit/miss so a
 	// long tail on the hit side (clustering) is distinguishable from the
 	// miss side (cold lookup walking to the terminal empty bucket).
-	probe_hist:       [PROBE_HIST_BUCKETS]u64,
-	probe_hist_miss:  [PROBE_HIST_BUCKETS]u64,
-	max_probe:        u64, // longest chain observed
-	max_probe_miss:   u64,
+	probe_hist      : [PROBE_HIST_BUCKETS]u64,
+	probe_hist_miss : [PROBE_HIST_BUCKETS]u64,
+	max_probe       : u64, // longest chain observed
+	max_probe_miss  : u64,
 	bloom_early_outs: u64, // lookups rejected by the bloom (no probe)
-	bloom_probes:     u64, // bloom positives that fell through to a probe
-	bloom_false_pos:  u64, // ... of which the probe then missed (false positive)
+	bloom_probes    : u64, // bloom positives that fell through to a probe
+	bloom_false_pos : u64, // ... of which the probe then missed (false positive)
 }
 
 // probe_bucket maps a chain length to its histogram bucket index.
-@(private="file")
+@(private = "file")
 probe_bucket :: proc(n: u64) -> int {
 	switch {
 	case n <= 1:
@@ -113,31 +113,31 @@ probe_bucket :: proc(n: u64) -> int {
 }
 
 Pager :: struct {
-	mutex:               sync.RW_Mutex, // guards storage state; see docs/concurrency.md (acquire after db.mu)
-	cache_table:         []Cache_Entry, // open-addressed index, page_num -> cache slot
-	bloom:               bloom.Filter, // negative gate over cached page numbers
-	free_slots:          [dynamic]^Page_Slot,
-	slot_count:          u32,
-	evict_hand:          u32,
-	dirty_pages:         [dynamic]u32, // pages dirtied in the current WAL txn; iterated by wal_commit/abort
-	file:                ^os.File,
-	file_len:            i64,
-	page_bitmap:         bit_array.Bit_Array,
-	wal_state:           Wal_State,
-	slots:               []Page_Slot,
-	stats_counters:      Pager_Stats,
-	file_name:           string,
-	page_size:           u32,
-	max_cache_pages:     u32,
-	first_free_page:     u32,
+	mutex              : sync.RW_Mutex, // guards storage state; see docs/concurrency.md (acquire after db.mu)
+	cache_table        : []Cache_Entry, // open-addressed index, page_num -> cache slot
+	bloom              : bloom.Filter, // negative gate over cached page numbers
+	free_slots         : [dynamic]^Page_Slot,
+	slot_count         : u32,
+	evict_hand         : u32,
+	dirty_pages        : [dynamic]u32, // pages dirtied in the current WAL txn; iterated by wal_commit/abort
+	file               : ^os.File,
+	file_len           : i64,
+	page_bitmap        : bit_array.Bit_Array,
+	wal_state          : Wal_State,
+	slots              : []Page_Slot,
+	stats_counters     : Pager_Stats,
+	file_name          : string,
+	page_size          : u32,
+	max_cache_pages    : u32,
+	first_free_page    : u32,
 	page_format_version: u32,
-	allocator:           mem.Allocator,
+	allocator          : mem.Allocator,
 	// Opaque B-tree statistics, owned by the btree package. The pager stores
 	// them (so they survive transient btree.Tree instances) but never
 	// interprets them: it clears entries via on_evict and frees via free_stats.
-	stats:               rawptr,
-	on_evict:            proc(data: rawptr, page_num: u32),
-	free_stats:          proc(data: rawptr),
+	stats              : rawptr,
+	on_evict           : proc(data: rawptr, page_num: u32),
+	free_stats         : proc(data: rawptr),
 }
 
 // pager_layout_report prints sizes/alignments of the pager's hot structures
@@ -193,20 +193,46 @@ pager_stats_report :: proc(p: ^Pager) {
 	)
 
 	b0, b1, b2, b3, b4, b5, b6, b7 :=
-		s.probe_hist[0], s.probe_hist[1], s.probe_hist[2], s.probe_hist[3],
-		s.probe_hist[4], s.probe_hist[5], s.probe_hist[6], s.probe_hist[7]
+		s.probe_hist[0],
+		s.probe_hist[1],
+		s.probe_hist[2],
+		s.probe_hist[3],
+		s.probe_hist[4],
+		s.probe_hist[5],
+		s.probe_hist[6],
+		s.probe_hist[7]
 	fmt.printf(
 		"pager_probe_hist: 1=%d 2-3=%d 4-7=%d 8-15=%d 16-31=%d 32-63=%d 64-127=%d 128+=%d max=%d\n",
-		b0, b1, b2, b3, b4, b5, b6, b7,
+		b0,
+		b1,
+		b2,
+		b3,
+		b4,
+		b5,
+		b6,
+		b7,
 		s.max_probe,
 	)
 
 	m0, m1, m2, m3, m4, m5, m6, m7 :=
-		s.probe_hist_miss[0], s.probe_hist_miss[1], s.probe_hist_miss[2], s.probe_hist_miss[3],
-		s.probe_hist_miss[4], s.probe_hist_miss[5], s.probe_hist_miss[6], s.probe_hist_miss[7]
+		s.probe_hist_miss[0],
+		s.probe_hist_miss[1],
+		s.probe_hist_miss[2],
+		s.probe_hist_miss[3],
+		s.probe_hist_miss[4],
+		s.probe_hist_miss[5],
+		s.probe_hist_miss[6],
+		s.probe_hist_miss[7]
 	fmt.printf(
 		"pager_probe_hist_miss: 1=%d 2-3=%d 4-7=%d 8-15=%d 16-31=%d 32-63=%d 64-127=%d 128+=%d max=%d\n",
-		m0, m1, m2, m3, m4, m5, m6, m7,
+		m0,
+		m1,
+		m2,
+		m3,
+		m4,
+		m5,
+		m6,
+		m7,
 		s.max_probe_miss,
 	)
 
@@ -217,7 +243,10 @@ pager_stats_report :: proc(p: ^Pager) {
 
 	fmt.printf(
 		"pager_bloom: early_outs=%d probes=%d false_pos=%d fp%%=%.3f\n",
-		s.bloom_early_outs, s.bloom_probes, s.bloom_false_pos, fp_pct,
+		s.bloom_early_outs,
+		s.bloom_probes,
+		s.bloom_false_pos,
+		fp_pct,
 	)
 }
 
@@ -281,7 +310,10 @@ cache_insert :: proc(p: ^Pager, page_num: u32, slot: ^Page_Slot) {
 		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
 	}
 
-	p.cache_table[i] = Cache_Entry{page_num = page_num, slot = slot}
+	p.cache_table[i] = Cache_Entry {
+		page_num = page_num,
+		slot     = slot,
+	}
 	bloom.add(&p.bloom, page_num)
 }
 
@@ -293,7 +325,7 @@ cache_delete :: proc(p: ^Pager, page_num: u32) {
 	for p.cache_table[i].page_num != 0 && p.cache_table[i].page_num != page_num {
 		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
 	}
-	if p.cache_table[i].page_num == 0 { return } // not present: no bloom change
+	if p.cache_table[i].page_num == 0 { return } 	// not present: no bloom change
 
 	bloom.remove(&p.bloom, page_num)
 	p.cache_table[i] = {}
@@ -357,7 +389,7 @@ evict_slot :: proc(p: ^Pager, slot: ^Page_Slot, writeback: bool) -> Error {
 	return .None
 }
 
-@(private="file")
+@(private = "file")
 evict_one_slot :: proc(p: ^Pager) -> Error {
 	n := len(p.slots)
 	p.stats_counters.evict_calls += 1
@@ -389,7 +421,7 @@ evict_one_slot :: proc(p: ^Pager) -> Error {
 // survivals: pins shouldn't exist at a statement boundary, so a skipped page
 // is left for the next GC rather than destroyed.
 Evict_Report :: struct {
-	evicted:        u32,
+	evicted       : u32,
 	skipped_pinned: u32,
 }
 

@@ -11,7 +11,7 @@ parse_create_table :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !expect_match(p, .TABLE, "Expected TABLE after CREATE") do return nil, false
+	if !expect_match(p, .TABLE, "Expected TABLE after CREATE") { return nil, false }
 
 	table_name := parse_identifier(p, allocator) or_return
 	if !expect_match(p, .LPAREN, "CREATE TABLE requires at least one column definition") {
@@ -54,7 +54,13 @@ parse_create_table :: proc(
 // parse_foreign_key_clause parses `FOREIGN KEY (col) REFERENCES table(col)`.
 // The caller has already consumed FOREIGN.
 @(private)
-parse_foreign_key_clause :: proc(p: ^Parser, allocator := context.allocator) -> (fk: Foreign_Key, ok: bool) {
+parse_foreign_key_clause :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	fk: Foreign_Key,
+	ok: bool,
+) {
 	if !expect_match(p, .KEY, "Expected KEY after FOREIGN") { return }
 	if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") { return }
 
@@ -74,7 +80,7 @@ parse_foreign_key_clause :: proc(p: ^Parser, allocator := context.allocator) -> 
 // NOT NULL, DEFAULT, CHECK, REFERENCES) after the type. Returns handled=false
 // when the next token starts no modifier (caller breaks); ok=false on error.
 // REFERENCES appends a table-level Foreign_Key for the column being defined.
-@(private="file")
+@(private = "file")
 parse_column_modifier :: proc(
 	p: ^Parser,
 	col: ^types.Column,
@@ -97,7 +103,7 @@ parse_column_modifier :: proc(
 		if !val_ok {
 			err(p, "Invalid DEFAULT value")
 			return true, false
-	 	}
+		}
 
 		col.default_value = val
 		return true, true
@@ -146,7 +152,10 @@ parse_column_def :: proc(
 	p: ^Parser,
 	fks: ^[dynamic]Foreign_Key,
 	allocator := context.allocator,
-) -> (col: types.Column, ok: bool) {
+) -> (
+	col: types.Column,
+	ok: bool,
+) {
 	col.name = parse_identifier(p, allocator) or_return
 	type_token := peek(p)
 	#partial switch type_token.type {
@@ -174,7 +183,13 @@ parse_column_def :: proc(
 // collect_check_source captures the raw text of a parenthesised CHECK expression,
 // tracking nesting depth. The caller has consumed CHECK.
 @(private)
-collect_check_source :: proc(p: ^Parser, allocator := context.allocator) -> (expr: string, ok: bool) {
+collect_check_source :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	expr: string,
+	ok: bool,
+) {
 	if !expect_match(p, .LPAREN, "Expected ( after CHECK") { return }
 
 	b := strings.builder_make(allocator)
@@ -202,7 +217,7 @@ parse_drop_table :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !expect_match(p, .TABLE, "Expected TABLE after DROP") do return nil, false
+	if !expect_match(p, .TABLE, "Expected TABLE after DROP") { return nil, false }
 	table_name := parse_identifier(p, allocator) or_return
 	return Drop_Stmt{table_name = table_name}, true
 }

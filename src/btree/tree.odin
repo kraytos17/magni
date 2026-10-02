@@ -1,15 +1,15 @@
-// Package btree implements the copy-on-write B+tree. Layer 2 — depends on
-// cell, pager, types.
+// Package btree implements the copy-on-write B+tree.
 package btree
 
+import "base:intrinsics"
 import "core:encoding/endian"
 import "core:log"
 import "core:mem"
 import "core:strings"
 import "src:cell"
 import "src:pager"
-import "src:util/varint"
 import "src:types"
+import "src:util/varint"
 
 MAX_TREE_DEPTH :: 12
 
@@ -20,13 +20,13 @@ DEFAULT_CONFIG := Config {
 }
 
 Tree :: struct {
-	pager:  ^pager.Pager,
-	root:   u32,
+	pager : ^pager.Pager,
+	root  : u32,
 	config: Config,
 }
 
 Config :: struct #all_or_none {
-	using _:          types.Storage_Config,
+	using _         : types.Storage_Config,
 	check_duplicates: bool,
 }
 
@@ -41,47 +41,58 @@ Error :: enum u8 {
 	Cell_Not_Found,
 	Invalid_Bounds,
 	Serialization_Failed,
+	Duplicate_Key,
+	Unsupported_Format,
 }
 
 Node :: struct {
-	id:     u32,
-	data:   []u8,
+	id    : u32,
+	data  : []u8,
 	header: ^Page_Header,
 	layout: ^Cell_Layout,
 }
 
 Insert_COW_Result :: struct #all_or_none {
-	new_page:   u32,
-	did_split:  bool,
+	new_page  : u32,
+	did_split : bool,
 	right_page: u32,
-	split_key:  types.Row_ID,
+	split_key : types.Row_ID,
 }
 
 init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree {
 	c := config
 	if c.allocator.procedure == nil { c.allocator = context.allocator }
 
-	t := Tree{pager = p, root = root_page, config = c}
+	t := Tree {
+		pager  = p,
+		root   = root_page,
+		config = c,
+	}
+
 	attach_stats(&t)
 	return t
 }
 
 @(private)
-is_leaf :: proc(n: Node) -> bool {
+is_leaf :: #force_inline proc "contextless" (n: Node) -> bool {
 	return n.header.page_type == .LEAF_TABLE || n.header.page_type == .LEAF_TABLE_COLUMNAR
 }
 
 @(private)
-node_leaf :: proc(n: Node) -> ^Leaf_Header { return get_leaf_header(n.data, n.id) }
+node_leaf :: #force_inline proc "contextless" (n: Node) -> ^Leaf_Header {return get_leaf_header(
+		n.data,
+		n.id,
+	)}
 
 @(private)
-node_interior :: proc(n: Node) -> ^Interior_Header {
+node_interior :: #force_inline proc "contextless" (n: Node) -> ^Interior_Header {
 	return get_interior_header(n.data, n.id)
 }
 
 @(private)
-unpin_node :: proc(t: ^Tree, n: Node) { pager.unpin_page(t.pager, n.id) }
+unpin_node :: #force_inline proc(t: ^Tree, n: Node) { pager.unpin_page(t.pager, n.id) }
 
+@(require_results)
 load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	page, err := pager.get_page(t.pager, page_id)
 	if err != nil { return {}, .Page_Read_Failed }
@@ -95,8 +106,8 @@ node_from_bytes :: proc(id: u32, data: []u8, layout: ^Cell_Layout) -> (Node, Err
 	return Node{id = id, data = data, header = common_hdr, layout = layout}, .None
 }
 
-@(private="file")
-leaf_lower_bound :: proc(
+@(private = "file")
+leaf_lower_bound :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	target: types.Row_ID,
@@ -116,11 +127,18 @@ leaf_lower_bound :: proc(
 }
 
 @(private)
-node_find_child :: proc(n: ^Node, key: types.Row_ID, layout: ^Cell_Layout) -> (u32, int) {
+node_find_child :: #force_inline proc(
+	n: ^Node,
+	key: types.Row_ID,
+	layout: ^Cell_Layout,
+) -> (
+	u32,
+	int,
+) {
 	return node_find_child_data(n.data, n.id, key, layout)
 }
 
-@(private)
+@(private, require_results)
 node_insert_leaf_cell :: proc(
 	t: ^Tree,
 	n: ^Node,
@@ -132,14 +150,16 @@ node_insert_leaf_cell :: proc(
 	// insert loudly (.Cell_Deserialize_Failed) instead of proceeding on
 	// undecodable bytes. .Page_Full is deliberately not used: it would send
 	// a doomed split down the abort path and leak the allocated right page.
-	if !ensure_row_major(n.data, n.id) { return .Cell_Deserialize_Failed }
+	if intrinsics.unlikely(!ensure_row_major(n.data, n.id)) {
+		return .Cell_Deserialize_Failed
+	}
 
 	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid, n.layout)
 	if t.config.check_duplicates {
 		if lb_ok && idx < int(n.header.cell_count) {
 			ptr := get_cell_ptr(n.data, n.id, idx, n.layout.stride)
-			rid, _ := cell.get_rowid(n.data, int(ptr))
-			if rid == rowid { return .Duplicate_Rowid }
+			rid, rid_ok := cell.get_rowid(n.data, int(ptr))
+			if intrinsics.unlikely(rid_ok && rid == rowid) { return .Duplicate_Rowid }
 		}
 	}
 
@@ -182,7 +202,7 @@ node_insert_leaf_cell :: proc(
 	return .None
 }
 
-@(private)
+@(private, require_results)
 node_update_child_ptr :: proc(
 	n: ^Node,
 	key: types.Row_ID,
@@ -203,13 +223,17 @@ node_update_child_ptr :: proc(
 	return false
 }
 
-@(private="file")
-node_find_insert_index :: proc(n: ^Node, target_rowid: types.Row_ID, layout: ^Cell_Layout) -> int {
+@(private = "file")
+node_find_insert_index :: #force_inline proc(
+	n: ^Node,
+	target_rowid: types.Row_ID,
+	layout: ^Cell_Layout,
+) -> int {
 	idx, _ := leaf_lower_bound(n.data, n.id, target_rowid, layout)
 	return idx
 }
 
-@(private)
+@(private, require_results)
 insert_recursive :: proc(
 	t: ^Tree,
 	page_id: u32,
@@ -237,7 +261,7 @@ insert_recursive :: proc(
 
 // insert_into_leaf inserts into a leaf node, splitting and retrying on
 // Page_Full. Returns did_split=true with the new right page on split.
-@(private="file")
+@(private = "file", require_results)
 insert_into_leaf :: proc(
 	t: ^Tree,
 	curr: ^Node,
@@ -290,7 +314,7 @@ insert_into_leaf :: proc(
 
 // insert_into_interior descends to the child, then handles the child's
 // result: repoint on no-split, or absorb the split halves.
-@(private="file")
+@(private = "file", require_results)
 insert_into_interior :: proc(
 	t: ^Tree,
 	curr: ^Node,
@@ -311,7 +335,9 @@ insert_into_interior :: proc(
 	}
 	if !child_result.did_split {
 		if cow && child_result.new_page != child_id {
-			node_update_child_ptr(curr, rowid, child_result.new_page, curr.layout)
+			if !node_update_child_ptr(curr, rowid, child_result.new_page, curr.layout) {
+				return {}, .Invalid_Cell_Pointer
+			}
 		}
 
 		update_row_count(t, curr.id, 1)
@@ -337,7 +363,7 @@ insert_into_interior :: proc(
 // handle_interior_child_split absorbs a split child: the left half keeps the
 // child's slot (with a new upper bound) and the right half gets a new entry.
 // The rightmost child (reachable only via right_ptr) is special-cased.
-@(private="file")
+@(private = "file", require_results)
 handle_interior_child_split :: proc(
 	t: ^Tree,
 	curr: ^Node,
@@ -393,9 +419,11 @@ handle_interior_child_split :: proc(
 
 	interior_split, split_err := split_interior_node(t, curr)
 	if split_err != .None { return {}, split_err }
+	if _, c_err := count_recursive(t, curr.id); c_err != .None { return {}, c_err }
+	if _, c_err := count_recursive(t, interior_split.right_page); c_err != .None {
+		return {}, c_err
+	}
 
-	count_recursive(t, curr.id)
-	count_recursive(t, interior_split.right_page)
 	target_id := curr.id
 	if insert_key > interior_split.split_key { target_id = interior_split.right_page }
 
@@ -404,17 +432,18 @@ handle_interior_child_split :: proc(
 
 	defer unpin_node(t, target_node)
 	if was_rightmost { set_right_ptr(target_node.data, target_id, child_result.right_page) }
-
-	insert_interior_cell(
+	if !insert_interior_cell(
 		target_node.data,
 		target_id,
 		ptr_for_insert,
 		insert_key,
 		target_node.layout,
-	)
+	) {
+		return {}, .Serialization_Failed
+	}
 
 	pager.mark_dirty(t.pager, target_id)
-	count_recursive(t, target_id)
+	if _, c_err := count_recursive(t, target_id); c_err != .None { return {}, c_err }
 	return Insert_COW_Result {
 			new_page = new_page_num,
 			did_split = true,
@@ -424,7 +453,7 @@ handle_interior_child_split :: proc(
 		.None
 }
 
-@(private="file")
+@(private = "file")
 rowid_exists :: proc(
 	data: []u8,
 	page_id: u32,
@@ -441,6 +470,7 @@ rowid_exists :: proc(
 
 // Insert a row into the b-tree. Handles root splits transparently.
 // Returns .Duplicate_Rowid if check_duplicates is enabled and the rowid exists.
+@(require_results)
 tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Error {
 	root_node := load_node(t, t.root) or_return
 	defer unpin_node(t, root_node)
@@ -464,8 +494,7 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 				{did_split = true, right_page = result.right_page, split_key = result.split_key},
 			); s_err != .None { return s_err }
 		}
-
-		count_recursive(t, t.root)
+		if _, c_err := count_recursive(t, t.root); c_err != .None { return c_err }
 		return .None
 	}
 
@@ -478,12 +507,12 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 		); s_err != .None {
 			return s_err
 		}
-		count_recursive(t, t.root)
+		if _, c_err := count_recursive(t, t.root); c_err != .None { return c_err }
 	}
 	return .None
 }
 
-@(private="file")
+@(private = "file")
 descend_to_leaf :: proc(
 	t: ^Tree,
 	get_child: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32,
@@ -501,8 +530,8 @@ descend_to_leaf :: proc(
 	}
 }
 
-@(private="file")
-node_find_child_data :: proc(
+@(private = "file")
+node_find_child_data :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
@@ -522,17 +551,17 @@ node_find_child_data :: proc(
 	return child, idx
 }
 
-@(private="file")
+@(private = "file")
 descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	return get_right_ptr(data, page_id)
 }
 
 Descend_Key_Ctx :: struct {
-	key:    types.Row_ID,
+	key   : types.Row_ID,
 	layout: ^Cell_Layout,
 }
 
-@(private="file")
+@(private = "file")
 descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	dk := (^Descend_Key_Ctx)(ctx)
 	child, _ := node_find_child_data(data, page_id, dk.key, dk.layout)
@@ -541,6 +570,7 @@ descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 
 // Find a row by Row_ID. Returns a Cell (with deep-copied or zero-copy values per Config).
 // Returns .Cell_Not_Found if the row doesn't exist.
+@(require_results)
 tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cell.Cell, Error) {
 	dk := Descend_Key_Ctx {
 		key    = key,
@@ -551,8 +581,7 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 	if err != .None { return {}, err }
 	defer unpin_node(t, leaf)
 
-	// Columnar page: linear scan rowids
-	if is_columnar(leaf.data, leaf.id) {
+	if intrinsics.unlikely(is_columnar(leaf.data, leaf.id)) {
 		num_cols, found := detect_columnar_col_count(leaf.data, leaf.id)
 		if !found { return {}, .Invalid_Cell_Pointer }
 
@@ -620,7 +649,7 @@ tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
 	return
 }
 
-@(private="file")
+@(private = "file", require_results)
 count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	if count, ok := stats_row_count_get(tree_stats(t), page_id); ok {
 		result = count
@@ -651,7 +680,7 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	return
 }
 
-@(private="file")
+@(private = "file")
 update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
 	s := tree_stats(t)
 	if count, ok := stats_row_count_get(s, page_id); ok {
@@ -659,7 +688,7 @@ update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
 	}
 }
 
-@(private="file")
+@(private = "file", require_results)
 delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Error) {
 	node, err := load_node(t, page_id)
 	if err != .None { return false, err }
@@ -681,7 +710,7 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 	return deleted, .None
 }
 
-@(private)
+@(private, require_results)
 delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error {
 	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
 	if !ensure_row_major(leaf_node.data, leaf_node.id) { return .Cell_Deserialize_Failed }
@@ -728,11 +757,13 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 }
 
 // Delete a row by Row_ID. Removes the cell and adds the freed space to the freeblock list.
+@(require_results)
 tree_delete :: proc(t: ^Tree, key: types.Row_ID) -> Error {
 	_, err := delete_recursive(t, t.root, key)
 	return err
 }
 
+@(require_results)
 tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Error {
 	dk := Descend_Key_Ctx {
 		key    = rowid,
@@ -750,6 +781,7 @@ tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 	return .None
 }
 
+@(require_results)
 tree_foreach :: proc(
 	t: ^Tree,
 	callback: proc(c: ^cell.Cell, user_data: rawptr) -> bool,
@@ -758,7 +790,7 @@ tree_foreach :: proc(
 	return foreach_recursive(t, t.root, callback, user_data)
 }
 
-@(private="file")
+@(private = "file", require_results)
 foreach_recursive :: proc(
 	t: ^Tree,
 	page_id: u32,
@@ -797,6 +829,7 @@ foreach_recursive :: proc(
 	return foreach_recursive(t, get_right_ptr(node.data, page_id), cb, ud)
 }
 
+@(cold)
 tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 	node, err := load_node(t, page_id)
 	if err != .None { log.debugf("Error reading page %d", page_id); return }
@@ -827,6 +860,7 @@ tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 	}
 }
 
+@(cold)
 tree_verify :: proc(t: ^Tree) -> bool {
 	visited := make(map[u32]bool, context.temp_allocator)
 	defer delete(visited)
@@ -835,13 +869,13 @@ tree_verify :: proc(t: ^Tree) -> bool {
 
 // verify_config_enabled can be set via -define:VERIFY_TREE=true at build time.
 // tree_verify allocates a map and walks the full tree — do not call on hot paths.
-VERIFY_TREE :: #config(VERIFY_TREE, false)
+VERIFY_TREE            :: #config(VERIFY_TREE, false)
 tree_verify_if_enabled :: proc(t: ^Tree) -> bool {
 	if !VERIFY_TREE { return true }
 	return tree_verify(t)
 }
 
-@(private="file")
+@(private = "file", cold)
 verify_recursive :: proc(
 	t: ^Tree,
 	page_id: u32,

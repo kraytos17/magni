@@ -6,11 +6,11 @@ import "core:time"
 import "src:pager"
 import "src:types"
 
-REFS_MAGIC :: "MAGNIREFS"
-REFS_LOG_OFFSET :: 24
-REFS_LOG_SIZE :: 64 * size_of(Ref_Log_Entry)
+REFS_MAGIC          :: "MAGNIREFS"
+REFS_LOG_OFFSET     :: 24
+REFS_LOG_SIZE       :: 64 * size_of(Ref_Log_Entry)
 REFS_ENTRIES_OFFSET :: REFS_LOG_OFFSET + REFS_LOG_SIZE
-MAX_LOG_ENTRIES :: 64
+MAX_LOG_ENTRIES     :: 64
 
 Ref_Kind :: enum u8 {
 	BRANCH = 0,
@@ -18,18 +18,18 @@ Ref_Kind :: enum u8 {
 }
 
 Ref_Entry :: struct #packed #simple {
-	name_hash:    u64,
-	snapshot_id:  u64,
-	name_len:     u16,
-	kind:         u8,
+	name_hash   : u64,
+	snapshot_id : u64,
+	name_len    : u16,
+	kind        : u8,
 	is_protected: u8,
-	max_age_ms:   u64,
-	min_to_keep:  u32,
+	max_age_ms  : u64,
+	min_to_keep : u32,
 }
 
 Ref_Log_Entry :: struct #packed {
 	snapshot_id: u64,
-	timestamp:   u64,
+	timestamp  : u64,
 }
 
 MAIN_REF :: "main"
@@ -123,7 +123,7 @@ get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: 
 	return 0, false
 }
 
-@(private="file")
+@(private = "file")
 list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocator) -> []Ref_Entry {
 	if refs_page == 0 { return nil }
 
@@ -194,7 +194,7 @@ log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool)
 	return entry.snapshot_id, true
 }
 
-@(private="file")
+@(private = "file")
 log_read_range :: proc(
 	p: ^pager.Pager,
 	refs_page: u32,

@@ -7,7 +7,7 @@ import "src:types"
 // copy_on_write copies a page via the pager and, for a special (header-carrying)
 // page, relocates the page-1 database header to offset 0 in the new copy. The
 // pager owns the page-1 semantics; the layout relocation is btree's concern.
-@(private)
+@(private, require_results)
 copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 	new_page, err := pager.copy_page(t.pager, page_id)
 	if err != .None {
@@ -24,7 +24,7 @@ copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 // relocate_copied_page1 moves a page-1 copy's data area (which starts at the
 // 100-byte database header boundary) down to offset 0, so the COW copy is a
 // normal B-tree page. Returns false on an invalid page header.
-@(private="file")
+@(private = "file")
 relocate_copied_page1 :: proc(page: ^pager.Page, format_version: u32) -> bool {
 	hdr := get_header(page.data, 1)
 	if hdr == nil { return false }
@@ -98,13 +98,16 @@ tree_insert_cow :: proc(
 
 		init_interior_page(new_root_page.data, new_root_page.page_num)
 		set_right_ptr(new_root_page.data, new_root_page.page_num, result.right_page)
-		insert_interior_cell(
+		if !insert_interior_cell(
 			new_root_page.data,
 			new_root_page.page_num,
 			result.new_page,
 			result.split_key,
 			get_layout(t.pager.page_format_version),
-		)
+		) {
+			pager.unpin_page(t.pager, new_root_page.page_num)
+			return 0, .Serialization_Failed
+		}
 
 		pager.mark_dirty(t.pager, new_root_page.page_num)
 		pager.unpin_page(t.pager, new_root_page.page_num)
@@ -151,7 +154,9 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 			pager.unpin_page(t.pager, child_result.new_page)
 		}
 		if child_result.new_page != child_id {
-			node_update_child_ptr(&node, key, child_result.new_page, node.layout)
+			if !node_update_child_ptr(&node, key, child_result.new_page, node.layout) {
+				return {}, .Invalid_Cell_Pointer
+			}
 		}
 
 		pager.mark_dirty(t.pager, node.id)
@@ -214,7 +219,9 @@ tree_update_cow :: proc(
 			pager.unpin_page(t.pager, child_result.new_page)
 		}
 		if child_result.new_page != child_id {
-			node_update_child_ptr(&node, rowid, child_result.new_page, node.layout)
+			if !node_update_child_ptr(&node, rowid, child_result.new_page, node.layout) {
+				return {}, .Invalid_Cell_Pointer
+			}
 		}
 
 		pager.mark_dirty(t.pager, node.id)

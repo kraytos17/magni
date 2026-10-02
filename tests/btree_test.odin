@@ -10,8 +10,8 @@ import "src:pager"
 import "src:types"
 
 Test_Context :: struct {
-	pager:    ^pager.Pager,
-	tree:     btree.Tree,
+	pager   : ^pager.Pager,
+	tree    : btree.Tree,
 	filename: string,
 }
 
@@ -100,7 +100,7 @@ test_persistence :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "persistence")
 	vals := []types.Value{types.value_int(999)}
-	btree.tree_insert(&ctx.tree, 42, vals)
+	testing.expect(t, btree.tree_insert(&ctx.tree, 42, vals) == .None, "seed insert succeeds")
 
 	_ = pager.close(ctx.pager)
 	ctx.pager = nil
@@ -164,7 +164,7 @@ test_duplicates :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	vals := []types.Value{types.value_int(1)}
-	btree.tree_insert(&ctx.tree, 10, vals)
+	testing.expect(t, btree.tree_insert(&ctx.tree, 10, vals) == .None, "first insert succeeds")
 	err := btree.tree_insert(&ctx.tree, 10, vals)
 	testing.expect_value(t, err, btree.Error.Duplicate_Rowid)
 
@@ -182,7 +182,7 @@ test_cursor :: proc(t: ^testing.T) {
 	keys := []types.Row_ID{50, 10, 30, 40, 20}
 	for k in keys {
 		vals := []types.Value{types.value_int(i64(k))}
-		btree.tree_insert(&ctx.tree, k, vals)
+		testing.expect(t, btree.tree_insert(&ctx.tree, k, vals) == .None, "seed insert succeeds")
 	}
 
 	cursor, err := btree.cursor_start(&ctx.tree)
@@ -224,9 +224,21 @@ test_deletion :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "deletion")
 	defer teardown_tree(&ctx)
 
-	btree.tree_insert(&ctx.tree, 1, []types.Value{types.value_int(1)})
-	btree.tree_insert(&ctx.tree, 2, []types.Value{types.value_int(2)})
-	btree.tree_insert(&ctx.tree, 3, []types.Value{types.value_int(3)})
+	testing.expect(
+		t,
+		btree.tree_insert(&ctx.tree, 1, []types.Value{types.value_int(1)}) == .None,
+		"seed insert succeeds",
+	)
+	testing.expect(
+		t,
+		btree.tree_insert(&ctx.tree, 2, []types.Value{types.value_int(2)}) == .None,
+		"seed insert succeeds",
+	)
+	testing.expect(
+		t,
+		btree.tree_insert(&ctx.tree, 3, []types.Value{types.value_int(3)}) == .None,
+		"seed insert succeeds",
+	)
 
 	err := btree.tree_delete(&ctx.tree, 2)
 	testing.expect_value(t, err, btree.Error.None)
@@ -254,7 +266,11 @@ test_auto_increment :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, btree.Error.None)
 	testing.expect_value(t, next, 1)
 
-	btree.tree_insert(&ctx.tree, 10, []types.Value{})
+	testing.expect(
+		t,
+		btree.tree_insert(&ctx.tree, 10, []types.Value{}) == .None,
+		"seed insert succeeds",
+	)
 
 	next2, _ := btree.tree_next_rowid(&ctx.tree)
 	testing.expect_value(t, next2, 11)
@@ -268,11 +284,20 @@ test_tree_verify :: proc(t: ^testing.T) {
 
 	items := 50
 	for i in 1 ..= items {
-		btree.tree_insert(&ctx.tree, types.Row_ID(i), []types.Value{types.value_int(i64(i))})
+		testing.expect(
+			t,
+			btree.tree_insert(
+				&ctx.tree,
+				types.Row_ID(i),
+				[]types.Value{types.value_int(i64(i))},
+			) ==
+			.None,
+			"seed insert succeeds",
+		)
 	}
 	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verification failed after inserts")
 
-	btree.tree_delete(&ctx.tree, 25)
+	testing.expect(t, btree.tree_delete(&ctx.tree, 25) == .None, "delete existing succeeds")
 	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verification failed after delete")
 }
 
@@ -282,7 +307,11 @@ test_delete_non_existent :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "del_miss")
 	defer teardown_tree(&ctx)
 
-	btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(10)})
+	testing.expect(
+		t,
+		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(10)}) == .None,
+		"seed insert succeeds",
+	)
 	err := btree.tree_delete(&ctx.tree, 99)
 	testing.expect_value(t, err, btree.Error.Cell_Not_Found)
 	cnt, _ := btree.tree_count_rows(&ctx.tree)
@@ -296,7 +325,16 @@ test_delete_first_last_key :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	for i in 1 ..= 5 {
-		btree.tree_insert(&ctx.tree, types.Row_ID(i), []types.Value{types.value_int(i64(i))})
+		testing.expect(
+			t,
+			btree.tree_insert(
+				&ctx.tree,
+				types.Row_ID(i),
+				[]types.Value{types.value_int(i64(i))},
+			) ==
+			.None,
+			"seed insert succeeds",
+		)
 	}
 
 	err := btree.tree_delete(&ctx.tree, 1)
@@ -323,7 +361,16 @@ test_consecutive_deletes :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	for i in 1 ..= 5 {
-		btree.tree_insert(&ctx.tree, types.Row_ID(i), []types.Value{types.value_int(i64(i))})
+		testing.expect(
+			t,
+			btree.tree_insert(
+				&ctx.tree,
+				types.Row_ID(i),
+				[]types.Value{types.value_int(i64(i))},
+			) ==
+			.None,
+			"seed insert succeeds",
+		)
 	}
 
 	for i in 1 ..= 5 {
@@ -342,8 +389,12 @@ test_reinsert_after_delete :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "reinsert")
 	defer teardown_tree(&ctx)
 
-	btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(1)})
-	btree.tree_delete(&ctx.tree, 10)
+	testing.expect(
+		t,
+		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(1)}) == .None,
+		"seed insert succeeds",
+	)
+	testing.expect(t, btree.tree_delete(&ctx.tree, 10) == .None, "delete existing succeeds")
 
 	vals := []types.Value{types.value_int(999)}
 	err := btree.tree_insert(&ctx.tree, 10, vals)
@@ -485,7 +536,11 @@ test_delete_on_empty_tree :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "empty_del")
 	defer teardown_tree(&ctx)
 
-	btree.tree_delete(&ctx.tree, 999)
+	testing.expect(
+		t,
+		btree.tree_delete(&ctx.tree, 999) == .Cell_Not_Found,
+		"delete on empty tree fails loudly",
+	)
 	_, err := btree.tree_find(&ctx.tree, 999, context.temp_allocator)
 	testing.expect(t, err == .Cell_Not_Found, "still empty after delete on empty tree")
 }
@@ -497,9 +552,9 @@ test_tree_collect_pages :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	val := []types.Value{types.value_int(10)}
-	btree.tree_insert(&ctx.tree, 1, val)
-	btree.tree_insert(&ctx.tree, 2, val)
-	btree.tree_insert(&ctx.tree, 3, val)
+	testing.expect(t, btree.tree_insert(&ctx.tree, 1, val) == .None, "seed insert succeeds")
+	testing.expect(t, btree.tree_insert(&ctx.tree, 2, val) == .None, "seed insert succeeds")
+	testing.expect(t, btree.tree_insert(&ctx.tree, 3, val) == .None, "seed insert succeeds")
 
 	pages := make(map[u32]bool, context.temp_allocator)
 	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
@@ -518,14 +573,18 @@ test_foreach_callback :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	val := []types.Value{types.value_int(100)}
-	btree.tree_insert(&ctx.tree, 1, val)
-	btree.tree_insert(&ctx.tree, 2, val)
+	testing.expect(t, btree.tree_insert(&ctx.tree, 1, val) == .None, "seed insert succeeds")
+	testing.expect(t, btree.tree_insert(&ctx.tree, 2, val) == .None, "seed insert succeeds")
 
 	count := 0
-	btree.tree_foreach(&ctx.tree, proc(c: ^cell.Cell, user_data: rawptr) -> bool {
-			(^int)(user_data)^ += 1
-			return true
-		}, &count)
+	testing.expect(
+		t,
+		btree.tree_foreach(&ctx.tree, proc(c: ^cell.Cell, user_data: rawptr) -> bool {
+				(^int)(user_data)^ += 1
+				return true
+			}, &count) == .None,
+		"foreach over 2 rows succeeds",
+	)
 	testing.expect_value(t, count, 2)
 }
 
@@ -548,7 +607,8 @@ test_page_accessor_v2 :: proc(t: ^testing.T) {
 	for i in 0 ..< 3 {
 		info := cell.compute_info(rids[i], vals[i])
 		off -= info.total_size
-		cell.serialize(pg.data[off:], rids[i], vals[i], info)
+		_, ser_ok := cell.serialize(pg.data[off:], rids[i], vals[i], info)
+		testing.expect(t, ser_ok, "serialize page cell succeeds")
 	}
 
 	// Set up as v2: 3 Cell_Entries (10 bytes each) at top
@@ -597,7 +657,8 @@ test_page_accessor_v2 :: proc(t: ^testing.T) {
 	// Test insert_cell_at: insert new entry at idx=1
 	info4 := cell.compute_info(400, {types.value_int(40)})
 	off4 := int(hdr.cell_content_offset) - info4.total_size
-	cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
+	_, ser_ok := cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
+	testing.expect(t, ser_ok, "serialize temp cell succeeds")
 	hdr.cell_content_offset = u16le(off4)
 	btree.insert_cell_at(pg.data, pg.page_num, 1, u16(off4), 400, btree.CELL_ENTRY_STRIDE)
 	hdr.cell_count = 4
@@ -663,7 +724,8 @@ test_page_accessor_move :: proc(t: ^testing.T) {
 	for i in 0 ..< 2 {
 		info := cell.compute_info(rids[i], vals[i])
 		off -= info.total_size
-		cell.serialize(src_pg.data[off:], rids[i], vals[i], info)
+		_, ser_ok := cell.serialize(src_pg.data[off:], rids[i], vals[i], info)
+		testing.expect(t, ser_ok, "serialize src cell succeeds")
 	}
 
 	src_hdr := btree.get_leaf_header(src_pg.data, src_pg.page_num)
@@ -718,7 +780,8 @@ test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label
 	for i in 0 ..< 3 {
 		info := cell.compute_info(rids[i], vals[i])
 		off -= info.total_size
-		cell.serialize(pg.data[off:], rids[i], vals[i], info)
+		_, ser_ok := cell.serialize(pg.data[off:], rids[i], vals[i], info)
+		testing.expect(t, ser_ok, "serialize page cell succeeds")
 		layout.set_entry(pg.data, pg.page_num, i, u16(off), rids[i])
 	}
 
@@ -754,7 +817,8 @@ test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label
 	// Test insert_cell_at: insert at index 1
 	info4 := cell.compute_info(types.Row_ID(400), {types.value_int(40)})
 	off4 := int(hdr.cell_content_offset) - info4.total_size
-	cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
+	_, ser_ok := cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
+	testing.expect(t, ser_ok, "serialize temp cell succeeds")
 	hdr.cell_content_offset = u16le(off4)
 	btree.insert_cell_at(pg.data, pg.page_num, 1, u16(off4), 400, layout.stride)
 	hdr.cell_count = 4

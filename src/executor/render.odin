@@ -47,15 +47,11 @@ render_table :: proc(cols: []string, rows: [][]string) {
 		}
 	}
 
-	table.write_markdown_table(
-		os.to_stream(os.stdout),
-		tbl,
-		width_proc,
-	)
+	table.write_markdown_table(os.to_stream(os.stdout), tbl, width_proc)
 }
 
 // is_ascii reports whether s contains only ASCII bytes.
-@(private="file")
+@(private = "file")
 is_ascii :: proc(s: string) -> bool {
 	for i in 0 ..< len(s) {
 		if s[i] >= 0x80 { return false }

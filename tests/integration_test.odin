@@ -494,7 +494,10 @@ test_integration_right_join :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO b VALUES (3, 'Z');")
 
 	// RIGHT JOIN: all rows from b, matched rows from a, NULLs for unmatched
-	q := db.query(d, "SELECT a.id, a.name, b.val FROM a RIGHT JOIN b ON a.id = b.id ORDER BY b.id;")
+	q := db.query(
+		d,
+		"SELECT a.id, a.name, b.val FROM a RIGHT JOIN b ON a.id = b.id ORDER BY b.id;",
+	)
 	testing.expect(t, q.ok, "RIGHT JOIN should succeed")
 	if q.ok {
 		testing.expect_value(t, len(q.rows), 2)
@@ -798,7 +801,11 @@ test_integration_wal_auto_checkpoint :: proc(t: ^testing.T) {
 
 	// With threshold 2 the WAL is auto-checkpointed every couple of commits, so
 	// it must never accumulate 20+ frames (frame_count stays below the threshold).
-	testing.expect(t, d.pager.wal_state.frame_count < 2, "WAL auto-checkpointed (frame_count below threshold)")
+	testing.expect(
+		t,
+		d.pager.wal_state.frame_count < 2,
+		"WAL auto-checkpointed (frame_count below threshold)",
+	)
 	db.close(d)
 	d2, open2 := db.open(filename)
 	testing.expect(t, open2 == .None, "reopen after auto-checkpoint")
@@ -996,7 +1003,7 @@ test_integration_skip_index_overflow :: proc(t: ^testing.T) {
 			id := chunk * CHUNK + i + 1
 			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
 		}
-		
+
 		strings.write_string(&sb, ";")
 		ok := db.execute(d, strings.to_string(sb)) == .None
 		testing.expect(t, ok, "chunk insert")
@@ -1126,7 +1133,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 
 	// Read current data from row-major page
 	original_rows := make([dynamic]struct {
-			rid:  types.Row_ID,
+			rid : types.Row_ID,
 			vals: []types.Value,
 		}, context.temp_allocator)
 	{
@@ -1135,7 +1142,7 @@ test_columnar_btree_read :: proc(t: ^testing.T) {
 		for c.is_valid {
 			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			append(&original_rows, struct {
-				rid:  types.Row_ID,
+				rid : types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
 			cell_val.values = nil
@@ -1238,12 +1245,16 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 
 	for i in 1 ..= 3 {
 		val := []types.Value{types.value_int(i64(i * 100))}
-		btree.tree_insert(&ctx.tree, types.Row_ID(i), val)
+		testing.expect(
+			t,
+			btree.tree_insert(&ctx.tree, types.Row_ID(i), val) == .None,
+			"seed insert succeeds",
+		)
 	}
 
 	// Read original rows via cursor
 	orig := make([dynamic]struct {
-			rid:  types.Row_ID,
+			rid : types.Row_ID,
 			vals: []types.Value,
 		}, context.temp_allocator)
 	{
@@ -1252,7 +1263,7 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 		for c.is_valid {
 			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			append(&orig, struct {
-				rid:  types.Row_ID,
+				rid : types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
 			cell_val.values = nil
@@ -1341,7 +1352,7 @@ verify_dense_rows :: proc(t: ^testing.T, tree: ^btree.Tree, n: int) -> bool {
 		if ok {
 			seen[rid] = true
 			ok = len(cell_val.values) == 1
-			if v, v_ok := cell_val.values[0].(i64); v_ok && v == i64(rid) {} else { ok = false }
+			if v, v_ok := cell_val.values[0].(i64); v_ok && v == i64(rid) {  } else { ok = false }
 		}
 		testing.expect(t, ok, "rowid in range, unique, value matches")
 		cell.destroy(&cell_val, context.temp_allocator)
@@ -1392,7 +1403,11 @@ test_columnar_conversion_then_split :: proc(t: ^testing.T) {
 			vals[i] = vs
 		}
 		cols := []types.Column{{name = "val", type = .INTEGER}}
-		testing.expect(t, cell.serialize_columnar(pg.data[off:], rowids, vals, cols), "serialize columnar")
+		testing.expect(
+			t,
+			cell.serialize_columnar(pg.data[off:], rowids, vals, cols),
+			"serialize columnar",
+		)
 		for v in vals { delete(v, context.temp_allocator) }
 
 		hdr := btree.get_leaf_header(pg.data, 1)
@@ -1411,7 +1426,11 @@ test_columnar_conversion_then_split :: proc(t: ^testing.T) {
 		ierr := btree.tree_insert(&ctx.tree, 301, vs)
 		testing.expect(t, ierr == .Cell_Deserialize_Failed, "overflowing conversion fails loudly")
 	}
-	testing.expect(t, verify_dense_rows(t, &ctx.tree, N_FIRST), "all 300 rows intact after failed conversion")
+	testing.expect(
+		t,
+		verify_dense_rows(t, &ctx.tree, N_FIRST),
+		"all 300 rows intact after failed conversion",
+	)
 
 	// Phase B: a small columnar page converts in place, then growth splits.
 	teardown_tree(&ctx)
@@ -1441,7 +1460,11 @@ test_columnar_conversion_then_split :: proc(t: ^testing.T) {
 			vals[i] = vs
 		}
 		cols := []types.Column{{name = "val", type = .INTEGER}}
-		testing.expect(t, cell.serialize_columnar(pg2.data[off2:], rowids, vals, cols), "serialize columnar")
+		testing.expect(
+			t,
+			cell.serialize_columnar(pg2.data[off2:], rowids, vals, cols),
+			"serialize columnar",
+		)
 		for v in vals { delete(v, context.temp_allocator) }
 		hdr := btree.get_leaf_header(pg2.data, 1)
 		hdr.page_type = .LEAF_TABLE_COLUMNAR
@@ -1461,7 +1484,11 @@ test_columnar_conversion_then_split :: proc(t: ^testing.T) {
 	pages := make(map[u32]bool, context.temp_allocator)
 	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
 	testing.expect(t, len(pages) > 1, "conversion + growth split the tree")
-	testing.expect(t, verify_dense_rows(t, &ctx.tree, M_TOTAL), "all rows exact after conversion + splits")
+	testing.expect(
+		t,
+		verify_dense_rows(t, &ctx.tree, M_TOTAL),
+		"all rows exact after conversion + splits",
+	)
 }
 
 @(test)
@@ -1473,12 +1500,16 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 
 	for i in 1 ..= 3 {
 		val := []types.Value{types.value_int(i64(i))}
-		btree.tree_insert(&ctx.tree, types.Row_ID(i), val)
+		testing.expect(
+			t,
+			btree.tree_insert(&ctx.tree, types.Row_ID(i), val) == .None,
+			"seed insert succeeds",
+		)
 	}
 
 	// Convert root page to columnar
 	orig_rows := make([dynamic]struct {
-			rid:  types.Row_ID,
+			rid : types.Row_ID,
 			vals: []types.Value,
 		}, context.temp_allocator)
 	{
@@ -1487,7 +1518,7 @@ test_columnar_update_conversion :: proc(t: ^testing.T) {
 		for c.is_valid {
 			cell_val, _ := btree.cursor_get_cell(&c, context.temp_allocator)
 			append(&orig_rows, struct {
-				rid:  types.Row_ID,
+				rid : types.Row_ID,
 				vals: []types.Value,
 			}{cell_val.rowid, cell_val.values})
 			cell_val.values = nil
@@ -1923,7 +1954,11 @@ test_integration_having_mixed :: proc(t: ^testing.T) {
 	// Parenthesized group-column HAVING.
 	q2 := db.query(d, "SELECT g FROM s GROUP BY g HAVING (g = 1 OR g = 2) AND COUNT(*) <= 2;")
 	testing.expect(t, q2.ok, "parenthesized HAVING should succeed")
-	testing.expect(t, len(q2.rows) == 2, "HAVING (g=1 OR g=2) AND COUNT(*)<=2 keeps groups 1 and 2")
+	testing.expect(
+		t,
+		len(q2.rows) == 2,
+		"HAVING (g=1 OR g=2) AND COUNT(*)<=2 keeps groups 1 and 2",
+	)
 
 	// GROUP BY applies even with no select-list aggregates.
 	q3 := db.query(d, "SELECT g FROM s GROUP BY g;")
@@ -1959,7 +1994,10 @@ test_integration_join_on_mixed :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t2 VALUES (2, 200);")
 
 	// Mixed logic in a JOIN ON clause.
-	q := db.query(d, "SELECT t1.x FROM t1 INNER JOIN t2 ON t1.x = t2.x AND (t1.y > 15 OR t2.z < 150) ORDER BY t1.x;")
+	q := db.query(
+		d,
+		"SELECT t1.x FROM t1 INNER JOIN t2 ON t1.x = t2.x AND (t1.y > 15 OR t2.z < 150) ORDER BY t1.x;",
+	)
 	testing.expect(t, q.ok, "mixed JOIN ON should succeed")
 	testing.expect(t, len(q.rows) == 2, "ON x=y AND (t1.y>15 OR t2.z<150) matches x=1 and x=2")
 	if len(q.rows) == 2 {
@@ -2211,7 +2249,9 @@ test_integration_delete_multipage :: proc(t: ^testing.T) {
 		if id > 1 { strings.write_string(&ids, ",") }
 		fmt.sbprintf(&ids, "%d", id)
 	}
-	ok := db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) == .None
+	ok :=
+		db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) ==
+		.None
 	testing.expect(t, ok, "multi-page delete")
 
 	r := db.query(d, "SELECT COUNT(*) AS n FROM t;")
@@ -2258,7 +2298,12 @@ test_integration_vacuum :: proc(t: ^testing.T) {
 		if id > 1 { strings.write_string(&ids, ",") }
 		fmt.sbprintf(&ids, "%d", id)
 	}
-	testing.expect(t, db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) == .None, "bulk delete")
+	testing.expect(
+		t,
+		db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) ==
+		.None,
+		"bulk delete",
+	)
 
 	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
 
@@ -2297,7 +2342,9 @@ test_integration_join_pushdown :: proc(t: ^testing.T) {
 	db.execute(d, "CREATE TABLE a (id INT PRIMARY KEY, grp INT, name TEXT);")
 	db.execute(d, "CREATE TABLE b (id INT PRIMARY KEY, score INT);")
 	for i in 1 ..= 300 {
-		ok := db.execute(d, fmt.tprintf("INSERT INTO a VALUES (%d, %d, 'n%d');", i, i % 10, i)) == .None
+		ok :=
+			db.execute(d, fmt.tprintf("INSERT INTO a VALUES (%d, %d, 'n%d');", i, i % 10, i)) ==
+			.None
 		testing.expect(t, ok, "insert a")
 		ok2 := db.execute(d, fmt.tprintf("INSERT INTO b VALUES (%d, %d);", i, i * 3)) == .None
 		testing.expect(t, ok2, "insert b")
@@ -2309,7 +2356,10 @@ test_integration_join_pushdown :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.rows[0][0].(i64), i64(30))
 
 	// Both sides pushed: grp on a, score on b.
-	r2 := db.query(d, "SELECT COUNT(*) AS n FROM a INNER JOIN b ON a.id = b.id WHERE grp = 5 AND score > 600;")
+	r2 := db.query(
+		d,
+		"SELECT COUNT(*) AS n FROM a INNER JOIN b ON a.id = b.id WHERE grp = 5 AND score > 600;",
+	)
 	testing.expect(t, r2.ok, "pushdown both sides")
 	testing.expect_value(t, r2.rows[0][0].(i64), i64(10))
 
@@ -2325,7 +2375,7 @@ test_integration_join_pushdown :: proc(t: ^testing.T) {
 }
 
 @(test)
-	test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
+test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "delround")
 
@@ -2386,7 +2436,10 @@ test_integration_empty_aggregates :: proc(t: ^testing.T) {
 	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
 	db.execute(d, "INSERT INTO t VALUES (1, 10);")
 
-	r := db.query(d, "SELECT COUNT(*) AS c, SUM(v) AS s, AVG(v) AS a, MIN(v) AS mn, MAX(v) AS mx FROM t WHERE id = 99;")
+	r := db.query(
+		d,
+		"SELECT COUNT(*) AS c, SUM(v) AS s, AVG(v) AS a, MIN(v) AS mn, MAX(v) AS mx FROM t WHERE id = 99;",
+	)
 	testing.expect(t, r.ok, "empty aggregate query")
 	testing.expect_value(t, len(r.rows), 1)
 	if len(r.rows) == 1 {
@@ -2401,7 +2454,7 @@ test_integration_empty_aggregates :: proc(t: ^testing.T) {
 }
 
 @(test)
-	test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
+test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "delvac")
 
@@ -2425,7 +2478,12 @@ test_integration_empty_aggregates :: proc(t: ^testing.T) {
 		if id > 1 { strings.write_string(&ids, ",") }
 		fmt.sbprintf(&ids, "%d", id)
 	}
-	testing.expect(t, db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) == .None, "bulk delete")
+	testing.expect(
+		t,
+		db.execute(d, fmt.tprintf("DELETE FROM t WHERE id IN (%s);", strings.to_string(ids))) ==
+		.None,
+		"bulk delete",
+	)
 
 	testing.expect(t, admin.vacuum(d) == .None, "vacuum after delete")
 
@@ -2468,7 +2526,7 @@ test_columnar_cursor_large :: proc(t: ^testing.T) {
 		row[1] = types.value_real(f64(i) * 0.5)
 		rows[i] = row
 	}
-	cols := []types.Column {{name = "iv", type = .INTEGER}, {name = "rv", type = .REAL}}
+	cols := []types.Column{{name = "iv", type = .INTEGER}, {name = "rv", type = .REAL}}
 
 	// Mount the columnar data as the tree's single leaf (page 1).
 	pg, pg_err := pager.get_page(ctx.pager, 1)
@@ -2503,8 +2561,14 @@ test_columnar_cursor_large :: proc(t: ^testing.T) {
 			all_ok = false
 		} else if int(cc.rowid) >= 1 && int(cc.rowid) <= 300 {
 			idx := int(cc.rowid) - 1
-			if !types.value_compare(cc.values[0], types.value_int(i64(idx * 10))) { all_ok = false }
-			if !types.value_compare(cc.values[1], types.value_real(f64(idx) * 0.5)) { all_ok = false }
+			if !types.value_compare(
+				cc.values[0],
+				types.value_int(i64(idx * 10)),
+			) { all_ok = false }
+			if !types.value_compare(
+				cc.values[1],
+				types.value_real(f64(idx) * 0.5),
+			) { all_ok = false }
 		} else {
 			all_ok = false
 		}
@@ -2582,7 +2646,11 @@ test_rollback_truncates_file :: proc(t: ^testing.T) {
 	clean_db_files(filename)
 
 	d := setup_db(t, "rollback_shrink")
-	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None,
+		"create",
+	)
 	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
 	for i in 1 ..= 700 {
 		if db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 3)) != .None {
@@ -2607,11 +2675,7 @@ test_rollback_truncates_file :: proc(t: ^testing.T) {
 	testing.expect(t, pager.page_count(d.pager) > steady_pages, "txn must grow the file")
 
 	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback")
-	testing.expect(
-		t,
-		pager.page_count(d.pager) == steady_pages,
-		"rollback must rewind the file",
-	)
+	testing.expect(t, pager.page_count(d.pager) == steady_pages, "rollback must rewind the file")
 	testing.expect(t, d.pager.first_free_page == 0, "freelist resets on rewind")
 
 	q := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
@@ -2634,7 +2698,11 @@ test_rollback_truncates_file :: proc(t: ^testing.T) {
 		pager.page_count(d2.pager) == steady_pages,
 		"reopened file keeps the rewound footprint",
 	)
-	testing.expect(t, db.execute(d2, "INSERT INTO t VALUES (701, 2103);") == .None, "insert after reopen")
+	testing.expect(
+		t,
+		db.execute(d2, "INSERT INTO t VALUES (701, 2103);") == .None,
+		"insert after reopen",
+	)
 	q2 := db.query(d2, "SELECT COUNT(*) FROM t;")
 	testing.expect(t, q2.ok && len(q2.rows) == 1, "post-reopen query")
 	testing.expect_value(t, q2.rows[0][0].(i64), i64(701))
@@ -2694,7 +2762,11 @@ test_expire_in_txn_preserves_uncommitted :: proc(t: ^testing.T) {
 	d := setup_db(t, "expire_txn")
 	defer teardown_db(d, "expire_txn")
 
-	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None,
+		"create",
+	)
 	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
 	for i in 1 ..= 700 {
 		testing.expect(
@@ -2729,7 +2801,11 @@ test_wide_text_volume_exact :: proc(t: ^testing.T) {
 	d := setup_db(t, "wide_vol")
 	defer teardown_db(d, "wide_vol")
 
-	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, name TEXT, score REAL);") == .None, "create")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, name TEXT, score REAL);") == .None,
+		"create",
+	)
 	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
 	for i in 1 ..= 2000 {
 		testing.expect(
@@ -2742,7 +2818,8 @@ test_wide_text_volume_exact :: proc(t: ^testing.T) {
 					i,
 					i,
 				),
-			) == .None,
+			) ==
+			.None,
 			"insert",
 		)
 	}
@@ -2766,7 +2843,11 @@ test_gc_reclaims_cow_waste :: proc(t: ^testing.T) {
 	d := setup_db(t, "gc_reclaim")
 	defer teardown_db(d, "gc_reclaim")
 
-	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None,
+		"create",
+	)
 	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
 	for i in 1 ..= 700 {
 		testing.expect(
@@ -2806,7 +2887,7 @@ test_gc_reclaims_cow_waste :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit2")
 	after := pager.page_count(d.pager)
-	testing.expect(t, int(after)-int(before) < 700, "second batch must reuse freelist")
+	testing.expect(t, int(after) - int(before) < 700, "second batch must reuse freelist")
 
 	q3 := db.query(d, "SELECT COUNT(*), MIN(id), MAX(id) FROM t;")
 	testing.expect(t, q3.ok && len(q3.rows) == 1, "final query")
@@ -2824,7 +2905,11 @@ test_expire_zero_keep_clamps :: proc(t: ^testing.T) {
 	d := setup_db(t, "expire_zero")
 	defer teardown_db(d, "expire_zero")
 
-	testing.expect(t, db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None, "create")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None,
+		"create",
+	)
 	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
 	for i in 1 ..= 700 {
 		testing.expect(
@@ -2891,7 +2976,11 @@ test_db_rejects_old_snapshot_layout :: proc(t: ^testing.T) {
 	testing.expect(t, os.write_entire_file(filename, raw) == nil, "magic patch must write")
 
 	reopened, open_err := db.open(filename)
-	testing.expect(t, open_err == .Unsupported_Format, "old snapshot layout must be rejected cleanly")
+	testing.expect(
+		t,
+		open_err == .Unsupported_Format,
+		"old snapshot layout must be rejected cleanly",
+	)
 	testing.expect(t, reopened == nil, "rejected open must return nil db")
 	clean_db_files(filename)
 }
@@ -3383,7 +3472,11 @@ test_mutation_pk_seek_qualified :: proc(t: ^testing.T) {
 	context = ctx
 	other := db.query(d, "SELECT v FROM t WHERE other.id = 3;")
 	context = restore_logger(saved)
-	testing.expect(t, !other.ok || len(other.rows) == 0, "foreign qualifier must not match this pk")
+	testing.expect(
+		t,
+		!other.ok || len(other.rows) == 0,
+		"foreign qualifier must not match this pk",
+	)
 }
 
 // Differential: vector scan (MAGNI_VECTOR=1) must return byte-identical
@@ -3413,7 +3506,7 @@ test_vector_scan_differential :: proc(t: ^testing.T) {
 	strings.write_string(&sb, ";")
 	testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "bulk insert")
 
-	queries := []string{
+	queries := []string {
 		"SELECT * FROM t;",
 		"SELECT id FROM t;",
 		"SELECT name, v FROM t;",
@@ -3465,7 +3558,11 @@ test_vector_scan_differential :: proc(t: ^testing.T) {
 		os.set_env("MAGNI_VECTOR", "1")
 		vec := db.query(d, q)
 		os.set_env("MAGNI_VECTOR", "0")
-		testing.expect(t, vec_rows_equal(scalar, vec), fmt.tprintf("vec/scalar mismatch q%d: %s", i, q))
+		testing.expect(
+			t,
+			vec_rows_equal(scalar, vec),
+			fmt.tprintf("vec/scalar mismatch q%d: %s", i, q),
+		)
 	}
 	os.unset_env("MAGNI_VECTOR")
 }

@@ -242,8 +242,16 @@ test_schema_hash_collision :: proc(t: ^testing.T) {
 		types.value_int(0),
 	}
 
-	btree.tree_delete(&tree, target_hash)
-	btree.tree_insert(&tree, target_hash, collision_vals)
+	testing.expect(
+		t,
+		btree.tree_delete(&tree, target_hash) == .None,
+		"delete colliding key succeeds",
+	)
+	testing.expect(
+		t,
+		btree.tree_insert(&tree, target_hash, collision_vals) == .None,
+		"collision insert succeeds",
+	)
 	// The original "mytable" row was overwritten by the collision row (same hash key).
 	// get_table("mytable") should fail because the row at that hash now has name "intruder".
 	_, found_mytable := schema.get_table(&tree, "mytable")

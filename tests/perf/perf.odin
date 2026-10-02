@@ -72,16 +72,19 @@ main :: proc() {
 	// COUNT(*) fast path (tree_count_rows, O(depth)): must stay orders of
 	// magnitude below the full scan. If this approaches scan time, the fast
 	// path stopped firing and COUNT(*) falls back to scan + aggregate.
-	timed_query(d, "count", "COUNT(*) over 100000 rows",
-		"SELECT COUNT(*) FROM t;", 1)
+	timed_query(d, "count", "COUNT(*) over 100000 rows", "SELECT COUNT(*) FROM t;", 1)
 
 	// DISTINCT (post-projection dedup over 100000 distinct values).
-	timed_query(d, "distinct", "DISTINCT over 100000 rows",
-		"SELECT DISTINCT v FROM t;", 100000)
+	timed_query(d, "distinct", "DISTINCT over 100000 rows", "SELECT DISTINCT v FROM t;", 100000)
 
 	// ORDER BY + LIMIT (sort full rows, slice after).
-	timed_query(d, "order", "ORDER BY v DESC LIMIT 100",
-		"SELECT * FROM t ORDER BY v DESC LIMIT 100;", 100)
+	timed_query(
+		d,
+		"order",
+		"ORDER BY v DESC LIMIT 100",
+		"SELECT * FROM t ORDER BY v DESC LIMIT 100;",
+		100,
+	)
 
 	// GROUP BY aggregation (build_groups + per-group finalize) over a
 	// low-cardinality key: 10000 rows in 100 groups.
@@ -91,8 +94,13 @@ main :: proc() {
 		db.execute(d, fmt.tprintf("INSERT INTO g VALUES (%d, %d);", i % 100, i))
 	}
 	db.execute(d, "COMMIT;")
-	timed_query(d, "group", "GROUP BY with 100 groups",
-		"SELECT k, COUNT(*), SUM(v) FROM g GROUP BY k;", 100)
+	timed_query(
+		d,
+		"group",
+		"GROUP BY with 100 groups",
+		"SELECT k, COUNT(*), SUM(v) FROM g GROUP BY k;",
+		100,
+	)
 
 	// IN-list membership (linear scan today: O(rows × list size)).
 	// 500 literals over the 100000-row table.
@@ -102,8 +110,13 @@ main :: proc() {
 		if i > 1 { strings.write_string(&in_list, ",") }
 		strings.write_int(&in_list, i)
 	}
-	timed_query(d, "inlist", "IN-list with 500 literals",
-		fmt.tprintf("SELECT id FROM t WHERE id IN (%s);", strings.to_string(in_list)), 500)
+	timed_query(
+		d,
+		"inlist",
+		"IN-list with 500 literals",
+		fmt.tprintf("SELECT id FROM t WHERE id IN (%s);", strings.to_string(in_list)),
+		500,
+	)
 
 	// CHECK enforcement (string split + column resolve + int parse per row).
 	db.execute(d, "CREATE TABLE chk (price INT CHECK (price > 0));")
@@ -115,8 +128,7 @@ main :: proc() {
 	db.execute(d, "COMMIT;")
 	el = time.duration_milliseconds(time.since(start))
 	fmt.printf("perf_check:  20000-row CHECK-enforced insert in %.1f ms\n", el)
-	timed_query(d, "chkcnt", "COUNT of CHECK table",
-		"SELECT COUNT(*) FROM chk;", 1)
+	timed_query(d, "chkcnt", "COUNT of CHECK table", "SELECT COUNT(*) FROM chk;", 1)
 
 	// Point lookups (tree_find + get_page/find_slot per level). Per-statement
 	// overhead (parse + temp-arena growth) dominates here, so treat this as
@@ -138,8 +150,13 @@ main :: proc() {
 	}
 
 	db.execute(d, "COMMIT;")
-	timed_query(d, "join", "1000x1000 join",
-		"SELECT t.id, b.w FROM t JOIN b ON t.id = b.id;", 1000)
+	timed_query(
+		d,
+		"join",
+		"1000x1000 join",
+		"SELECT t.id, b.w FROM t JOIN b ON t.id = b.id;",
+		1000,
+	)
 
 	pager.pager_stats_report(d.pager)
 }

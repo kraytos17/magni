@@ -2,7 +2,7 @@ package parser
 
 import "src:types"
 
-@(private="file")
+@(private = "file")
 parse_insert_column_list :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -12,7 +12,7 @@ parse_insert_column_list :: proc(
 ) {
 	columns = make([dynamic]string, allocator)
 	defer if !ok {
-		for c in columns do delete(c, allocator)
+		for c in columns { delete(c, allocator) }
 		delete(columns)
 	}
 	if peek(p).type == .LPAREN && p.current + 1 < len(p.tokens) {
@@ -33,7 +33,7 @@ parse_insert_column_list :: proc(
 
 // parse_insert_value_row parses one parenthesized VALUES row (the opening
 // paren is already consumed). Partial values are freed on failure.
-@(private="file")
+@(private = "file")
 parse_insert_value_row :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -47,10 +47,7 @@ parse_insert_value_row :: proc(
 		delete(acc)
 	}
 	for {
-		val, val_ok := parse_value(
-			p,
-			allocator,
-		); if !val_ok {
+		val, val_ok := parse_value(p, allocator); if !val_ok {
 			return nil, false
 		}
 
@@ -73,13 +70,13 @@ parse_insert :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !expect_match(p, .INTO, "Expected INTO after INSERT") do return nil, false
+	if !expect_match(p, .INTO, "Expected INTO after INSERT") { return nil, false }
 
 	table_name := parse_identifier(p, allocator) or_return
 	columns, cok := parse_insert_column_list(p, allocator)
 	if !cok { return nil, false }
 	defer if !ok {
-		for c in columns do delete(c, allocator)
+		for c in columns { delete(c, allocator) }
 		delete(columns)
 	}
 	if !expect_match(p, .VALUES, "Expected VALUES after INSERT") ||
@@ -162,9 +159,9 @@ parse_delete :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !expect_match(p, .FROM, "Expected FROM after DELETE") do return nil, false
+	if !expect_match(p, .FROM, "Expected FROM after DELETE") { return nil, false }
 	table_name := parse_identifier(p, allocator) or_return
-	defer if !ok do delete(table_name, allocator)
+	defer if !ok { delete(table_name, allocator) }
 
 	where_cl: Maybe(Where_Clause)
 	if match(p, .WHERE) { where_cl = parse_where_clause(p, allocator) or_return }

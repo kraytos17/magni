@@ -7,19 +7,19 @@ import "core:os"
 import "core:strings"
 import "src:db"
 
-APP_VERSION :: "1.0"
+APP_VERSION     :: "1.0"
 DEFAULT_DB_PATH :: "test.db"
 
 CLI :: struct {
-	database:      string `args:"pos=0,usage=Database file path (default: test.db)"`,
-	file:          string `args:"name=file,usage=Execute SQL from file and exit"`,
-	eval:          string `args:"name=eval,usage=Execute a single SQL statement and exit"`,
-	stop_on_error: bool   `args:"name=stop-on-error,usage=Exit on first SQL error in script mode"`,
-	version:       bool   `args:"name=version,usage=Print version and exit"`,
-	log_level:     string `args:"name=log-level,usage=Log level: debug, info, warn, error (default: info)"`,
-	verbose:       bool   `args:"name=verbose,usage=Enable debug-level logging"`,
-	v:             bool   `args:"name=v,usage=Enable debug-level logging (alias for --verbose)"`,
-	snapshot_batch: int    `args:"name=snapshot-batch,usage=Create a snapshot every N write statements (default: 1)"`,
+	database          : string `args:"pos=0,usage=Database file path (default: test.db)"`,
+	file              : string `args:"name=file,usage=Execute SQL from file and exit"`,
+	eval              : string `args:"name=eval,usage=Execute a single SQL statement and exit"`,
+	stop_on_error     : bool `args:"name=stop-on-error,usage=Exit on first SQL error in script mode"`,
+	version           : bool `args:"name=version,usage=Print version and exit"`,
+	log_level         : string `args:"name=log-level,usage=Log level: debug, info, warn, error (default: info)"`,
+	verbose           : bool `args:"name=verbose,usage=Enable debug-level logging"`,
+	v                 : bool `args:"name=v,usage=Enable debug-level logging (alias for --verbose)"`,
+	snapshot_batch    : int `args:"name=snapshot-batch,usage=Create a snapshot every N write statements (default: 1)"`,
 	wal_size_threshold: int `args:"name=wal-size-threshold,usage=Auto-checkpoint the WAL after N frames (0 = disabled)"`,
 }
 
@@ -78,17 +78,21 @@ main :: proc() {
 	if !ok { os.exit(1) }
 }
 
-@(private="file")
+@(private = "file")
 resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Level {
 	if verbose || v {
 		return .Debug
 	}
 	if len(level_str) > 0 {
 		switch strings.to_lower(level_str) {
-		case "debug": return .Debug
-		case "info":  return .Info
-		case "warn", "warning": return .Warning
-		case "error": return .Error
+		case "debug":
+			return .Debug
+		case "info":
+			return .Info
+		case "warn", "warning":
+			return .Warning
+		case "error":
+			return .Error
 		}
 	}
 
@@ -96,10 +100,14 @@ resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Leve
 	env := os.get_env(env_buf[:], "MAGNI_LOG_LEVEL")
 	if len(env) > 0 {
 		switch env {
-		case "DEBUG": return .Debug
-		case "INFO":  return .Info
-		case "WARN", "WARNING": return .Warning
-		case "ERROR": return .Error
+		case "DEBUG":
+			return .Debug
+		case "INFO":
+			return .Info
+		case "WARN", "WARNING":
+			return .Warning
+		case "ERROR":
+			return .Error
 		}
 	}
 	return .Info

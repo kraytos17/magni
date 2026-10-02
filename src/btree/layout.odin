@@ -2,8 +2,8 @@ package btree
 
 import "core:mem"
 import "src:cell"
-import "src:util/varint"
 import "src:types"
+import "src:util/varint"
 
 PAGE_SIZE :: types.PAGE_SIZE
 
@@ -22,16 +22,16 @@ Cell_Entry :: struct #packed {
 #assert(size_of(Cell_Entry) == 10)
 
 Page_Header :: struct #packed #simple {
-	page_type:           Page_Type, // Byte 0
-	first_freeblock:     u16le, // Bytes 1-2
-	cell_count:          u16le, // Bytes 3-4
+	page_type          : Page_Type, // Byte 0
+	first_freeblock    : u16le, // Bytes 1-2
+	cell_count         : u16le, // Bytes 3-4
 	cell_content_offset: u16le, // Bytes 5-6
-	fragmented_bytes:    u8, // Byte 7
+	fragmented_bytes   : u8, // Byte 7
 }
 #assert(size_of(Page_Header) == 8)
 
 Interior_Header :: struct #packed #simple {
-	using common:  Page_Header,
+	using common : Page_Header,
 	rightmost_ptr: u32be,
 }
 #assert(size_of(Interior_Header) == 12)
@@ -43,36 +43,40 @@ Leaf_Header :: struct #packed #simple {
 
 // Page 1 has a 100-byte database header prefix (types.DATABASE_HEADER_SIZE);
 // all other pages start at offset 0.
-get_page_header_offset :: proc(page_num: u32) -> int {
+// force_inline + contextless: per-cell hot path, no context use.
+get_page_header_offset :: #force_inline proc "contextless" (page_num: u32) -> int {
 	return int(page_num == 1 ? types.DATABASE_HEADER_SIZE : 0)
 }
 
 @(private)
-page_header_size :: proc(page_type: Page_Type) -> int {
+page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> int {
 	return int(page_type == .INTERIOR_TABLE ? size_of(Interior_Header) : size_of(Leaf_Header))
 }
 
-get_header :: proc(data: []u8, page_id: u32) -> ^Page_Header {
+get_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Page_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Page_Header) { return nil }
 	return (^Page_Header)(raw_data(data[off:]))
 }
 
 @(private)
-get_interior_header :: proc(data: []u8, page_id: u32) -> ^Interior_Header {
+get_interior_header :: #force_inline proc "contextless" (
+	data: []u8,
+	page_id: u32,
+) -> ^Interior_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Interior_Header) { return nil }
 	return (^Interior_Header)(raw_data(data[off:]))
 }
 
-get_leaf_header :: proc(data: []u8, page_id: u32) -> ^Leaf_Header {
+get_leaf_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Leaf_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Leaf_Header) { return nil }
 	return (^Leaf_Header)(raw_data(data[off:]))
 }
 
 @(private)
-is_columnar :: proc(data: []u8, page_id: u32) -> bool {
+is_columnar :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> bool {
 	h := get_header(data, page_id)
 	return h != nil && h.page_type == .LEAF_TABLE_COLUMNAR
 }
@@ -113,7 +117,7 @@ Columnar_Decode :: struct {
 // decode_columnar_page reads every rowid and column value out of a columnar
 // page without modifying it. Single O(n) rowid walk (not per-row seeks).
 // Returns ok=false on truncated or garbage data; the page is untouched.
-@(private)
+@(private, cold)
 decode_columnar_page :: proc(
 	data: []u8,
 	page_id: u32,
@@ -161,7 +165,7 @@ decode_columnar_page :: proc(
 // Atomic: the expansion is measured first and .Page_Full returns with the
 // page untouched when it cannot fit (a half-converted page would silently
 // drop the tail rows, so callers must fail the op instead).
-@(private)
+@(private, cold)
 reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -> Error {
 	total := size_of(Leaf_Header) + len(decoded.rowids) * CELL_ENTRY_STRIDE
 	for ri in 0 ..< len(decoded.rowids) {
@@ -178,13 +182,29 @@ reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -
 
 		info := cell.compute_info(decoded.rowids[ri], decoded.values[ri])
 		dest_off := int(header.cell_content_offset) - info.total_size
-		if dest_off < off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * CELL_ENTRY_STRIDE {
+		if dest_off <
+		   off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * CELL_ENTRY_STRIDE {
 			return .Page_Full
 		}
 
-		cell.serialize(data[dest_off:dest_off + info.total_size], decoded.rowids[ri], decoded.values[ri], info)
+		// Loud on short write: the space was measured above, so failure
+		// here is a bug that would otherwise leave a half-written cell.
+		bytes_written, ser_ok := cell.serialize(
+			data[dest_off:dest_off + info.total_size],
+			decoded.rowids[ri],
+			decoded.values[ri],
+			info,
+		)
+		if !ser_ok || bytes_written != info.total_size { return .Serialization_Failed }
+
 		header.cell_content_offset = u16le(dest_off)
-		entry := (^Cell_Entry)(raw_data(data[off + int(size_of(Leaf_Header)) + int(header.cell_count) * CELL_ENTRY_STRIDE:]))
+		entry := (^Cell_Entry)(
+			raw_data(
+				data[off +
+				int(size_of(Leaf_Header)) +
+				int(header.cell_count) * CELL_ENTRY_STRIDE:],
+			),
+		)
 		entry^ = Cell_Entry {
 			ptr = Cell_Pointer(u16(dest_off)),
 			key = decoded.rowids[ri],
@@ -194,6 +214,7 @@ reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -
 	return .None
 }
 
+@(cold)
 convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 	off := get_page_header_offset(page_id)
 	hdr := (^Page_Header)(raw_data(data[off:]))
@@ -204,7 +225,7 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 	_ = reinsert_row_major(data, page_id, decoded)
 }
 
-@(private)
+@(private, require_results)
 ensure_row_major :: proc(data: []u8, page_id: u32) -> bool {
 	if !is_columnar(data, page_id) { return true }
 
@@ -217,7 +238,7 @@ ensure_row_major :: proc(data: []u8, page_id: u32) -> bool {
 	return !is_columnar(data, page_id)
 }
 
-@(private)
+@(private, require_results)
 detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
 	if !is_columnar(data, page_id) { return 0, false }
 	hdr := get_header(data, page_id)
@@ -233,29 +254,19 @@ detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
 	return n, true
 }
 
-@(private)
-get_raw_entries :: proc(data: []u8, page_id: u32) -> []Cell_Entry {
-	header := get_header(data, page_id)
-	if header == nil { return nil }
-
-	off := get_page_header_offset(page_id)
-	hdr_sz := page_header_size(header.page_type)
-	start := off + hdr_sz
-	if start >= len(data) { return nil }
-
-	max_entries := (len(data) - start) / size_of(Cell_Entry)
-	entry_start := raw_data(data[start:])
-	return ([^]Cell_Entry)(entry_start)[:max_entries]
-}
-
 CELL_ENTRY_STRIDE :: size_of(Cell_Entry) // 10
 
-get_cell_count :: proc(data: []u8, page_id: u32) -> int {
+get_cell_count :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> int {
 	hdr := get_header(data, page_id)
 	return hdr != nil ? int(hdr.cell_count) : 0
 }
 
-get_cell_ptr :: proc(data: []u8, page_id: u32, i: int, stride: int) -> u16 {
+get_cell_ptr :: #force_inline proc "contextless" (
+	data: []u8,
+	page_id: u32,
+	i: int,
+	stride: int,
+) -> u16 {
 	off := get_page_header_offset(page_id)
 	hdr := get_header(data, page_id)
 	hdr_sz := page_header_size(hdr.page_type)
@@ -267,7 +278,7 @@ get_cell_key :: proc(data: []u8, page_id: u32, i: int, layout: ^Cell_Layout) -> 
 	return layout.get_key(data, page_id, i)
 }
 
-insert_cell_at :: proc(
+insert_cell_at :: proc "contextless" (
 	data: []u8,
 	page_id: u32,
 	i: int,
@@ -296,7 +307,7 @@ insert_cell_at :: proc(
 	}
 }
 
-delete_cell_at :: proc(data: []u8, page_id: u32, i: int, stride: int) {
+delete_cell_at :: proc "contextless" (data: []u8, page_id: u32, i: int, stride: int) {
 	off := get_page_header_offset(page_id)
 	hdr := get_header(data, page_id)
 	hdr_sz := page_header_size(hdr.page_type)
@@ -347,14 +358,14 @@ move_cells_to :: proc(
 }
 
 @(private)
-get_right_ptr :: proc(data: []u8, page_id: u32) -> u32 {
+get_right_ptr :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> u32 {
 	h := get_interior_header(data, page_id)
 	if h == nil { return 0 }
 	return u32(h.rightmost_ptr)
 }
 
 @(private)
-set_right_ptr :: proc(data: []u8, page_id: u32, ptr: u32) {
+set_right_ptr :: #force_inline proc "contextless" (data: []u8, page_id: u32, ptr: u32) {
 	h := get_interior_header(data, page_id)
 	if h != nil {
 		h.rightmost_ptr = u32be(ptr)

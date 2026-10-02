@@ -1,10 +1,10 @@
 package db
 
-import "src:executor"
 import "core:log"
 import "core:strings"
 import "core:sync"
 import "src:btree"
+import "src:executor"
 import "src:pager"
 import "src:schema"
 import "src:snapshot"
@@ -13,7 +13,7 @@ import "src:types"
 DEFAULT_KEEP :: 20
 
 Open_Config :: struct {
-	wal_size_threshold:       int, // If non-zero, WAL pages are checkpointed when WAL reaches this many pages
+	wal_size_threshold      : int, // If non-zero, WAL pages are checkpointed when WAL reaches this many pages
 	snapshot_batch_threshold: int, // 0 = every mutation, N = batch N mutations
 }
 
@@ -85,36 +85,36 @@ Txn_State :: enum u8 {
 }
 
 Database :: struct {
-	pager:                    ^pager.Pager,
-	path:                     string,
-	is_new:                   bool,
-	schema_root_page:         u32,
-	latest_snapshot:          u32,
-	txn_snapshot_id:          u64,
-	txn_state:                Txn_State,
-	txn_start_file_len:       u64,
-	snapshot_index:           map[u64]u32,
-	refs_page:                u32,
-	snapshot_batch_count:     int,
+	pager                   : ^pager.Pager,
+	path                    : string,
+	is_new                  : bool,
+	schema_root_page        : u32,
+	latest_snapshot         : u32,
+	txn_snapshot_id         : u64,
+	txn_state               : Txn_State,
+	txn_start_file_len      : u64,
+	snapshot_index          : map[u64]u32,
+	refs_page               : u32,
+	snapshot_batch_count    : int,
 	snapshot_batch_threshold: int,
-	wal_size_threshold:       int, // 0 = disabled; auto-checkpoint when the WAL reaches this many frames
-	table_cache:              schema.Table_Cache, // in-memory catalog cache; invalidated on schema-root change
-	txn_pending:              executor.Pending_Roots, // staged data roots; flushed at COMMIT (explicit txn only)
-	mu:                       sync.RW_Mutex, // guards database state; see docs/concurrency.md (acquire before pager.mutex)
+	wal_size_threshold      : int, // 0 = disabled; auto-checkpoint when the WAL reaches this many frames
+	table_cache             : schema.Table_Cache, // in-memory catalog cache; invalidated on schema-root change
+	txn_pending             : executor.Pending_Roots, // staged data roots; flushed at COMMIT (explicit txn only)
+	mu                      : sync.RW_Mutex, // guards database state; see docs/concurrency.md (acquire before pager.mutex)
 }
 
 Header :: struct #packed {
-	magic:                [13]u8,
-	page_size:            u32le,
-	page_count:           u32le,
-	schema_version:       u32le,
-	page_format_version:  u32le,
-	schema_root_page:     u32le,
+	magic               : [13]u8,
+	page_size           : u32le,
+	page_count          : u32le,
+	schema_version      : u32le,
+	page_format_version : u32le,
+	schema_root_page    : u32le,
 	latest_snapshot_page: u32le,
-	snapshot_id_counter:  u64le,
-	first_free_page:      u32le,
-	refs_page:            u32le,
-	reserved:             [47]u8,
+	snapshot_id_counter : u64le,
+	first_free_page     : u32le,
+	refs_page           : u32le,
+	reserved            : [47]u8,
 }
 #assert(size_of(Header) == types.DATABASE_HEADER_SIZE)
 
@@ -137,7 +137,8 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 	}
 
 	db.pager = p
-	if cfg.snapshot_batch_threshold > 0 { db.snapshot_batch_threshold = cfg.snapshot_batch_threshold }
+	if cfg.snapshot_batch_threshold >
+	   0 { db.snapshot_batch_threshold = cfg.snapshot_batch_threshold }
 	if cfg.wal_size_threshold > 0 { db.wal_size_threshold = cfg.wal_size_threshold }
 
 	db.is_new = (db.pager.file_len == 0)
@@ -164,7 +165,7 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 // load_existing validates the header of an on-disk database and restores all
 // persisted state: header fields, page-format gate, and the snapshot index.
 // On any failure the caller closes db and propagates the error.
-@(private="file")
+@(private = "file")
 load_existing :: proc(db: ^Database) -> DB_Error {
 	if v_err := verify_header(db); v_err != .None { return v_err }
 	if h_err := load_header_fields(db); h_err != .None { return h_err }
@@ -173,7 +174,7 @@ load_existing :: proc(db: ^Database) -> DB_Error {
 
 // load_header_fields reads page 1 into db's runtime fields and gates the page
 // format version. Self-heals a freelist head pointing past EOF.
-@(private="file")
+@(private = "file")
 load_header_fields :: proc(db: ^Database) -> DB_Error {
 	page1, h_err := pager.get_page(db.pager, 1)
 	if h_err != .None { return .IO_Error }
@@ -212,7 +213,7 @@ load_header_fields :: proc(db: ^Database) -> DB_Error {
 // indexing each packed header by id. Returns .Unsupported_Format on an old
 // single-header page (hard break, no migration); stops the walk on other
 // mid-chain corruption.
-@(private="file")
+@(private = "file")
 rebuild_snapshot_index :: proc(db: ^Database) -> DB_Error {
 	page := db.latest_snapshot
 	for page != 0 {
@@ -283,7 +284,7 @@ close :: proc(db: ^Database) {
 	free(db)
 }
 
-@(private="file")
+@(private = "file")
 initialize :: proc(db: ^Database) -> DB_Error {
 	page1, err := pager.allocate_page(db.pager)
 	if err != .None {

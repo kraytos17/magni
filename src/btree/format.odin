@@ -5,9 +5,9 @@ import "src:types"
 MAX_FORMAT_VERSION :: 64
 
 Cell_Layout :: struct {
-	version:   u32,
-	stride:    int,
-	get_key:   proc(data: []u8, page_id: u32, i: int) -> types.Row_ID,
+	version  : u32,
+	stride   : int,
+	get_key  : proc(data: []u8, page_id: u32, i: int) -> types.Row_ID,
 	set_entry: proc(data: []u8, page_id: u32, i: int, ptr: u16, key: types.Row_ID),
 }
 

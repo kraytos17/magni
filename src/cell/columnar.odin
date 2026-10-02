@@ -4,15 +4,15 @@ import "core:encoding/endian"
 import "src:types"
 import "src:util/varint"
 
-ENCODING_RAW :: 0
+ENCODING_RAW   :: 0
 ENCODING_DELTA :: 1
 
 Col_Header :: struct #packed {
-	col_index:   u8,
-	encoding:    u8,
-	row_count:   u16,
+	col_index  : u8,
+	encoding   : u8,
+	row_count  : u16,
 	byte_offset: u32,
-	byte_size:   u32,
+	byte_size  : u32,
 }
 
 COLUMNAR_DIR_OFFSET :: 8

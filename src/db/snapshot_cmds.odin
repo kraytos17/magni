@@ -19,7 +19,7 @@ Reclaim_Decision :: enum u8 {
 	Blocked_Active_Txn,
 }
 
-@(private="file")
+@(private = "file")
 reclaim_decision :: proc(db: ^Database) -> Reclaim_Decision {
 	if db.latest_snapshot == 0 { return .Empty_No_Snapshots }
 	if db.txn_state == .Active { return .Blocked_Active_Txn }
@@ -214,7 +214,9 @@ expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
 	case .Empty_No_Snapshots:
 		return .None
 	case .Blocked_Active_Txn:
-		log.warnf("expire skipped: transaction active; uncommitted data is not in any snapshot live set")
+		log.warnf(
+			"expire skipped: transaction active; uncommitted data is not in any snapshot live set",
+		)
 		return .None
 	case .Proceed:
 	}

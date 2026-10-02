@@ -13,10 +13,10 @@ import "core:hash"
 // (the pager cache capacity) this is m/n = 16, k = 11 -> ~0.05% false-positive
 // rate. COUNTERS must be a power of two so probe positions mask, not modulo.
 COUNTER_BITS :: 4
-COUNTERS :: 4096
-MAX_COUNT :: (1 << COUNTER_BITS) - 1
-HASHES :: 11
-BYTES :: COUNTERS * COUNTER_BITS / 8
+COUNTERS     :: 4096
+MAX_COUNT    :: (1 << COUNTER_BITS) - 1
+HASHES       :: 11
+BYTES        :: COUNTERS * COUNTER_BITS / 8
 
 #assert(COUNTERS & (COUNTERS - 1) == 0)
 #assert(BYTES * 8 == COUNTERS * COUNTER_BITS)
@@ -68,14 +68,14 @@ might_contain :: proc(f: ^Filter, key: u32) -> bool {
 // one 64-bit mix of the key. h2 is forced odd so that, with a power-of-two
 // COUNTERS, the k probe positions never degenerate to a short cycle (the
 // RocksDB fix).
-@(private="file")
+@(private = "file")
 probe_seeds :: proc(key: u32) -> (h1, h2: u32) {
 	bytes := transmute([4]u8)key
 	h := hash.fnv64a(bytes[:])
 	return u32(h), u32(h >> 32) | 1
 }
 
-@(private="file")
+@(private = "file")
 counter_get :: #force_inline proc(f: ^Filter, pos: u32) -> u8 {
 	idx := pos >> 1
 	b: u8
@@ -83,7 +83,7 @@ counter_get :: #force_inline proc(f: ^Filter, pos: u32) -> u8 {
 	return u8(b & 0x0F) if (pos & 1) == 0 else u8(b >> 4)
 }
 
-@(private="file")
+@(private = "file")
 counter_inc :: #force_inline proc(f: ^Filter, pos: u32) {
 	idx := pos >> 1
 	lo := (pos & 1) == 0
@@ -97,7 +97,7 @@ counter_inc :: #force_inline proc(f: ^Filter, pos: u32) {
 	}
 }
 
-@(private="file")
+@(private = "file")
 counter_dec :: #force_inline proc(f: ^Filter, pos: u32) {
 	idx := pos >> 1
 	lo := (pos & 1) == 0

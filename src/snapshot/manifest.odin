@@ -11,7 +11,7 @@ MANIFEST_MAGIC :: "MAGNIMNF"
 Manifest_Entry :: struct #packed {
 	name_hash: u64,
 	root_page: u32,
-	name_len:  u16,
+	name_len : u16,
 }
 
 Table_Change :: enum u8 {
@@ -22,9 +22,9 @@ Table_Change :: enum u8 {
 
 Snapshot_Diff_Entry :: struct {
 	table_name: string,
-	change:     Table_Change,
-	old_root:   u32,
-	new_root:   u32,
+	change    : Table_Change,
+	old_root  : u32,
+	new_root  : u32,
 }
 
 diff_entries_free :: proc(entries: []Snapshot_Diff_Entry, allocator := context.allocator) {
@@ -97,7 +97,7 @@ find_in_manifest :: proc(
 	return 0, false
 }
 
-@(private="file")
+@(private = "file")
 load_manifest :: proc(
 	p: ^pager.Pager,
 	manifest_page: u32,

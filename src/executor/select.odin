@@ -11,12 +11,12 @@ import "src:types"
 // once by the top-level dispatch instead of being re-derived inside every
 // exec_select_* variant.
 Select_Plan :: struct {
-	has_join:       bool,
-	has_aggregate:  bool,
-	has_group_by:   bool,
-	has_subquery:   bool,
+	has_join       : bool,
+	has_aggregate  : bool,
+	has_group_by   : bool,
+	has_subquery   : bool,
 	is_literal_only: bool,
-	single_table:   bool,
+	single_table   : bool,
 }
 
 plan_select :: proc(stmt: parser.Select_Stmt) -> Select_Plan {
@@ -30,13 +30,13 @@ plan_select :: proc(stmt: parser.Select_Stmt) -> Select_Plan {
 	has_join := len(stmt.joins) > 0
 	has_agg := len(stmt.aggregates) > 0
 	has_group := len(stmt.group_by) > 0
-	return Select_Plan{
-		has_join       = has_join,
-		has_aggregate  = has_agg,
-		has_group_by   = has_group,
-		has_subquery   = false,
+	return Select_Plan {
+		has_join = has_join,
+		has_aggregate = has_agg,
+		has_group_by = has_group,
+		has_subquery = false,
 		is_literal_only = false,
-		single_table   = !has_join,
+		single_table = !has_join,
 	}
 }
 
@@ -62,7 +62,10 @@ exec_select_literals :: proc(
 		return nil, nil, false
 	}
 
-	row := Row_Entry{rowid = 1, values = stmt.literal_values}
+	row := Row_Entry {
+		rowid  = 1,
+		values = stmt.literal_values,
+	}
 	cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 	for name, i in stmt.columns {
 		cols[i] = types.Column {
@@ -84,8 +87,14 @@ exec_select_literals :: proc(
 // fetch_single_rows and the vector fetch path so the rule cannot diverge.
 limit_pushable :: proc(stmt: parser.Select_Stmt, has_order: bool) -> bool {
 	_, has_lim := stmt.limit.?
-	return has_lim && !has_order && !stmt.is_distinct &&
-		len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil
+	return(
+		has_lim &&
+		!has_order &&
+		!stmt.is_distinct &&
+		len(stmt.aggregates) == 0 &&
+		len(stmt.group_by) == 0 &&
+		stmt.having == nil \
+	)
 }
 
 @(private)
@@ -154,7 +163,12 @@ seek_single_row :: proc(
 	cols: []types.Column,
 	single_range: []Table_Col_Range,
 	allocator := context.allocator,
-) -> ([]Row_Entry, []types.Column, []Table_Col_Range, bool) {
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	[]Table_Col_Range,
+	bool,
+) {
 	r := make([dynamic]Row_Entry, allocator)
 	c, find_err := btree.tree_find(table_tree, rowid, allocator)
 	if find_err == .None {
@@ -214,14 +228,20 @@ exec_select_single_data :: proc(
 		vals := make([]types.Value, 1, context.temp_allocator)
 		vals[0] = types.value_int(i64(count))
 		rows_mat := make([]Row_Entry, 1, context.temp_allocator)
-		rows_mat[0] = Row_Entry{rowid = 1, values = vals}
+		rows_mat[0] = Row_Entry {
+			rowid  = 1,
+			values = vals,
+		}
 
 		name := "COUNT(*)"
 		if len(stmt.columns) > 0 { name = stmt.columns[0] }
 		if len(stmt.aliases) > 0 && stmt.aliases[0] != "" { name = stmt.aliases[0] }
 
 		cols_mat := make([]types.Column, 1, context.temp_allocator)
-		cols_mat[0] = types.Column{name = name, type = .INTEGER}
+		cols_mat[0] = types.Column {
+			name = name,
+			type = .INTEGER,
+		}
 		return rows_mat, cols_mat, true
 	}
 
@@ -233,7 +253,9 @@ exec_select_single_data :: proc(
 	// their own columns). Joins/subqueries/setops never reach this proc.
 	// All error paths log canonically through the shared helpers,
 	// identical to the scalar route.
-	if len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil &&
+	if len(stmt.aggregates) == 0 &&
+	   len(stmt.group_by) == 0 &&
+	   stmt.having == nil &&
 	   vec_scan_enabled() {
 		vrows, vcols, vranges, vproj, v_ok := fetch_single_rows_vec(
 			t,
@@ -294,7 +316,11 @@ finish_select :: proc(
 		return out, cols, true
 	}
 
-	indices, i_ok := build_display_indices(stmt.columns, build_column_resolver(cols, ranges), len(cols))
+	indices, i_ok := build_display_indices(
+		stmt.columns,
+		build_column_resolver(cols, ranges),
+		len(cols),
+	)
 	if !i_ok { return nil, nil, false }
 
 	proj := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
@@ -490,9 +516,18 @@ build_scan_plan :: proc(
 	plan: Scan_Plan,
 	ok: bool,
 ) {
-	plan = Scan_Plan{max_rows = max_rows}
+	plan = Scan_Plan {
+		max_rows = max_rows,
+	}
 	if wc, has_wc := where_clause.?; has_wc && wc.root != nil {
-		ctx, ctx_ok := init_where_ctx(&wc, table.columns, table_ranges, schema_tree, allocator, cache).?
+		ctx, ctx_ok := init_where_ctx(
+			&wc,
+			table.columns,
+			table_ranges,
+			schema_tree,
+			allocator,
+			cache,
+		).?
 		if !ctx_ok {
 			log.error("Error: Could not resolve WHERE clause")
 			return {}, false
@@ -531,14 +566,14 @@ build_scan_plan :: proc(
 // skip_chain_conditions collects the leaf conditions of a top-level AND chain.
 // Skipping is only safe when the predicate is a flat conjunction of comparisons;
 // OR subtrees or nested boolean groups disable the optimization (empty result).
-@(private="file")
+@(private = "file")
 skip_chain_conditions :: proc(root: ^Resolved_Node) -> []Resolved_Condition {
 	chain := make([dynamic]Resolved_Condition, context.temp_allocator)
 	collect_skip_chain(root, &chain)
 	return chain[:]
 }
 
-@(private="file")
+@(private = "file")
 collect_skip_chain :: proc(node: ^Resolved_Node, out: ^[dynamic]Resolved_Condition) {
 	if node == nil { return }
 	switch node.kind {

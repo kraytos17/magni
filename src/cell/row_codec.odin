@@ -2,13 +2,13 @@ package cell
 
 import "core:encoding/endian"
 import "core:strings"
-import "src:util/varint"
 import "src:types"
+import "src:util/varint"
 
 Serialization_Info :: struct {
 	serial_types_size: int,
-	payload_size:      int,
-	total_size:        int,
+	payload_size     : int,
+	total_size       : int,
 }
 
 compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serialization_Info {
@@ -22,6 +22,7 @@ compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serializatio
 
 	header_bytes :=
 		varint.size(u64(rowid)) + varint.size(u64(info.serial_types_size)) + info.serial_types_size
+
 	total_payload := header_bytes + info.payload_size
 	info.total_size = varint.size(u64(total_payload)) + total_payload
 	return info
@@ -29,6 +30,7 @@ compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serializatio
 
 // Serialize a row into the binary cell format at dest. Info must come from compute_info.
 // Returns bytes written and ok=false if dest is too small.
+@(require_results)
 serialize :: proc(
 	dest: []u8,
 	rowid: types.Row_ID,
@@ -84,6 +86,7 @@ serialize :: proc(
 }
 
 // Returns the Cell + bytes consumed. ok=false on invalid input.
+@(require_results)
 deserialize :: proc(
 	src: []u8,
 	offset := 0,
@@ -118,7 +121,8 @@ deserialize :: proc(
 	header_start := pos
 	serial_types: [types.MAX_COLS]u64
 	serial_count := 0
-	for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
+
+	#no_bounds_check for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
 		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st { return {}, 0, false }
 
@@ -132,7 +136,7 @@ deserialize :: proc(
 	defer if !success && !config.zero_copy {
 		types.values_delete(result_values, alloc)
 	}
-	for st_idx in 0 ..< serial_count {
+	#no_bounds_check for st_idx in 0 ..< serial_count {
 		st := serial_types[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
 		type_code := types.Serial_Type(st)
@@ -204,6 +208,7 @@ deserialize :: proc(
 // serial count treats trailing positions as not needed. Malformed input
 // fails exactly where deserialize fails.
 // Returns the rowid, bytes consumed, and ok=false on invalid input.
+@(require_results)
 deserialize_needed :: proc(
 	src: []u8,
 	offset: int,
@@ -234,7 +239,7 @@ deserialize_needed :: proc(
 	header_start := pos
 	serial_types: [types.MAX_COLS]u64
 	serial_count := 0
-	for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
+	#no_bounds_check for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
 		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st { return 0, 0, false }
 
@@ -242,8 +247,10 @@ deserialize_needed :: proc(
 		serial_count += 1
 		pos += n4
 	}
-	if len(out_values) < serial_count { return 0, 0, false }
-	for st_idx in 0 ..< serial_count {
+	if len(out_values) < serial_count {
+		return 0, 0, false
+	}
+	#no_bounds_check for st_idx in 0 ..< serial_count {
 		st := serial_types[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
 		type_code := types.Serial_Type(st)
@@ -286,7 +293,7 @@ deserialize_needed :: proc(
 	return types.Row_ID(rowid_val), pos - offset, true
 }
 
-@(private="file")
+@(private = "file")
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
 	if offset + size > len(data) { return 0, false }
 	switch size {
@@ -312,7 +319,7 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 	return 0, false
 }
 
-@(private="file")
+@(private = "file")
 write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> bool {
 	if offset + size > len(dest) { return false }
 	switch size {
@@ -336,7 +343,7 @@ write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> boo
 	return false
 }
 
-@(private="file")
+@(private = "file")
 serial_type_for_value :: proc(v: types.Value) -> u64 {
 	switch val in v {
 	case types.Null:
@@ -375,8 +382,8 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 	}
 }
 
-@(private="file")
+@(private = "file")
 is_text_serial :: proc(serial: u64) -> bool { return serial >= 13 && (serial % 2 != 0) }
 
-@(private="file")
+@(private = "file")
 is_blob_serial :: proc(serial: u64) -> bool { return serial >= 12 && (serial % 2 == 0) }

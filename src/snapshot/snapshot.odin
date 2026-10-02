@@ -11,9 +11,9 @@ import "core:time"
 import "src:pager"
 import "src:types"
 
-SNAPSHOT_MAGIC :: "MAGNISNP"
+SNAPSHOT_MAGIC       :: "MAGNISNP"
 MAX_HEADERS_PER_PAGE :: 100
-HEADER_PREFIX_SIZE :: 8
+HEADER_PREFIX_SIZE   :: 8
 
 Snapshot_Operation :: enum u8 {
 	UNKNOWN = 0,
@@ -27,15 +27,15 @@ Snapshot_Operation :: enum u8 {
 }
 
 Snapshot_Header :: struct #packed #all_or_none #simple {
-	magic:         [8]u8,
-	snapshot_id:   u64,
+	magic        : [8]u8,
+	snapshot_id  : u64,
 	prev_snapshot: u32,
-	timestamp:     u64,
-	schema_root:   u32,
+	timestamp    : u64,
+	schema_root  : u32,
 	manifest_page: u32,
-	state:         u8,
-	operation:     u8,
-	padding:       [2]u8,
+	state        : u8,
+	operation    : u8,
+	padding      : [2]u8,
 }
 
 #assert(size_of(Snapshot_Header) == 40)
@@ -65,7 +65,7 @@ snapshot_state_from_u8 :: proc(v: u8) -> Snapshot_State {
 }
 
 TAG_OFFSET :: HEADER_PREFIX_SIZE + MAX_HEADERS_PER_PAGE * size_of(Snapshot_Header)
-TAG_SIZE :: 64
+TAG_SIZE   :: 64
 
 // headers_on_page returns the packed header slice when data holds the packed
 // format (leading count in 1..MAX_HEADERS_PER_PAGE), or nil for the old
@@ -88,23 +88,26 @@ headers_on_page :: proc(data: []u8) -> []Snapshot_Header {
 // Snapshot_Query selects one chain link by id or by timestamp. The match
 // condition travels as data (not a closure) because walk callbacks are
 // proc literals and cannot capture locals.
-Snapshot_Query_Kind :: enum u8 { By_Id, By_Timestamp }
+Snapshot_Query_Kind :: enum u8 {
+	By_Id,
+	By_Timestamp,
+}
 
 Snapshot_Query :: struct {
-	kind:      Snapshot_Query_Kind,
-	id:        u64,
+	kind     : Snapshot_Query_Kind,
+	id       : u64,
 	timestamp: u64,
 }
 
-@(private="file")
+@(private = "file")
 Find_Query_Data :: struct {
 	result: ^Snapshot_Header,
-	found:  ^bool,
-	query:  Snapshot_Query,
+	found : ^bool,
+	query : Snapshot_Query,
 }
 
 Debug_Data :: struct {
-	p:     ^pager.Pager,
+	p    : ^pager.Pager,
 	count: int,
 }
 
@@ -126,7 +129,9 @@ create :: proc(
 			// Room check composes on the shared dispatch: a full page
 			// (len == MAX) falls through to a fresh page below.
 			if hdrs := headers_on_page(pg.data); hdrs != nil && len(hdrs) < MAX_HEADERS_PER_PAGE {
-				h := (^Snapshot_Header)(raw_data(pg.data[HEADER_PREFIX_SIZE + len(hdrs) * size_of(Snapshot_Header):]))
+				h := (^Snapshot_Header)(
+					raw_data(pg.data[HEADER_PREFIX_SIZE + len(hdrs) * size_of(Snapshot_Header):]),
+				)
 				copy(h.magic[:], SNAPSHOT_MAGIC)
 				h.snapshot_id = snapshot_id
 				h.timestamp =
@@ -161,7 +166,8 @@ create :: proc(
 
 	h.snapshot_id = snapshot_id
 	h.prev_snapshot = prev_snapshot
-	h.timestamp = timestamp if timestamp != 0 else u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO)
+	h.timestamp =
+		timestamp if timestamp != 0 else u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO)
 
 	h.schema_root = schema_root
 	h.manifest_page = manifest_page
@@ -256,7 +262,7 @@ walk_chain :: proc(
 	}
 }
 
-@(private="file")
+@(private = "file")
 list_snapshots :: proc(
 	p: ^pager.Pager,
 	latest_page: u32,
@@ -270,7 +276,14 @@ list_snapshots :: proc(
 	return result[:]
 }
 
-find_snapshot :: proc(p: ^pager.Pager, start_page: u32, query: Snapshot_Query) -> (Snapshot_Header, bool) {
+find_snapshot :: proc(
+	p: ^pager.Pager,
+	start_page: u32,
+	query: Snapshot_Query,
+) -> (
+	Snapshot_Header,
+	bool,
+) {
 	result: Snapshot_Header
 	found := false
 	d := Find_Query_Data{&result, &found, query}
@@ -281,7 +294,8 @@ find_snapshot :: proc(p: ^pager.Pager, start_page: u32, query: Snapshot_Query) -
 		case .By_Id:
 			match = h.snapshot_id == d.query.id
 		case .By_Timestamp:
-			match = snapshot_state_from_u8(h.state) == .COMMITTED && h.timestamp <= d.query.timestamp
+			match =
+				snapshot_state_from_u8(h.state) == .COMMITTED && h.timestamp <= d.query.timestamp
 		}
 		if match {
 			d.result^ = h
@@ -341,24 +355,28 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 // Snapshot_Info is one chain link for presentation layers (admin). tag is
 // cloned into allocator: get_tag aliases the (unpinned) page buffer.
 Snapshot_Info :: struct {
-	id:        u64,
-	page:      u32,
+	id       : u64,
+	page     : u32,
 	operation: Snapshot_Operation,
-	state:     Snapshot_State,
+	state    : Snapshot_State,
 	timestamp: u64, // microseconds since the unix epoch
-	tag:       string,
+	tag      : string,
 }
 
-@(private="file")
+@(private = "file")
 Chain_Collect :: struct {
-	p:     ^pager.Pager,
-	out:   ^[dynamic]Snapshot_Info,
+	p    : ^pager.Pager,
+	out  : ^[dynamic]Snapshot_Info,
 	alloc: mem.Allocator,
 }
 
 // chain_infos returns newest-first chain links (including ABANDONED ones —
 // callers show state explicitly instead of silently skipping).
-chain_infos :: proc(p: ^pager.Pager, start_page: u32, allocator := context.allocator) -> []Snapshot_Info {
+chain_infos :: proc(
+	p: ^pager.Pager,
+	start_page: u32,
+	allocator := context.allocator,
+) -> []Snapshot_Info {
 	out := make([dynamic]Snapshot_Info, allocator)
 	d := Chain_Collect{p, &out, allocator}
 	walk_chain(p, start_page, &d, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {

@@ -68,10 +68,16 @@ execute :: proc(
 			vals := make([]types.Value, 1, context.temp_allocator)
 			vals[0] = types.value_text(sql)
 			rows := make([]Row_Entry, 1, context.temp_allocator)
-			rows[0] = Row_Entry{rowid = 1, values = vals}
+			rows[0] = Row_Entry {
+				rowid  = 1,
+				values = vals,
+			}
 			out.rows = rows
 			cols := make([]types.Column, 1, context.temp_allocator)
-			cols[0] = types.Column{name = "QUERY PLAN", type = .TEXT}
+			cols[0] = types.Column {
+				name = "QUERY PLAN",
+				type = .TEXT,
+			}
 			out.cols = cols
 			out.is_select = true
 			out.new_root = schema_tree.root

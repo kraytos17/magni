@@ -2,12 +2,12 @@ package snapshot
 
 import "src:pager"
 
-@(private="file")
+@(private = "file")
 Mark_Accum :: struct {
-	p:       ^pager.Pager,
+	p      : ^pager.Pager,
 	expired: ^[dynamic]u64,
-	keep:    int,
-	seen:    int,
+	keep   : int,
+	seen   : int,
 }
 
 // mark_abandoned marks all but the newest keep_count COMMITTED snapshots
@@ -38,7 +38,13 @@ mark_abandoned :: proc(
 	return expired
 }
 
-expire_and_collect :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int) -> (expired_ids: [dynamic]u64) {
+expire_and_collect :: proc(
+	p: ^pager.Pager,
+	latest_page: u32,
+	keep_count: int,
+) -> (
+	expired_ids: [dynamic]u64,
+) {
 	// Temp-scoped ids (consumed immediately by the caller): matches the old
 	// expire_snapshots contract, so per-expire heap churn stays zero.
 	expired_ids = mark_abandoned(p, latest_page, keep_count, context.temp_allocator)

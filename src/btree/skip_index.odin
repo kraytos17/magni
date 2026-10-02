@@ -25,8 +25,8 @@ Skip_Op :: enum u8 {
 Skip_Entry :: struct #packed {
 	page_min: u32,
 	page_max: u32,
-	min_int:  i64,
-	max_int:  i64,
+	min_int : i64,
+	max_int : i64,
 }
 
 Skip_Index :: struct {
@@ -104,12 +104,17 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 // touch into single zone-map entries (page spans with a running min/max).
 Skip_Accumulator :: struct {
 	current: Skip_Entry,
-	active:  bool,
+	active : bool,
 }
 
 // add extends the current entry when `min_val` continues its integer range,
 // otherwise flushes it and starts a new one.
-accumulator_add :: proc(a: ^Skip_Accumulator, page_id: u32, min_val, max_val: i64, entries: ^[dynamic]Skip_Entry) {
+accumulator_add :: proc(
+	a: ^Skip_Accumulator,
+	page_id: u32,
+	min_val, max_val: i64,
+	entries: ^[dynamic]Skip_Entry,
+) {
 	if a.active && a.current.max_int + 1 >= min_val {
 		a.current.page_max = page_id
 		if max_val > a.current.max_int { a.current.max_int = max_val }
@@ -137,7 +142,7 @@ accumulator_flush :: proc(a: ^Skip_Accumulator, entries: ^[dynamic]Skip_Entry) {
 // leaf page's cells, preferring the cached stats range and falling back to a
 // full cell scan. `min > max` means "no integer values" (page contributes no
 // entry). When the scan derives a range and stats are enabled, it is cached.
-@(private="file")
+@(private = "file")
 page_int_range :: proc(
 	t: ^Tree,
 	node: Node,
@@ -161,18 +166,30 @@ page_int_range :: proc(
 	if min_val > max_val {
 		min_val, max_val = scan_page_int_range(node, page_id, cell_count, col_index)
 		if min_val <= max_val && has_dir {
-			stats_range_set(tree_stats(t), page_id, pager.Page_Int_Range{
-				col_index = u8(col_index),
-				min_int   = min_val,
-				max_int   = max_val,
-			})
+			stats_range_set(
+				tree_stats(t),
+				page_id,
+				pager.Page_Int_Range {
+					col_index = u8(col_index),
+					min_int = min_val,
+					max_int = max_val,
+				},
+			)
 		}
 	}
 	return min_val, max_val
 }
 
-@(private="file")
-scan_page_int_range :: proc(node: Node, page_id: u32, cell_count: int, col_index: int) -> (i64, i64) {
+@(private = "file")
+scan_page_int_range :: proc(
+	node: Node,
+	page_id: u32,
+	cell_count: int,
+	col_index: int,
+) -> (
+	i64,
+	i64,
+) {
 	min_val := max(i64)
 	max_val := min(i64)
 	if col_index == -1 { return min_val, max_val }
@@ -197,7 +214,7 @@ scan_page_int_range :: proc(node: Node, page_id: u32, cell_count: int, col_index
 
 // write_skip_page serializes the sorted entries into a fresh skip-index page:
 // [magic u32][count u32][col_index u32] then packed Skip_Entry rows.
-@(private="file")
+@(private = "file")
 write_skip_page :: proc(t: ^Tree, entries: []Skip_Entry, col_index: int) -> (Skip_Index, Error) {
 	page, a_err := pager.allocate_page(t.pager)
 	if a_err != .None { return {}, .Page_Full }

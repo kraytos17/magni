@@ -15,7 +15,7 @@ import "src:pager"
 // are always >= 0); page_int_ranges uses nil for uncached. Entries are reset to
 // the sentinel on eviction/free so a reused page never reads a stale value.
 Stats :: struct {
-	row_counts:      [dynamic]int, // index = page id; -1 = uncached
+	row_counts     : [dynamic]int, // index = page id; -1 = uncached
 	page_int_ranges: [dynamic]Maybe(pager.Page_Int_Range), // index = page id; nil = uncached
 }
 
@@ -44,6 +44,7 @@ attach_stats :: proc(t: ^Tree) {
 @(private)
 stats_row_count_get :: proc(s: ^Stats, page_id: u32) -> (int, bool) {
 	if int(page_id) >= len(s.row_counts) { return 0, false }
+
 	count := s.row_counts[page_id]
 	return count, count >= 0
 }
@@ -95,17 +96,19 @@ stats_range_reset :: proc(s: ^Stats, page_id: u32) {
 	if int(page_id) < len(s.page_int_ranges) { s.page_int_ranges[page_id] = nil }
 }
 
-@(private="file")
+@(private = "file")
 on_evict_stats :: proc(data: rawptr, page_num: u32) {
 	if data == nil { return }
+
 	s := cast(^Stats)data
 	stats_row_count_reset(s, page_num)
 	stats_range_reset(s, page_num)
 }
 
-@(private="file")
+@(private = "file")
 free_stats_proc :: proc(data: rawptr) {
 	if data == nil { return }
+
 	s := cast(^Stats)data
 	delete(s.row_counts)
 	delete(s.page_int_ranges)

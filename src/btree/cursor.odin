@@ -1,5 +1,6 @@
 package btree
 
+import "base:intrinsics"
 import "core:encoding/endian"
 import "core:mem"
 import "src:cell"
@@ -8,43 +9,42 @@ import "src:types"
 import "src:util/varint"
 
 Cursor_Stack_Item :: struct {
-	page_id:    u32,
+	page_id   : u32,
 	cell_index: u16,
 }
 
 Cursor :: struct {
-	tree:             ^Tree,
-	path:             [MAX_TREE_DEPTH]Cursor_Stack_Item,
-	depth:            u8,
-	is_valid:         bool,
-	cached_page_id:   u32,
-	cached_page_data: []u8,
+	tree             : ^Tree,
+	path             : [MAX_TREE_DEPTH]Cursor_Stack_Item,
+	depth            : u8,
+	is_valid         : bool,
+	cached_page_id   : u32,
+	cached_page_data : []u8,
 	cached_cell_count: u16,
-	cached_is_leaf:   bool,
+	cached_is_leaf   : bool,
 	// Incremental columnar decode state, nil unless positioned on a
 	// columnar page — row-major scans don't pay for it. Statement-scoped
 	// (temp arena); freed on page-leave/destroy, else reclaimed with it.
-	col: ^Columnar_Cursor_State,
+	col              : ^Columnar_Cursor_State,
 }
 
 // Columnar_Cursor_State caches the column count plus the incremental
-// per-column decode state for columnar pages (mirrors the rowid cache so a
-// sequential scan decodes in O(R·C) instead of O(R²·C)).
+// per-column decode state for columnar pages
 Columnar_Cursor_State :: struct {
-	num_cols:  u8, // >0 when synced to a columnar page; caches the column count
-	rowid:     u64, // accumulated rowid at the current cell_index
+	num_cols : u8, // >0 when synced to a columnar page; caches the column count
+	rowid    : u64, // accumulated rowid at the current cell_index
 	rowid_pos: int, // byte position in the rowid region for the current row
 	encodings: [types.MAX_COLS]u8, // cell.ENCODING_RAW / cell.ENCODING_DELTA
-	offsets:   [types.MAX_COLS]u32, // byte offset of each column's data (relative to page data)
-	val_pos:   [types.MAX_COLS]int, // byte position after the current DELTA value
-	mins:      [types.MAX_COLS]i64, // per-column min (added to each delta to recover the value)
-	running:   [types.MAX_COLS]i64, // current value at cell_index (DELTA columns = min + delta)
+	offsets  : [types.MAX_COLS]u32, // byte offset of each column's data (relative to page data)
+	val_pos  : [types.MAX_COLS]int, // byte position after the current DELTA value
+	mins     : [types.MAX_COLS]i64, // per-column min (added to each delta to recover the value)
+	running  : [types.MAX_COLS]i64, // current value at cell_index (DELTA columns = min + delta)
 }
 
 // cursor_col_state returns the columnar decode state, allocating it on first
 // landing on a columnar page.
-@(private="file")
-cursor_col_state :: proc(c: ^Cursor) -> ^Columnar_Cursor_State {
+@(private = "file")
+cursor_col_state :: #force_inline proc(c: ^Cursor) -> ^Columnar_Cursor_State {
 	if c.col == nil {
 		c.col = new(Columnar_Cursor_State, context.temp_allocator)
 	}
@@ -53,15 +53,15 @@ cursor_col_state :: proc(c: ^Cursor) -> ^Columnar_Cursor_State {
 
 // cursor_col_clear drops the columnar decode state when leaving a columnar
 // page (or destroying the cursor). Row-major pages never hold state.
-@(private="file")
-cursor_col_clear :: proc(c: ^Cursor) {
+@(private = "file")
+cursor_col_clear :: #force_inline proc(c: ^Cursor) {
 	if c.col != nil {
 		free(c.col, context.temp_allocator)
 		c.col = nil
 	}
 }
 
-@(private="file")
+@(private = "file")
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	curr := start_page
 	for {
@@ -133,7 +133,7 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, er
 // cursor_start_at_page positions a cursor at the first cell of the leaf page
 // `page_id`, building the full root→leaf path so traversal can continue past
 // the leaf. Used to start a scan at a skip-index lower bound.
-@(private="file")
+@(private = "file")
 cursor_start_at_page :: proc(
 	t: ^Tree,
 	page_id: u32,
@@ -152,6 +152,9 @@ cursor_start_at_page :: proc(
 // cursor_advance can leave the leaf correctly. Returns .Page_Not_Found when
 // page_id is not reachable as a leaf (e.g. a stale skip-index page); callers
 // should fall back to a full scan in that case.
+// require_results: an unhandled seek error leaves the cursor invalid while
+// the caller scans from nowhere — always check.
+@(require_results)
 cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 	c.depth = 0
 	c.is_valid = false
@@ -170,7 +173,11 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 		if is_leaf(node) {
 			if curr != page_id { return .Cell_Not_Found }
 
-			c.path[c.depth] = Cursor_Stack_Item {page_id = curr, cell_index = 0}
+			c.path[c.depth] = Cursor_Stack_Item {
+				page_id    = curr,
+				cell_index = 0,
+			}
+
 			c.depth += 1
 			c.is_valid = true
 			return .None
@@ -179,17 +186,20 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 		cell_count := get_cell_count(node.data, curr)
 		idx := find_interior_cell_for_child(node.data, curr, page_id, node.layout)
 		if idx >= 0 {
-			c.path[c.depth] = Cursor_Stack_Item {page_id = curr, cell_index = u16(idx)}
+			c.path[c.depth] = Cursor_Stack_Item {
+				page_id    = curr,
+				cell_index = u16(idx),
+			}
+
 			c.depth += 1
 			ptr := get_cell_ptr(node.data, curr, idx, node.layout.stride)
 			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
 			if !ok { return .Invalid_Cell_Pointer }
 			curr = child
 		} else if get_right_ptr(node.data, curr) == page_id {
-			// Target lies in the rightmost subtree: mark this level as fully
-			// visited (cell_index == cell_count) so advance pops past it.
 			c.path[c.depth] = Cursor_Stack_Item {
-				page_id = curr, cell_index = u16(cell_count),
+				page_id    = curr,
+				cell_index = u16(cell_count),
 			}
 
 			c.depth += 1
@@ -202,9 +212,12 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 
 // Loads a node, caching the page in the cursor to avoid repeated loads.
 // The page stays pinned until the cursor moves to a different page or is destroyed.
-@(private="file")
+// likely(hit): sequential scans hit the pinned page once per cell, so the
+// cached path dominates by orders of magnitude.
+// require_results: using a zero Node after a failed load reads garbage.
+@(private = "file", require_results)
 load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
-	if page_id == c.cached_page_id {
+	if intrinsics.likely(page_id == c.cached_page_id) {
 		return node_from_bytes(
 			page_id,
 			c.cached_page_data,
@@ -258,7 +271,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 // columnar_advance_state advances the incremental columnar decode state by one
 // row: the rowid stream plus each DELTA value column. RAW columns are indexed
 // by cell_index, so they carry no state.
-@(private="file")
+@(private = "file")
 columnar_advance_state :: proc(c: ^Cursor) {
 	if c.col == nil { return }
 
@@ -284,7 +297,7 @@ columnar_advance_state :: proc(c: ^Cursor) {
 // descend_to_next_leaf walks up from a finished leaf/interior cell to the next
 // sibling in in-order, drilling down its leftmost leaf. Sets is_valid=false at
 // end of tree. Caller has already popped the finished leaf's cell_index.
-@(private="file")
+@(private = "file")
 descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
 	for c.depth > 0 {
 		top_idx := c.depth - 1
@@ -346,7 +359,7 @@ cursor_get_cell_needed :: proc(
 	if !is_leaf(node) {
 		return 0, .Invalid_Page_Header
 	}
-	if is_columnar(node.data, item.page_id) {
+	if intrinsics.unlikely(is_columnar(node.data, item.page_id)) {
 		return cursor_get_cell_needed_columnar(c, node, item, needed, out_values)
 	}
 
@@ -372,7 +385,7 @@ cursor_get_cell_needed :: proc(
 // Unneeded positions are set to Null. Columnar pages hold ints/reals/Null
 // only (no text/blob), so nothing here is borrowed or cloned. Same file
 // so the private columnar state is in reach.
-@(private="file")
+@(private = "file")
 cursor_get_cell_needed_columnar :: proc(
 	c: ^Cursor,
 	node: Node,
@@ -386,8 +399,7 @@ cursor_get_cell_needed_columnar :: proc(
 	num_cols, found := detect_columnar_col_count(node.data, item.page_id)
 	if !found || int(item.cell_index) < 0 { return 0, .Cell_Not_Found }
 	// The fixed decode-state arrays are MAX_COLS wide; a wider page is
-	// corrupt — fail loudly instead of indexing past them. (The full-row
-	// assembler has the same latent exposure; this path does not.)
+	// corrupt — fail loudly instead of indexing past them.
 	if num_cols > types.MAX_COLS || num_cols > len(out_values) {
 		return 0, .Cell_Deserialize_Failed
 	}
@@ -443,7 +455,7 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 	if actual_alloc.procedure == nil {
 		actual_alloc = context.allocator
 	}
-	if is_columnar(node.data, item.page_id) {
+	if intrinsics.unlikely(is_columnar(node.data, item.page_id)) {
 		return read_columnar_cursor_cell(c, node, item, actual_alloc)
 	}
 
@@ -470,13 +482,16 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 // advancing the cursor's incremental per-column decode state. On the first
 // access to a page it syncs the rowid stream and every DELTA column to the
 // current cell_index; subsequent rows advance O(columns) via cursor_advance.
-@(private="file")
+@(private = "file")
 read_columnar_cursor_cell :: proc(
 	c: ^Cursor,
 	node: Node,
 	item: Cursor_Stack_Item,
 	allocator: mem.Allocator,
-) -> (cell.Cell, Error) {
+) -> (
+	cell.Cell,
+	Error,
+) {
 	num_cols, found := detect_columnar_col_count(node.data, item.page_id)
 	if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
 
@@ -491,8 +506,8 @@ read_columnar_cursor_cell :: proc(
 	values, v_ok := columnar_assemble_row(c, node, item, num_cols, allocator)
 	if !v_ok { return {}, .Cell_Deserialize_Failed }
 	return cell.Cell {
-			rowid     = types.Row_ID(cs.rowid),
-			values    = values,
+			rowid = types.Row_ID(cs.rowid),
+			values = values,
 			owns_data = !c.tree.config.zero_copy,
 		},
 		.None
@@ -500,8 +515,13 @@ read_columnar_cursor_cell :: proc(
 
 // columnar_sync_to_cell positions the rowid stream and every DELTA value column
 // at the cursor's current cell_index on first access to a columnar page.
-@(private="file")
-columnar_sync_to_cell :: proc(c: ^Cursor, node: Node, item: Cursor_Stack_Item, num_cols: int) -> bool {
+@(private = "file")
+columnar_sync_to_cell :: proc(
+	c: ^Cursor,
+	node: Node,
+	item: Cursor_Stack_Item,
+	num_cols: int,
+) -> bool {
 	cs := c.col
 	boff := get_page_header_offset(item.page_id)
 	cs.rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
@@ -529,7 +549,7 @@ columnar_sync_to_cell :: proc(c: ^Cursor, node: Node, item: Cursor_Stack_Item, n
 // columnar_sync_delta_col advances one DELTA column's min/delta stream to the
 // cursor's current cell_index (the stored delta yields value == min + delta,
 // not a running sum).
-@(private="file")
+@(private = "file")
 columnar_sync_delta_col :: proc(
 	c: ^Cursor,
 	node: Node,
@@ -561,14 +581,17 @@ columnar_sync_delta_col :: proc(
 // columnar_assemble_row builds the Value row from the cursor's cached
 // per-column state (O(1) per row): DELTA columns read the running value, RAW
 // columns index directly by cell_index.
-@(private="file")
+@(private = "file")
 columnar_assemble_row :: proc(
 	c: ^Cursor,
 	node: Node,
 	item: Cursor_Stack_Item,
 	num_cols: int,
 	allocator: mem.Allocator,
-) -> ([]types.Value, bool) {
+) -> (
+	[]types.Value,
+	bool,
+) {
 	scratch: [dynamic; types.MAX_COLS]types.Value
 	cs := c.col
 	for col_i in 0 ..< num_cols {

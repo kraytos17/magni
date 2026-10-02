@@ -71,7 +71,7 @@ collect_needed_cols :: proc(
 // filter tree, including under OR/NOT (any reachable comparison may need
 // its column). IN-list/subquery memberships need no extra columns beyond
 // col_idx: their candidate values are constants, not row references.
-@(private="file")
+@(private = "file")
 collect_node_cols :: proc(node: ^Resolved_Node, needed: []bool) {
 	if node == nil { return }
 	switch node.kind {
@@ -80,7 +80,8 @@ collect_node_cols :: proc(node: ^Resolved_Node, needed: []bool) {
 			needed[node.cond.col_idx] = true
 		}
 		if node.cond.has_right_col &&
-		   node.cond.right_idx >= 0 && node.cond.right_idx < len(needed) {
+		   node.cond.right_idx >= 0 &&
+		   node.cond.right_idx < len(needed) {
 			needed[node.cond.right_idx] = true
 		}
 	case .AND, .OR, .NOT:

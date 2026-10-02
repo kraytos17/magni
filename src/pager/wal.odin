@@ -10,21 +10,21 @@ import "core:time"
 import "src:types"
 
 WAL_Header :: struct #packed {
-	magic:           [8]u8,
-	format_version:  u32le,
-	page_size:       u32le,
-	salt1:           u32le,
-	salt2:           u32le,
+	magic          : [8]u8,
+	format_version : u32le,
+	page_size      : u32le,
+	salt1          : u32le,
+	salt2          : u32le,
 	header_checksum: u64le,
 }
 
 WAL_Frame_Header :: struct #packed {
-	page_num:      u32le,
+	page_num     : u32le,
 	db_size_after: u32le,
-	salt1:         u32le,
-	salt2:         u32le,
-	checksum1:     u32le,
-	checksum2:     u32le,
+	salt1        : u32le,
+	salt2        : u32le,
+	checksum1    : u32le,
+	checksum2    : u32le,
 }
 
 WAL_FORMAT_VERSION :: 1
@@ -48,7 +48,7 @@ frame_is_commit :: proc(fh: WAL_Frame_Header) -> bool {
 // stops at the first foreign-generation frame (crash-torn tails); only
 // recover needs it, since abort/checkpoint run on a live WAL whose salts
 // cannot change mid-scan.
-@(private="file")
+@(private = "file")
 wal_scan_committed_upto :: proc(ws: ^Wal_State, file_size: i64, check_salt: bool) -> i64 {
 	committed_upto := i64(types.WAL_HEADER_SIZE)
 	scan := i64(types.WAL_HEADER_SIZE)
@@ -72,19 +72,19 @@ wal_scan_committed_upto :: proc(ws: ^Wal_State, file_size: i64, check_salt: bool
 // page_index tracks committed frame locations (merged from txn_index on commit).
 // txn_index tracks uncommitted frame locations (discarded on abort).
 Wal_State :: struct {
-	file:           ^os.File,
-	wal_path:       string,
+	file          : ^os.File,
+	wal_path      : string,
 	header_written: bool,
-	salt1:          u32,
-	salt2:          u32,
-	frame_count:    u32,
-	write_offset:   i64,
-	page_index:     map[u32]i64,
-	txn_index:      map[u32]i64,
-	txn_active:     bool,
+	salt1         : u32,
+	salt2         : u32,
+	frame_count   : u32,
+	write_offset  : i64,
+	page_index    : map[u32]i64,
+	txn_index     : map[u32]i64,
+	txn_active    : bool,
 }
 
-@(private="file")
+@(private = "file")
 wal_frame_hash :: proc(h: ^WAL_Frame_Header, page_data: []u8) -> u64 {
 	local := h^
 	local.checksum1 = 0
@@ -212,7 +212,10 @@ wal_abort_txn :: proc(p: ^Pager) -> Evict_Report {
 	clear(&ws.txn_index)
 	report := evict_aborted(p, p.dirty_pages[:])
 	if report.skipped_pinned > 0 {
-		log.warnf("WAL abort: %d pinned pages kept; space reclaimed by next GC", report.skipped_pinned)
+		log.warnf(
+			"WAL abort: %d pinned pages kept; space reclaimed by next GC",
+			report.skipped_pinned,
+		)
 	}
 
 	clear(&p.dirty_pages)
@@ -341,7 +344,7 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 // Page_Offset locates one valid WAL frame's page within the WAL file.
 Page_Offset :: struct {
 	page_num: u32,
-	offset:   i64,
+	offset  : i64,
 }
 
 wal_recover :: proc(p: ^Pager) -> Error {
@@ -365,7 +368,7 @@ wal_recover :: proc(p: ^Pager) -> Error {
 // checksum-clean frame. The walk stops at the last commit marker
 // (wal_scan_committed_upto) and at the first checksum mismatch (a crash-torn
 // tail). Returns an empty slice when there is nothing to replay.
-@(private="file")
+@(private = "file")
 collect_valid_frames :: proc(ws: ^Wal_State, file_size: i64) -> ([dynamic]Page_Offset, Error) {
 	valid_frames := make([dynamic]Page_Offset, context.temp_allocator)
 	committed_upto := wal_scan_committed_upto(ws, file_size, true)
@@ -400,7 +403,7 @@ collect_valid_frames :: proc(ws: ^Wal_State, file_size: i64) -> ([dynamic]Page_O
 // replay_frames copies each valid frame's page image into the main file (commit
 // markers are skipped) and extends the logical file length to cover the highest
 // replayed page.
-@(private="file")
+@(private = "file")
 replay_frames :: proc(p: ^Pager, valid_frames: []Page_Offset) {
 	ws := &p.wal_state
 	for fo in valid_frames {

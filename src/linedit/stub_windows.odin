@@ -35,12 +35,12 @@ Key :: enum {
 }
 
 Key_Event :: struct {
-	key:  Key,
+	key : Key,
 	char: rune,
 }
 
 Editor :: struct {
-	history:     History,
+	history    : History,
 	complete_fn: Tab_Complete_Callback,
 }
 

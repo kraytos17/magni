@@ -50,13 +50,17 @@ split_where_for_join :: proc(
 		}
 		if len(assigned) == 0 { continue }
 		if len(assigned) == 1 {
-			filters[ti] = parser.Where_Clause {root = assigned[0]}
+			filters[ti] = parser.Where_Clause {
+				root = assigned[0],
+			}
 		} else {
 			and_node := new(parser.Where_Node, allocator)
 			and_node.kind = .AND
 			and_node.children = make([dynamic]^parser.Where_Node, 0, len(assigned), allocator)
 			append(&and_node.children, ..assigned[:])
-			filters[ti] = parser.Where_Clause {root = and_node}
+			filters[ti] = parser.Where_Clause {
+				root = and_node,
+			}
 		}
 	}
 	return filters
@@ -191,14 +195,17 @@ init_where_ctx :: proc(
 	return Where_Eval_Ctx{root = root, schema_tree = schema_tree}
 }
 
-@(private="file")
+@(private = "file")
 build_resolved_node :: proc(
 	node: ^parser.Where_Node,
 	resolver: Column_Resolver,
 	schema_tree: ^btree.Tree,
 	allocator: mem.Allocator,
 	cache: ^schema.Table_Cache = nil,
-) -> (^Resolved_Node, bool) {
+) -> (
+	^Resolved_Node,
+	bool,
+) {
 	rn := new(Resolved_Node, allocator)
 	switch node.kind {
 	case .COND:
@@ -229,7 +236,7 @@ build_resolved_node :: proc(
 	return rn, true
 }
 
-@(private="file")
+@(private = "file")
 free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	if n == nil { return }
 	switch n.kind {
@@ -248,14 +255,17 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	free(n, allocator)
 }
 
-@(private="file")
+@(private = "file")
 resolve_condition :: proc(
 	cond: parser.Condition,
 	resolver: Column_Resolver,
 	schema_tree: ^btree.Tree,
 	allocator: mem.Allocator,
 	cache: ^schema.Table_Cache = nil,
-) -> (Resolved_Condition, bool) {
+) -> (
+	Resolved_Condition,
+	bool,
+) {
 	idx, found := resolve(resolver, cond.column)
 	if !found { return {}, false }
 
@@ -306,7 +316,7 @@ evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 	return evaluate_node(ctx, ctx.root, row)
 }
 
-@(private="file")
+@(private = "file")
 evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Value) -> bool {
 	switch node.kind {
 	case .COND:
@@ -335,7 +345,7 @@ evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Va
 // the materialized results; an unmaterialized subquery executes per row.
 // No membership → false (NULL never matches: it compares unequal to
 // everything, including itself).
-@(private="file")
+@(private = "file")
 membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: types.Value) -> bool {
 	#partial switch rc.in_mem.kind {
 	case .Values:
@@ -356,14 +366,20 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 	if rc.in_subquery != nil {
 		subq_rows, _ := exec_subquery(schema_tree, rc.in_subquery^)
 		for sr in subq_rows {
-			if !types.is_null(v) && len(sr.values) > 0 && compare_values(v, sr.values[0]) == 0 { return true }
+			if !types.is_null(v) &&
+			   len(sr.values) > 0 &&
+			   compare_values(v, sr.values[0]) == 0 { return true }
 		}
 	}
 	return false
 }
 
-@(private="file")
-evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition, row: []types.Value) -> bool {
+@(private = "file")
+evaluate_resolved_condition :: proc(
+	ctx: Where_Eval_Ctx,
+	rc: Resolved_Condition,
+	row: []types.Value,
+) -> bool {
 	left_val := row[rc.col_idx]
 	cond_result: bool
 	if rc.operator == .IS {
@@ -425,7 +441,7 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 	return false
 }
 
-@(private="file")
+@(private = "file")
 like_match :: proc(pattern: string, text: string) -> bool {
 	if len(pattern) > 1 && pattern[len(pattern) - 1] == '%' {
 		if strings.index_byte(pattern[:len(pattern) - 1], '_') < 0 {

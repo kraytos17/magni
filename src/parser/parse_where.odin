@@ -6,7 +6,7 @@ import "core:strconv"
 import "core:strings"
 import "src:types"
 
-@(private="file")
+@(private = "file")
 unescape_sql_string :: proc(s: string, allocator: mem.Allocator) -> string {
 	if !strings.contains(s, "''") { return strings.clone(s, allocator) }
 
@@ -76,7 +76,7 @@ parse_where_clause :: proc(
 //   or_expr   := and_expr (OR and_expr)*
 //   and_expr  := primary (AND primary)*
 //   primary   := '(' or_expr ')' | condition
-@(private="file")
+@(private = "file")
 parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	left, ok := parse_and_expr(p, allocator)
 	if !ok { return nil, false }
@@ -95,11 +95,14 @@ parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 	}
 
 	node := new(Where_Node, allocator)
-	node^ = Where_Node{kind = .OR, children = children}
+	node^ = Where_Node {
+		kind     = .OR,
+		children = children,
+	}
 	return node, true
 }
 
-@(private="file")
+@(private = "file")
 parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	left, ok := parse_primary(p, allocator)
 	if !ok { return nil, false }
@@ -118,11 +121,14 @@ parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bo
 	}
 
 	node := new(Where_Node, allocator)
-	node^ = Where_Node{kind = .AND, children = children}
+	node^ = Where_Node {
+		kind     = .AND,
+		children = children,
+	}
 	return node, true
 }
 
-@(private="file")
+@(private = "file")
 Between_Parse :: enum u8 {
 	Not_Between, // lookahead says this isn't a BETWEEN expression; keep parsing
 	Parsed, // BETWEEN parsed (node owns its strings)
@@ -131,22 +137,32 @@ Between_Parse :: enum u8 {
 
 // make_between_cond builds one leaf comparison of a BETWEEN desugar,
 // cloning the column name for the node's ownership.
-@(private="file")
+@(private = "file")
 make_between_cond :: proc(
 	op: Token_Type,
 	val: types.Value,
 	col_name: string,
 	allocator: mem.Allocator,
-) -> (^Where_Node, bool) {
-	c := Condition { column = strings.clone(col_name, allocator), operator = op, rhs = val }
+) -> (
+	^Where_Node,
+	bool,
+) {
+	c := Condition {
+		column   = strings.clone(col_name, allocator),
+		operator = op,
+		rhs      = val,
+	}
 	n := new(Where_Node, allocator)
-	n^ = Where_Node{kind = .COND, cond = c}
+	n^ = Where_Node {
+		kind = .COND,
+		cond = c,
+	}
 	return n, true
 }
 
 // try_parse_between parses `col BETWEEN lo AND hi` (and NOT BETWEEN),
 // desugaring to `col >= lo AND col <= hi` (or `<`/`>` under negation).
-@(private="file")
+@(private = "file")
 try_parse_between :: proc(
 	p: ^Parser,
 	allocator: mem.Allocator,
@@ -161,7 +177,8 @@ try_parse_between :: proc(
 	if p.current + 2 < len(p.tokens) { peek2_type = p.tokens[p.current + 2].type }
 
 	is_between := peek0.type != .NOT && peek1_type == .BETWEEN
-	is_not_between := (peek0.type == .NOT && peek2_type == .BETWEEN) ||
+	is_not_between :=
+		(peek0.type == .NOT && peek2_type == .BETWEEN) ||
 		(peek0.type != .NOT && peek1_type == .NOT && peek2_type == .BETWEEN)
 	if !is_between && !is_not_between { return nil, .Not_Between }
 
@@ -210,11 +227,14 @@ try_parse_between :: proc(
 	append(&children, right)
 
 	node = new(Where_Node, allocator)
-	node^ = Where_Node{kind = kind, children = children}
+	node^ = Where_Node {
+		kind     = kind,
+		children = children,
+	}
 	return node, .Parsed
 }
 
-@(private="file")
+@(private = "file")
 parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	p.nest_depth += 1
 	defer p.nest_depth -= 1
@@ -222,7 +242,8 @@ parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 		if p.err_msg == "" { p.err_msg = "Expression nesting too deep" }
 		return nil, false
 	}
-	if between_node, between_status := try_parse_between(p, allocator); between_status != .Not_Between {
+	if between_node, between_status := try_parse_between(p, allocator);
+	   between_status != .Not_Between {
 		return between_node, between_status == .Parsed
 	}
 	if match(p, .NOT) {
@@ -232,7 +253,10 @@ parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 		children := make([dynamic]^Where_Node, allocator)
 		append(&children, child)
 		node := new(Where_Node, allocator)
-		node^ = Where_Node{kind = .NOT, children = children}
+		node^ = Where_Node {
+			kind     = .NOT,
+			children = children,
+		}
 		return node, true
 	}
 	if match(p, .LPAREN) {
@@ -248,19 +272,22 @@ parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 	if !cond_ok { return nil, false }
 
 	node := new(Where_Node, allocator)
-	node^ = Where_Node{kind = .COND, cond = cond}
+	node^ = Where_Node {
+		kind = .COND,
+		cond = cond,
+	}
 	return node, true
 }
 
 // condition_cleanup frees the owned string fields of a partially-parsed
 // Condition on error paths (column + aggregate argument).
-@(private="file")
+@(private = "file")
 condition_cleanup :: proc(cond: ^Condition, allocator: mem.Allocator) {
 	delete(cond.column, allocator)
 	delete(cond.agg_column, allocator)
 }
 
-@(private="file")
+@(private = "file")
 parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Condition, ok: bool) {
 	cond.column = parse_qualified_identifier(p, allocator) or_return
 	if !parse_aggregate_ref(p, &cond, allocator) {
@@ -302,7 +329,7 @@ parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Conditio
 // parse_aggregate_ref consumes an optional `(...)` aggregate argument after a
 // column reference: COUNT(*), COUNT(v), SUM(v), ... Sets cond.agg_column and
 // advances past the closing paren. No paren → nothing to do (true).
-@(private="file")
+@(private = "file")
 parse_aggregate_ref :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
 	if peek(p).type != .LPAREN { return true }
 	advance(p)
@@ -316,7 +343,7 @@ parse_aggregate_ref :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocat
 
 // parse_in_condition handles `col [NOT] IN (subquery | value, ...)`. The
 // operator token is IN and still unconsumed on entry.
-@(private="file")
+@(private = "file")
 parse_in_condition :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
 	cond.operator = .IN; advance(p)
 	if !match(p, .LPAREN) { return false }
@@ -326,7 +353,7 @@ parse_in_condition :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocato
 	return parse_in_value_list(p, cond, allocator)
 }
 
-@(private="file")
+@(private = "file")
 parse_in_subquery :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
 	advance(p)
 	subq_variant, subq_ok := parse_select(p, allocator)
@@ -341,7 +368,7 @@ parse_in_subquery :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator
 	return true
 }
 
-@(private="file")
+@(private = "file")
 parse_in_value_list :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
 	in_vals := make([dynamic]types.Value, allocator)
 	for {
@@ -363,7 +390,7 @@ parse_in_value_list :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocat
 	return true
 }
 
-@(private="file")
+@(private = "file")
 cleanup_in_values :: proc(in_vals: ^[dynamic]types.Value, allocator: mem.Allocator) {
 	for v in in_vals { types.value_delete(v, allocator) }
 	delete(in_vals^)
@@ -371,7 +398,7 @@ cleanup_in_values :: proc(in_vals: ^[dynamic]types.Value, allocator: mem.Allocat
 
 // parse_is_null_condition handles `col IS [NOT] NULL`. The operator token is
 // IS and still unconsumed on entry. A NOT directly before IS is invalid SQL.
-@(private="file")
+@(private = "file")
 parse_is_null_condition :: proc(p: ^Parser, cond: ^Condition) -> bool {
 	if cond.negated {
 		if p.err_msg == "" { p.err_msg = "Expected NULL after IS" }
@@ -387,7 +414,7 @@ parse_is_null_condition :: proc(p: ^Parser, cond: ^Condition) -> bool {
 
 // parse_condition_rhs parses the right-hand side of a binary comparison: either
 // a qualified column (column-to-column) or a literal value.
-@(private="file")
+@(private = "file")
 parse_condition_rhs :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
 	if peek(p).type == .IDENTIFIER {
 		rhs_str, rhs_ok := parse_qualified_identifier(p, allocator)

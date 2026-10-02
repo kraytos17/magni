@@ -137,7 +137,10 @@ resolve_table :: proc(
 	database: ^db.Database,
 	table_name: string,
 	allocator := context.allocator,
-) -> (types.Table, bool) {
+) -> (
+	types.Table,
+	bool,
+) {
 	st := db.Schema_Tree(database)
 	return schema.get_table(&st, table_name, allocator)
 }
@@ -187,7 +190,7 @@ stats :: proc(database: ^db.Database) -> db.DB_Error {
 	st := db.Schema_Tree(database)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	cols := []string{"property", "value"}
-	rows := [][]string{
+	rows := [][]string {
 		{"path", database.path},
 		{"page_size", fmt.aprintf("%d", types.PAGE_SIZE, allocator = context.temp_allocator)},
 		{"total_pages", fmt.aprintf("%d", page_count, allocator = context.temp_allocator)},
@@ -281,12 +284,7 @@ print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 		return .None
 	}
 
-	infos := snapshot.chain_infos(
-		database.pager,
-		database.latest_snapshot,
-		context.temp_allocator,
-	)
-
+	infos := snapshot.chain_infos(database.pager, database.latest_snapshot, context.temp_allocator)
 	cols := []string{"id", "op", "state", "timestamp", "tag"}
 	rows := make([][]string, len(infos), context.temp_allocator)
 	for info, i in infos {
@@ -306,7 +304,7 @@ print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 
 // format_snapshot_ts renders unix-microsecond timestamps as UTC wall time.
 // Raw values stay available via .snapshot_debug.
-@(private="file")
+@(private = "file")
 format_snapshot_ts :: proc(micros: u64, allocator := context.allocator) -> string {
 	t := time.unix(i64(micros / 1_000_000), i64(micros % 1_000_000) * 1000)
 	year, month, day := time.date(t)

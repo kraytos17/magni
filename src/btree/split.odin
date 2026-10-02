@@ -3,18 +3,18 @@ package btree
 import "core:encoding/endian"
 import "src:cell"
 import "src:pager"
-import "src:util/varint"
 import "src:types"
+import "src:util/varint"
 
 Split_Result :: struct #all_or_none {
-	did_split:  bool,
+	did_split : bool,
 	right_page: u32,
-	split_key:  types.Row_ID,
+	split_key : types.Row_ID,
 }
 
 // move_src_count reports the source entry count for the pre-move bounds
 // check: entries are fixed-stride, so the header count rules.
-@(private="file")
+@(private = "file")
 move_src_count :: proc(src: ^Node) -> int {
 	return int(src.header.cell_count)
 }
@@ -22,7 +22,13 @@ move_src_count :: proc(src: ^Node) -> int {
 // move_leaf_cells moves count cells to a leaf sibling through the layout
 // primitives.
 @(private)
-move_leaf_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
+move_leaf_cells :: proc(
+	l: ^Cell_Layout,
+	src: ^Node,
+	dst: ^Node,
+	start_idx: int,
+	count: int,
+) -> bool {
 	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
 	if start_idx + count > move_src_count(src) { return false }
 
@@ -36,7 +42,13 @@ move_leaf_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: int,
 
 		dst_off -= cell_sz
 		copy(dst.data[dst_off:dst_off + cell_sz], src.data[src_ptr:src_ptr + cell_sz])
-		l.set_entry(dst.data, dst.id, dst_cell_count + i, u16(dst_off), l.get_key(src.data, src.id, idx))
+		l.set_entry(
+			dst.data,
+			dst.id,
+			dst_cell_count + i,
+			u16(dst_off),
+			l.get_key(src.data, src.id, idx),
+		)
 	}
 
 	dst.header.cell_content_offset = u16le(dst_off)
@@ -47,7 +59,13 @@ move_leaf_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: int,
 // move_interior_cells moves count cells to an interior sibling through the
 // layout primitives.
 @(private)
-move_interior_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
+move_interior_cells :: proc(
+	l: ^Cell_Layout,
+	src: ^Node,
+	dst: ^Node,
+	start_idx: int,
+	count: int,
+) -> bool {
 	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
 	if start_idx + count > move_src_count(src) { return false }
 
@@ -61,7 +79,13 @@ move_interior_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: 
 
 		dst_off -= cell_sz
 		copy(dst.data[dst_off:dst_off + cell_sz], src.data[src_off:src_off + cell_sz])
-		l.set_entry(dst.data, dst.id, dst_cell_count + i, u16(dst_off), l.get_key(src.data, src.id, idx))
+		l.set_entry(
+			dst.data,
+			dst.id,
+			dst_cell_count + i,
+			u16(dst_off),
+			l.get_key(src.data, src.id, idx),
+		)
 	}
 
 	dst_int.cell_content_offset = u16le(dst_off)
@@ -74,7 +98,7 @@ move_interior_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: 
 // a temp buffer first: after random-order inserts/splits the bodies are not
 // offset-contiguous, so an in-place downward pack would overwrite unprocessed
 // source cells. `cell_size_at` supplies each cell's size from its offset.
-@(private="file")
+@(private = "file")
 pack_left_half :: proc(
 	curr: ^Node,
 	mid: int,
@@ -131,12 +155,12 @@ pack_left_half :: proc(
 
 // leaf_cell_size / interior_cell_size adapt the two cell-size queries to
 // pack_left_half's function parameter.
-@(private="file")
+@(private = "file")
 leaf_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
 	return cell.get_size(data, off)
 }
 
-@(private="file")
+@(private = "file")
 interior_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
 	sz := interior_cell_size_from_page(data, off)
 	return sz, sz != 0
@@ -180,7 +204,7 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 // pointers). Used before a split, which operates on fixed-stride
 // row-major cells. Unreachable in practice — inserts convert via
 // ensure_row_major first — but must stay correct if ever reached.
-@(private="file")
+@(private = "file")
 convert_columnar_leaf_to_row_major :: proc(curr: ^Node) -> Error {
 	num_cols, found := detect_columnar_col_count(curr.data, curr.id)
 	if !found { return .Page_Full }
@@ -241,7 +265,10 @@ split_leaf_root :: proc(
 	root_page: u32,
 	rowid: Maybe(types.Row_ID) = nil,
 	values: Maybe([]types.Value) = nil,
-) -> (new_root: u32, err: Error) {
+) -> (
+	new_root: u32,
+	err: Error,
+) {
 	left_page, l_err := pager.allocate_page(t.pager)
 	if l_err != .None { return 0, .Page_Full }
 
@@ -277,8 +304,6 @@ split_leaf_root :: proc(
 	}
 
 	sep := get_cell_key(right_node.data, right_node.id, 0, right_node.layout)
-	// Insert the row that overflowed the leaf into the correct half. The COW
-	// caller passes it here; the non-COW caller re-inserts it via insert_recursive.
 	if rid, has_rid := rowid.?; has_rid {
 		vals, has_vals := values.?
 		if !has_vals { return 0, .Serialization_Failed }
@@ -301,7 +326,11 @@ split_leaf_root :: proc(
 	if load_err != .None { return 0, load_err }
 
 	set_right_ptr(root_node.data, root_node.id, right_node.id)
-	insert_interior_cell(root_node.data, root_node.id, left_node.id, sep, root_node.layout)
+	if !insert_interior_cell(root_node.data, root_node.id, left_node.id, sep, root_node.layout) {
+		unpin_node(t, root_node)
+		return 0, .Serialization_Failed
+	}
+
 	pager.mark_dirty(t.pager, left_node.id)
 	pager.mark_dirty(t.pager, right_node.id)
 	pager.mark_dirty(t.pager, root_node.id)
@@ -316,11 +345,15 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 
 	defer pager.unpin_page(t.pager, left_page.page_num)
 	init_interior_page(left_page.data, left_page.page_num)
-	left_node, _ := node_from_bytes(
+	// Loud on failure: a fresh page always has a valid header; proceeding
+	// with a zero Node would corrupt the split below. (left_page unpins via
+	// the defer above.)
+	left_node, lb_err := node_from_bytes(
 		left_page.page_num,
 		left_page.data,
 		get_layout(t.pager.page_format_version),
 	)
+	if lb_err != .None { return .Invalid_Page_Header }
 
 	root_node := load_node(t, t.root) or_return
 	if is_leaf(root_node) { unpin_node(t, root_node); return .Invalid_Page_Header }
@@ -340,13 +373,16 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
 	root_node = load_node(t, t.root) or_return
 
 	set_right_ptr(root_node.data, root_node.id, split.right_page)
-	insert_interior_cell(
+	if !insert_interior_cell(
 		root_node.data,
 		root_node.id,
 		left_node.id,
 		split.split_key,
 		root_node.layout,
-	)
+	) {
+		unpin_node(t, root_node)
+		return .Serialization_Failed
+	}
 
 	pager.mark_dirty(t.pager, t.root)
 	pager.mark_dirty(t.pager, left_node.id)

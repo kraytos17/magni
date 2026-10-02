@@ -1,11 +1,12 @@
 package btree
 
+import "base:intrinsics"
 import "core:encoding/endian"
 import "src:types"
 import "src:util/varint"
 
 @(private)
-find_interior_cell_for_child :: proc(
+find_interior_cell_for_child :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	child_page: u32,
@@ -14,7 +15,11 @@ find_interior_cell_for_child :: proc(
 	cell_count := get_cell_count(data, page_id)
 	for i in 0 ..< cell_count {
 		ptr := get_cell_ptr(data, page_id, i, layout.stride)
-		stored_child, _ := endian.get_u32(data[int(ptr):], .Big)
+		// Undecodable bytes are not a match: the caller falls back to a
+		// full scan (correct, just slower) instead of comparing garbage.
+		// (An all-zero failure word could otherwise equal page 0.)
+		stored_child, ok := endian.get_u32(data[int(ptr):], .Big)
+		if intrinsics.unlikely(!ok) { continue }
 		if stored_child == child_page {
 			return i
 		}
@@ -23,7 +28,7 @@ find_interior_cell_for_child :: proc(
 }
 
 @(private)
-interior_lower_bound :: proc(
+interior_lower_bound :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
@@ -46,8 +51,8 @@ interior_lower_bound :: proc(
 	return left, true
 }
 
-@(private="file")
-find_interior_insert_index :: proc(
+@(private = "file")
+find_interior_insert_index :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
@@ -57,8 +62,8 @@ find_interior_insert_index :: proc(
 	return idx
 }
 
-@(private="file")
-interior_cell_size :: proc(key: types.Row_ID) -> int {
+@(private = "file")
+interior_cell_size :: #force_inline proc(key: types.Row_ID) -> int {
 	return 4 + varint.size(u64(key))
 }
 
@@ -69,7 +74,7 @@ interior_cell_size_from_page :: proc(data: []u8, offset: int) -> int {
 	return 4 + n
 }
 
-@(private)
+@(private, require_results)
 insert_interior_cell :: proc(
 	data: []u8,
 	page_id: u32,
