@@ -209,30 +209,11 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 	}
 
 	// Leaf fast path: use cached cell count to avoid load_cached_page
-	top_idx := c.depth - 1
-	item := &c.path[top_idx]
+	item := &c.path[c.depth - 1]
 	if c.cached_is_leaf {
 		item.cell_index += 1
 		if int(item.cell_index) < int(c.cached_cell_count) {
-			if c.col_num_cols > 0 && c.col_rowid_pos > 0 {
-				// Advance rowid for columnar page
-				delta, n, ok := varint.decode(c.cached_page_data, c.col_rowid_pos)
-				if ok {
-					c.col_rowid += delta
-					c.col_rowid_pos += n
-				}
-				// Advance each DELTA value column by one varint (RAW columns are
-				// directly indexed by cell_index, so they need no state).
-				for col_i in 0 ..< int(c.col_num_cols) {
-					if c.col_encodings[col_i] == cell.ENCODING_DELTA {
-						d, dn, d_ok := varint.decode(c.cached_page_data, c.col_val_pos[col_i])
-						if d_ok {
-							c.col_running[col_i] = c.col_mins[col_i] + i64(d)
-							c.col_val_pos[col_i] += dn
-						}
-					}
-				}
-			}
+			columnar_advance_state(c)
 			return .None
 		}
 
@@ -243,11 +224,40 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 			return .None
 		}
 	}
-	for c.depth > 0 {
-		top_idx = c.depth - 1
-		item = &c.path[top_idx]
-		node := load_cached_page(c, item.page_id) or_return
+	return descend_to_next_leaf(c)
+}
 
+// columnar_advance_state advances the incremental columnar decode state by one
+// row: the rowid stream plus each DELTA value column. RAW columns are indexed
+// by cell_index, so they carry no state.
+@(private="file")
+columnar_advance_state :: proc(c: ^Cursor) {
+	if c.col_num_cols == 0 || c.col_rowid_pos == 0 { return }
+	delta, n, ok := varint.decode(c.cached_page_data, c.col_rowid_pos)
+	if ok {
+		c.col_rowid += delta
+		c.col_rowid_pos += n
+	}
+	for col_i in 0 ..< int(c.col_num_cols) {
+		if c.col_encodings[col_i] == cell.ENCODING_DELTA {
+			d, dn, d_ok := varint.decode(c.cached_page_data, c.col_val_pos[col_i])
+			if d_ok {
+				c.col_running[col_i] = c.col_mins[col_i] + i64(d)
+				c.col_val_pos[col_i] += dn
+			}
+		}
+	}
+}
+
+// descend_to_next_leaf walks up from a finished leaf/interior cell to the next
+// sibling in in-order, drilling down its leftmost leaf. Sets is_valid=false at
+// end of tree. Caller has already popped the finished leaf's cell_index.
+@(private="file")
+descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
+	for c.depth > 0 {
+		top_idx := c.depth - 1
+		item := &c.path[top_idx]
+		node := load_cached_page(c, item.page_id) or_return
 		item.cell_index += 1
 		limit := int(node.header.cell_count)
 		if is_leaf(node) {
@@ -296,80 +306,7 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 		actual_alloc = context.allocator
 	}
 	if is_columnar(node.data, item.page_id) {
-		num_cols, found := detect_columnar_col_count(node.data, item.page_id)
-		if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
-
-		boff := get_page_header_offset(item.page_id)
-		c.col_num_cols = u8(num_cols)
-		if c.col_rowid_pos == 0 {
-			// First access to this page: walk the rowid stream and every DELTA
-			// value column to the current cell_index (RAW columns are indexed).
-			c.col_rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
-			c.col_rowid = 0
-			for _ in 0 ..= int(item.cell_index) {
-				delta, n, ok := varint.decode(node.data, c.col_rowid_pos)
-				if !ok { break }
-
-				c.col_rowid += delta
-				c.col_rowid_pos += n
-			}
-			for col_i in 0 ..< num_cols {
-				h, h_ok := cell.read_col_header(node.data, col_i, boff)
-				if !h_ok { return {}, .Cell_Deserialize_Failed }
-
-				c.col_encodings[col_i] = h.encoding
-				c.col_offsets[col_i] = u32(boff + int(h.byte_offset))
-				if h.encoding == cell.ENCODING_DELTA {
-					pos := boff + int(h.byte_offset)
-					min, n1, ok1 := varint.decode(node.data, pos)
-					if !ok1 { return {}, .Cell_Deserialize_Failed }
-
-					pos += n1
-					c.col_mins[col_i] = i64(min)
-					// Each stream value is (value - min); the running value at the
-					// current row is min + that delta (not a running sum).
-					running := i64(min)
-					for _ in 0 ..= int(item.cell_index) {
-						d, n2, ok2 := varint.decode(node.data, pos)
-						if !ok2 { return {}, .Cell_Deserialize_Failed }
-
-						running = i64(min) + i64(d)
-						pos += n2
-					}
-
-					c.col_running[col_i] = running
-					c.col_val_pos[col_i] = pos
-				}
-			}
-		}
-
-		// Assemble the cell from the cached per-column state (O(1) per row).
-		scratch: [dynamic; types.MAX_COLS]types.Value
-		for col_i in 0 ..< num_cols {
-			if c.col_encodings[col_i] == cell.ENCODING_DELTA {
-				append(&scratch, types.value_int(c.col_running[col_i]))
-			} else {
-				pos := int(c.col_offsets[col_i]) + int(item.cell_index) * 8
-				if pos + 8 <= len(node.data) {
-					if fv, fv_ok := endian.get_f64(node.data[pos:], .Big); fv_ok {
-						append(&scratch, types.value_real(fv))
-					} else {
-						append(&scratch, types.Null{})
-					}
-				} else {
-					append(&scratch, types.Null{})
-				}
-			}
-		}
-
-		result_values := make([]types.Value, len(scratch), actual_alloc)
-		copy(result_values, scratch[:])
-		return cell.Cell {
-				rowid      = types.Row_ID(c.col_rowid),
-				values     = result_values,
-				owns_data  = !c.tree.config.zero_copy,
-			},
-			.None
+		return read_columnar_cursor_cell(c, node, item, actual_alloc)
 	}
 
 	stride := node.layout.stride
@@ -389,4 +326,127 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 		return {}, .Cell_Deserialize_Failed
 	}
 	return res_cell, .None
+}
+
+// read_columnar_cursor_cell materializes one row from a columnar leaf page,
+// advancing the cursor's incremental per-column decode state. On the first
+// access to a page it syncs the rowid stream and every DELTA column to the
+// current cell_index; subsequent rows advance O(columns) via cursor_advance.
+@(private="file")
+read_columnar_cursor_cell :: proc(
+	c: ^Cursor,
+	node: Node,
+	item: Cursor_Stack_Item,
+	allocator: mem.Allocator,
+) -> (cell.Cell, Error) {
+	num_cols, found := detect_columnar_col_count(node.data, item.page_id)
+	if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
+
+	c.col_num_cols = u8(num_cols)
+	if c.col_rowid_pos == 0 {
+		if !columnar_sync_to_cell(c, node, item, num_cols) {
+			return {}, .Cell_Deserialize_Failed
+		}
+	}
+
+	values, v_ok := columnar_assemble_row(c, node, item, num_cols, allocator)
+	if !v_ok { return {}, .Cell_Deserialize_Failed }
+	return cell.Cell {
+			rowid     = types.Row_ID(c.col_rowid),
+			values    = values,
+			owns_data = !c.tree.config.zero_copy,
+		},
+		.None
+}
+
+// columnar_sync_to_cell positions the rowid stream and every DELTA value column
+// at the cursor's current cell_index on first access to a columnar page.
+@(private="file")
+columnar_sync_to_cell :: proc(c: ^Cursor, node: Node, item: Cursor_Stack_Item, num_cols: int) -> bool {
+	boff := get_page_header_offset(item.page_id)
+	c.col_rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
+	c.col_rowid = 0
+	for _ in 0 ..= int(item.cell_index) {
+		delta, n, ok := varint.decode(node.data, c.col_rowid_pos)
+		if !ok { break }
+
+		c.col_rowid += delta
+		c.col_rowid_pos += n
+	}
+	for col_i in 0 ..< num_cols {
+		h, h_ok := cell.read_col_header(node.data, col_i, boff)
+		if !h_ok { return false }
+
+		c.col_encodings[col_i] = h.encoding
+		c.col_offsets[col_i] = u32(boff + int(h.byte_offset))
+		if h.encoding == cell.ENCODING_DELTA {
+			if !columnar_sync_delta_col(c, node, col_i, h, boff) { return false }
+		}
+	}
+	return true
+}
+
+// columnar_sync_delta_col advances one DELTA column's min/delta stream to the
+// cursor's current cell_index (the stored delta yields value == min + delta,
+// not a running sum).
+@(private="file")
+columnar_sync_delta_col :: proc(
+	c: ^Cursor,
+	node: Node,
+	col_i: int,
+	h: cell.Col_Header,
+	boff: int,
+) -> bool {
+	pos := boff + int(h.byte_offset)
+	min, n1, ok1 := varint.decode(node.data, pos)
+	if !ok1 { return false }
+
+	pos += n1
+	c.col_mins[col_i] = i64(min)
+	running := i64(min)
+	for _ in 0 ..= int(c.path[c.depth - 1].cell_index) {
+		d, n2, ok2 := varint.decode(node.data, pos)
+		if !ok2 { return false }
+
+		running = i64(min) + i64(d)
+		pos += n2
+	}
+
+	c.col_running[col_i] = running
+	c.col_val_pos[col_i] = pos
+	return true
+}
+
+// columnar_assemble_row builds the Value row from the cursor's cached
+// per-column state (O(1) per row): DELTA columns read the running value, RAW
+// columns index directly by cell_index.
+@(private="file")
+columnar_assemble_row :: proc(
+	c: ^Cursor,
+	node: Node,
+	item: Cursor_Stack_Item,
+	num_cols: int,
+	allocator: mem.Allocator,
+) -> ([]types.Value, bool) {
+	scratch: [dynamic; types.MAX_COLS]types.Value
+	for col_i in 0 ..< num_cols {
+		if c.col_encodings[col_i] == cell.ENCODING_DELTA {
+			append(&scratch, types.value_int(c.col_running[col_i]))
+		} else {
+			pos := int(c.col_offsets[col_i]) + int(item.cell_index) * 8
+			if pos + 8 <= len(node.data) {
+				if fv, fv_ok := endian.get_f64(node.data[pos:], .Big); fv_ok {
+					append(&scratch, types.value_real(fv))
+				} else {
+					append(&scratch, types.Null{})
+				}
+			} else {
+				append(&scratch, types.Null{})
+			}
+		}
+	}
+
+	result_values := make([]types.Value, len(scratch), allocator)
+	copy(result_values, scratch[:])
+	return result_values, true
 }

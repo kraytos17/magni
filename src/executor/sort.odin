@@ -58,50 +58,10 @@ sort_rows :: proc(
 	cols: []types.Column,
 	table_ranges: []Table_Col_Range,
 ) -> bool {
-	sort_indices := make([]int, len(order_clause), context.temp_allocator)
-	for o, i in order_clause {
-		idx, col_ok := resolve_qualified_column(cols, table_ranges, o.column)
-		if !col_ok {
-			log.errorf("Error: Unknown column in ORDER BY: %s", o.column)
-			return false
-		}
-		sort_indices[i] = idx
-	}
+	sort_indices, r_ok := resolve_sort_indices(order_clause, cols, table_ranges)
+	if !r_ok { return false }
 	if len(order_clause) == 1 && len(rows) > 1 {
-		sort_idx := sort_indices[0]
-		all_int := true
-		keys := make([]i64, len(rows), context.temp_allocator)
-		for row, i in rows {
-			if iv, ok := row.values[sort_idx].(i64); ok {
-				keys[i] = iv
-			} else {
-				all_int = false
-				break
-			}
-		}
-		if all_int {
-			desc := order_clause[0].desc
-			nulls_first := order_clause[0].nulls_first
-			// SQL default: ASC → NULLS LAST, DESC → NULLS FIRST.
-			if !nulls_first { nulls_first = desc }
-
-			idx := make([]int, len(rows), context.temp_allocator)
-			for i in 0 ..< len(rows) { idx[i] = i }
-
-			slice.sort_by_with_data(idx, proc(a, b: int, data: rawptr) -> bool {
-					k := (^[]i64)(data)
-					return k[a] < k[b]
-				}, &keys)
-
-			sorted := make([]Row_Entry, len(rows), context.temp_allocator)
-			for pi, i in idx {
-				sorted[i] = rows[pi]
-			}
-			if desc || nulls_first { slice.reverse(sorted) }
-
-			copy(rows, sorted)
-			return true
-		}
+		if sort_rows_int_fast(rows, order_clause[0], sort_indices[0]) { return true }
 	}
 
 	sort_ctx := Sort_Ctx{order_clause, sort_indices}
@@ -126,5 +86,62 @@ sort_rows :: proc(
 			}
 			return false
 		}, &sort_ctx)
+	return true
+}
+
+// resolve_sort_indices maps each ORDER BY column to its absolute index in the
+// row. Logs and returns false on an unknown column.
+@(private="file")
+resolve_sort_indices :: proc(
+	order_clause: []parser.Order_By_Column,
+	cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+) -> (
+	[]int,
+	bool,
+) {
+	sort_indices := make([]int, len(order_clause), context.temp_allocator)
+	for o, i in order_clause {
+		idx, col_ok := resolve_qualified_column(cols, table_ranges, o.column)
+		if !col_ok {
+			log.errorf("Error: Unknown column in ORDER BY: %s", o.column)
+			return nil, false
+		}
+		sort_indices[i] = idx
+	}
+	return sort_indices, true
+}
+
+// sort_rows_int_fast sorts by a single integer column via a precomputed key
+// array (no per-comparison union dispatch). Returns false when any value is a
+// non-int (or there are no rows), letting the general comparator handle it.
+@(private="file")
+sort_rows_int_fast :: proc(rows: []Row_Entry, order: parser.Order_By_Column, sort_idx: int) -> bool {
+	keys := make([]i64, len(rows), context.temp_allocator)
+	for row, i in rows {
+		iv, ok := row.values[sort_idx].(i64)
+		if !ok { return false }
+		keys[i] = iv
+	}
+
+	desc := order.desc
+	nulls_first := order.nulls_first
+	if !nulls_first { nulls_first = desc }
+
+	idx := make([]int, len(rows), context.temp_allocator)
+	for i in 0 ..< len(rows) { idx[i] = i }
+
+	slice.sort_by_with_data(idx, proc(a, b: int, data: rawptr) -> bool {
+			k := (^[]i64)(data)
+			return k[a] < k[b]
+		}, &keys)
+
+	sorted := make([]Row_Entry, len(rows), context.temp_allocator)
+	for pi, i in idx {
+		sorted[i] = rows[pi]
+	}
+	if desc || nulls_first { slice.reverse(sorted) }
+
+	copy(rows, sorted)
 	return true
 }

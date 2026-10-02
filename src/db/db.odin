@@ -153,77 +153,95 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 		}
 		db.pager.page_format_version = types.PAGE_FORMAT_VERSION
 	} else {
-		if v_err := verify_header(db); v_err != .None {
+		if v_err := load_existing(db); v_err != .None {
 			close(db)
 			return nil, v_err
 		}
+	}
+	return db, .None
+}
 
-		page1, h_err := pager.get_page(db.pager, 1)
-		if h_err != .None {
-			close(db)
-			return nil, .IO_Error
-		}
+// load_existing validates the header of an on-disk database and restores all
+// persisted state: header fields, page-format gate, and the snapshot index.
+// On any failure the caller closes db and propagates the error.
+@(private="file")
+load_existing :: proc(db: ^Database) -> DB_Error {
+	if v_err := verify_header(db); v_err != .None { return v_err }
+	if h_err := load_header_fields(db); h_err != .None { return h_err }
+	return rebuild_snapshot_index(db)
+}
 
-		header := (^Header)(raw_data(page1.data))
-		db.schema_root_page = u32(header.schema_root_page)
-		db.latest_snapshot = u32(header.latest_snapshot_page)
-		db.txn_snapshot_id = u64(header.snapshot_id_counter)
-		db.pager.first_free_page = u32(header.first_free_page)
-		if db.pager.first_free_page > pager.page_count(db.pager) {
-			// Self-heal: a header persisted before an uncompleted shrink
-			// may reference pages past EOF. Dropping the freelist leaks
-			// space until the next GC rebuilds it, but can never misread:
-			// freelist links are validated on use.
-			log.warnf(
-				"Database header references free page %d past end of file; dropping freelist",
-				db.pager.first_free_page,
-			)
-			db.pager.first_free_page = 0
-		}
+// load_header_fields reads page 1 into db's runtime fields and gates the page
+// format version. Self-heals a freelist head pointing past EOF.
+@(private="file")
+load_header_fields :: proc(db: ^Database) -> DB_Error {
+	page1, h_err := pager.get_page(db.pager, 1)
+	if h_err != .None { return .IO_Error }
 
-		db.refs_page = u32(header.refs_page)
-		pfv := u32(header.page_format_version)
-		if pfv == 0 { pfv = u32(header.schema_version) }
-		if pfv != u32(types.PAGE_FORMAT_VERSION) {
-			pager.unpin_page(db.pager, 1)
-			close(db)
-			return nil, .Unsupported_Format
-		}
+	header := (^Header)(raw_data(page1.data))
+	db.schema_root_page = u32(header.schema_root_page)
+	db.latest_snapshot = u32(header.latest_snapshot_page)
+	db.txn_snapshot_id = u64(header.snapshot_id_counter)
+	db.pager.first_free_page = u32(header.first_free_page)
+	if db.pager.first_free_page > pager.page_count(db.pager) {
+		// Self-heal: a header persisted before an uncompleted shrink may
+		// reference pages past EOF. Dropping the freelist leaks space until
+		// the next GC rebuilds it, but can never misread: freelist links are
+		// validated on use.
+		log.warnf(
+			"Database header references free page %d past end of file; dropping freelist",
+			db.pager.first_free_page,
+		)
+		db.pager.first_free_page = 0
+	}
 
-		db.pager.page_format_version = pfv
+	db.refs_page = u32(header.refs_page)
+	pfv := u32(header.page_format_version)
+	if pfv == 0 { pfv = u32(header.schema_version) }
+	if pfv != u32(types.PAGE_FORMAT_VERSION) {
 		pager.unpin_page(db.pager, 1)
-		page := db.latest_snapshot
-		for page != 0 {
-			pg, pg_err := pager.get_page(db.pager, page)
-			if pg_err != .None { break }
+		return .Unsupported_Format
+	}
 
-			next_page: u32
-			if headers := snapshot.headers_on_page(pg.data); headers != nil {
-				for i := 0; i < len(headers); i += 1 {
-					db.snapshot_index[headers[i].snapshot_id] = page
-				}
-				next_page = headers[0].prev_snapshot
-			} else {
-				// Hard break: the old single-header layout is unsupported (no
-				// migration). Snapshot magic without a packed count is an
-				// old-format page — reject the file. Anything else is
-				// corruption mid-chain, still handled by stopping the walk.
-				h := (^snapshot.Snapshot_Header)(raw_data(pg.data))
-				if string(h.magic[:]) == snapshot.SNAPSHOT_MAGIC {
-					pager.unpin_page(db.pager, page)
-					close(db)
-					return nil, .Unsupported_Format
-				}
+	db.pager.page_format_version = pfv
+	pager.unpin_page(db.pager, 1)
+	return .None
+}
 
+// rebuild_snapshot_index walks the snapshot chain from the latest snapshot,
+// indexing each packed header by id. Returns .Unsupported_Format on an old
+// single-header page (hard break, no migration); stops the walk on other
+// mid-chain corruption.
+@(private="file")
+rebuild_snapshot_index :: proc(db: ^Database) -> DB_Error {
+	page := db.latest_snapshot
+	for page != 0 {
+		pg, pg_err := pager.get_page(db.pager, page)
+		if pg_err != .None { break }
+
+		next_page: u32
+		if headers := snapshot.headers_on_page(pg.data); headers != nil {
+			for i := 0; i < len(headers); i += 1 {
+				db.snapshot_index[headers[i].snapshot_id] = page
+			}
+			next_page = headers[0].prev_snapshot
+		} else {
+			// Snapshot magic without a packed count is an old-format page:
+			// reject the file. Anything else is corruption mid-chain.
+			h := (^snapshot.Snapshot_Header)(raw_data(pg.data))
+			if string(h.magic[:]) == snapshot.SNAPSHOT_MAGIC {
 				pager.unpin_page(db.pager, page)
-				break
+				return .Unsupported_Format
 			}
 
 			pager.unpin_page(db.pager, page)
-			page = next_page
+			break
 		}
+
+		pager.unpin_page(db.pager, page)
+		page = next_page
 	}
-	return db, .None
+	return .None
 }
 
 // maybe_auto_checkpoint checkpoints the WAL once it grows past

@@ -83,7 +83,6 @@ serialize :: proc(
 	return offset, true
 }
 
-// Deserialize a binary cell from src at offset. Config controls allocator and zero-copy mode.
 // Returns the Cell + bytes consumed. ok=false on invalid input.
 deserialize :: proc(
 	src: []u8,

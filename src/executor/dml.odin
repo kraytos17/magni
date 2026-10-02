@@ -113,11 +113,39 @@ prepare_insert_row :: proc(
 	t: ^btree.Tree,
 	root_page: u32,
 ) -> (Insert_Row_Info, bool) {
-	values := row_values
+	values, v_ok := reorder_insert_values(table, columns, row_values)
+	if !v_ok { return {}, false }
+	if check := check_row(values, table); check != .Ok {
+		if check == .Type_Error {
+			log.error("Error: Data type validation failed")
+		}
+		return {}, false
+	}
+	return Insert_Row_Info {
+			values = values,
+			row_id = assign_insert_rowid(table, values, t, root_page),
+			table_tree = btree.init(t.pager, root_page),
+		},
+		true
+}
+
+// reorder_insert_values maps the INSERT's column list / values onto the table's
+// full column order, filling omitted columns with their DEFAULT (cloned) or
+// NULL. With an empty column list, row_values must already be full-width.
+@(private="file")
+reorder_insert_values :: proc(
+	table: types.Table,
+	columns: []string,
+	row_values: []types.Value,
+) -> (
+	values: []types.Value,
+	ok: bool,
+) {
+	values = row_values
 	if len(columns) > 0 {
 		if len(columns) != len(row_values) {
 			log.error("Error: Column list length does not match value count")
-			return {}, false
+			return nil, false
 		}
 		if len(columns) > len(table.columns) {
 			log.errorf(
@@ -125,12 +153,12 @@ prepare_insert_row :: proc(
 				len(table.columns),
 				len(columns),
 			)
-			return {}, false
+			return nil, false
 		}
 
 		reordered := make([]types.Value, len(table.columns), context.temp_allocator)
 		for i in 0 ..< len(reordered) {
-			if def, ok := table.columns[i].default_value.?; ok {
+			if def, has_def := table.columns[i].default_value.?; has_def {
 				cloned, _ := types.value_clone(def, context.temp_allocator)
 				reordered[i] = cloned
 			} else {
@@ -138,10 +166,10 @@ prepare_insert_row :: proc(
 			}
 		}
 		for col_name, i in columns {
-			idx, ok := schema.find_column_index(table.columns, col_name)
-			if !ok {
+			idx, col_ok := schema.find_column_index(table.columns, col_name)
+			if !col_ok {
 				log.errorf("Error: Unknown column: %s", col_name)
-				return {}, false
+				return nil, false
 			}
 			reordered[idx] = row_values[i]
 		}
@@ -153,35 +181,35 @@ prepare_insert_row :: proc(
 			len(table.columns),
 			len(values),
 		)
-		return {}, false
+		return nil, false
 	}
-	if check := check_row(values, table); check != .Ok {
-		if check == .Type_Error {
-			log.error("Error: Data type validation failed")
-		}
-		return {}, false
-	}
+	return values, true
+}
 
+// assign_insert_rowid picks the row's Row_ID: an explicit integer PK value, else
+// the next tree rowid (which fills an implicit/missing PK slot in place).
+@(private="file")
+assign_insert_rowid :: proc(
+	table: types.Table,
+	values: []types.Value,
+	t: ^btree.Tree,
+	root_page: u32,
+) -> types.Row_ID {
 	table_tree := btree.init(t.pager, root_page)
-	next_rowid: types.Row_ID
 	pk_idx, has_pk := schema.get_pk_column(table.columns)
 	if has_pk {
 		if val, is_int := values[pk_idx].(i64); is_int {
-			next_rowid = types.Row_ID(val)
-		} else {
-			id, id_err := btree.tree_next_rowid(&table_tree)
-			next_rowid = id if id_err == .None else 1
-			values[pk_idx] = types.value_int(i64(next_rowid))
+			return types.Row_ID(val)
 		}
-	} else {
-		id, err := btree.tree_next_rowid(&table_tree)
-		if err != .None {
-			next_rowid = 1
-		} else {
-			next_rowid = id
-		}
+
+		id, id_err := btree.tree_next_rowid(&table_tree)
+		next := id if id_err == .None else 1
+		values[pk_idx] = types.value_int(i64(next))
+		return next
 	}
-	return Insert_Row_Info{values = values, row_id = next_rowid, table_tree = table_tree}, true
+
+	id, err := btree.tree_next_rowid(&table_tree)
+	return id if err == .None else 1
 }
 
 @(private)

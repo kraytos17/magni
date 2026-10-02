@@ -205,54 +205,105 @@ deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	return new_values
 }
 
+// Parsed_Check is a CHECK expression decomposed into its parts:
+// `col <op> int_literal`. Parsing a raw check_expr string is split out so the
+// evaluator is a clean comparison instead of an inline string split.
+Parsed_Check :: struct {
+	col_name: string, // resolved against the table's columns
+	op:       Check_Op,
+	val:      i64,
+}
+
+Check_Op :: enum u8 {
+	GT,
+	LT,
+	GTE,
+	LTE,
+	EQ,
+	NE,
+}
+
+// parse_check_expr decomposes a raw `col <op> int` CHECK string. Returns
+// ok=false (already logged) on malformed input or an unsupported operator.
+@(private)
+parse_check_expr :: proc(chk: string) -> (Parsed_Check, bool) {
+	parts := strings.split(chk, " ", context.temp_allocator)
+	if len(parts) < 3 {
+		log.errorf("Error: CHECK constraint too complex: %s", chk)
+		return {}, false
+	}
+
+	op, op_ok := check_op_from_token(parts[1])
+	if !op_ok {
+		log.errorf("CHECK uses unsupported operator: %s", parts[1])
+		return {}, false
+	}
+
+	val, parse_num := strconv.parse_i64(parts[2])
+	if !parse_num {
+		log.errorf("Error: CHECK constraint non-integer comparison: %s", chk)
+		return {}, false
+	}
+	return Parsed_Check{col_name = parts[0], op = op, val = val}, true
+}
+
+@(private="file")
+check_op_from_token :: proc(tok: string) -> (Check_Op, bool) {
+	switch tok {
+	case ">":
+		return .GT, true
+	case "<":
+		return .LT, true
+	case ">=":
+		return .GTE, true
+	case "<=":
+		return .LTE, true
+	case "=":
+		return .EQ, true
+	case "!=", "<>":
+		return .NE, true
+	}
+	return .EQ, false
+}
+
+@(private="file")
+check_op_eval :: proc(op: Check_Op, left, right: i64) -> bool {
+	switch op {
+	case .GT:
+		return left > right
+	case .LT:
+		return left < right
+	case .GTE:
+		return left >= right
+	case .LTE:
+		return left <= right
+	case .EQ:
+		return left == right
+	case .NE:
+		return left != right
+	}
+	return false
+}
+
 @(private)
 check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
 	for col in table.columns {
 		if chk, has_chk := col.check_expr.?; has_chk {
-			parts := strings.split(chk, " ", context.temp_allocator)
-			if len(parts) < 3 {
-				log.errorf("Error: CHECK constraint too complex: %s", chk)
-				return false
-			}
+			parsed, p_ok := parse_check_expr(chk)
+			if !p_ok { return false }
 
-			col_idx, col_ok := resolve_qualified_column(table.columns, nil, parts[0])
+			col_idx, col_ok := resolve_qualified_column(table.columns, nil, parsed.col_name)
 			if !col_ok {
-				log.errorf("Error: CHECK references unknown column: %s", parts[0])
+				log.errorf("Error: CHECK references unknown column: %s", parsed.col_name)
 				return false
 			}
 
-			left_val := values[col_idx]
-			op_token := parts[1]
-			val_num, parse_num := strconv.parse_i64(parts[2])
-			if !parse_num {
-				log.errorf("Error: CHECK constraint non-integer comparison: %s", chk)
-				return false
-			}
-
-			left_i64, is_int := left_val.(i64)
+			left_i64, is_int := values[col_idx].(i64)
 			if !is_int {
 				log.errorf("Error: CHECK column value is not an integer: %s", chk)
 				return false
 			}
-
-			result := false
-			if op_token == ">" {
-				result = left_i64 > val_num
-			} else if op_token == "<" {
-				result = left_i64 < val_num
-			} else if op_token == ">=" {
-				result = left_i64 >= val_num
-			} else if op_token == "<=" {
-				result = left_i64 <= val_num
-			} else if op_token == "=" {
-				result = left_i64 == val_num
-			} else if op_token == "!=" || op_token == "<>" {
-				result = left_i64 != val_num
-			} else {
-				log.errorf("CHECK uses unsupported operator: %s", op_token)
-				return false
-			}
-			if !result {
+			if !check_op_eval(parsed.op, left_i64, parsed.val) {
 				log.errorf("CHECK constraint violation: %s", chk)
 				return false
 			}

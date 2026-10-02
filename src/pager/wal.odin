@@ -342,6 +342,12 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 	return .None
 }
 
+// Page_Offset locates one valid WAL frame's page within the WAL file.
+Page_Offset :: struct {
+	page_num: u32,
+	offset:   i64,
+}
+
 wal_recover :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
 	if ws.file == nil { return .None }
@@ -350,14 +356,24 @@ wal_recover :: proc(p: ^Pager) -> Error {
 	if size_err != nil { return .IO_Error }
 	if file_size <= types.WAL_HEADER_SIZE { return .None }
 
-	Page_Offset :: struct {
-		page_num: u32,
-		offset:   i64,
-	}
+	valid_frames, scan_err := collect_valid_frames(ws, file_size)
+	if scan_err != .None { return scan_err }
+	if len(valid_frames) == 0 { return .None }
 
+	replay_frames(p, valid_frames[:])
+	log.infof("WAL: recovery complete, %d frames replayed", len(valid_frames))
+	return .None
+}
+
+// collect_valid_frames scans the committed WAL region and returns one entry per
+// checksum-clean frame. The walk stops at the last commit marker
+// (wal_scan_committed_upto) and at the first checksum mismatch (a crash-torn
+// tail). Returns an empty slice when there is nothing to replay.
+@(private="file")
+collect_valid_frames :: proc(ws: ^Wal_State, file_size: i64) -> ([dynamic]Page_Offset, Error) {
 	valid_frames := make([dynamic]Page_Offset, context.temp_allocator)
 	committed_upto := wal_scan_committed_upto(ws, file_size, true)
-	if committed_upto <= i64(types.WAL_HEADER_SIZE) { return .None }
+	if committed_upto <= i64(types.WAL_HEADER_SIZE) { return valid_frames, .None }
 
 	offset := i64(types.WAL_HEADER_SIZE)
 	for offset < committed_upto {
@@ -382,6 +398,15 @@ wal_recover :: proc(p: ^Pager) -> Error {
 		append(&valid_frames, Page_Offset{u32(fh.page_num), offset})
 		offset += types.WAL_FRAME_SIZE
 	}
+	return valid_frames, .None
+}
+
+// replay_frames copies each valid frame's page image into the main file (commit
+// markers are skipped) and extends the logical file length to cover the highest
+// replayed page.
+@(private="file")
+replay_frames :: proc(p: ^Pager, valid_frames: []Page_Offset) {
+	ws := &p.wal_state
 	for fo in valid_frames {
 		if fo.page_num == WAL_COMMIT_PAGE { continue }
 
@@ -401,7 +426,4 @@ wal_recover :: proc(p: ^Pager) -> Error {
 
 	new_len := i64(max_page_num) * i64(types.PAGE_SIZE)
 	if new_len > p.file_len { p.file_len = new_len }
-
-	log.infof("WAL: recovery complete, %d frames replayed", len(valid_frames))
-	return .None
 }

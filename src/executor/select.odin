@@ -238,35 +238,39 @@ exec_select_single_data :: proc(
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, cols, single_range)
 	}
-	// Sort on the full rows (so ORDER BY names outside the projected columns
-	// resolve), then project, dedup, and limit — same order as
-	// exec_select_join_data.
+	return finish_select(stmt, rows, cols, single_range)
+}
+
+// finish_select is the shared post-filter tail for single-table and join
+// SELECTs: ORDER BY sort (on the full rows, so names outside the projection
+// resolve), projection, DISTINCT dedup, then LIMIT/OFFSET — in that order.
+// Used by exec_select_single_data and exec_select_join_data so the two paths
+// can never diverge on evaluation order.
+@(private)
+finish_select :: proc(
+	stmt: parser.Select_Stmt,
+	rows: []Row_Entry,
+	cols: []types.Column,
+	ranges: []Table_Col_Range,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		if !sort_rows(rows, order_clause, cols, single_range) {
+		if !sort_rows(rows, order_clause, cols, ranges) {
 			return nil, nil, false
 		}
 	}
 	if len(stmt.columns) == 0 {
 		out := rows
 		if stmt.is_distinct { out = dedup_rows(out) }
-		if limit, has_limit := stmt.limit.?; has_limit {
-			off := u64(0)
-			if o, has_off := stmt.offset.?; has_off { off = o }
 
-			start := int(min(off, u64(len(out))))
-			end := int(min(off + limit, u64(len(out))))
-			out = out[start:end]
-		}
+		out = apply_limit_offset(stmt, out)
 		return out, cols, true
 	}
-	// Project to the requested columns (e.g. `SELECT c FROM u` on a multi-column
-	// table returns only column c).
-	indices, i_ok := build_display_indices(
-		stmt.columns,
-		cols,
-		single_range,
-		len(cols),
-	)
+
+	indices, i_ok := build_display_indices(stmt.columns, cols, ranges, len(cols))
 	if !i_ok { return nil, nil, false }
 
 	proj := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
@@ -286,15 +290,24 @@ exec_select_single_data :: proc(
 
 	out := proj[:]
 	if stmt.is_distinct { out = dedup_rows(out) }
-	if limit, has_limit := stmt.limit.?; has_limit {
-		off := u64(0)
-		if o, has_off := stmt.offset.?; has_off { off = o }
 
-		start := int(min(off, u64(len(out))))
-		end := int(min(off + limit, u64(len(out))))
-		out = out[start:end]
-	}
+	out = apply_limit_offset(stmt, out)
 	return out, proj_cols, true
+}
+
+// apply_limit_offset slices rows to [offset, offset+limit). No LIMIT clause
+// leaves the rows untouched.
+@(private)
+apply_limit_offset :: proc(stmt: parser.Select_Stmt, out: []Row_Entry) -> []Row_Entry {
+	limit, has_limit := stmt.limit.?
+	if !has_limit { return out }
+
+	off := u64(0)
+	if o, has_off := stmt.offset.?; has_off { off = o }
+
+	start := int(min(off, u64(len(out))))
+	end := int(min(off + limit, u64(len(out))))
+	return out[start:end]
 }
 
 exec_query :: proc(

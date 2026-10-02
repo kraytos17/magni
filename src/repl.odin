@@ -188,18 +188,23 @@ dot_cmd_tables :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 }
 
 @(private="file")
-dot_cmd_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.print_schema(database); err != .None {
+report_result :: proc(err: db.DB_Error, success_msg: string = "") {
+	if err != .None {
 		log.errorf("%s", db.db_error_string(err))
+	} else if success_msg != "" {
+		fmt.println(success_msg)
 	}
+}
+
+@(private="file")
+dot_cmd_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+	report_result(admin.print_schema(database))
 	return false
 }
 
 @(private="file")
 dot_cmd_debug_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.print_schema(database, debug = true); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	}
+	report_result(admin.print_schema(database, debug = true))
 	return false
 }
 
@@ -237,17 +242,13 @@ dot_cmd_tree_page :: proc(database: ^db.Database, args: string, cmd: ^Dot_Comman
 
 @(private="file")
 dot_cmd_snapshot_debug :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.print_snapshots(database, debug = true); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	}
+	report_result(admin.print_snapshots(database, debug = true))
 	return false
 }
 
 @(private="file")
 dot_cmd_stats :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.stats(database); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	}
+	report_result(admin.stats(database))
 	return false
 }
 
@@ -277,9 +278,7 @@ dot_cmd_rollback :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command
 
 @(private="file")
 dot_cmd_snapshots :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.print_snapshots(database); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	}
+	report_result(admin.print_snapshots(database))
 	return false
 }
 
@@ -290,9 +289,7 @@ dot_cmd_snapdiff :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command
 		older, older_ok := dot_uint_arg(parts, 1)
 		newer, newer_ok := dot_uint_arg(parts, 2)
 		if older_ok && newer_ok {
-			if err := db.snapshot_diff(database, older, newer); err != .None {
-				log.errorf("%s", db.db_error_string(err))
-			}
+			report_result(db.snapshot_diff(database, older, newer))
 			return false
 		}
 	}
@@ -303,31 +300,19 @@ dot_cmd_snapdiff :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command
 
 @(private="file")
 dot_cmd_checkpoint :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.checkpoint(database); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	} else {
-		fmt.println("Database flushed to disk.")
-	}
+	report_result(admin.checkpoint(database), "Database flushed to disk.")
 	return false
 }
 
 @(private="file")
 dot_cmd_vacuum :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.vacuum(database); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	} else {
-		fmt.println("Database rebuilt into packed pages.")
-	}
+	report_result(admin.vacuum(database), "Database rebuilt into packed pages.")
 	return false
 }
 
 @(private="file")
 dot_cmd_integrity :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.integrity_check(database); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	} else {
-		fmt.println("OK")
-	}
+	report_result(admin.integrity_check(database), "OK")
 	return false
 }
 

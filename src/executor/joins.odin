@@ -536,52 +536,11 @@ exec_select_join_data :: proc(
 	jb := build_join_result(t, stmt, cache)
 	if !jb.ok { return nil, nil, false }
 
-	rows, combined_cols, table_ranges, total_cols := jb.rows, jb.cols, jb.ranges, jb.total_cols
+	rows, combined_cols, table_ranges := jb.rows, jb.cols, jb.ranges
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, combined_cols, table_ranges)
 	}
-	// Sort on the full combined rows (so qualified ORDER BY names resolve),
-	// then project to the requested columns.
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		if !sort_rows(rows, order_clause, combined_cols, table_ranges) {
-			return nil, nil, false
-		}
-	}
-
-	display_indices, d_ok := build_display_indices(
-		stmt.columns,
-		combined_cols,
-		table_ranges,
-		total_cols,
-	)
-	if !d_ok { return nil, nil, false }
-
-	proj_rows := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
-	for entry in rows {
-		proj_vals := make([]types.Value, len(display_indices), context.temp_allocator)
-		for idx, i in display_indices { proj_vals[i] = entry.values[idx] }
-		append(&proj_rows, Row_Entry{entry.rowid, proj_vals})
-	}
-
-	proj_cols := make([]types.Column, len(display_indices), context.temp_allocator)
-	for idx, i in display_indices {
-		proj_cols[i] = combined_cols[idx]
-		if i < len(stmt.aliases) && stmt.aliases[i] != "" {
-			proj_cols[i].name = stmt.aliases[i]
-		}
-	}
-
-	out := proj_rows[:]
-	if stmt.is_distinct { out = dedup_rows(out) }
-	if limit, has_limit := stmt.limit.?; has_limit {
-		off := u64(0)
-		if o, has_off := stmt.offset.?; has_off { off = o }
-
-		start := int(min(off, u64(len(out))))
-		end := int(min(off + limit, u64(len(out))))
-		out = out[start:end]
-	}
-	return out, proj_cols, true
+	return finish_select(stmt, rows, combined_cols, table_ranges)
 }
 
 @(private="file")

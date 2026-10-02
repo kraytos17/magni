@@ -69,66 +69,84 @@ move_interior_cells :: proc(l: ^Cell_Layout, src: ^Node, dst: ^Node, start_idx: 
 	return true
 }
 
+// pack_left_half repacks the first `mid` cells of `curr` to the top of the page
+// (downward, compact) and sets the header count/offset. Cells are snapshotted to
+// a temp buffer first: after random-order inserts/splits the bodies are not
+// offset-contiguous, so an in-place downward pack would overwrite unprocessed
+// source cells. `cell_size_at` supplies each cell's size from its offset.
+@(private="file")
+pack_left_half :: proc(
+	curr: ^Node,
+	mid: int,
+	cell_size_at: proc(data: []u8, off: int) -> (int, bool),
+) -> bool {
+	total := int(curr.header.cell_count)
+	if mid <= 0 {
+		curr.header.cell_content_offset = PAGE_SIZE
+		curr.header.cell_count = 0
+		return true
+	}
+
+	refs := make([]int, total, context.temp_allocator) // offset per cell
+	sizes := make([]int, total, context.temp_allocator)
+	total_sz := 0
+	for i in 0 ..< total {
+		off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
+		sz, ok := cell_size_at(curr.data, off)
+		if !ok { return false }
+
+		refs[i] = off
+		sizes[i] = sz
+		total_sz += sz
+	}
+
+	buf := make([]u8, total_sz, context.temp_allocator)
+	pos := 0
+	for i in 0 ..< total {
+		copy(buf[pos:pos + sizes[i]], curr.data[refs[i]:refs[i] + sizes[i]])
+		pos += sizes[i]
+	}
+
+	dst_off := PAGE_SIZE
+	pos = 0
+	for i in 0 ..< mid {
+		sz := sizes[i]
+		dst_off -= sz
+		copy(curr.data[dst_off:dst_off + sz], buf[pos:pos + sz])
+
+		pos += sz
+		curr.layout.set_entry(
+			curr.data,
+			curr.id,
+			i,
+			u16(dst_off),
+			get_cell_key(curr.data, curr.id, i, curr.layout),
+		)
+	}
+
+	curr.header.cell_content_offset = u16le(dst_off)
+	curr.header.cell_count = u16le(mid)
+	return true
+}
+
+// leaf_cell_size / interior_cell_size adapt the two cell-size queries to
+// pack_left_half's function parameter.
+@(private="file")
+leaf_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
+	return cell.get_size(data, off)
+}
+
+@(private="file")
+interior_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
+	sz := interior_cell_size_from_page(data, off)
+	return sz, sz != 0
+}
+
 @(private)
 split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if node_leaf(curr^).cell_count == 0 { return {}, .Page_Full }
 	if is_columnar(curr.data, curr.id) {
-		num_cols, found := detect_columnar_col_count(curr.data, curr.id)
-		if !found { return {}, .Page_Full }
-
-		row_count := int(curr.header.cell_count)
-		boff := get_page_header_offset(curr.id)
-		rowids := make([]types.Row_ID, row_count, context.temp_allocator)
-		for i in 0 ..< row_count {
-			rid, rid_ok := cell.read_columnar_rowid(curr.data, num_cols, i, boff)
-			if !rid_ok { return {}, .Serialization_Failed }
-			rowids[i] = rid
-		}
-
-		values := make([][]types.Value, row_count, context.temp_allocator)
-		for col_i in 0 ..< num_cols {
-			col_vals := cell.decode_column(
-				curr.data,
-				num_cols,
-				col_i,
-				boff,
-				context.temp_allocator,
-			)
-
-			if col_vals == nil { return {}, .Serialization_Failed }
-			for ri in 0 ..< row_count {
-				if values[ri] == nil {
-					values[ri] = make([]types.Value, num_cols, context.temp_allocator)
-				}
-				if ri < len(col_vals) {
-					values[ri][col_i] = col_vals[ri]
-				}
-			}
-		}
-
-		// Reinitialize page as row-major and insert all rows
-		init_leaf_page(curr.data, curr.id)
-		for ri in 0 ..< row_count {
-			info := cell.compute_info(rowids[ri], values[ri])
-			off := get_page_header_offset(curr.id)
-			header := (^Leaf_Header)(raw_data(curr.data[off:]))
-			dest_off := int(header.cell_content_offset) - info.total_size
-			if dest_off < off + size_of(Leaf_Header) + (int(header.cell_count) + 1) * 2 {
-				return {}, .Page_Full
-			}
-
-			cell.serialize(
-				curr.data[dest_off:dest_off + info.total_size],
-				rowids[ri],
-				values[ri],
-				info,
-			)
-
-			header.cell_content_offset = u16le(dest_off)
-			ptr_loc := off + size_of(Leaf_Header) + int(header.cell_count) * 2
-			endian.put_u16(curr.data[ptr_loc:], .Little, u16(dest_off))
-			header.cell_count = u16le(int(header.cell_count) + 1)
-		}
+		if err := convert_columnar_leaf_to_row_major(curr); err != .None { return {}, err }
 	}
 
 	new_page, err := pager.allocate_page(t.pager)
@@ -147,57 +165,65 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if !move_leaf_cells(curr.layout, curr, &right_node, mid, total - mid) {
 		return {}, .Serialization_Failed
 	}
-	if mid > 0 {
-		// Snapshot all original cell bodies to a temp buffer before repacking:
-		// with random insert order the bodies are not offset-contiguous, so an
-		// in-place downward pack would overwrite unprocessed source cells.
-		Cell_Ref :: struct {
-			off: int,
-			sz:  int,
-		}
-
-		refs := make([]Cell_Ref, total, context.temp_allocator)
-		total_sz := 0
-		for i in 0 ..< total {
-			off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
-			sz, ok := cell.get_size(curr.data, off)
-			if !ok { return {}, .Serialization_Failed }
-
-			refs[i] = Cell_Ref{off = off, sz = sz}
-			total_sz += sz
-		}
-
-		buf := make([]u8, total_sz, context.temp_allocator)
-		pos := 0
-		for i in 0 ..< total {
-			copy(buf[pos:pos + refs[i].sz], curr.data[refs[i].off:refs[i].off + refs[i].sz])
-			pos += refs[i].sz
-		}
-
-		dst_off := PAGE_SIZE
-		pos = 0
-		for i in 0 ..< mid {
-			sz := refs[i].sz
-			dst_off -= sz
-			copy(curr.data[dst_off:dst_off + sz], buf[pos:pos + sz])
-			pos += sz
-			curr.layout.set_entry(
-				curr.data,
-				curr.id,
-				i,
-				u16(dst_off),
-				get_cell_key(curr.data, curr.id, i, curr.layout),
-			)
-		}
-
-		curr.header.cell_content_offset = u16le(dst_off)
-		curr.header.cell_count = u16le(mid)
+	if !pack_left_half(curr, mid, leaf_cell_size) {
+		return {}, .Serialization_Failed
 	}
 
 	sep := get_cell_key(right_node.data, right_node.id, 0, right_node.layout)
 	pager.mark_dirty(t.pager, curr.id)
 	pager.mark_dirty(t.pager, right_node.id)
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
+}
+
+// convert_columnar_leaf_to_row_major rewrites a columnar leaf in place as
+// row-major, decoding each row and re-serializing it. Used before a split,
+// which operates on fixed-stride row-major cells.
+@(private="file")
+convert_columnar_leaf_to_row_major :: proc(curr: ^Node) -> Error {
+	num_cols, found := detect_columnar_col_count(curr.data, curr.id)
+	if !found { return .Page_Full }
+
+	row_count := int(curr.header.cell_count)
+	boff := get_page_header_offset(curr.id)
+	rowids := make([]types.Row_ID, row_count, context.temp_allocator)
+	for i in 0 ..< row_count {
+		rid, rid_ok := cell.read_columnar_rowid(curr.data, num_cols, i, boff)
+		if !rid_ok { return .Serialization_Failed }
+		rowids[i] = rid
+	}
+
+	values := make([][]types.Value, row_count, context.temp_allocator)
+	for col_i in 0 ..< num_cols {
+		col_vals := cell.decode_column(curr.data, num_cols, col_i, boff, context.temp_allocator)
+		if col_vals == nil { return .Serialization_Failed }
+		for ri in 0 ..< row_count {
+			if values[ri] == nil {
+				values[ri] = make([]types.Value, num_cols, context.temp_allocator)
+			}
+			if ri < len(col_vals) {
+				values[ri][col_i] = col_vals[ri]
+			}
+		}
+	}
+
+	// Reinitialize page as row-major and insert all rows.
+	init_leaf_page(curr.data, curr.id)
+	for ri in 0 ..< row_count {
+		info := cell.compute_info(rowids[ri], values[ri])
+		off := get_page_header_offset(curr.id)
+		header := (^Leaf_Header)(raw_data(curr.data[off:]))
+		dest_off := int(header.cell_content_offset) - info.total_size
+		if dest_off < off + size_of(Leaf_Header) + (int(header.cell_count) + 1) * 2 {
+			return .Page_Full
+		}
+
+		cell.serialize(curr.data[dest_off:dest_off + info.total_size], rowids[ri], values[ri], info)
+		header.cell_content_offset = u16le(dest_off)
+		ptr_loc := off + size_of(Leaf_Header) + int(header.cell_count) * 2
+		endian.put_u16(curr.data[ptr_loc:], .Little, u16(dest_off))
+		header.cell_count = u16le(int(header.cell_count) + 1)
+	}
+	return .None
 }
 
 @(private)
@@ -235,51 +261,8 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 
 	orig_rightmost := get_right_ptr(curr.data, curr.id)
 	set_right_ptr(right_node.data, right_node.id, orig_rightmost)
-	if mid > 0 {
-		// Snapshot all original interior cell bodies to a temp buffer before
-		// repacking (interior cells are also non-offset-contiguous after splits).
-		Cell_Ref :: struct { off: int, sz: int }
-
-		refs := make([]Cell_Ref, total, context.temp_allocator)
-		total_sz := 0
-		for i in 0 ..< total {
-			off := int(get_cell_ptr(curr.data, curr.id, i, curr.layout.stride))
-			sz := interior_cell_size_from_page(curr.data, off)
-			if sz == 0 { return {}, .Serialization_Failed }
-
-			refs[i] = Cell_Ref{off = off, sz = sz}
-			total_sz += sz
-		}
-
-		buf := make([]u8, total_sz, context.temp_allocator)
-		pos := 0
-		for i in 0 ..< total {
-			copy(buf[pos:pos + refs[i].sz], curr.data[refs[i].off:refs[i].off + refs[i].sz])
-			pos += refs[i].sz
-		}
-
-		dst_off := PAGE_SIZE
-		pos = 0
-		for i in 0 ..< mid {
-			sz := refs[i].sz
-			dst_off -= sz
-			copy(curr.data[dst_off:dst_off + sz], buf[pos:pos + sz])
-			pos += sz
-			curr.layout.set_entry(
-				curr.data,
-				curr.id,
-				i,
-				u16(dst_off),
-				get_cell_key(curr.data, curr.id, i, curr.layout),
-			)
-		}
-
-		curr_int := node_interior(curr^)
-		curr_int.cell_content_offset = u16le(dst_off)
-		curr_int.cell_count = u16le(mid)
-	} else {
-		curr.header.cell_content_offset = PAGE_SIZE
-		curr.header.cell_count = 0
+	if !pack_left_half(curr, mid, interior_cell_size) {
+		return {}, .Serialization_Failed
 	}
 
 	set_right_ptr(curr.data, curr.id, child_from_mid_cell)

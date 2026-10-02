@@ -170,42 +170,8 @@ read_columnar_cell :: proc(
 		if !h_ok { return {}, false }
 		if row_index >= int(h.row_count) { return {}, false }
 
-		val: types.Value
-		if h.encoding == ENCODING_DELTA {
-			pos := base_offset + int(h.byte_offset)
-			min, n1, ok1 := varint.decode(data, pos)
-			if !ok1 { return {}, false }
-			pos += n1
-			for i := 0; i <= row_index; i += 1 {
-				delta, n2, ok2 := varint.decode(data, pos)
-				if !ok2 { return {}, false }
-
-				pos += n2
-				if i == row_index {
-					val = types.value_int(i64(i64(min) + i64(delta)))
-				}
-			}
-		} else {
-			pos := base_offset + int(h.byte_offset)
-			for i := 0; i <= row_index; i += 1 {
-				if i == row_index {
-					if pos + 8 <= base_offset + int(h.byte_offset) + int(h.byte_size) {
-						fv, fv_ok := endian.get_f64(data[pos:], .Big)
-						if fv_ok {
-							val = types.value_real(fv)
-						}
-					}
-					break
-				}
-
-				_, n, _ := varint.decode(data, pos)
-				if n > 0 {
-					pos += n
-				} else {
-					pos += 8
-				}
-			}
-		}
+		val, v_ok := decode_columnar_value(data, h, row_index, base_offset)
+		if !v_ok { return {}, false }
 		append(&scratch, val)
 	}
 	if len(scratch) != num_cols { return {}, false }
@@ -213,4 +179,82 @@ read_columnar_cell :: proc(
 	result_values := make([]types.Value, len(scratch), alloc)
 	copy(result_values, scratch[:])
 	return Cell{rowid = rowid, values = result_values, owns_data = !config.zero_copy}, true
+}
+
+// decode_columnar_value decodes column col_i's value at row_index from a
+// columnar page: DELTA columns walk the varint stream to (min + delta), RAW
+// columns walk fixed 8-byte entries (varint-length-prefixed when present).
+@(private)
+decode_columnar_value :: proc(
+	data: []u8,
+	h: Col_Header,
+	row_index: int,
+	base_offset: int,
+) -> (
+	types.Value,
+	bool,
+) {
+	if h.encoding == ENCODING_DELTA {
+		return decode_columnar_delta(data, h, row_index, base_offset)
+	}
+	return decode_columnar_raw(data, h, row_index, base_offset)
+}
+
+@(private)
+decode_columnar_delta :: proc(
+	data: []u8,
+	h: Col_Header,
+	row_index: int,
+	base_offset: int,
+) -> (
+	types.Value,
+	bool,
+) {
+	pos := base_offset + int(h.byte_offset)
+	min, n1, ok1 := varint.decode(data, pos)
+	if !ok1 { return {}, false }
+
+	pos += n1
+	for i := 0; i <= row_index; i += 1 {
+		delta, n2, ok2 := varint.decode(data, pos)
+		if !ok2 { return {}, false }
+
+		pos += n2
+		if i == row_index {
+			return types.value_int(i64(i64(min) + i64(delta))), true
+		}
+	}
+	return {}, false
+}
+
+@(private)
+decode_columnar_raw :: proc(
+	data: []u8,
+	h: Col_Header,
+	row_index: int,
+	base_offset: int,
+) -> (
+	types.Value,
+	bool,
+) {
+	col_end := base_offset + int(h.byte_offset) + int(h.byte_size)
+	pos := base_offset + int(h.byte_offset)
+	for i := 0; i <= row_index; i += 1 {
+		if i == row_index {
+			if pos + 8 <= col_end {
+				if fv, fv_ok := endian.get_f64(data[pos:], .Big); fv_ok {
+					return types.value_real(fv), true
+				}
+			}
+			return {}, false
+		}
+
+		_, n, _ := varint.decode(data, pos)
+		if n > 0 {
+			pos += n
+		} else {
+			pos += 8
+		}
+	}
+	return {}, false
 }
