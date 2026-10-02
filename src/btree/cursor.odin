@@ -323,18 +323,13 @@ descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
 // buffer). Unneeded positions are set to Null. TEXT/BLOB for needed
 // columns are ALWAYS borrowed from the page: valid only while the cursor
 // stays on the page (single-page pin, slot-buffer reuse on eviction) —
-// clone survivors before advancing.
-//
-// Row-major pages decode via cell.deserialize_needed: zero allocations.
-// Columnar pages fall back to a full decode into the allocator with needed
-// slots cloned out of it (columnar values are int/real/Null in practice;
-// string/blob variants are cloned defensively). Fallback costs one temp
-// slice per row on columnar pages — same as cursor_get_cell today.
+// clone survivors before advancing. Zero allocations on both page kinds:
+// row-major via cell.deserialize_needed, columnar via direct needed-slot
+// reads from the cursor's sync-once decode state.
 cursor_get_cell_needed :: proc(
 	c: ^Cursor,
 	needed: []bool,
 	out_values: []types.Value,
-	allocator := context.allocator,
 ) -> (
 	rowid: types.Row_ID,
 	err: Error,
@@ -351,9 +346,8 @@ cursor_get_cell_needed :: proc(
 	if !is_leaf(node) {
 		return 0, .Invalid_Page_Header
 	}
-
 	if is_columnar(node.data, item.page_id) {
-		return cursor_get_cell_needed_columnar(c, node, item, needed, out_values, allocator)
+		return cursor_get_cell_needed_columnar(c, node, item, needed, out_values)
 	}
 
 	stride := node.layout.stride
@@ -371,8 +365,13 @@ cursor_get_cell_needed :: proc(
 }
 
 // cursor_get_cell_needed_columnar serves cursor_get_cell_needed on columnar
-// pages: full decode into the allocator, needed slots cloned/copied out,
-// temp cell destroyed. Same file so the private columnar state is in reach.
+// pages without allocating: it runs the same sync-once state machine as
+// read_columnar_cursor_cell, then reads only needed slots straight from
+// the running state (DELTA ints) or the raw f64 region — the same value
+// computation as columnar_assemble_row, minus the full-width make+copy.
+// Unneeded positions are set to Null. Columnar pages hold ints/reals/Null
+// only (no text/blob), so nothing here is borrowed or cloned. Same file
+// so the private columnar state is in reach.
 @(private="file")
 cursor_get_cell_needed_columnar :: proc(
 	c: ^Cursor,
@@ -380,49 +379,48 @@ cursor_get_cell_needed_columnar :: proc(
 	item: Cursor_Stack_Item,
 	needed: []bool,
 	out_values: []types.Value,
-	allocator: mem.Allocator,
 ) -> (
 	types.Row_ID,
 	Error,
 ) {
-	actual_alloc := allocator
-	if actual_alloc.procedure == nil {
-		actual_alloc = context.allocator
-	}
-	tmp, t_err := read_columnar_cursor_cell(c, node, item, actual_alloc)
-	if t_err != .None {
-		return 0, t_err
-	}
-	defer cell.destroy(&tmp, actual_alloc)
-	if len(tmp.values) > len(out_values) {
+	num_cols, found := detect_columnar_col_count(node.data, item.page_id)
+	if !found || int(item.cell_index) < 0 { return 0, .Cell_Not_Found }
+	// The fixed decode-state arrays are MAX_COLS wide; a wider page is
+	// corrupt — fail loudly instead of indexing past them. (The full-row
+	// assembler has the same latent exposure; this path does not.)
+	if num_cols > types.MAX_COLS || num_cols > len(out_values) {
 		return 0, .Cell_Deserialize_Failed
 	}
-	for v, i in tmp.values {
-		if i >= len(needed) || !needed[i] {
+
+	cs := cursor_col_state(c)
+	cs.num_cols = u8(num_cols)
+	if cs.rowid_pos == 0 {
+		if !columnar_sync_to_cell(c, node, item, num_cols) {
+			return 0, .Cell_Deserialize_Failed
+		}
+	}
+	for i in 0 ..< len(out_values) {
+		if i >= num_cols || i >= len(needed) || !needed[i] {
 			out_values[i] = types.value_null()
 			continue
 		}
-		#partial switch _ in v {
-		case string:
-			cloned, c_err := types.value_clone(v, actual_alloc)
-			if c_err != nil {
-				return 0, .Cell_Deserialize_Failed
+		if cs.encodings[i] == cell.ENCODING_DELTA {
+			out_values[i] = types.value_int(cs.running[i])
+			continue
+		}
+
+		pos := int(cs.offsets[i]) + int(item.cell_index) * 8
+		if pos + 8 <= len(node.data) {
+			if fv, fv_ok := endian.get_f64(node.data[pos:], .Big); fv_ok {
+				out_values[i] = types.value_real(fv)
+			} else {
+				out_values[i] = types.value_null()
 			}
-			out_values[i] = cloned
-		case []u8:
-			cloned, c_err := types.value_clone(v, actual_alloc)
-			if c_err != nil {
-				return 0, .Cell_Deserialize_Failed
-			}
-			out_values[i] = cloned
-		case:
-			out_values[i] = v
+		} else {
+			out_values[i] = types.value_null()
 		}
 	}
-	// Positions past the decoded width stay as the caller left them; the
-	// scan loop sizes `needed`/`out` to MAX_COLS so trailing slots are
-	// always overwritten per row by the caller-owned mask extension.
-	return tmp.rowid, .None
+	return types.Row_ID(cs.rowid), .None
 }
 
 // Deserialize and return the cell at the current cursor position.

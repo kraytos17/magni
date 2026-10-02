@@ -225,15 +225,17 @@ exec_select_single_data :: proc(
 		return rows_mat, cols_mat, true
 	}
 
-	// Vector scan route (Phase 2, MAGNI_VECTOR=1): same fetch contract via
-	// fetch_single_rows_vec, same finish_select tail. Excluded exactly where
-	// the aggregate tail takes over (aggregates/GROUP BY/HAVING change
-	// cardinality and resolve their own columns). Joins/subqueries/setops
-	// never reach this proc. All error paths log canonically through the
-	// shared helpers, identical to the scalar route.
+	// Vector scan route (MAGNI_VECTOR=1): same fetch contract via
+	// fetch_single_rows_vec. Fused rows (no ORDER BY, explicit projection)
+	// take finish_projected (dedup + limit only); full-width rows take the
+	// shared finish_select tail. Excluded exactly where the aggregate tail
+	// takes over (aggregates/GROUP BY/HAVING change cardinality and resolve
+	// their own columns). Joins/subqueries/setops never reach this proc.
+	// All error paths log canonically through the shared helpers,
+	// identical to the scalar route.
 	if len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil &&
 	   vec_scan_enabled() {
-		vrows, vcols, vranges, v_ok := fetch_single_rows_vec(
+		vrows, vcols, vranges, vproj, v_ok := fetch_single_rows_vec(
 			t,
 			table^,
 			tbl_name,
@@ -242,6 +244,9 @@ exec_select_single_data :: proc(
 			cache,
 		)
 		if !v_ok { return nil, nil, false }
+		if vproj {
+			return finish_projected(stmt, vrows, vcols)
+		}
 		return finish_select(stmt, vrows, vcols, vranges)
 	}
 
@@ -308,6 +313,29 @@ finish_select :: proc(
 	}
 
 	out := proj[:]
+	if stmt.is_distinct { out = dedup_rows(out) }
+
+	out = apply_limit_offset(stmt, out)
+	return out, proj_cols, true
+}
+
+// finish_projected is the post-scan tail for vector rows that arrived
+// already projected (fused in scan_table_vec, no-ORDER-BY only): DISTINCT
+// dedup then LIMIT/OFFSET, in that order — the same tail finish_select
+// applies after its own projection. It must never run on full-width rows
+// and finish_select must never run on pre-projected rows (double
+// projection). Used only by the vec route in exec_select_single_data.
+@(private)
+finish_projected :: proc(
+	stmt: parser.Select_Stmt,
+	rows: []Row_Entry,
+	proj_cols: []types.Column,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
+	out := rows
 	if stmt.is_distinct { out = dedup_rows(out) }
 
 	out = apply_limit_offset(stmt, out)

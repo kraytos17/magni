@@ -35,10 +35,9 @@ import "src:schema"
 import "src:types"
 
 // vec_scan_enabled reports whether the vector scan path may be used.
-// Default off (empty/unset); set MAGNI_VECTOR=1 to enable for A/B runs.
-// Mirrors the MAGNI_PAGER_STATS opt-in pattern.
+// Default on; set MAGNI_VECTOR=0 to force the scalar path.
 vec_scan_enabled :: proc() -> bool {
-	return os.get_env("MAGNI_VECTOR", context.temp_allocator) == "1"
+	return os.get_env("MAGNI_VECTOR", context.temp_allocator) != "0"
 }
 
 // collect_needed_cols returns a length-total_cols mask of the columns a
@@ -99,9 +98,17 @@ collect_node_cols :: proc(node: ^Resolved_Node, needed: []bool) {
 // full-width buffer via the existing scalar evaluators (unneeded slots are
 // Null, and every referenced column is decoded by construction of the
 // needed mask), so filter semantics are identical by reuse, not by
-// reimplementation. Survivors materialize full-width with text/blob
-// cloned; finish_select (projection/sort/distinct/limit) runs unchanged
-// downstream, exactly as on scalar rows.
+// reimplementation.
+//
+// Projection fusion: when the statement has no ORDER BY and projects
+// explicit columns, survivors materialize directly at projected width and
+// `projected` returns true — the caller must use finish_projected (dedup +
+// limit only), never finish_select (which would project twice). With
+// ORDER BY, survivors stay full-width (sort runs on full rows before
+// projection, so sort keys must survive) and `projected` is false.
+// SELECT * is always full-width. Text/blob clone before the cursor moves
+// in both modes; a display slot duplicated in the projection (SELECT a, a)
+// clones once and shares the header, exactly like finish_select's copy.
 scan_table_vec :: proc(
 	tree: ^btree.Tree,
 	table: ^types.Table,
@@ -113,6 +120,8 @@ scan_table_vec :: proc(
 	table_ranges: []Table_Col_Range = nil,
 ) -> (
 	rows: []Row_Entry,
+	out_cols: []types.Column,
+	projected: bool,
 	err: bool,
 ) {
 	plan, plan_ok := build_scan_plan(
@@ -126,7 +135,7 @@ scan_table_vec :: proc(
 		table_ranges,
 	)
 	if !plan_ok {
-		return nil, true
+		return nil, nil, false, true
 	}
 
 	// Needed mask: filter columns from the resolved plan plus sort keys
@@ -136,23 +145,26 @@ scan_table_vec :: proc(
 	// so every column finish_select might read must decode).
 	total_cols := len(table.columns)
 	resolver := build_column_resolver(table.columns, table_ranges)
+	has_order := false
 	sort_indices: []int
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		has_order = true
 		si, si_ok := resolve_sort_indices(order_clause, resolver)
 		if !si_ok {
 			// Logged canonically inside resolve_sort_indices, same outcome
 			// as the scalar path failing later in sort_rows.
-			return nil, true
+			return nil, nil, false, true
 		}
 		sort_indices = si
 	}
+
 	proj_indices: []int
 	if len(stmt.columns) > 0 {
 		pi, pi_ok := build_display_indices(stmt.columns, resolver, len(table.columns))
 		if !pi_ok {
 			// Logged canonically inside build_display_indices, same
 			// outcome as the scalar finish_select failing on projection.
-			return nil, true
+			return nil, nil, false, true
 		}
 		proj_indices = pi
 	} else {
@@ -164,10 +176,12 @@ scan_table_vec :: proc(
 			proj_indices[i] = i
 		}
 	}
+
 	filter_root: ^Resolved_Node
 	if f, has_f := plan.filter.?; has_f {
 		filter_root = f.root
 	}
+
 	needed := collect_needed_cols(filter_root, proj_indices, sort_indices, total_cols, allocator)
 	// Extend to MAX_COLS with true: a row whose serial count exceeds the
 	// table width (schema drift, impossible mid-statement) then decodes
@@ -182,15 +196,34 @@ scan_table_vec :: proc(
 
 	r := make([dynamic]Row_Entry, allocator)
 	cursor, c_err := btree.cursor_start(tree, allocator)
-	if c_err != .None { return nil, true }
+	if c_err != .None { return nil, nil, false, true }
 	if plan.skip_start > 0 {
 		if seek_err := btree.cursor_seek_to_page(&cursor, plan.skip_start); seek_err != .None {
 			btree.cursor_destroy(&cursor)
 			cursor, c_err = btree.cursor_start(tree, allocator)
-			if c_err != .None { return nil, true }
+			if c_err != .None { return nil, nil, false, true }
 		}
 	}
 	defer btree.cursor_destroy(&cursor)
+
+	// Fused projection: valid only without ORDER BY. finish_select sorts
+	// full rows before projecting (so out-of-projection sort keys
+	// resolve); projecting first would silently drop them. With ORDER BY
+	// the scan stays full-width and finish_select runs unchanged.
+	fused := !has_order && len(stmt.columns) > 0
+	out_width := total_cols if !fused else len(proj_indices)
+	proj_cols: []types.Column
+	if fused {
+		proj_cols = make([]types.Column, len(proj_indices), allocator)
+		for idx, i in proj_indices {
+			proj_cols[i] = table.columns[idx]
+			if i < len(stmt.aliases) && stmt.aliases[i] != "" {
+				proj_cols[i].name = stmt.aliases[i]
+			}
+		}
+	} else {
+		proj_cols = table.columns
+	}
 
 	row_buf: [types.MAX_COLS]types.Value
 	for cursor.is_valid {
@@ -198,7 +231,6 @@ scan_table_vec :: proc(
 			cp := cursor.path[cursor.depth - 1].page_id
 			if cp > plan.skip_end { break }
 		}
-
 		// Full-width clear: deserialize_needed writes only 0..<serial_count,
 		// so without this a short row could inherit a previous row's tail
 		// into a filter position. Ten stores per row; negligible next to
@@ -206,7 +238,8 @@ scan_table_vec :: proc(
 		for i in 0 ..< len(row_buf) {
 			row_buf[i] = types.value_null()
 		}
-		rowid, get_err := btree.cursor_get_cell_needed(&cursor, ext, row_buf[:], allocator)
+
+		rowid, get_err := btree.cursor_get_cell_needed(&cursor, ext, row_buf[:])
 		if get_err != .None {
 			btree.cursor_advance(&cursor)
 			continue
@@ -220,32 +253,61 @@ scan_table_vec :: proc(
 
 		// Survivor: one owned slice, text/blob cloned before the cursor
 		// moves (borrows die on page change). Matches scalar ownership:
-		// values live in `allocator`, same as scan_table entries.
-		vals := make([]types.Value, total_cols, allocator)
-		for i in 0 ..< total_cols {
-			#partial switch _ in row_buf[i] {
-			case string, []u8:
-				cloned, c_err := types.value_clone(row_buf[i], allocator)
-				if c_err != nil {
-					delete(vals, allocator)
-					return nil, true
+		// values live in `allocator`, same as scan_table entries. Fused
+		// mode writes display position i from table column proj_indices[i];
+		// a column projected twice (SELECT a, a) clones once and shares
+		// the header, exactly like finish_select's copy.
+		vals := make([]types.Value, out_width, allocator)
+		if fused {
+			cloned_cols: [types.MAX_COLS]bool
+			for idx, i in proj_indices {
+				src := row_buf[idx]
+				#partial switch _ in src {
+				case string, []u8:
+					if !cloned_cols[idx] {
+						c, c_err := types.value_clone(src, allocator)
+						if c_err != nil {
+							delete(vals, allocator)
+							return nil, nil, false, true
+						}
+
+						row_buf[idx] = c
+						cloned_cols[idx] = true
+					}
+					vals[i] = row_buf[idx]
+				case:
+					vals[i] = src
 				}
-				vals[i] = cloned
-			case:
-				vals[i] = row_buf[i]
+			}
+		} else {
+			for i in 0 ..< total_cols {
+				#partial switch _ in row_buf[i] {
+				case string, []u8:
+					cloned, c_err := types.value_clone(row_buf[i], allocator)
+					if c_err != nil {
+						delete(vals, allocator)
+						return nil, nil, false, true
+					}
+					vals[i] = cloned
+				case:
+					vals[i] = row_buf[i]
+				}
 			}
 		}
+
 		append(&r, Row_Entry{rowid, vals})
 		if limit, has_limit := plan.max_rows.?; has_limit && u64(len(r)) >= limit { break }
 		btree.cursor_advance(&cursor)
 	}
-
-	return r[:], false
+	return r[:], proj_cols, fused, false
 }
 
 // fetch_single_rows_vec mirrors fetch_single_rows (PK-seek bypass, shared
 // limit_pushable rule, same range descriptor) but scans through
-// scan_table_vec. Same returns, same error shape.
+// scan_table_vec. Same returns plus the projected flag: true when rows are
+// already at projected width (caller must use finish_projected, never
+// finish_select). The PK-seek bypass returns full-width rows exactly like
+// the scalar path, so projected is false there.
 fetch_single_rows_vec :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
@@ -254,10 +316,11 @@ fetch_single_rows_vec :: proc(
 	allocator := context.allocator,
 	cache: ^schema.Table_Cache = nil,
 ) -> (
-	[]Row_Entry,
-	[]types.Column,
-	[]Table_Col_Range,
-	bool,
+	rows: []Row_Entry,
+	cols: []types.Column,
+	ranges: []Table_Col_Range,
+	projected: bool,
+	ok: bool,
 ) {
 	tbl := table
 	table_tree := btree.init(t.pager, tbl.root_page)
@@ -267,7 +330,6 @@ fetch_single_rows_vec :: proc(
 	}
 
 	pushable := limit_pushable(stmt, has_order)
-
 	max_rows := stmt.limit if pushable else nil
 	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
 	single_range := []Table_Col_Range {
@@ -276,11 +338,19 @@ fetch_single_rows_vec :: proc(
 
 	if wc, has_wc := stmt.where_clause.?; has_wc {
 		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
-			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
+			srows, scols, sranges, sok := seek_single_row(
+				&table_tree,
+				rowid,
+				tbl.columns,
+				single_range,
+				allocator,
+			)
+			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
+			return
 		}
 	}
 
-	rows, scan_err := scan_table_vec(
+	vrows, out_cols, vproj, scan_err := scan_table_vec(
 		&table_tree,
 		&tbl,
 		stmt,
@@ -290,6 +360,16 @@ fetch_single_rows_vec :: proc(
 		cache,
 		single_range,
 	)
-	if scan_err { return nil, nil, nil, false }
-	return rows, tbl.columns, single_range, true
+	if scan_err { return nil, nil, nil, false, false }
+	if vproj {
+		// Rows are at projected width: redescribe the range so any
+		// downstream resolver sees a consistent (cols, ranges) pair.
+		// finish_projected itself resolves nothing (no sort/projection).
+		single_range = []Table_Col_Range {
+			{table_name = from_name, start_col = 0, col_count = len(out_cols)},
+		}
+	}
+
+	rows, cols, ranges, projected, ok = vrows, out_cols, single_range, vproj, true
+	return
 }

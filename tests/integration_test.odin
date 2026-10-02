@@ -3436,6 +3436,10 @@ test_vector_scan_differential :: proc(t: ^testing.T) {
 		"SELECT id FROM t WHERE v > 50 LIMIT 5 OFFSET 10;",
 		"SELECT r FROM t WHERE r > 100.0;",
 		"SELECT id FROM t WHERE name = 'n42';",
+		"SELECT v, v FROM t WHERE v > 200;",
+		"SELECT name FROM t WHERE v > 100;",
+		"SELECT * FROM t ORDER BY id;",
+		"SELECT v, id FROM t WHERE v < 100 ORDER BY v;",
 	}
 
 	vec_rows_equal :: proc(a, b: db.Query_Result) -> bool {
@@ -3464,4 +3468,75 @@ test_vector_scan_differential :: proc(t: ^testing.T) {
 		testing.expect(t, vec_rows_equal(scalar, vec), fmt.tprintf("vec/scalar mismatch q%d: %s", i, q))
 	}
 	os.unset_env("MAGNI_VECTOR")
+}
+
+// Parity: cursor_get_cell_needed on a columnar page must return the same
+// values as the full decode for needed slots (and Null elsewhere), with
+// identical rowids — without allocating. Covers DELTA-int and RAW-real
+// columns under first-only, second-only, and empty masks.
+@(test)
+test_columnar_needed_decode_parity :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	ctx := setup_tree(t, "colneeded")
+	defer teardown_tree(&ctx)
+
+	rows_in := [][]types.Value {
+		{types.value_int(10), types.value_real(1.5)},
+		{types.value_int(20), types.value_real(2.5)},
+		{types.value_int(30), types.value_real(3.5)},
+		{types.value_int(40), types.value_real(4.5)},
+	}
+	for r, i in rows_in {
+		err := btree.tree_insert(&ctx.tree, types.Row_ID(i + 1), r)
+		testing.expect(t, err == .None, fmt.tprintf("insert row %d", i + 1))
+	}
+
+	pg, pg_err := pager.get_page(ctx.pager, 1)
+	testing.expect(t, pg_err == .None, "get page 1")
+	defer pager.unpin_page(ctx.pager, 1)
+
+	off := btree.get_page_header_offset(1)
+	rowids := []types.Row_ID{1, 2, 3, 4}
+	cols := []types.Column{{name = "id", type = .INTEGER}, {name = "v", type = .REAL}}
+	testing.expect(t, cell.serialize_columnar(pg.data[off:], rowids, rows_in, cols), "to columnar")
+	hdr := btree.get_leaf_header(pg.data, 1)
+	hdr.page_type = .LEAF_TABLE_COLUMNAR
+	hdr.cell_count = u16le(4)
+	hdr.cell_content_offset = u16le(8 + len(cols) * 12)
+	pager.mark_dirty(ctx.pager, 1)
+
+	masks := [][]bool{{true, false}, {false, true}, {true, true}, {false, false}}
+	for mask, mi in masks {
+		c, c_err := btree.cursor_start(&ctx.tree)
+		testing.expect(t, c_err == .None, "cursor start")
+		n := 0
+		for c.is_valid {
+			full, f_err := btree.cursor_get_cell(&c, context.temp_allocator)
+			testing.expect(t, f_err == .None, "full decode")
+			out_buf: [types.MAX_COLS]types.Value
+			rid, n_err := btree.cursor_get_cell_needed(&c, mask, out_buf[:])
+			testing.expect(t, n_err == .None, fmt.tprintf("mask %d needed decode row %d", mi, n))
+			testing.expect_value(t, rid, full.rowid)
+			for i in 0 ..< len(rows_in[0]) {
+				if mask[i] {
+					testing.expect(
+						t,
+						types.value_compare(out_buf[i], full.values[i]),
+						fmt.tprintf("mask %d row %d col %d parity", mi, n, i),
+					)
+				} else {
+					testing.expect(
+						t,
+						types.is_null(out_buf[i]),
+						fmt.tprintf("mask %d row %d col %d must be Null", mi, n, i),
+					)
+				}
+			}
+			btree.cursor_advance(&c)
+			cell.destroy(&full, context.temp_allocator)
+			n += 1
+		}
+		btree.cursor_destroy(&c)
+		testing.expect_value(t, n, 4)
+	}
 }
