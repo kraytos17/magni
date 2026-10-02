@@ -261,65 +261,6 @@ get_cell_count :: #force_inline proc "contextless" (data: []u8, page_id: u32) ->
 	return hdr != nil ? int(hdr.cell_count) : 0
 }
 
-get_cell_ptr :: #force_inline proc "contextless" (
-	data: []u8,
-	page_id: u32,
-	i: int,
-	stride: int,
-) -> u16 {
-	off := get_page_header_offset(page_id)
-	hdr := get_header(data, page_id)
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off + hdr_sz
-	return u16((^u16le)(raw_data(data[start + i * stride:]))^)
-}
-
-get_cell_key :: proc(data: []u8, page_id: u32, i: int, layout: ^Cell_Layout) -> types.Row_ID {
-	return layout.get_key(data, page_id, i)
-}
-
-insert_cell_at :: proc "contextless" (
-	data: []u8,
-	page_id: u32,
-	i: int,
-	ptr: u16,
-	key: types.Row_ID,
-	stride: int,
-) {
-	off := get_page_header_offset(page_id)
-	hdr := get_header(data, page_id)
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off + hdr_sz
-	cell_count := int(hdr.cell_count)
-
-	// Shift entries [i..cell_count) right by 1
-	if i < cell_count {
-		src := data[start + i * stride:start + cell_count * stride]
-		dst := data[start + (i + 1) * stride:]
-		copy(dst, src)
-	}
-
-	// Write new entry
-	entry := (^Cell_Entry)(raw_data(data[start + i * stride:]))
-	entry^ = Cell_Entry {
-		ptr = Cell_Pointer(ptr),
-		key = key,
-	}
-}
-
-delete_cell_at :: proc "contextless" (data: []u8, page_id: u32, i: int, stride: int) {
-	off := get_page_header_offset(page_id)
-	hdr := get_header(data, page_id)
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off + hdr_sz
-	cell_count := int(hdr.cell_count)
-	if i < cell_count - 1 {
-		src := data[start + (i + 1) * stride:start + cell_count * stride]
-		dst := data[start + i * stride:]
-		copy(dst, src)
-	}
-}
-
 entry_area_end :: proc(data: []u8, page_id: u32, stride: int) -> int {
 	off := get_page_header_offset(page_id)
 	hdr := get_header(data, page_id)

@@ -22,6 +22,10 @@ Cursor :: struct {
 	cached_page_data : []u8,
 	cached_cell_count: u16,
 	cached_is_leaf   : bool,
+	// Resolved layout for the cached page (one interface hop per page
+	// visit, not per cell). Set on every cache fill; the hit path reuses
+	// it without re-resolving.
+	cached_layout    : Page_Layout,
 	// Incremental columnar decode state, nil unless positioned on a
 	// columnar page — row-major scans don't pay for it. Statement-scoped
 	// (temp arena); freed on page-leave/destroy, else reclaimed with it.
@@ -77,8 +81,9 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 
 		if is_leaf(node) { break }
 		if node.header.cell_count > 0 {
-			stride := node.layout.stride
-			ptr := get_cell_ptr(node.data, curr, 0, stride)
+			ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, Page_Id(curr), 0)
+			if p_err != .None { return .Invalid_Cell_Pointer }
+
 			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
 			if !ok { return .Invalid_Cell_Pointer }
 			curr = child
@@ -162,6 +167,7 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 	c.cached_page_data = nil
 	c.cached_cell_count = 0
 	c.cached_is_leaf = false
+	c.cached_layout = {}
 	cursor_col_clear(c)
 
 	curr := c.tree.root
@@ -192,7 +198,9 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 			}
 
 			c.depth += 1
-			ptr := get_cell_ptr(node.data, curr, idx, node.layout.stride)
+			ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, Page_Id(curr), idx)
+			if p_err != .None { return .Invalid_Cell_Pointer }
+
 			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
 			if !ok { return .Invalid_Cell_Pointer }
 			curr = child
@@ -218,11 +226,10 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 @(private = "file", require_results)
 load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	if intrinsics.likely(page_id == c.cached_page_id) {
-		return node_from_bytes(
-			page_id,
-			c.cached_page_data,
-			get_layout(c.tree.pager.page_format_version),
-		)
+		// Hit: reuse the cached bytes AND the resolved layout (no
+		// re-resolve per cell). cached_layout is set on every fill below
+		// and cleared on seek; the hit path always follows a fill.
+		return node_from_bytes(page_id, c.cached_page_data, c.cached_layout)
 	}
 	if c.cached_page_id != 0 {
 		pager.unpin_page(c.tree.pager, c.cached_page_id)
@@ -235,9 +242,13 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	c.cached_page_data = page.data
 	cursor_col_clear(c)
 
-	n, n_err := node_from_bytes(page_id, page.data, get_layout(c.tree.pager.page_format_version))
+	layout, _, l_err := layout_for_page(page.data, Page_Id(page_id))
+	if l_err != .None { return {}, l_err }
+
+	n, n_err := node_from_bytes(page_id, page.data, layout)
 	if n_err != .None { return {}, n_err }
 
+	c.cached_layout = layout
 	c.cached_cell_count = u16(n.header.cell_count)
 	c.cached_is_leaf = is_leaf(n)
 	return n, .None
@@ -316,8 +327,13 @@ descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
 				if int(item.cell_index) == limit {
 					child_page = get_right_ptr(node.data, item.page_id)
 				} else {
-					stride := node.layout.stride
-					ptr := get_cell_ptr(node.data, item.page_id, int(item.cell_index), stride)
+					nid := Page_Id(item.page_id)
+					ptr, p_err := node.layout.vtable.cell_ptr_at(
+						node.data,
+						nid,
+						int(item.cell_index),
+					)
+					if p_err != .None { return .Invalid_Cell_Pointer }
 					child_page, _ = endian.get_u32(node.data[int(ptr):], .Big)
 				}
 				return drill_down_leftmost(c, child_page)
@@ -363,13 +379,15 @@ cursor_get_cell_needed :: proc(
 		return cursor_get_cell_needed_columnar(c, node, item, needed, out_values)
 	}
 
-	stride := node.layout.stride
+	nid := Page_Id(item.page_id)
 	cell_count := get_cell_count(node.data, item.page_id)
 	if int(item.cell_index) >= cell_count {
 		return 0, .Cell_Not_Found
 	}
 
-	cell_ptr := get_cell_ptr(node.data, item.page_id, int(item.cell_index), stride)
+	cell_ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, int(item.cell_index))
+	if p_err != .None { return 0, .Cell_Deserialize_Failed }
+
 	rid, _, ok := cell.deserialize_needed(node.data, int(cell_ptr), needed, out_values)
 	if !ok {
 		return 0, .Cell_Deserialize_Failed
@@ -459,13 +477,15 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 		return read_columnar_cursor_cell(c, node, item, actual_alloc)
 	}
 
-	stride := node.layout.stride
+	nid := Page_Id(item.page_id)
 	cell_count := get_cell_count(node.data, item.page_id)
 	if int(item.cell_index) >= cell_count {
 		return {}, .Cell_Not_Found
 	}
 
-	cell_ptr := get_cell_ptr(node.data, item.page_id, int(item.cell_index), stride)
+	cell_ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, int(item.cell_index))
+	if p_err != .None { return {}, .Cell_Deserialize_Failed }
+
 	cell_cfg := cell.Config {
 		allocator = actual_alloc,
 		zero_copy = c.tree.config.zero_copy,

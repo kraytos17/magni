@@ -194,7 +194,9 @@ scan_page_int_range :: proc(
 	max_val := min(i64)
 	if col_index == -1 { return min_val, max_val }
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(node.data, page_id, i, node.layout.stride)
+		ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, Page_Id(page_id), i)
+		if p_err != .None { continue }
+
 		c, _, ok := cell.deserialize(
 			node.data,
 			int(ptr),

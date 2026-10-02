@@ -10,7 +10,9 @@ import "src:types"
 // next garbage-collection pass. It is an O(n) maintenance operation intended
 // for an explicit VACUUM, not for hot-path use.
 tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
-	layout := get_layout(t.pager.page_format_version)
+	layout, l_err := layout_for_version(t.pager.page_format_version)
+	if l_err != .None { return 0, l_err }
+
 	handles := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
 	vc := vacuum_ctx {
 		t          = t,
@@ -89,7 +91,7 @@ Node_Handle :: struct {
 @(private)
 vacuum_ctx :: struct {
 	t         : ^Tree,
-	layout    : ^Cell_Layout,
+	layout    : Page_Layout,
 	leaf      : Node,
 	leaf_empty: bool,
 	handles   : ^[dynamic]Node_Handle,

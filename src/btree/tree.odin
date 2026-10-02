@@ -49,7 +49,7 @@ Node :: struct {
 	id    : u32,
 	data  : []u8,
 	header: ^Page_Header,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 }
 
 Insert_COW_Result :: struct #all_or_none {
@@ -96,11 +96,14 @@ unpin_node :: #force_inline proc(t: ^Tree, n: Node) { pager.unpin_page(t.pager, 
 load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	page, err := pager.get_page(t.pager, page_id)
 	if err != nil { return {}, .Page_Read_Failed }
-	return node_from_bytes(page_id, page.data, get_layout(t.pager.page_format_version))
+
+	layout, _, l_err := layout_for_page(page.data, Page_Id(page_id))
+	if l_err != .None { return {}, l_err }
+	return node_from_bytes(page_id, page.data, layout)
 }
 
 @(private)
-node_from_bytes :: proc(id: u32, data: []u8, layout: ^Cell_Layout) -> (Node, Error) {
+node_from_bytes :: proc(id: u32, data: []u8, layout: Page_Layout) -> (Node, Error) {
 	common_hdr := get_header(data, id)
 	if common_hdr == nil { return {}, .Invalid_Page_Header }
 	return Node{id = id, data = data, header = common_hdr, layout = layout}, .None
@@ -111,31 +114,26 @@ leaf_lower_bound :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	target: types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> (
 	int,
 	bool,
 ) {
 	cell_count := get_cell_count(data, page_id)
+	pid := Page_Id(page_id)
 	left, right := 0, cell_count
 	for left < right {
 		mid := left + (right - left) / 2
-		if get_cell_key(data, page_id, mid, layout) <
-		   target { left = mid + 1 } else { right = mid }
+		k, k_err := layout.vtable.key_at(data, pid, mid)
+		if k_err != .None { return left, false }
+		if k < target { left = mid + 1 } else { right = mid }
 	}
 	return left, true
 }
 
 @(private)
-node_find_child :: #force_inline proc(
-	n: ^Node,
-	key: types.Row_ID,
-	layout: ^Cell_Layout,
-) -> (
-	u32,
-	int,
-) {
-	return node_find_child_data(n.data, n.id, key, layout)
+node_find_child :: #force_inline proc(n: ^Node, key: types.Row_ID) -> (u32, int) {
+	return node_find_child_data(n.data, n.id, key, n.layout)
 }
 
 @(private, require_results)
@@ -154,10 +152,16 @@ node_insert_leaf_cell :: proc(
 		return .Cell_Deserialize_Failed
 	}
 
+	rl, _, r_err := layout_for_page(n.data, Page_Id(n.id))
+	if r_err != .None { return r_err }
+
+	n.layout = rl
 	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid, n.layout)
 	if t.config.check_duplicates {
 		if lb_ok && idx < int(n.header.cell_count) {
-			ptr := get_cell_ptr(n.data, n.id, idx, n.layout.stride)
+			ptr, p_err := n.layout.vtable.cell_ptr_at(n.data, Page_Id(n.id), idx)
+			if p_err != .None { return .Invalid_Cell_Pointer }
+
 			rid, rid_ok := cell.get_rowid(n.data, int(ptr))
 			if intrinsics.unlikely(rid_ok && rid == rowid) { return .Duplicate_Rowid }
 		}
@@ -173,8 +177,16 @@ node_insert_leaf_cell :: proc(
 	if free_off != 0 {
 		bytes_written, ok := cell.serialize(n.data[int(free_off):], rowid, values, cinfo)
 		if !ok || bytes_written != cinfo.total_size { return .Serialization_Failed }
+		if s_err := n.layout.vtable.slot_insert(
+			n.data,
+			Page_Id(n.id),
+			idx,
+			rowid,
+			Cell_Off(u16(free_off)),
+		); s_err != .None {
+			return s_err
+		}
 
-		insert_cell_at(n.data, n.id, idx, u16(free_off), rowid, n.layout.stride)
 		n.header.cell_count += 1
 		pager.mark_dirty(t.pager, n.id)
 		invalidate_page_int_range(t, n.id)
@@ -183,8 +195,8 @@ node_insert_leaf_cell :: proc(
 
 	base_offset := get_page_header_offset(n.id)
 	header_size := page_header_size(n.header.page_type)
-	entry_sz := n.layout.stride
-	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * entry_sz
+	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * CELL_ENTRY_STRIDE
+
 	if ptr_area_end >= int(n.header.cell_content_offset) { return .Page_Full }
 	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end {
 		return .Page_Full
@@ -193,8 +205,16 @@ node_insert_leaf_cell :: proc(
 	new_offset := int(n.header.cell_content_offset) - cinfo.total_size
 	bytes_written, ok := cell.serialize(n.data[new_offset:], rowid, values, cinfo)
 	if !ok || bytes_written != cinfo.total_size { return .Serialization_Failed }
+	if s_err := n.layout.vtable.slot_insert(
+		n.data,
+		Page_Id(n.id),
+		idx,
+		rowid,
+		Cell_Off(u16(new_offset)),
+	); s_err != .None {
+		return s_err
+	}
 
-	insert_cell_at(n.data, n.id, idx, u16(new_offset), rowid, n.layout.stride)
 	n.header.cell_count += 1
 	n.header.cell_content_offset = u16le(new_offset)
 	pager.mark_dirty(t.pager, n.id)
@@ -203,17 +223,14 @@ node_insert_leaf_cell :: proc(
 }
 
 @(private, require_results)
-node_update_child_ptr :: proc(
-	n: ^Node,
-	key: types.Row_ID,
-	new_sibling: u32,
-	layout: ^Cell_Layout,
-) -> bool {
+node_update_child_ptr :: proc(n: ^Node, key: types.Row_ID, new_sibling: u32) -> bool {
 	cell_count := get_cell_count(n.data, n.id)
-	idx, ok := interior_lower_bound(n.data, n.id, key, layout)
+	idx, ok := interior_lower_bound(n.data, n.id, key, n.layout)
 	if ok && idx < cell_count {
-		cell_offset := int(get_cell_ptr(n.data, n.id, idx, layout.stride))
-		endian.put_u32(n.data[cell_offset:], .Big, new_sibling)
+		cell_offset, c_err := n.layout.vtable.cell_ptr_at(n.data, Page_Id(n.id), idx)
+		if c_err != .None { return false }
+
+		endian.put_u32(n.data[int(cell_offset):], .Big, new_sibling)
 		return true
 	}
 	if idx == cell_count {
@@ -227,7 +244,7 @@ node_update_child_ptr :: proc(
 node_find_insert_index :: #force_inline proc(
 	n: ^Node,
 	target_rowid: types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> int {
 	idx, _ := leaf_lower_bound(n.data, n.id, target_rowid, layout)
 	return idx
@@ -326,7 +343,7 @@ insert_into_interior :: proc(
 	Insert_COW_Result,
 	Error,
 ) {
-	child_id, child_idx := node_find_child(curr, rowid, curr.layout)
+	child_id, child_idx := node_find_child(curr, rowid)
 	was_rightmost := child_idx == -1
 	child_result, c_err := insert_recursive(t, child_id, rowid, values, cow)
 	if c_err != .None { return {}, c_err }
@@ -335,7 +352,7 @@ insert_into_interior :: proc(
 	}
 	if !child_result.did_split {
 		if cow && child_result.new_page != child_id {
-			if !node_update_child_ptr(curr, rowid, child_result.new_page, curr.layout) {
+			if !node_update_child_ptr(curr, rowid, child_result.new_page) {
 				return {}, .Invalid_Cell_Pointer
 			}
 		}
@@ -391,14 +408,24 @@ handle_interior_child_split :: proc(
 			return {}, .Invalid_Page_Header
 		}
 
-		stride := curr.layout.stride
-		cell_offset := int(get_cell_ptr(curr.data, curr.id, idx, stride))
+		cell_ptr, cp_err := curr.layout.vtable.cell_ptr_at(curr.data, Page_Id(curr.id), idx)
+		if cp_err != .None { return {}, .Invalid_Cell_Pointer }
+
+		cell_offset := int(cell_ptr)
 		old_sep_u64, _, ok := varint.decode(curr.data, cell_offset + 4)
 		if !ok { return {}, .Invalid_Cell_Pointer }
 
 		endian.put_u32(curr.data[cell_offset:], .Big, child_result.new_page)
 		varint.encode(curr.data[cell_offset + 4:], u64(child_result.split_key))
-		curr.layout.set_entry(curr.data, curr.id, idx, u16(cell_offset), child_result.split_key)
+		if rp_err := curr.layout.vtable.slot_repoint(
+			curr.data,
+			Page_Id(curr.id),
+			idx,
+			child_result.split_key,
+			Cell_Off(u16(cell_offset)),
+		); rp_err != .None {
+			return {}, rp_err
+		}
 		insert_key = types.Row_ID(old_sep_u64)
 	}
 
@@ -458,13 +485,16 @@ rowid_exists :: proc(
 	data: []u8,
 	page_id: u32,
 	target_rowid: types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> bool {
 	cell_count := get_cell_count(data, page_id)
 	idx, ok := leaf_lower_bound(data, page_id, target_rowid, layout)
 	if !ok || idx >= cell_count { return false }
 
-	rowid, ok2 := cell.get_rowid(data, int(get_cell_ptr(data, page_id, idx, layout.stride)))
+	ptr, p_err := layout.vtable.cell_ptr_at(data, Page_Id(page_id), idx)
+	if p_err != .None { return false }
+
+	rowid, ok2 := cell.get_rowid(data, int(ptr))
 	return ok2 && rowid == target_rowid
 }
 
@@ -535,7 +565,7 @@ node_find_child_data :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> (
 	u32,
 	int,
@@ -546,7 +576,9 @@ node_find_child_data :: #force_inline proc(
 	idx, ok := interior_lower_bound(data, page_id, key, layout)
 	if !ok || idx >= cell_count { return get_right_ptr(data, page_id), -1 }
 
-	ptr := get_cell_ptr(data, page_id, idx, layout.stride)
+	ptr, p_err := layout.vtable.cell_ptr_at(data, Page_Id(page_id), idx)
+	if p_err != .None { return get_right_ptr(data, page_id), -1 }
+
 	child, _ := endian.get_u32(data[int(ptr):], .Big)
 	return child, idx
 }
@@ -558,7 +590,7 @@ descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 
 Descend_Key_Ctx :: struct {
 	key   : types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 }
 
 @(private = "file")
@@ -572,9 +604,12 @@ descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 // Returns .Cell_Not_Found if the row doesn't exist.
 @(require_results)
 tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cell.Cell, Error) {
+	nav_layout, nav_err := layout_for_version(t.pager.page_format_version)
+	if nav_err != .None { return {}, nav_err }
+
 	dk := Descend_Key_Ctx {
 		key    = key,
-		layout = get_layout(t.pager.page_format_version),
+		layout = nav_layout,
 	}
 
 	leaf, err := descend_to_leaf(t, descend_by_key, &dk)
@@ -610,13 +645,15 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 		return {}, .Cell_Not_Found
 	}
 
-	stride := leaf.layout.stride
+	lid := Page_Id(leaf.id)
 	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key, leaf.layout)
 	if !ok { return {}, .Invalid_Cell_Pointer }
 
 	cell_count := get_cell_count(leaf.data, leaf.id)
 	if idx < cell_count {
-		ptr := get_cell_ptr(leaf.data, leaf.id, idx, stride)
+		ptr, p_err := leaf.layout.vtable.cell_ptr_at(leaf.data, lid, idx)
+		if p_err != .None { return {}, .Invalid_Cell_Pointer }
+
 		rid, ok1 := cell.get_rowid(leaf.data, int(ptr))
 		if ok1 && rid == key {
 			c, _, des_ok := cell.deserialize(
@@ -636,8 +673,13 @@ tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
 	defer unpin_node(t, leaf)
 	if leaf.header.cell_count == 0 { result = 1; return }
 
-	stride := leaf.layout.stride
-	last_ptr := get_cell_ptr(leaf.data, leaf.id, int(leaf.header.cell_count) - 1, stride)
+	last_ptr, p_err := leaf.layout.vtable.cell_ptr_at(
+		leaf.data,
+		Page_Id(leaf.id),
+		int(leaf.header.cell_count) - 1,
+	)
+	if p_err != .None { err = .Invalid_Cell_Pointer; return }
+
 	last_id, ok := cell.get_rowid(leaf.data, int(last_ptr))
 	if !ok { err = .Invalid_Cell_Pointer; return }
 	result = last_id + 1; return
@@ -665,10 +707,12 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	}
 
 	total := 0
-	stride := node.layout.stride
+	nid := Page_Id(page_id)
 	cell_count := get_cell_count(node.data, page_id)
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(node.data, page_id, i, stride)
+		ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, i)
+		if p_err != .None { err = .Invalid_Cell_Pointer; return }
+
 		child_id, ok := endian.get_u32(node.data[int(ptr):], .Big)
 		if !ok { err = .Invalid_Cell_Pointer; return }
 		total += count_recursive(t, child_id) or_return
@@ -701,7 +745,7 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 		return true, .None
 	}
 
-	child_id, _ := node_find_child(&node, key, node.layout)
+	child_id, _ := node_find_child(&node, key)
 	deleted, d_err := delete_recursive(t, child_id, key)
 	if d_err != .None { return false, d_err }
 	if deleted {
@@ -715,11 +759,21 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
 	if !ensure_row_major(leaf_node.data, leaf_node.id) { return .Cell_Deserialize_Failed }
 
+	rl, _, r_err := layout_for_page(leaf_node.data, Page_Id(leaf_node.id))
+	if r_err != .None { return r_err }
+
+	leaf_node.layout = rl
 	limit := int(leaf_node.header.cell_count)
 	delete_idx, cell_off, cell_sz := -1, 0, 0
 	idx, ok := leaf_lower_bound(leaf_node.data, leaf_node.id, key, leaf_node.layout)
 	if ok && idx < limit {
-		ptr := get_cell_ptr(leaf_node.data, leaf_node.id, idx, leaf_node.layout.stride)
+		ptr, p_err := leaf_node.layout.vtable.cell_ptr_at(
+			leaf_node.data,
+			Page_Id(leaf_node.id),
+			idx,
+		)
+		if p_err != .None { return .Invalid_Cell_Pointer }
+
 		rid, ok2 := cell.get_rowid(leaf_node.data, int(ptr))
 		if ok2 && rid == key {
 			delete_idx = idx
@@ -732,7 +786,13 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 		return .Cell_Not_Found
 	}
 	if delete_idx < limit - 1 {
-		delete_cell_at(leaf_node.data, leaf_node.id, delete_idx, leaf_node.layout.stride)
+		if d_err := leaf_node.layout.vtable.slot_delete(
+			leaf_node.data,
+			Page_Id(leaf_node.id),
+			delete_idx,
+		); d_err != .None {
+			return d_err
+		}
 	}
 
 	leaf_node.header.cell_count -= 1
@@ -765,9 +825,12 @@ tree_delete :: proc(t: ^Tree, key: types.Row_ID) -> Error {
 
 @(require_results)
 tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Error {
+	nav_layout, nav_err := layout_for_version(t.pager.page_format_version)
+	if nav_err != .None { return nav_err }
+
 	dk := Descend_Key_Ctx {
 		key    = rowid,
-		layout = get_layout(t.pager.page_format_version),
+		layout = nav_layout,
 	}
 
 	leaf_node := descend_to_leaf(t, descend_by_key, &dk) or_return
@@ -800,11 +863,13 @@ foreach_recursive :: proc(
 	node := load_node(t, page_id) or_return
 	defer unpin_node(t, node)
 
-	stride := node.layout.stride
+	nid := Page_Id(page_id)
 	if is_leaf(node) {
 		cell_count := get_cell_count(node.data, page_id)
 		for i in 0 ..< cell_count {
-			ptr := get_cell_ptr(node.data, page_id, i, stride)
+			ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, i)
+			if p_err != .None { return .Cell_Deserialize_Failed }
+
 			c, _, ok := cell.deserialize(
 				node.data,
 				int(ptr),
@@ -821,7 +886,9 @@ foreach_recursive :: proc(
 
 	cell_count := get_cell_count(node.data, page_id)
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(node.data, page_id, i, stride)
+		ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, i)
+		if p_err != .None { return .Invalid_Cell_Pointer }
+
 		child, ok := endian.get_u32(node.data[int(ptr):], .Big)
 		if !ok { return .Invalid_Cell_Pointer }
 		if e := foreach_recursive(t, child, cb, ud); e != .None { return e }
@@ -843,10 +910,15 @@ tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 		node.header.fragmented_bytes,
 	)
 
-	stride := node.layout.stride
+	nid := Page_Id(page_id)
 	cell_count := get_cell_count(node.data, page_id)
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(node.data, page_id, i, stride)
+		ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, i)
+		if p_err != .None {
+			log.debugf("  Cell %d: [Bad Slot]", i)
+			continue
+		}
+
 		c, _, ok := cell.deserialize(
 			node.data,
 			int(ptr),
@@ -911,12 +983,16 @@ verify_recursive :: proc(
 		node.header.cell_count,
 	)
 
-	stride := node.layout.stride
+	nid := Page_Id(page_id)
 	cell_count := get_cell_count(node.data, page_id)
 	if is_leaf(node) {
 		prev := min_k
 		for i in 0 ..< cell_count {
-			rowid := get_cell_key(node.data, page_id, i, node.layout)
+			rowid, r_err := node.layout.vtable.key_at(node.data, nid, i)
+			if r_err != .None {
+				log.debugf("Unreadable leaf key at slot %d", i)
+				return false
+			}
 			if rowid < prev {
 				log.debugf("Leaf key disorder: %d came after %d", rowid, prev)
 				return false
@@ -932,14 +1008,23 @@ verify_recursive :: proc(
 
 	prev_k := min_k
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(node.data, page_id, i, stride)
+		ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, i)
+		if p_err != .None {
+			log.debugf("Corrupt interior slot %d", i)
+			return false
+		}
+
 		child, r_ok := endian.get_u32(node.data[int(ptr):], .Big)
 		if !r_ok {
 			log.debugf("Corrupt interior cell at offset %d", int(ptr))
 			return false
 		}
 
-		key := get_cell_key(node.data, page_id, i, node.layout)
+		key, k_err := node.layout.vtable.key_at(node.data, nid, i)
+		if k_err != .None {
+			log.debugf("Unreadable interior key at slot %d", i)
+			return false
+		}
 		if key < prev_k || key > max_k {
 			log.debugf("Interior key %d out of bounds [%d, %d]", key, prev_k, max_k)
 			return false
@@ -965,10 +1050,12 @@ collect_pages :: proc(t: ^Tree, root: u32, pages: ^map[u32]bool) {
 	defer unpin_node(t, node)
 	if is_leaf(node) { return }
 
-	stride := node.layout.stride
+	nid := Page_Id(node.id)
 	cell_count := get_cell_count(node.data, node.id)
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(node.data, node.id, i, stride)
+		ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, i)
+		if p_err != .None { continue }
+
 		child, _ := endian.get_u32(node.data[int(ptr):], .Big)
 		collect_pages(t, child, pages)
 	}

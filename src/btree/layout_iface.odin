@@ -66,6 +66,19 @@ Page_Layout_VTable :: struct {
 		off: Cell_Off,
 	) -> Error,
 	slot_delete      : proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Error,
+	// cell_ptr_at returns the cell-area offset of slot i (the u16 entry
+	// prefix). Needed everywhere cell bytes are read (deserialize, child
+	// extraction, rowid probes). Bounds-checked: corrupt counts trap.
+	cell_ptr_at      : proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u16, Error),
+	// slot_repoint rewrites slot i in place (ptr+key). The repoint path
+	// for COW child updates and split fixups — insert shifts, this doesn't.
+	slot_repoint     : proc "contextless" (
+		data: []u8,
+		id: Page_Id,
+		idx: int,
+		rowid: types.Row_ID,
+		off: Cell_Off,
+	) -> Error,
 	validate         : proc "contextless" (data: []u8, id: Page_Id) -> Error,
 }
 
@@ -274,7 +287,23 @@ compat_slot_insert :: proc "contextless" (
 	if intrinsics.unlikely(hdr == nil) { return .Invalid_Page_Header }
 	if intrinsics.unlikely(idx < 0 || idx > int(hdr.cell_count)) { return .Invalid_Bounds }
 
-	insert_cell_at(data, u32(id), idx, u16(off), rowid, CELL_ENTRY_STRIDE)
+	// Former insert_cell_at body, inlined so the free function can die:
+	// shift entries [idx..count) right by one, then write the new entry.
+	off0 := get_page_header_offset(u32(id))
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off0 + hdr_sz
+	cell_count := int(hdr.cell_count)
+	if idx < cell_count {
+		src := data[start + idx * CELL_ENTRY_STRIDE:start + cell_count * CELL_ENTRY_STRIDE]
+		dst := data[start + (idx + 1) * CELL_ENTRY_STRIDE:]
+		copy(dst, src)
+	}
+
+	entry := (^Cell_Entry)(raw_data(data[start + idx * CELL_ENTRY_STRIDE:]))
+	entry^ = Cell_Entry {
+		ptr = Cell_Pointer(u16(off)),
+		key = rowid,
+	}
 	return .None
 }
 
@@ -284,7 +313,57 @@ compat_slot_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> 
 	if intrinsics.unlikely(hdr == nil) { return .Invalid_Page_Header }
 	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
 
-	delete_cell_at(data, u32(id), idx, CELL_ENTRY_STRIDE)
+	off0 := get_page_header_offset(u32(id))
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off0 + hdr_sz
+	cell_count := int(hdr.cell_count)
+	if idx < cell_count - 1 {
+		src := data[start + (idx + 1) * CELL_ENTRY_STRIDE:start + cell_count * CELL_ENTRY_STRIDE]
+		dst := data[start + idx * CELL_ENTRY_STRIDE:]
+		copy(dst, src)
+	}
+	return .None
+}
+
+@(private = "file", require_results)
+compat_cell_ptr_at :: #force_inline proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	i: int,
+) -> (
+	u16,
+	Error,
+) {
+	off := get_page_header_offset(u32(id))
+	hdr := get_header(data, u32(id))
+	if intrinsics.unlikely(hdr == nil) { return 0, .Invalid_Page_Header }
+	if intrinsics.unlikely(i < 0 || i >= int(hdr.cell_count)) { return 0, .Cell_Not_Found }
+
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off + hdr_sz
+	return u16((^u16le)(raw_data(data[start + i * CELL_ENTRY_STRIDE:]))^), .None
+}
+
+@(private = "file", require_results)
+compat_slot_repoint :: proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	idx: int,
+	rowid: types.Row_ID,
+	off: Cell_Off,
+) -> Error {
+	hdr := get_header(data, u32(id))
+	if intrinsics.unlikely(hdr == nil) { return .Invalid_Page_Header }
+	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
+
+	off0 := get_page_header_offset(u32(id))
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off0 + hdr_sz
+	entry := (^Cell_Entry)(raw_data(data[start + idx * CELL_ENTRY_STRIDE:]))
+	entry^ = Cell_Entry {
+		ptr = Cell_Pointer(u16(off)),
+		key = rowid,
+	}
 	return .None
 }
 
@@ -313,6 +392,8 @@ compat_page_table := Page_Layout_VTable {
 	lower_bound_rowid = compat_lower_bound_rowid,
 	slot_insert       = compat_slot_insert,
 	slot_delete       = compat_slot_delete,
+	cell_ptr_at       = compat_cell_ptr_at,
+	slot_repoint      = compat_slot_repoint,
 	validate          = compat_validate,
 }
 
@@ -388,6 +469,30 @@ v3_stub_validate :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	return .Unsupported_Format
 }
 
+@(private = "file", cold, require_results)
+v3_stub_cell_ptr_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u16, Error) {
+	_ = data
+	_ = id
+	_ = i
+	return 0, .Unsupported_Format
+}
+
+@(private = "file", cold, require_results)
+v3_stub_repoint :: proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	idx: int,
+	rowid: types.Row_ID,
+	off: Cell_Off,
+) -> Error {
+	_ = data
+	_ = id
+	_ = idx
+	_ = rowid
+	_ = off
+	return .Unsupported_Format
+}
+
 @(private = "file")
 v3_stub_table := Page_Layout_VTable {
 	header_size       = v3_stub_int,
@@ -396,6 +501,8 @@ v3_stub_table := Page_Layout_VTable {
 	lower_bound_rowid = v3_stub_lower_bound,
 	slot_insert       = v3_stub_insert,
 	slot_delete       = v3_stub_delete,
+	cell_ptr_at       = v3_stub_cell_ptr_at,
+	slot_repoint      = v3_stub_repoint,
 	validate          = v3_stub_validate,
 }
 
@@ -428,6 +535,8 @@ columnar_readonly_table := Page_Layout_VTable {
 	lower_bound_rowid = v3_stub_lower_bound,
 	slot_insert       = v3_stub_insert,
 	slot_delete       = v3_stub_delete,
+	cell_ptr_at       = v3_stub_cell_ptr_at,
+	slot_repoint      = v3_stub_repoint,
 	validate          = compat_validate,
 }
 

@@ -10,14 +10,14 @@ find_interior_cell_for_child :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	child_page: u32,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> int {
 	cell_count := get_cell_count(data, page_id)
+	pid := Page_Id(page_id)
 	for i in 0 ..< cell_count {
-		ptr := get_cell_ptr(data, page_id, i, layout.stride)
-		// Undecodable bytes are not a match: the caller falls back to a
-		// full scan (correct, just slower) instead of comparing garbage.
-		// (An all-zero failure word could otherwise equal page 0.)
+		ptr, p_err := layout.vtable.cell_ptr_at(data, pid, i)
+		if p_err != .None { continue }
+
 		stored_child, ok := endian.get_u32(data[int(ptr):], .Big)
 		if intrinsics.unlikely(!ok) { continue }
 		if stored_child == child_page {
@@ -32,17 +32,20 @@ interior_lower_bound :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> (
 	int,
 	bool,
 ) {
 	cell_count := get_cell_count(data, page_id)
+	pid := Page_Id(page_id)
 	left := 0
 	right := cell_count
 	for left < right {
 		mid := left + (right - left) / 2
-		if key >= get_cell_key(data, page_id, mid, layout) {
+		k, k_err := layout.vtable.key_at(data, pid, mid)
+		if k_err != .None { return left, false }
+		if key >= k {
 			left = mid + 1
 		} else {
 			right = mid
@@ -56,7 +59,7 @@ find_interior_insert_index :: #force_inline proc(
 	data: []u8,
 	page_id: u32,
 	key: types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> int {
 	idx, _ := interior_lower_bound(data, page_id, key, layout)
 	return idx
@@ -80,7 +83,7 @@ insert_interior_cell :: proc(
 	page_id: u32,
 	child_page: u32,
 	key: types.Row_ID,
-	layout: ^Cell_Layout,
+	layout: Page_Layout,
 ) -> bool {
 	header := get_interior_header(data, page_id)
 	if header == nil { return false }
@@ -88,8 +91,7 @@ insert_interior_cell :: proc(
 	size := interior_cell_size(key)
 	hdr_sz := size_of(Interior_Header)
 	base_off := get_page_header_offset(page_id)
-	entry_sz := layout.stride
-	ptrs_end := base_off + hdr_sz + int(header.cell_count + 1) * entry_sz
+	ptrs_end := base_off + hdr_sz + int(header.cell_count + 1) * CELL_ENTRY_STRIDE
 	content_start := int(header.cell_content_offset)
 	if ptrs_end + size > content_start {
 		return false
@@ -100,19 +102,18 @@ insert_interior_cell :: proc(
 	endian.put_u32(data[new_offset:], .Big, child_page)
 	varint.encode(data[new_offset + 4:], u64(key))
 	insert_idx := find_interior_insert_index(data, page_id, key, layout)
-
-	// Shift entries right at insert_idx
-	if insert_idx < int(header.cell_count) {
-		src := data[base_off +
-		hdr_sz +
-		insert_idx * entry_sz:base_off +
-		hdr_sz +
-		int(header.cell_count) * entry_sz]
-		dst := data[base_off + hdr_sz + (insert_idx + 1) * entry_sz:]
-		copy(dst, src)
+	if layout.vtable.slot_insert(
+		   data,
+		   Page_Id(page_id),
+		   insert_idx,
+		   key,
+		   Cell_Off(u16(new_offset)),
+	   ) !=
+	   .None {
+		header.cell_content_offset = u16le(content_start)
+		return false
 	}
 
-	layout.set_entry(data, page_id, insert_idx, u16(new_offset), key)
 	header.cell_count += 1
 	return true
 }

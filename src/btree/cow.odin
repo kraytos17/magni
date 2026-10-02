@@ -14,7 +14,7 @@ copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 		return 0, .Page_Read_Failed
 	}
 	if pager.is_special_page(page_id) {
-		if !relocate_copied_page1(new_page, t.pager.page_format_version) {
+		if !relocate_copied_page1(new_page) {
 			return 0, .Invalid_Page_Header
 		}
 	}
@@ -25,7 +25,7 @@ copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 // 100-byte database header boundary) down to offset 0, so the COW copy is a
 // normal B-tree page. Returns false on an invalid page header.
 @(private = "file")
-relocate_copied_page1 :: proc(page: ^pager.Page, format_version: u32) -> bool {
+relocate_copied_page1 :: proc(page: ^pager.Page) -> bool {
 	hdr := get_header(page.data, 1)
 	if hdr == nil { return false }
 
@@ -43,8 +43,7 @@ relocate_copied_page1 :: proc(page: ^pager.Page, format_version: u32) -> bool {
 	} else {
 		hdr_sz := page_header_size(hdr.page_type)
 		cell_count := int(hdr.cell_count)
-		stride := get_layout(format_version).stride
-		ptr_sz := cell_count * stride
+		ptr_sz := cell_count * CELL_ENTRY_STRIDE
 		total_sz := hdr_sz + ptr_sz
 		tmp := make([]u8, total_sz, context.temp_allocator)
 
@@ -98,12 +97,21 @@ tree_insert_cow :: proc(
 
 		init_interior_page(new_root_page.data, new_root_page.page_num)
 		set_right_ptr(new_root_page.data, new_root_page.page_num, result.right_page)
+		nr_layout, _, nr_err := layout_for_page(
+			new_root_page.data,
+			Page_Id(new_root_page.page_num),
+		)
+
+		if nr_err != .None {
+			pager.unpin_page(t.pager, new_root_page.page_num)
+			return 0, nr_err
+		}
 		if !insert_interior_cell(
 			new_root_page.data,
 			new_root_page.page_num,
 			result.new_page,
 			result.split_key,
-			get_layout(t.pager.page_format_version),
+			nr_layout,
 		) {
 			pager.unpin_page(t.pager, new_root_page.page_num)
 			return 0, .Serialization_Failed
@@ -147,14 +155,14 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 			return Update_COW_Result{new_page = node.id}, delete_from_leaf(t, &node, key)
 		}
 
-		child_id, _ := node_find_child(&node, key, node.layout)
+		child_id, _ := node_find_child(&node, key)
 		child_result, c_err := delete_cow_recursive(t, child_id, key, true)
 		if c_err != .None { return {}, c_err }
 		if child_result.new_page != child_id {
 			pager.unpin_page(t.pager, child_result.new_page)
 		}
 		if child_result.new_page != child_id {
-			if !node_update_child_ptr(&node, key, child_result.new_page, node.layout) {
+			if !node_update_child_ptr(&node, key, child_result.new_page) {
 				return {}, .Invalid_Cell_Pointer
 			}
 		}
@@ -212,14 +220,14 @@ tree_update_cow :: proc(
 			return Update_Result{new_page = node.id}, .None
 		}
 
-		child_id, _ := node_find_child(&node, rowid, node.layout)
+		child_id, _ := node_find_child(&node, rowid)
 		child_result, c_err := update_recursive(t, child_id, rowid, values, true)
 		if c_err != .None { return {}, c_err }
 		if child_result.new_page != child_id {
 			pager.unpin_page(t.pager, child_result.new_page)
 		}
 		if child_result.new_page != child_id {
-			if !node_update_child_ptr(&node, rowid, child_result.new_page, node.layout) {
+			if !node_update_child_ptr(&node, rowid, child_result.new_page) {
 				return {}, .Invalid_Cell_Pointer
 			}
 		}

@@ -1098,8 +1098,12 @@ test_columnar_integration :: proc(t: ^testing.T) {
 	testing.expect(t, hdr.page_type == .LEAF_TABLE, "page type is LEAF_TABLE after conversion")
 
 	// Verify: deserialize cells from row-major page
+	il, _, il_err := btree.layout_for_page(buf[:], btree.Page_Id(page_id))
+	testing.expect(t, il_err == .None, "resolve converted page layout")
+	ipid := btree.Page_Id(page_id)
 	for i in 0 ..< 3 {
-		ptr := btree.get_cell_ptr(buf[:], page_id, i, btree.CELL_ENTRY_STRIDE)
+		ptr, p_err := il.vtable.cell_ptr_at(buf[:], ipid, i)
+		testing.expect(t, p_err == .None, fmt.tprintf("cell_ptr_at %d", i))
 		c, _, des_ok := cell.deserialize(
 			buf[:],
 			int(ptr),

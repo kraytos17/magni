@@ -636,60 +636,71 @@ test_page_accessor_v2 :: proc(t: ^testing.T) {
 
 	// Verify get_cell_count
 	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 3)
-	// Verify get_cell_ptr — v2 stride = 10
+	layout, _, l_err := btree.layout_for_page(pg.data, btree.Page_Id(pg.page_num))
+	testing.expect(t, l_err == .None, "resolve compat layout")
+	pid := btree.Page_Id(pg.page_num)
+	// Verify cell_ptr_at on compat slots
 	for i in 0 ..< 3 {
-		p := btree.get_cell_ptr(pg.data, pg.page_num, i, btree.CELL_ENTRY_STRIDE)
+		p, p_err := layout.vtable.cell_ptr_at(pg.data, pid, i)
+		testing.expect(t, p_err == .None, "cell_ptr_at succeeds")
 		testing.expectf(
 			t,
 			p == ptr_offsets[i],
-			"v2 get_cell_ptr(%d) = %d, expected %d",
+			"cell_ptr_at(%d) = %d, expected %d",
 			i,
 			p,
 			ptr_offsets[i],
 		)
 	}
-	// Verify get_cell_key — v2 version = 2
+	// Verify key_at on compat slots
 	for i in 0 ..< 3 {
-		k := btree.get_cell_key(pg.data, pg.page_num, i, btree.get_layout(2))
-		testing.expectf(t, k == rids[i], "v2 get_cell_key(%d) = %d, expected %d", i, k, rids[i])
+		k, k_err := layout.vtable.key_at(pg.data, pid, i)
+		testing.expect(t, k_err == .None, "key_at succeeds")
+		testing.expectf(t, k == rids[i], "key_at(%d) = %d, expected %d", i, k, rids[i])
 	}
 
-	// Test insert_cell_at: insert new entry at idx=1
+	// Test slot_insert: insert new entry at idx=1
 	info4 := cell.compute_info(400, {types.value_int(40)})
 	off4 := int(hdr.cell_content_offset) - info4.total_size
 	_, ser_ok := cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
 	testing.expect(t, ser_ok, "serialize temp cell succeeds")
 	hdr.cell_content_offset = u16le(off4)
-	btree.insert_cell_at(pg.data, pg.page_num, 1, u16(off4), 400, btree.CELL_ENTRY_STRIDE)
+	testing.expect(
+		t,
+		layout.vtable.slot_insert(pg.data, pid, 1, 400, btree.Cell_Off(u16(off4))) == .None,
+		"slot_insert succeeds",
+	)
 	hdr.cell_count = 4
 
 	// Verify after insert
 	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 4)
 	expected_keys := []types.Row_ID{100, 400, 200, 300}
 	for i in 0 ..< len(expected_keys) {
-		k := btree.get_cell_key(pg.data, pg.page_num, i, btree.get_layout(2))
+		k, k_err := layout.vtable.key_at(pg.data, pid, i)
+		testing.expect(t, k_err == .None, "key_at succeeds")
 		testing.expectf(
 			t,
 			k == expected_keys[i],
-			"v2 after insert get_cell_key(%d) = %d, expected %d",
+			"after insert key_at(%d) = %d, expected %d",
 			i,
 			k,
 			expected_keys[i],
 		)
 	}
 
-	// Test delete_cell_at: delete entry at idx=2 (which has expected_key=200)
-	btree.delete_cell_at(pg.data, pg.page_num, 2, btree.CELL_ENTRY_STRIDE)
+	// Test slot_delete: delete entry at idx=2 (which has expected_key=200)
+	testing.expect(t, layout.vtable.slot_delete(pg.data, pid, 2) == .None, "slot_delete succeeds")
 	hdr.cell_count = 3
 	// Verify after delete
 	testing.expect_value(t, btree.get_cell_count(pg.data, pg.page_num), 3)
 	expected_keys2 := []types.Row_ID{100, 400, 300}
 	for i in 0 ..< len(expected_keys2) {
-		k := btree.get_cell_key(pg.data, pg.page_num, i, btree.get_layout(2))
+		k, k_err := layout.vtable.key_at(pg.data, pid, i)
+		testing.expect(t, k_err == .None, "key_at succeeds")
 		testing.expectf(
 			t,
 			k == expected_keys2[i],
-			"v2 after delete get_cell_key(%d) = %d, expected %d",
+			"after delete key_at(%d) = %d, expected %d",
 			i,
 			k,
 			expected_keys2[i],
@@ -758,11 +769,14 @@ test_page_accessor_move :: proc(t: ^testing.T) {
 	dst_hdr.cell_count = 1
 	// Verify dst has entry with key=20
 	testing.expect_value(t, btree.get_cell_count(dst_pg.data, dst_pg.page_num), 1)
-	k := btree.get_cell_key(dst_pg.data, dst_pg.page_num, 0, btree.get_layout(2))
+	dst_layout, _, dst_err := btree.layout_for_page(dst_pg.data, btree.Page_Id(dst_pg.page_num))
+	testing.expect(t, dst_err == .None, "resolve dst layout")
+	k, k_err := dst_layout.vtable.key_at(dst_pg.data, btree.Page_Id(dst_pg.page_num), 0)
+	testing.expect(t, k_err == .None, "dst key_at succeeds")
 	testing.expect_value(t, k, types.Row_ID(20))
 }
 
-test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label: string) {
+test_layout_conformance :: proc(t: ^testing.T, layout: btree.Page_Layout, label: string) {
 	p, err := pager.open(fmt.tprintf("test_layout_%s.db", label), 8)
 	defer pager.close(p)
 	defer os.remove(fmt.tprintf("test_layout_%s.db", label))
@@ -773,7 +787,11 @@ test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label
 	if a_err != nil { testing.fail_now(t, "alloc failed") }
 
 	btree.init_leaf_page(pg.data, pg.page_num)
-	// Manually build 3 cells and write entries using layout
+	pid := btree.Page_Id(pg.page_num)
+	hdr := btree.get_leaf_header(pg.data, pg.page_num)
+	// Manually build 3 cells and write entries through the vtable. The
+	// count bumps per iteration (real-insert order: slot at idx == count,
+	// then bump) so slot_insert's append contract holds throughout.
 	vals := [][]types.Value{{types.value_int(10)}, {types.value_int(20)}, {types.value_int(30)}}
 	rids := []types.Row_ID{100, 200, 300}
 	off := int(types.PAGE_SIZE)
@@ -782,60 +800,73 @@ test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label
 		off -= info.total_size
 		_, ser_ok := cell.serialize(pg.data[off:], rids[i], vals[i], info)
 		testing.expect(t, ser_ok, "serialize page cell succeeds")
-		layout.set_entry(pg.data, pg.page_num, i, u16(off), rids[i])
+		testing.expect(
+			t,
+			layout.vtable.slot_insert(pg.data, pid, i, rids[i], btree.Cell_Off(u16(off))) == .None,
+			"build slot_insert succeeds",
+		)
+		hdr.cell_count += 1
 	}
-
-	hdr := btree.get_leaf_header(pg.data, pg.page_num)
-	hdr.cell_count = 3
 	hdr.cell_content_offset = u16le(off)
 
-	// Test get_cell_count
-	testing.expectf(
-		t,
-		btree.get_cell_count(pg.data, pg.page_num) == 3,
-		"%s: cell_count == 3",
-		label,
-	)
+	// Test cell_count
+	testing.expectf(t, layout.vtable.cell_count(pg.data, pid) == 3, "%s: cell_count == 3", label)
 
-	// Test get_cell_ptr + get_cell_key round-trip
+	// Test cell_ptr_at + key_at round-trip
 	for i in 0 ..< 3 {
-		ptr := btree.get_cell_ptr(pg.data, pg.page_num, i, layout.stride)
-		k := layout.get_key(pg.data, pg.page_num, i)
-		testing.expectf(
-			t,
-			k == rids[i],
-			"%s: get_key(%d) == %d, expected %d",
-			label,
-			i,
-			k,
-			rids[i],
-		)
+		ptr, p_err := layout.vtable.cell_ptr_at(pg.data, pid, i)
+		testing.expect(t, p_err == .None, "cell_ptr_at succeeds")
+		k, k_err := layout.vtable.key_at(pg.data, pid, i)
+		testing.expect(t, k_err == .None, "key_at succeeds")
+		testing.expectf(t, k == rids[i], "%s: key_at(%d) == %d, expected %d", label, i, k, rids[i])
 		rid, ok := cell.get_rowid(pg.data, int(ptr))
 		testing.expectf(t, ok && rid == rids[i], "%s: cell %d has rowid %d", label, i, rid)
 	}
 
-	// Test insert_cell_at: insert at index 1
+	// Out-of-range slots fail loudly.
+	_, oob1 := layout.vtable.cell_ptr_at(pg.data, pid, 3)
+	testing.expect(t, oob1 == .Cell_Not_Found, "cell_ptr_at past end fails")
+	_, oob2 := layout.vtable.key_at(pg.data, pid, -1)
+	testing.expect(t, oob2 == .Cell_Not_Found, "key_at negative fails")
+
+	// Test lower_bound_rowid: exact hits and gaps.
+	lb_cases := [][2]int{{50, 0}, {100, 0}, {150, 1}, {300, 2}, {400, 3}}
+	for c in lb_cases {
+		idx, lb_err := layout.vtable.lower_bound_rowid(pg.data, pid, types.Row_ID(c[0]))
+		testing.expect(t, lb_err == .None, "lower_bound succeeds")
+		testing.expect_value(t, idx, c[1])
+	}
+
+	// Test validate on the clean page.
+	testing.expect(t, layout.vtable.validate(pg.data, pid) == .None, "validate clean page")
+
+	// Test slot_insert: insert at index 1
 	info4 := cell.compute_info(types.Row_ID(400), {types.value_int(40)})
 	off4 := int(hdr.cell_content_offset) - info4.total_size
 	_, ser_ok := cell.serialize(pg.data[off4:], 400, {types.value_int(40)}, info4)
 	testing.expect(t, ser_ok, "serialize temp cell succeeds")
 	hdr.cell_content_offset = u16le(off4)
-	btree.insert_cell_at(pg.data, pg.page_num, 1, u16(off4), 400, layout.stride)
+	testing.expect(
+		t,
+		layout.vtable.slot_insert(pg.data, pid, 1, 400, btree.Cell_Off(u16(off4))) == .None,
+		"slot_insert succeeds",
+	)
 	hdr.cell_count = 4
 
 	testing.expectf(
 		t,
-		btree.get_cell_count(pg.data, pg.page_num) == 4,
+		layout.vtable.cell_count(pg.data, pid) == 4,
 		"%s: after insert count == 4",
 		label,
 	)
 	expected := []types.Row_ID{100, 400, 200, 300}
 	for i in 0 ..< len(expected) {
-		k := layout.get_key(pg.data, pg.page_num, i)
+		k, k_err := layout.vtable.key_at(pg.data, pid, i)
+		testing.expect(t, k_err == .None, "key_at succeeds")
 		testing.expectf(
 			t,
 			k == expected[i],
-			"%s: after insert get_key(%d) == %d, expected %d",
+			"%s: after insert key_at(%d) == %d, expected %d",
 			label,
 			i,
 			k,
@@ -843,22 +874,23 @@ test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label
 		)
 	}
 
-	// Test delete_cell_at: delete index 2
-	btree.delete_cell_at(pg.data, pg.page_num, 2, layout.stride)
+	// Test slot_delete: delete index 2
+	testing.expect(t, layout.vtable.slot_delete(pg.data, pid, 2) == .None, "slot_delete succeeds")
 	hdr.cell_count = 3
 	testing.expectf(
 		t,
-		btree.get_cell_count(pg.data, pg.page_num) == 3,
+		layout.vtable.cell_count(pg.data, pid) == 3,
 		"%s: after delete count == 3",
 		label,
 	)
 	expected2 := []types.Row_ID{100, 400, 300}
 	for i in 0 ..< len(expected2) {
-		k := layout.get_key(pg.data, pg.page_num, i)
+		k, k_err := layout.vtable.key_at(pg.data, pid, i)
+		testing.expect(t, k_err == .None, "key_at succeeds")
 		testing.expectf(
 			t,
 			k == expected2[i],
-			"%s: after delete get_key(%d) == %d, expected %d",
+			"%s: after delete key_at(%d) == %d, expected %d",
 			label,
 			i,
 			k,
@@ -866,14 +898,17 @@ test_layout_conformance :: proc(t: ^testing.T, layout: ^btree.Cell_Layout, label
 		)
 	}
 
-	// Test entry_area_end
-	eae := btree.entry_area_end(pg.data, pg.page_num, layout.stride)
+	// Test entry_area_end (retained free function).
+	eae := btree.entry_area_end(pg.data, pg.page_num, btree.CELL_ENTRY_STRIDE)
 	testing.expectf(t, eae > 0, "%s: entry_area_end > 0", label)
 	pager.unpin_page(p, pg.page_num)
 }
 
 @(test)
-test_cell_layout_v2_conformance :: proc(t: ^testing.T) {
+test_compat_layout_conformance :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
-	test_layout_conformance(t, btree.get_layout(2), "v2")
+	layout, l_err := btree.layout_for_version(2)
+	testing.expect(t, l_err == .None, "resolve compat layout")
+	if l_err != .None { return }
+	test_layout_conformance(t, layout, "compat")
 }
