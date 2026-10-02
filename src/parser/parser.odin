@@ -96,6 +96,11 @@ Token_Type :: enum u8 {
 	IS,
 }
 
+// parse tokenizes and parses one SQL statement. The AST is arena-owned by
+// `allocator` (callers pass the statement temp arena): it is valid for the
+// statement scope only and is never freed piecemeal — failed parses abandon
+// partial nodes to the arena. Anything outliving the statement (catalog
+// rows, caches) must copy, never borrow.
 parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, string) {
 	tokens, ok := tokenize(sql, context.temp_allocator)
 	if !ok { return {}, false, "Tokenizer error" }

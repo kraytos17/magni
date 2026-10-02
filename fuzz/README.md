@@ -178,7 +178,7 @@ governor check) and `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` (system
 
 - **Target choice:** parser first (fast, deterministic, no I/O), then the exec
   harness for the full `db.execute` stack with a scratch temp db per exec.
-- **`statement_free` is `@(private)`** — harnesses deliberately don't free the
+- **ASTs are arena-owned** — harnesses deliberately don't free the
   AST (one process per input, `temp_allocator` released at exit).
 - **Deep nesting** is capped at `MAX_PARSE_NESTING` (512); the over-limit seed
   `deep_subquery_over_guard` exercises the guard's clean-error path.

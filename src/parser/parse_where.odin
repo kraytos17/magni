@@ -87,7 +87,6 @@ parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 	for {
 		right, right_ok := parse_and_expr(p, allocator)
 		if !right_ok {
-			where_nodes_free(children, allocator)
 			return nil, false
 		}
 
@@ -111,7 +110,6 @@ parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bo
 	for {
 		right, right_ok := parse_primary(p, allocator)
 		if !right_ok {
-			where_nodes_free(children, allocator)
 			return nil, false
 		}
 
@@ -204,7 +202,6 @@ try_parse_between :: proc(
 	right, rok := make_between_cond(right_op, upper_val, col_name, allocator)
 	if !rok {
 		delete(col_name, allocator)
-		where_node_free(left, allocator)
 		return nil, .Error
 	}
 
@@ -243,7 +240,6 @@ parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 		inner, inner_ok := parse_or_expr(p, allocator)
 		if !inner_ok { return nil, false }
 		if !expect_match(p, .RPAREN, "Expected ')' in WHERE expression") {
-			where_node_free(inner, allocator)
 			return nil, false
 		}
 		return inner, true
@@ -341,8 +337,6 @@ parse_in_subquery :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator
 	subq_ptr^ = subq_variant.(Select_Stmt)
 	cond.in_subquery = subq_ptr
 	if !match(p, .RPAREN) {
-		statement_free(Statement{type = subq_ptr^, sql = ""}, allocator)
-		free(subq_ptr, allocator)
 		return false
 	}
 	return true

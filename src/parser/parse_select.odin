@@ -197,6 +197,22 @@ parse_select_columns :: proc(
 
 // parse_column_or_aggregate handles a `name(` token: an aggregate when the name
 // resolves (COUNT/SUM/...), otherwise a bare column identifier.
+// builder_emit_column appends one projected column to the builder's parallel
+// arrays (columns/col_kinds/col_literal_idx stay in lockstep through this
+// single choke point). For LITERAL slots the caller appends to literal_values
+// first and passes its index.
+@(private="file")
+builder_emit_column :: proc(
+	b: ^Select_Builder,
+	display: string,
+	kind: Select_Column_Kind,
+	lit_idx: int,
+) {
+	append(&b.columns, display)
+	append(&b.col_kinds, kind)
+	append(&b.col_literal_idx, lit_idx)
+}
+
 @(private="file")
 parse_column_or_aggregate :: proc(
 	p: ^Parser,
@@ -209,9 +225,7 @@ parse_column_or_aggregate :: proc(
 		col, cok := parse_identifier(p, allocator)
 		if !cok { return false }
 
-		append(&b.columns, col)
-		append(&b.col_kinds, Select_Column_Kind.COLUMN)
-		append(&b.col_literal_idx, -1)
+		builder_emit_column(b, col, .COLUMN, -1)
 		return true
 	}
 
@@ -227,10 +241,7 @@ parse_column_or_aggregate :: proc(
 
 	arg_display := "*" if is_star else arg_col
 	display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
-
-	append(&b.columns, display)
-	append(&b.col_kinds, Select_Column_Kind.AGGREGATE)
-	append(&b.col_literal_idx, -1)
+	builder_emit_column(b, display, .AGGREGATE, -1)
 
 	agg_col := "" if is_star else arg_col
 	append(&b.aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
@@ -255,17 +266,12 @@ parse_column_or_literal :: proc(
 		val, vok := parse_value(p, allocator)
 		if !vok { return false }
 
-		append(&b.columns, strings.clone(tok.lexeme, allocator))
-		append(&b.col_kinds, Select_Column_Kind.LITERAL)
-		append(&b.col_literal_idx, len(b.literal_values))
 		append(&b.literal_values, val)
+		builder_emit_column(b, strings.clone(tok.lexeme, allocator), .LITERAL, len(b.literal_values) - 1)
 	case:
 		col, cok := parse_qualified_identifier(p, allocator)
 		if !cok { return false }
-
-		append(&b.columns, col)
-		append(&b.col_kinds, Select_Column_Kind.COLUMN)
-		append(&b.col_literal_idx, -1)
+		builder_emit_column(b, col, .COLUMN, -1)
 	}
 	return true
 }
@@ -303,7 +309,8 @@ resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
 // aggregate-named leaf conditions (COUNT(*), SUM(v), ...) into `out` so the
 // executor computes them. `out` holds select-list aggregates first; HAVING
 // references are appended (deduped) and their column arg is cloned because
-// both statement_free and condition_free own their strings.
+// the HAVING tree and the aggregate list are freed independently (the clone
+// keeps each owner holding its own string).
 @(private="file")
 collect_having_aggregates :: proc(
 	node: ^Where_Node,
@@ -668,6 +675,29 @@ parse_set_op :: proc(p: ^Parser) -> (op: Set_Op, ok: bool) {
 // parse_compound_select parses `SELECT ... [UNION|INTERSECT|EXCEPT [ALL] SELECT ...]...`
 // followed by an optional compound-level ORDER BY / LIMIT. Returns a Compound_Stmt
 // when a set-operation follows the first SELECT, otherwise the plain Select_Stmt.
+// parse_compound_operand parses one `SELECT ...` operand after a set
+// operator (already consumed) and binds it to that operator. Operands never
+// consume a trailing ORDER BY/LIMIT (the compound tail owns those).
+@(private="file")
+parse_compound_operand :: proc(
+	p: ^Parser,
+	op: Set_Op,
+	allocator := context.allocator,
+) -> (
+	operand: Set_Operand,
+	ok: bool,
+) {
+	if !match(p, .SELECT) { return {}, false }
+
+	sel_variant, sel_ok := parse_select(p, allocator, false)
+	if !sel_ok { return {}, false }
+
+	sel, _ := sel_variant.(Select_Stmt)
+	sel_ptr := new(Select_Stmt, allocator)
+	sel_ptr^ = sel
+	return Set_Operand{select = sel_ptr, op = op}, true
+}
+
 @(private)
 parse_compound_select :: proc(
 	p: ^Parser,
@@ -687,24 +717,13 @@ parse_compound_select :: proc(
 	first_ptr^ = first_sel
 	operands := make([dynamic]Set_Operand, allocator)
 	for {
-		// Each operand begins with its own `SELECT` keyword (the dispatch consumed
-		// only the first one).
-		if !match(p, .SELECT) {
+		operand, op_ok := parse_compound_operand(p, op, allocator)
+		if !op_ok {
 			free(first_ptr, allocator)
 			return nil, false
 		}
 
-		sel_variant, sel_ok := parse_select(p, allocator, false)
-		if !sel_ok {
-			free(first_ptr, allocator)
-			return nil, false
-		}
-
-		sel, _ := sel_variant.(Select_Stmt)
-		sel_ptr := new(Select_Stmt, allocator)
-		sel_ptr^ = sel
-
-		append(&operands, Set_Operand{select = sel_ptr, op = op})
+		append(&operands, operand)
 		next_op, has_next := parse_set_op(p)
 		if !has_next { break }
 		op = next_op

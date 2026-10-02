@@ -234,8 +234,8 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	switch n.kind {
 	case .COND:
 		// Only Subquery values are owned (made at resolve time); Values
-		// borrows the parser's list (freed by condition_free), so freeing
-		// it here would double-free borrowed strings.
+		// borrows the parser's arena list, so freeing it here would
+		// double-free borrowed strings.
 		if n.cond.in_mem.kind == .Subquery {
 			delete(n.cond.in_mem.values, allocator)
 		}

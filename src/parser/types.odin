@@ -19,7 +19,7 @@ Condition :: struct {
 		string,
 	},
 	in_values:   []types.Value, // IN (val1, val2, ...)
-	in_subquery: ^Select_Stmt, // IN (SELECT ...); owned pointer freed by where_clause_free
+	in_subquery: ^Select_Stmt, // IN (SELECT ...); arena-owned with the statement
 }
 
 Where_Kind :: enum u8 {
