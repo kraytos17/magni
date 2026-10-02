@@ -184,7 +184,8 @@ init_where_ctx :: proc(
 		return Where_Eval_Ctx{}
 	}
 
-	root, ok := build_resolved_node(clause.root, cols, table_ranges, schema_tree, allocator, cache)
+	resolver := build_column_resolver(cols, table_ranges, allocator)
+	root, ok := build_resolved_node(clause.root, resolver, schema_tree, allocator, cache)
 	if !ok { return nil }
 	return Where_Eval_Ctx{root = root, schema_tree = schema_tree}
 }
@@ -192,8 +193,7 @@ init_where_ctx :: proc(
 @(private="file")
 build_resolved_node :: proc(
 	node: ^parser.Where_Node,
-	cols: []types.Column,
-	table_ranges: []Table_Col_Range,
+	resolver: Column_Resolver,
 	schema_tree: ^btree.Tree,
 	allocator: mem.Allocator,
 	cache: ^schema.Table_Cache = nil,
@@ -201,18 +201,19 @@ build_resolved_node :: proc(
 	rn := new(Resolved_Node, allocator)
 	switch node.kind {
 	case .COND:
-		rc, ok := resolve_condition(node.cond, cols, table_ranges, schema_tree, allocator, cache)
+		rc, ok := resolve_condition(node.cond, resolver, schema_tree, allocator, cache)
 		if !ok {
 			free(rn, allocator)
 			return nil, false
 		}
+
 		rn.kind = .COND
 		rn.cond = rc
 	case .AND, .OR, .NOT:
 		rn.kind = .NOT if node.kind == .NOT else (.AND if node.kind == .AND else .OR)
 		children := make([]^Resolved_Node, len(node.children), allocator)
 		for child, i in node.children {
-			child_rn, ok := build_resolved_node(child, cols, table_ranges, schema_tree, allocator, cache)
+			child_rn, ok := build_resolved_node(child, resolver, schema_tree, allocator, cache)
 			if !ok {
 				for j in 0 ..< i { free_resolved_node(children[j], allocator) }
 
@@ -249,13 +250,12 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 @(private="file")
 resolve_condition :: proc(
 	cond: parser.Condition,
-	cols: []types.Column,
-	table_ranges: []Table_Col_Range,
+	resolver: Column_Resolver,
 	schema_tree: ^btree.Tree,
 	allocator: mem.Allocator,
 	cache: ^schema.Table_Cache = nil,
 ) -> (Resolved_Condition, bool) {
-	idx, found := resolve_qualified_column(cols, table_ranges, cond.column)
+	idx, found := resolve(resolver, cond.column)
 	if !found { return {}, false }
 
 	rc := Resolved_Condition {
@@ -269,7 +269,7 @@ resolve_condition :: proc(
 	}
 
 	if rhs_str, is_col := cond.rhs.(string); is_col {
-		right_idx, rc_found := resolve_qualified_column(cols, table_ranges, rhs_str)
+		right_idx, rc_found := resolve(resolver, rhs_str)
 		if !rc_found { return {}, false }
 
 		rc.has_right_col = true
@@ -279,9 +279,6 @@ resolve_condition :: proc(
 	}
 
 	if cond.in_values != nil {
-		// Fingerprint prefilter: O(1) miss check per row instead of O(list).
-		// Hits still verify with compare_values, so hash collisions and
-		// NULL semantics are exactly the linear scan's.
 		rc.in_mem.kind = .Values
 		rc.in_mem.values = cond.in_values
 		rc.in_mem.set = make(map[u64]bool, len(cond.in_values), allocator)

@@ -70,6 +70,45 @@ parse_foreign_key_clause :: proc(p: ^Parser, allocator := context.allocator) -> 
 	return Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col}, true
 }
 
+// parse_column_modifier parses one trailing column modifier (PRIMARY KEY,
+// NOT NULL, DEFAULT, CHECK) after the type. Returns handled=false when the
+// next token starts no modifier (caller breaks); ok=false on error.
+@(private="file")
+parse_column_modifier :: proc(
+	p: ^Parser,
+	col: ^types.Column,
+	allocator := context.allocator,
+) -> (
+	handled: bool,
+	ok: bool,
+) {
+	if match(p, .PRIMARY) {
+		if !expect_match(p, .KEY, "Expected KEY after PRIMARY") { return true, false }
+		col.pk = true
+		return true, true
+	} else if match(p, .NOT) {
+		if !expect_match(p, .NULL, "Expected NULL after NOT") { return true, false }
+		col.not_null = true
+		return true, true
+	} else if match(p, .DEFAULT) {
+		val, val_ok := parse_value(p, allocator)
+		if !val_ok {
+			err(p, "Invalid DEFAULT value")
+			return true, false
+	 	}
+
+		col.default_value = val
+		return true, true
+	} else if match(p, .CHECK) {
+		expr, expr_ok := collect_check_source(p, allocator)
+		if !expr_ok { return true, false }
+
+		col.check_expr = expr
+		return true, true
+	}
+	return false, true
+}
+
 // parse_column_def parses one `name TYPE [modifiers]` column definition.
 @(private)
 parse_column_def :: proc(p: ^Parser, allocator := context.allocator) -> (col: types.Column, ok: bool) {
@@ -90,33 +129,17 @@ parse_column_def :: proc(p: ^Parser, allocator := context.allocator) -> (col: ty
 	}
 
 	for {
-		if match(p, .PRIMARY) {
-			if !expect_match(p, .KEY, "Expected KEY after PRIMARY") { return {}, false }
-			col.pk = true
-		} else if match(p, .NOT) {
-			if !expect_match(p, .NULL, "Expected NULL after NOT") { return {}, false }
-			col.not_null = true
-		} else if match(p, .DEFAULT) {
-			val, val_ok := parse_value(p, allocator)
-			if !val_ok {
-				err(p, "Invalid DEFAULT value")
-				return {}, false
-		 	}
-			col.default_value = val
-		} else if match(p, .CHECK) {
-			expr, expr_ok := parse_check_expr(p, allocator)
-			if !expr_ok { return {}, false }
-
-			col.check_expr = expr
-		} else { break }
+		handled, mok := parse_column_modifier(p, &col, allocator)
+		if !mok { return {}, false }
+		if !handled { break }
 	}
 	return col, true
 }
 
-// parse_check_expr captures the raw text of a parenthesised CHECK expression,
+// collect_check_source captures the raw text of a parenthesised CHECK expression,
 // tracking nesting depth. The caller has consumed CHECK.
 @(private)
-parse_check_expr :: proc(p: ^Parser, allocator := context.allocator) -> (expr: string, ok: bool) {
+collect_check_source :: proc(p: ^Parser, allocator := context.allocator) -> (expr: string, ok: bool) {
 	if !expect_match(p, .LPAREN, "Expected ( after CHECK") { return }
 
 	b := strings.builder_make(allocator)

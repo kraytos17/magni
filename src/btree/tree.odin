@@ -128,8 +128,12 @@ node_insert_leaf_cell :: proc(
 	values: []types.Value,
 ) -> Error {
 	if !is_leaf(n^) { return .Invalid_Page_Header }
+	// A columnar page that cannot expand to row-major in place fails the
+	// insert loudly (.Cell_Deserialize_Failed) instead of proceeding on
+	// undecodable bytes. .Page_Full is deliberately not used: it would send
+	// a doomed split down the abort path and leak the allocated right page.
+	if !ensure_row_major(n.data, n.id) { return .Cell_Deserialize_Failed }
 
-	ensure_row_major(n.data, n.id)
 	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid, n.layout)
 	if t.config.check_duplicates {
 		if lb_ok && idx < int(n.header.cell_count) {
@@ -680,8 +684,8 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 @(private)
 delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error {
 	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
+	if !ensure_row_major(leaf_node.data, leaf_node.id) { return .Cell_Deserialize_Failed }
 
-	ensure_row_major(leaf_node.data, leaf_node.id)
 	limit := int(leaf_node.header.cell_count)
 	delete_idx, cell_off, cell_sz := -1, 0, 0
 	idx, ok := leaf_lower_bound(leaf_node.data, leaf_node.id, key, leaf_node.layout)

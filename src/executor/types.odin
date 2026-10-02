@@ -25,10 +25,12 @@ Table_Context :: struct {
 
 // Join_Build captures the assembled state of a FROM+JOINs query: resolved
 // table contexts, combined column metadata, and (after execution) rows.
+// resolver indexes cols/ranges once so ON-clause resolution is O(1).
 Join_Build :: struct {
 	ctxs:       []Table_Context,
 	ranges:     []Table_Col_Range,
 	cols:       []types.Column,
+	resolver:   Column_Resolver,
 	rows:       []Row_Entry,
 	total_cols: int,
 	ok:         bool,

@@ -26,42 +26,11 @@ hash_values :: proc(values: []types.Value, indices: []int = nil) -> u64 {
 	h := FNV_OFFSET_BASIS
 	if indices == nil {
 		for v in values {
-			switch val in v {
-			case types.Null:
-				h = fnv_mix(h, 0)
-			case i64:
-				h = fnv_mix(h, 1)
-				h = fnv_mix(h, u64(val))
-			case f64:
-				h = fnv_mix(h, 2)
-				h = fnv_mix(h, transmute(u64)val)
-			case string:
-				h = fnv_mix(h, 3)
-				h = hash.fnv64a(transmute([]u8)val, h)
-			case []u8:
-				h = fnv_mix(h, 4)
-				h = hash.fnv64a(val, h)
-			}
+			h = hash_value_into(h, v)
 		}
 	} else {
 		for col_idx in indices {
-			v := values[col_idx]
-			switch val in v {
-			case types.Null:
-				h = fnv_mix(h, 0)
-			case i64:
-				h = fnv_mix(h, 1)
-				h = fnv_mix(h, u64(val))
-			case f64:
-				h = fnv_mix(h, 2)
-				h = fnv_mix(h, transmute(u64)val)
-			case string:
-				h = fnv_mix(h, 3)
-				h = hash.fnv64a(transmute([]u8)val, h)
-			case []u8:
-				h = fnv_mix(h, 4)
-				h = hash.fnv64a(val, h)
-			}
+			h = hash_value_into(h, values[col_idx])
 		}
 	}
 	return h
@@ -72,48 +41,88 @@ fnv_mix :: proc(h, w: u64) -> u64 {
 	return (h ~ w) * FNV_PRIME
 }
 
+// hash_value_into mixes one value into a running FNV-1a hash. Single source
+// for the per-type tag mapping shared by hash_value and hash_values.
+@(private)
+hash_value_into :: proc(h: u64, v: types.Value) -> u64 {
+	acc := h
+	switch val in v {
+	case types.Null:
+		acc = fnv_mix(acc, 0)
+	case i64:
+		acc = fnv_mix(acc, 1)
+		acc = fnv_mix(acc, u64(val))
+	case f64:
+		acc = fnv_mix(acc, 2)
+		acc = fnv_mix(acc, transmute(u64)val)
+	case string:
+		acc = fnv_mix(acc, 3)
+		acc = hash.fnv64a(transmute([]u8)val, acc)
+	case []u8:
+		acc = fnv_mix(acc, 4)
+		acc = hash.fnv64a(val, acc)
+	}
+	return acc
+}
+
 // hash_value computes the FNV-1a hash of a single value, using the same
 // per-type tags as hash_values. Used for hash-join keys.
 @(private)
 hash_value :: proc(v: types.Value) -> u64 {
-	h := FNV_OFFSET_BASIS
-	switch val in v {
-	case types.Null:
-		h = fnv_mix(h, 0)
-	case i64:
-		h = fnv_mix(h, 1)
-		h = fnv_mix(h, u64(val))
-	case f64:
-		h = fnv_mix(h, 2)
-		h = fnv_mix(h, transmute(u64)val)
-	case string:
-		h = fnv_mix(h, 3)
-		h = hash.fnv64a(transmute([]u8)val, h)
-	case []u8:
-		h = fnv_mix(h, 4)
-		h = hash.fnv64a(val, h)
-	}
-	return h
+	return hash_value_into(FNV_OFFSET_BASIS, v)
 }
 
+// Column_Resolver resolves column names to absolute indices within a query's
+// combined column array. Build it once per statement (from the combined
+// columns + per-table ranges) and reuse it for every condition, ORDER BY,
+// aggregate, and projection that would otherwise rescan the column list.
+//
+// Unqualified names go through a name→index hash (built once); qualified names
+// (`alias.col`) are matched against the owning table's range, preserving the
+// original "a qualifier that names no known table/alias does not resolve"
+// behavior.
+Column_Resolver :: struct {
+	cols:   []types.Column,
+	ranges: []Table_Col_Range,
+	index:  map[string]int, // unqualified name → first matching index
+}
+
+// build_column_resolver indexes the combined columns for fast resolution.
+// Later duplicate names do not overwrite earlier ones (first-wins, matching
+// the linear-scan original).
 @(private)
-resolve_qualified_column :: proc(
-	combined_cols: []types.Column,
-	table_ranges: []Table_Col_Range,
-	name: string,
-) -> (
-	int,
-	bool,
-) {
-	if len(table_ranges) > 0 {
+build_column_resolver :: proc(
+	cols: []types.Column,
+	ranges: []Table_Col_Range,
+	allocator := context.temp_allocator,
+) -> Column_Resolver {
+	r := Column_Resolver {
+		cols   = cols,
+		ranges = ranges,
+	}
+	if len(cols) > 0 {
+		r.index = make(map[string]int, len(cols), allocator)
+		for col, i in cols {
+			if _, exists := r.index[col.name]; !exists {
+				r.index[col.name] = i
+			}
+		}
+	}
+	return r
+}
+
+// resolve maps a (possibly qualified) column name to its absolute index.
+@(private)
+resolve :: proc(r: Column_Resolver, name: string) -> (int, bool) {
+	if len(r.ranges) > 0 {
 		if dot_pos := strings.last_index_byte(name, '.'); dot_pos >= 0 {
 			table_part := name[:dot_pos]
 			col_part := name[dot_pos + 1:]
-			for tr in table_ranges {
+			for tr in r.ranges {
 				if tr.table_name == table_part {
 					end := tr.start_col + tr.col_count
 					for i in tr.start_col ..< end {
-						if combined_cols[i].name == col_part {
+						if r.cols[i].name == col_part {
 							return i, true
 						}
 					}
@@ -122,7 +131,13 @@ resolve_qualified_column :: proc(
 			return -1, false
 		}
 	}
-	return schema.find_column_index(combined_cols, name)
+	if r.index != nil {
+		if i, ok := r.index[name]; ok {
+			return i, true
+		}
+		return -1, false
+	}
+	return schema.find_column_index(r.cols, name)
 }
 
 // where_single_condition returns the lone leaf condition when the clause tree is
@@ -196,6 +211,24 @@ values_equal_by_indices :: proc(
 	return true
 }
 
+// bucket_add appends a row position to a fingerprint bucket index
+// (fetch/append/store). Shared by DISTINCT dedup, set-op membership, and
+// GROUP BY grouping, which all probe map[u64][dynamic]int the same way.
+@(private)
+bucket_add :: proc(index: ^map[u64][dynamic]int, fp: u64, pos: int) {
+	bucket := index^[fp]
+	append(&bucket, pos)
+	index^[fp] = bucket
+}
+
+// bucket_index_destroy frees a fingerprint bucket index built with
+// bucket_add. Deferred by every builder: `defer bucket_index_destroy(&index)`.
+@(private)
+bucket_index_destroy :: proc(index: ^map[u64][dynamic]int) {
+	for _, bucket in index^ { delete(bucket) }
+	delete(index^)
+}
+
 @(private)
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	new_values := make([]types.Value, len(values), context.temp_allocator)
@@ -223,10 +256,10 @@ Check_Op :: enum u8 {
 	NE,
 }
 
-// parse_check_expr decomposes a raw `col <op> int` CHECK string. Returns
+// parse_check_predicate decomposes a raw `col <op> int` CHECK string. Returns
 // ok=false (already logged) on malformed input or an unsupported operator.
 @(private)
-parse_check_expr :: proc(chk: string) -> (Parsed_Check, bool) {
+parse_check_predicate :: proc(chk: string) -> (Parsed_Check, bool) {
 	parts := strings.split(chk, " ", context.temp_allocator)
 	if len(parts) < 3 {
 		log.errorf("Error: CHECK constraint too complex: %s", chk)
@@ -285,28 +318,62 @@ check_op_eval :: proc(op: Check_Op, left, right: i64) -> bool {
 	return false
 }
 
+// Resolved_Check is one CHECK constraint with parsing and column resolution
+// done: evaluated per row with zero allocation and no string work. `src`
+// keeps the original expression for error messages (borrowed from the table).
+Resolved_Check :: struct {
+	col_idx: int,
+	op:      Check_Op,
+	val:     i64,
+	src:     string,
+}
+
+// resolve_table_checks parses and resolves every CHECK constraint on the
+// table once per statement. Returns ok=false (already logged) when a check
+// is malformed or names an unknown column.
 @(private)
-check_constraints :: proc(values: []types.Value, table: types.Table) -> bool {
+resolve_table_checks :: proc(table: types.Table) -> ([]Resolved_Check, bool) {
+	n := 0
 	for col in table.columns {
-		if chk, has_chk := col.check_expr.?; has_chk {
-			parsed, p_ok := parse_check_expr(chk)
-			if !p_ok { return false }
+		if _, has_chk := col.check_expr.?; has_chk { n += 1 }
+	}
+	if n == 0 { return nil, true }
 
-			col_idx, col_ok := resolve_qualified_column(table.columns, nil, parsed.col_name)
-			if !col_ok {
-				log.errorf("Error: CHECK references unknown column: %s", parsed.col_name)
-				return false
-			}
+	checks := make([]Resolved_Check, n, context.temp_allocator)
+	resolver := build_column_resolver(table.columns, nil)
+	i := 0
+	for col in table.columns {
+		chk, has_chk := col.check_expr.?
+		if !has_chk { continue }
 
-			left_i64, is_int := values[col_idx].(i64)
-			if !is_int {
-				log.errorf("Error: CHECK column value is not an integer: %s", chk)
-				return false
-			}
-			if !check_op_eval(parsed.op, left_i64, parsed.val) {
-				log.errorf("CHECK constraint violation: %s", chk)
-				return false
-			}
+		parsed, p_ok := parse_check_predicate(chk)
+		if !p_ok { return nil, false }
+
+		col_idx, col_ok := resolve(resolver, parsed.col_name)
+		if !col_ok {
+			log.errorf("Error: CHECK references unknown column: %s", parsed.col_name)
+			return nil, false
+		}
+
+		checks[i] = Resolved_Check{col_idx = col_idx, op = parsed.op, val = parsed.val, src = chk}
+		i += 1
+	}
+	return checks, true
+}
+
+// check_constraints_resolved evaluates statement-resolved CHECK constraints
+// against one row. Only the integer assertion and comparison run per row.
+@(private)
+check_constraints_resolved :: proc(values: []types.Value, checks: []Resolved_Check) -> bool {
+	for rc in checks {
+		left_i64, is_int := values[rc.col_idx].(i64)
+		if !is_int {
+			log.errorf("Error: CHECK column value is not an integer: %s", rc.src)
+			return false
+		}
+		if !check_op_eval(rc.op, left_i64, rc.val) {
+			log.errorf("CHECK constraint violation: %s", rc.src)
+			return false
 		}
 	}
 	return true

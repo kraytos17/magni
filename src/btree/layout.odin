@@ -103,18 +103,36 @@ init_leaf_page :: proc(data: []u8, page_id: u32) {
 	header.fragmented_bytes = 0
 }
 
-convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
+// Columnar_Decode is a columnar page fully decoded into row-major rows,
+// ready for reinsert. Slices borrow the temp allocator.
+Columnar_Decode :: struct {
+	rowids: []types.Row_ID,
+	values: [][]types.Value,
+}
+
+// decode_columnar_page reads every rowid and column value out of a columnar
+// page without modifying it. Single O(n) rowid walk (not per-row seeks).
+// Returns ok=false on truncated or garbage data; the page is untouched.
+@(private)
+decode_columnar_page :: proc(
+	data: []u8,
+	page_id: u32,
+	num_cols: int,
+) -> (
+	decoded: Columnar_Decode,
+	ok: bool,
+) {
 	off := get_page_header_offset(page_id)
 	hdr := (^Page_Header)(raw_data(data[off:]))
 	row_count := int(hdr.cell_count)
-	if row_count == 0 { return }
+	if row_count == 0 { return {}, true }
 
 	rowids := make([]types.Row_ID, row_count, context.temp_allocator)
 	rid_pos := off + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
 	total: types.Row_ID = 0
 	for i in 0 ..< row_count {
-		delta, n, ok := varint.decode(data, rid_pos)
-		if !ok { return }
+		delta, n, dok := varint.decode(data, rid_pos)
+		if !dok { return {}, false }
 
 		total += types.Row_ID(delta)
 		rowids[i] = total
@@ -127,49 +145,76 @@ convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
 	}
 	for col_i in 0 ..< num_cols {
 		col_vals := cell.decode_column(data, num_cols, col_i, off, context.temp_allocator)
-		if col_vals == nil { return }
+		if col_vals == nil { return {}, false }
 		for ri in 0 ..< row_count {
 			if ri < len(col_vals) {
 				values[ri][col_i] = col_vals[ri]
 			}
 		}
 	}
+	return Columnar_Decode{rowids = rowids, values = values}, true
+}
 
-	// Reinitialize page as row-major LEAF_TABLE
-	mem.zero_slice(data[off:])
+// reinsert_row_major reinitializes the page as row-major LEAF_TABLE and
+// serializes every decoded row with canonical V2 Cell_Entry{ptr, key}
+// pointers — the u16-only pointer array must never be written again.
+// Atomic: the expansion is measured first and .Page_Full returns with the
+// page untouched when it cannot fit (a half-converted page would silently
+// drop the tail rows, so callers must fail the op instead).
+@(private)
+reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -> Error {
+	total := size_of(Leaf_Header) + len(decoded.rowids) * CELL_ENTRY_STRIDE
+	for ri in 0 ..< len(decoded.rowids) {
+		if decoded.values[ri] == nil { continue }
+		total += cell.compute_info(decoded.rowids[ri], decoded.values[ri]).total_size
+	}
+	if total > PAGE_SIZE { return .Page_Full }
+
+	off := get_page_header_offset(page_id)
+	init_leaf_page(data, page_id)
 	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .LEAF_TABLE
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
+	for ri in 0 ..< len(decoded.rowids) {
+		if decoded.values[ri] == nil { continue }
 
-	for ri in 0 ..< row_count {
-		if values[ri] == nil { continue }
-
-		info := cell.compute_info(rowids[ri], values[ri])
+		info := cell.compute_info(decoded.rowids[ri], decoded.values[ri])
 		dest_off := int(header.cell_content_offset) - info.total_size
 		if dest_off < off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * CELL_ENTRY_STRIDE {
-			return
+			return .Page_Full
 		}
 
-		cell.serialize(data[dest_off:dest_off + info.total_size], rowids[ri], values[ri], info)
+		cell.serialize(data[dest_off:dest_off + info.total_size], decoded.rowids[ri], decoded.values[ri], info)
 		header.cell_content_offset = u16le(dest_off)
 		entry := (^Cell_Entry)(raw_data(data[off + int(size_of(Leaf_Header)) + int(header.cell_count) * CELL_ENTRY_STRIDE:]))
 		entry^ = Cell_Entry {
 			ptr = Cell_Pointer(u16(dest_off)),
-			key = rowids[ri],
+			key = decoded.rowids[ri],
 		}
 		header.cell_count = u16le(int(header.cell_count) + 1)
 	}
+	return .None
+}
+
+convert_columnar_to_row_major :: proc(data: []u8, page_id: u32, num_cols: int) {
+	off := get_page_header_offset(page_id)
+	hdr := (^Page_Header)(raw_data(data[off:]))
+	if int(hdr.cell_count) == 0 { return }
+
+	decoded, ok := decode_columnar_page(data, page_id, num_cols)
+	if !ok { return }
+	_ = reinsert_row_major(data, page_id, decoded)
 }
 
 @(private)
-ensure_row_major :: proc(data: []u8, page_id: u32) {
-	if !is_columnar(data, page_id) { return }
+ensure_row_major :: proc(data: []u8, page_id: u32) -> bool {
+	if !is_columnar(data, page_id) { return true }
+
 	num_cols, found := detect_columnar_col_count(data, page_id)
-	if !found { return }
-	convert_columnar_to_row_major(data, page_id, num_cols)
+	if !found { return false }
+
+	decoded, ok := decode_columnar_page(data, page_id, num_cols)
+	if !ok { return false }
+	if reinsert_row_major(data, page_id, decoded) != .None { return false }
+	return !is_columnar(data, page_id)
 }
 
 @(private)

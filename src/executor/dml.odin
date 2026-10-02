@@ -83,13 +83,14 @@ Row_Check :: enum u8 {
 	Check_Error,
 }
 
-// check_row runs type validation then CHECK constraints for one candidate
-// row. Logging stays with the caller, which owns the INSERT-vs-UPDATE
-// message vocabulary; check_constraints logs its own specifics on failure.
+// check_row runs type validation then statement-resolved CHECK constraints
+// for one candidate row. Logging stays with the caller, which owns the
+// INSERT-vs-UPDATE message vocabulary; check_constraints_resolved logs its
+// own specifics on failure.
 @(private)
-check_row :: proc(values: []types.Value, table: types.Table) -> Row_Check {
+check_row :: proc(values: []types.Value, table: types.Table, checks: []Resolved_Check) -> Row_Check {
 	if !cell.validate(values, table.columns) { return .Type_Error }
-	if !check_constraints(values, table) { return .Check_Error }
+	if !check_constraints_resolved(values, checks) { return .Check_Error }
 	return .Ok
 }
 
@@ -104,7 +105,9 @@ Insert_Row_Info :: struct {
 // prepare_insert_row validates column list, reorders values to match the table
 // schema, applies defaults, checks constraints, and assigns a row ID.
 // root_page is the current data root to use for rowid lookup and insert.
-// Returns (info, true) on success or ({}, false) on error (already logged).
+// `checks` are the statement-resolved CHECK constraints (built once per
+// INSERT, not per row). Returns (info, true) on success or ({}, false) on
+// error (already logged).
 @(private)
 prepare_insert_row :: proc(
 	table: types.Table,
@@ -112,10 +115,11 @@ prepare_insert_row :: proc(
 	row_values: []types.Value,
 	t: ^btree.Tree,
 	root_page: u32,
+	checks: []Resolved_Check,
 ) -> (Insert_Row_Info, bool) {
 	values, v_ok := reorder_insert_values(table, columns, row_values)
 	if !v_ok { return {}, false }
-	if check := check_row(values, table); check != .Ok {
+	if check := check_row(values, table, checks); check != .Ok {
 		if check == .Type_Error {
 			log.error("Error: Data type validation failed")
 		}
@@ -222,9 +226,18 @@ exec_insert_impl :: proc(
 	pending: ^Pending_Roots = nil,
 ) -> (bool, u32, Mutated_Table_Info) {
 	is_direct := mode == .Direct
+	// Resolve CHECK constraints once per statement (not per row). Skipped
+	// for row-less inserts, which never evaluate a row and must keep
+	// passing through today.
+	checks: []Resolved_Check
+	if len(stmt.values) > 0 {
+		rc, rc_ok := resolve_table_checks(table)
+		if !rc_ok { return false, t.root, {} }
+		checks = rc
+	}
 	if is_direct {
 		for row_values in stmt.values {
-			info, ok := prepare_insert_row(table, stmt.columns, row_values, t, table.root_page)
+			info, ok := prepare_insert_row(table, stmt.columns, row_values, t, table.root_page, checks)
 			if !ok { return false, t.root, {} }
 
 			err := btree.tree_insert(&info.table_tree, info.row_id, info.values)
@@ -238,7 +251,7 @@ exec_insert_impl :: proc(
 	} else {
 		data_root := table.root_page
 		for row_values in stmt.values {
-			info, ok := prepare_insert_row(table, stmt.columns, row_values, t, data_root)
+			info, ok := prepare_insert_row(table, stmt.columns, row_values, t, data_root, checks)
 			if !ok { return false, t.root, {} }
 
 			table_tree := btree.init(t.pager, data_root)
@@ -304,18 +317,29 @@ build_update_map :: proc(
 // apply_update validates and applies column updates to a row.
 // Returns the new row and true if valid and changed, or (nil, false) if unchanged,
 // or (nil, true) if validation failed (error already logged or warned).
+// CHECK constraints resolve lazily on the first updated row, so zero-match
+// UPDATEs never surface resolution errors for rows they never touch.
 @(private)
 apply_update :: proc(
 	c: ^cell.Cell,
 	update_map: map[int]types.Value,
-	table: ^types.Table,
+	plan: ^Update_Plan,
 	policy: Violation_Policy,
 ) -> ([]types.Value, bool) {
+	if !plan.checks_built {
+		plan.checks_built = true
+		if rc, rc_ok := resolve_table_checks(plan.tbl); rc_ok {
+			plan.checks = rc
+		} else {
+			return nil, true // true = had an error (already logged)
+		}
+	}
+
 	new_row := deep_copy_values(c.values)
 	for idx, val in update_map {
 		new_row[idx] = val
 	}
-	if check := check_row(new_row, table^); check != .Ok {
+	if check := check_row(new_row, plan.tbl, plan.checks); check != .Ok {
 		reason := "violates column constraints" if check == .Type_Error else "violates CHECK constraint"
 		if policy == .Skip {
 			log.warn("Skipping UPDATE row", c.rowid, "—", reason)
@@ -360,13 +384,17 @@ exec_update_impl :: proc(
 
 // Update_Plan captures the resolved state for an UPDATE: target table,
 // column→value map, optional filter, and write mode. Built once by
-// exec_update_impl, consumed by the pk/scan procs below.
+// exec_update_impl, consumed by the pk/scan procs below. `checks` holds the
+// statement-resolved CHECK constraints, built lazily by apply_update on the
+// first updated row (so zero-match UPDATEs never resolve them).
 Update_Plan :: struct {
-	tbl:        types.Table,
-	table_name: string,
-	update_map: map[int]types.Value,
-	using filt: Mutation_Filter,
-	direct:     bool,
+	tbl:          types.Table,
+	table_name:   string,
+	update_map:   map[int]types.Value,
+	using filt:   Mutation_Filter,
+	direct:       bool,
+	checks:       []Resolved_Check,
+	checks_built: bool,
 }
 
 // eval_mutation_filter evaluates a mutation plan's pre-resolved filter
@@ -501,7 +529,7 @@ update_by_pk :: proc(
 	}
 	defer cell.destroy(&c, context.temp_allocator)
 
-	new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, .Fail)
+	new_row, had_err := apply_update(&c, plan.update_map, plan, .Fail)
 	if had_err && new_row == nil {
 		return true, false, t.root, {}
 	}
@@ -567,19 +595,21 @@ update_scan_direct :: proc(
 	ops := make([dynamic]Update_Op, context.temp_allocator)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(cursor, context.temp_allocator)
-		defer cell.destroy(&c, context.temp_allocator)
 		if get_err != .None {
+			cell.destroy(&c, context.temp_allocator)
 			btree.cursor_advance(cursor)
 			continue
 		}
 
 		should_update := eval_mutation_filter(&plan.filt, c.values)
 		if should_update {
-			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, .Skip)
+			new_row, had_err := apply_update(&c, plan.update_map, plan, .Skip)
 			if !had_err && new_row != nil {
 				append(&ops, Update_Op{c.rowid, new_row})
 			}
 		}
+
+		cell.destroy(&c, context.temp_allocator)
 		btree.cursor_advance(cursor)
 	}
 
@@ -613,14 +643,14 @@ update_scan_cow :: proc(
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(cursor, context.temp_allocator)
 		if get_err != .None {
+			cell.destroy(&c, context.temp_allocator)
 			btree.cursor_advance(cursor)
 			continue
 		}
 
-		defer cell.destroy(&c, context.temp_allocator)
 		should_update := eval_mutation_filter(&plan.filt, c.values)
 		if should_update {
-			new_row, had_err := apply_update(&c, plan.update_map, &plan.tbl, .Fail)
+			new_row, had_err := apply_update(&c, plan.update_map, plan, .Fail)
 			if !had_err && new_row != nil {
 				tree_at := btree.init(t.pager, current_root)
 				nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)
@@ -630,6 +660,8 @@ update_scan_cow :: proc(
 				}
 			}
 		}
+
+		cell.destroy(&c, context.temp_allocator)
 		btree.cursor_advance(cursor)
 	}
 	if count > 0 {
@@ -746,15 +778,17 @@ collect_delete_targets :: proc(
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
+			cell.destroy(&c, context.temp_allocator)
 			btree.cursor_advance(&cursor)
 			continue
 		}
-		defer cell.destroy(&c, context.temp_allocator)
 
 		should_delete := eval_mutation_filter(&plan.filt, c.values)
 		if should_delete {
 			append(&targets, c.rowid)
 		}
+
+		cell.destroy(&c, context.temp_allocator)
 		btree.cursor_advance(&cursor)
 	}
 	return targets

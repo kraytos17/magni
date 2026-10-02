@@ -270,7 +270,7 @@ finish_select :: proc(
 		return out, cols, true
 	}
 
-	indices, i_ok := build_display_indices(stmt.columns, cols, ranges, len(cols))
+	indices, i_ok := build_display_indices(stmt.columns, build_column_resolver(cols, ranges), len(cols))
 	if !i_ok { return nil, nil, false }
 
 	proj := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
@@ -396,13 +396,14 @@ scan_table :: proc(
 		}
 
 		c, get_err := btree.cursor_get_cell(&cursor, allocator)
-		defer cell.destroy(&c, allocator)
 		if get_err != .None {
+			cell.destroy(&c, allocator)
 			btree.cursor_advance(&cursor)
 			continue
 		}
 		if f, has_f := plan.filter.?; has_f {
 			if !evaluate_where_ctx(f, c.values) {
+				cell.destroy(&c, allocator)
 				btree.cursor_advance(&cursor)
 				continue
 			}
@@ -410,6 +411,7 @@ scan_table :: proc(
 
 		append(&r, Row_Entry{c.rowid, c.values})
 		c.values = nil
+		cell.destroy(&c, allocator)
 		if limit, has_limit := plan.max_rows.?; has_limit && u64(len(r)) >= limit { break }
 		btree.cursor_advance(&cursor)
 	}

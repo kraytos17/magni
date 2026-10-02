@@ -2,22 +2,19 @@ package parser
 
 import "src:types"
 
-@(private)
-parse_insert :: proc(
+@(private="file")
+parse_insert_column_list :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
 ) -> (
-	stmt: Statement_Variant,
+	columns: [dynamic]string,
 	ok: bool,
 ) {
-	if !expect_match(p, .INTO, "Expected INTO after INSERT") do return nil, false
-	table_name := parse_identifier(p, allocator) or_return
-	columns := make([dynamic]string, allocator)
+	columns = make([dynamic]string, allocator)
 	defer if !ok {
 		for c in columns do delete(c, allocator)
 		delete(columns)
 	}
-
 	if peek(p).type == .LPAREN && p.current + 1 < len(p.tokens) {
 		next_type := p.tokens[p.current + 1].type
 		if next_type == .IDENTIFIER || next_type == .RPAREN {
@@ -27,9 +24,63 @@ parse_insert :: proc(
 				if match(
 					p,
 					.RPAREN,
-				) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column") { return nil, false }
+				) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column") { return {}, false }
 			}
 		}
+	}
+	return columns, true
+}
+
+// parse_insert_value_row parses one parenthesized VALUES row (the opening
+// paren is already consumed). Partial values are freed on failure.
+@(private="file")
+parse_insert_value_row :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	values: []types.Value,
+	ok: bool,
+) {
+	acc := make([dynamic]types.Value, allocator)
+	defer if !ok {
+		for v in acc { types.value_delete(v, allocator) }
+		delete(acc)
+	}
+	for {
+		val, val_ok := parse_value(
+			p,
+			allocator,
+		); if !val_ok {
+			return nil, false
+		}
+
+		append(&acc, val)
+		if match(
+			p,
+			.RPAREN,
+		) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") {
+			return nil, false
+		}
+	}
+	return acc[:], true
+}
+
+@(private)
+parse_insert :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
+	if !expect_match(p, .INTO, "Expected INTO after INSERT") do return nil, false
+
+	table_name := parse_identifier(p, allocator) or_return
+	columns, cok := parse_insert_column_list(p, allocator)
+	if !cok { return nil, false }
+	defer if !ok {
+		for c in columns do delete(c, allocator)
+		delete(columns)
 	}
 	if !expect_match(p, .VALUES, "Expected VALUES after INSERT") ||
 	   !expect_match(p, .LPAREN, "Expected ( after VALUES") {
@@ -45,31 +96,12 @@ parse_insert :: proc(
 		delete(rows)
 	}
 	for {
-		values := make([dynamic]types.Value, allocator)
-		for {
-			val, val_ok := parse_value(
-				p,
-				allocator,
-			); if !val_ok {
-				for v in values { types.value_delete(v, allocator) }
-
-				delete(values)
-				return err(p, "Invalid value in INSERT")
-			}
-
-			append(&values, val)
-			if match(
-				p,
-				.RPAREN,
-			) { break } else if !expect_match(p, .COMMA, "Expected , or ) after value") {
-				for v in values { types.value_delete(v, allocator) }
-
-				delete(values)
-				return nil, false
-			}
+		values, vok := parse_insert_value_row(p, allocator)
+		if !vok {
+			return err(p, "Invalid value in INSERT")
 		}
 
-		append(&rows, values[:])
+		append(&rows, values)
 		if !match(p, .COMMA) { break }
 		if !expect_match(p, .LPAREN, "Expected ( after , for next VALUES row") {
 			return nil, false

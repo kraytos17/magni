@@ -315,16 +315,8 @@ try_hash_join :: proc(
 	rhs_str, is_col := cond.rhs.(string)
 	if !is_col { return false }
 
-	left_idx, left_ok := resolve_qualified_column(
-		jb.cols,
-		jb.ranges,
-		cond.column,
-	)
-	right_idx, right_ok := resolve_qualified_column(
-		jb.cols,
-		jb.ranges,
-		rhs_str,
-	)
+	left_idx, left_ok := resolve(jb.resolver, cond.column)
+	right_idx, right_ok := resolve(jb.resolver, rhs_str)
 	if !left_ok || !right_ok { return false }
 
 	right_adjust := jb.ctxs[info_idx].range.start_col
@@ -439,29 +431,41 @@ nested_loop_join :: proc(
 	delete(matched_right)
 }
 
-@(private)
-build_join_result :: proc(
+// resolve_join_tables resolves the FROM source and every JOIN source into
+// parallel context/range arrays. Returns false (already logged) on failure.
+@(private="file")
+resolve_join_tables :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
+	table_ctxs: []Table_Context,
+	table_ranges: []Table_Col_Range,
 	cache: ^schema.Table_Cache = nil,
-) -> Join_Build {
-	table_count := 1 + len(stmt.joins)
-	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
-	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
+) -> bool {
 	if !resolve_from_source(t, stmt, &table_ctxs[0], cache) {
-		return {}
+		return false
 	}
 
 	table_ranges[0] = table_ctxs[0].range
-	col_count_0 := table_ctxs[0].range.col_count
 	for join, i in stmt.joins {
 		idx := i + 1
 		if !resolve_join_source(t, join, table_ctxs[idx - 1].range, &table_ctxs[idx], cache) {
-			return {}
+			return false
 		}
 		table_ranges[idx] = table_ctxs[idx].range
 	}
+	return true
+}
 
+// assemble_combined_cols lays every table's columns into one array at their
+// range offsets. Returns the array and the total column count.
+@(private="file")
+assemble_combined_cols :: proc(
+	table_ctxs: []Table_Context,
+	table_count: int,
+) -> (
+	[]types.Column,
+	int,
+) {
 	total_cols :=
 		table_ctxs[table_count - 1].range.start_col + table_ctxs[table_count - 1].range.col_count
 
@@ -474,17 +478,23 @@ build_join_result :: proc(
 			for j in 0 ..< tr.col_count { combined_cols[tr.start_col + j] = table_ctxs[ti].info.table.columns[j] }
 		}
 	}
+	return combined_cols, total_cols
+}
 
-	// Predicate pushdown: partition the WHERE conjuncts per table so each table
-	// scan filters early (and can use skip-index pruning). Conjuncts that are
-	// qualified/ambiguous/cross-table stay for the post-join filter_rows below.
-	join_filters := make([dynamic]Maybe(parser.Where_Clause), 0, context.temp_allocator)
-	if wc, has_wc := stmt.where_clause.?; has_wc {
-		join_filters = split_where_for_join(wc, combined_cols, table_ranges)
-	}
-
-	rows: []Row_Entry
-	if col_count_0 > 0 {
+// scan_first_table materializes the FROM side: a btree scan with its
+// pushdown filter, or the virtual rows for a subquery source. Returns
+// (nil, true) when the first source yields no rows without error.
+@(private="file")
+scan_first_table :: proc(
+	t: ^btree.Tree,
+	table_ctxs: []Table_Context,
+	join_filters: [dynamic]Maybe(parser.Where_Clause),
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	[]Row_Entry,
+	bool,
+) {
+	if table_ctxs[0].range.col_count > 0 {
 		r, scan_err := scan_table(
 			&table_ctxs[0].info.tree,
 			&table_ctxs[0].info.table,
@@ -494,28 +504,68 @@ build_join_result :: proc(
 			context.temp_allocator,
 			cache,
 		)
-		if scan_err { return {} }
-		rows = r
+		if scan_err { return nil, false }
+		return r, true
 	} else if vt, is_virtual := table_ctxs[0].info.virtual.?; is_virtual {
-		rows = vt.rows
+		return vt.rows, true
 	}
+	return nil, true
+}
 
-	jb := Join_Build {
-		ctxs = table_ctxs,
-		ranges = table_ranges,
-		cols = combined_cols,
-	}
+// run_join_chain executes each JOIN clause in order, then applies the
+// residual post-join WHERE filter over the combined rows.
+@(private="file")
+run_join_chain :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+	jb: ^Join_Build,
+	rows: []Row_Entry,
+	join_filters: [dynamic]Maybe(parser.Where_Clause),
+	cache: ^schema.Table_Cache = nil,
+) -> []Row_Entry {
+	out := rows
 	for j_idx in 0 ..< len(stmt.joins) {
 		jc := stmt.joins[j_idx]
 		info_idx := j_idx + 1
 		filter := join_filters[info_idx] if info_idx < len(join_filters) else nil
-		rows = execute_single_join(t, &jb, jc, info_idx, rows, filter, cache)
+		out = execute_single_join(t, jb, jc, info_idx, out, filter, cache)
 	}
 	if where_clause, has_where := stmt.where_clause.?; has_where {
-		rows = filter_rows(rows, &where_clause, combined_cols, table_ranges)
+		out = filter_rows(out, &where_clause, jb.cols, jb.ranges)
+	}
+	return out
+}
+
+@(private)
+build_join_result :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
+) -> Join_Build {
+	table_count := 1 + len(stmt.joins)
+	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
+	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
+	if !resolve_join_tables(t, stmt, table_ctxs, table_ranges, cache) {
+		return {}
 	}
 
-	jb.rows = rows
+	combined_cols, total_cols := assemble_combined_cols(table_ctxs, table_count)
+	join_filters := make([dynamic]Maybe(parser.Where_Clause), 0, context.temp_allocator)
+	if wc, has_wc := stmt.where_clause.?; has_wc {
+		join_filters = split_where_for_join(wc, combined_cols, table_ranges)
+	}
+
+	rows, scan_ok := scan_first_table(t, table_ctxs, join_filters, cache)
+	if !scan_ok { return {} }
+
+	jb := Join_Build {
+		ctxs     = table_ctxs,
+		ranges   = table_ranges,
+		cols     = combined_cols,
+		resolver = build_column_resolver(combined_cols, table_ranges),
+	}
+
+	jb.rows = run_join_chain(t, stmt, &jb, rows, join_filters, cache)
 	jb.total_cols = total_cols
 	jb.ok = true
 	return jb

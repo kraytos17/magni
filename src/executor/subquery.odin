@@ -113,8 +113,7 @@ exec_subquery_data :: proc(
 	rows, single_range := materialize_subquery_rows(inner_rows, virtual_cols, stmt)
 	display_indices, ok := build_display_indices(
 		stmt.columns,
-		virtual_cols,
-		single_range,
+		build_column_resolver(virtual_cols, single_range),
 		len(virtual_cols),
 	)
 

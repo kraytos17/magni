@@ -17,25 +17,14 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	if len(rows) <= 1 { return rows }
 	seen := make(map[u64][dynamic]int, len(rows), context.temp_allocator)
 	result := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
-	defer {
-		for _, bucket in seen { delete(bucket) }
-		delete(seen)
-	}
+	defer bucket_index_destroy(&seen)
 
 	for r in rows {
 		fp := row_fingerprint(r.values)
 		is_dup := false
 		if bucket, ok := seen[fp]; ok {
 			for idx in bucket {
-				existing := result[idx]
-				all_eq := true
-				for j in 0 ..< len(r.values) {
-					if !types.value_compare(r.values[j], existing.values[j]) {
-						all_eq = false
-						break
-					}
-				}
-				if all_eq {
+				if values_equal(r.values, result[idx].values) {
 					is_dup = true
 					break
 				}
@@ -43,9 +32,7 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 		}
 		if !is_dup {
 			append(&result, r)
-			bucket := seen[fp]
-			append(&bucket, len(result) - 1)
-			seen[fp] = bucket
+			bucket_add(&seen, fp, len(result) - 1)
 		}
 	}
 	return result[:]
@@ -58,7 +45,8 @@ sort_rows :: proc(
 	cols: []types.Column,
 	table_ranges: []Table_Col_Range,
 ) -> bool {
-	sort_indices, r_ok := resolve_sort_indices(order_clause, cols, table_ranges)
+	resolver := build_column_resolver(cols, table_ranges)
+	sort_indices, r_ok := resolve_sort_indices(order_clause, resolver)
 	if !r_ok { return false }
 	if len(order_clause) == 1 && len(rows) > 1 {
 		if sort_rows_int_fast(rows, order_clause[0], sort_indices[0]) { return true }
@@ -94,15 +82,14 @@ sort_rows :: proc(
 @(private="file")
 resolve_sort_indices :: proc(
 	order_clause: []parser.Order_By_Column,
-	cols: []types.Column,
-	table_ranges: []Table_Col_Range,
+	resolver: Column_Resolver,
 ) -> (
 	[]int,
 	bool,
 ) {
 	sort_indices := make([]int, len(order_clause), context.temp_allocator)
 	for o, i in order_clause {
-		idx, col_ok := resolve_qualified_column(cols, table_ranges, o.column)
+		idx, col_ok := resolve(resolver, o.column)
 		if !col_ok {
 			log.errorf("Error: Unknown column in ORDER BY: %s", o.column)
 			return nil, false

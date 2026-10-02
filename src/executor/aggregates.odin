@@ -47,8 +47,9 @@ build_groups :: proc(
 	ok: bool,
 ) {
 	group_by_indices = make([]int, len(stmt.group_by), context.temp_allocator)
+	resolver := build_column_resolver(combined_cols, table_ranges)
 	for col, i in stmt.group_by {
-		idx, col_ok := resolve_qualified_column(combined_cols, table_ranges, col)
+		idx, col_ok := resolve(resolver, col)
 		if !col_ok {
 			log.errorf("Error: Unknown column in GROUP BY: %s", col)
 			return nil, nil, false
@@ -60,7 +61,7 @@ build_groups :: proc(
 	// takes no column and always resolves.
 	for agg in stmt.aggregates {
 		if agg.column == "" { continue }
-		if _, col_ok := resolve_qualified_column(combined_cols, table_ranges, agg.column); !col_ok {
+		if _, col_ok := resolve(resolver, agg.column); !col_ok {
 			log.errorf("Error: Unknown column in aggregate: %s", agg.column)
 			return nil, nil, false
 		}
@@ -68,10 +69,7 @@ build_groups :: proc(
 
 	groups = make([dynamic]Group, context.temp_allocator)
 	group_map := make(map[u64][dynamic]int, context.temp_allocator)
-	defer {
-		for _, bucket in group_map { delete(bucket) }
-		delete(group_map)
-	}
+	defer bucket_index_destroy(&group_map)
 	for row_entry, _ in rows {
 		if len(group_by_indices) == 0 {
 			if len(groups) == 0 {
@@ -97,9 +95,7 @@ build_groups :: proc(
 
 				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
 				append(&new_grp_rows, row_entry)
-				bucket := group_map[hash]
-				append(&bucket, len(groups))
-				group_map[hash] = bucket
+				bucket_add(&group_map, hash, len(groups))
 				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
 			}
 		}
@@ -330,8 +326,7 @@ value_rank :: proc(v: types.Value) -> int {
 @(private)
 build_display_indices :: proc(
 	columns: []string,
-	cols: []types.Column,
-	table_ranges: []Table_Col_Range,
+	resolver: Column_Resolver,
 	total_cols: int,
 ) -> (
 	[]int,
@@ -344,7 +339,7 @@ build_display_indices :: proc(
 		}
 	} else {
 		for req_col in columns {
-			idx, ok := resolve_qualified_column(cols, table_ranges, req_col)
+			idx, ok := resolve(resolver, req_col)
 			if !ok {
 				log.errorf("Error: Unknown column: %s", req_col)
 				return nil, false

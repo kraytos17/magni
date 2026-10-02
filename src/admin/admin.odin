@@ -230,13 +230,14 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	table_rows := make([dynamic][]string, context.temp_allocator)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
-		defer cell.destroy(&c, context.temp_allocator)
 		if get_err != .None {
+			cell.destroy(&c, context.temp_allocator)
 			btree.cursor_advance(&cursor)
 			continue
 		}
 
 		append(&table_rows, executor.stringify_row(c.values, context.temp_allocator))
+		cell.destroy(&c, context.temp_allocator)
 		btree.cursor_advance(&cursor)
 	}
 

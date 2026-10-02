@@ -1258,6 +1258,147 @@ test_columnar_insert_conversion :: proc(t: ^testing.T) {
 	}
 }
 
+// verify_dense_rows scans the whole tree and expects exactly the rowids
+// 1..n, each holding a single INTEGER value equal to its rowid.
+verify_dense_rows :: proc(t: ^testing.T, tree: ^btree.Tree, n: int) -> bool {
+	seen := make([]bool, n + 1, context.temp_allocator)
+	total := 0
+	c, _ := btree.cursor_start(tree)
+	defer btree.cursor_destroy(&c)
+	for c.is_valid {
+		cell_val, g_err := btree.cursor_get_cell(&c, context.temp_allocator)
+		if g_err != .None {
+			testing.expect(t, false, "cursor decodes row")
+			return false
+		}
+		rid := int(cell_val.rowid)
+		ok := rid >= 1 && rid <= n && !seen[rid]
+		if ok {
+			seen[rid] = true
+			ok = len(cell_val.values) == 1
+			if v, v_ok := cell_val.values[0].(i64); v_ok && v == i64(rid) {} else { ok = false }
+		}
+		testing.expect(t, ok, "rowid in range, unique, value matches")
+		cell.destroy(&cell_val, context.temp_allocator)
+		if !ok { return false }
+		total += 1
+		btree.cursor_advance(&c)
+	}
+	testing.expect(t, total == n, "all rows present exactly once")
+	return total == n
+}
+
+@(test)
+test_columnar_conversion_then_split :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	// Bulk columnar page → conversion on first insert → splits on later
+	// inserts. Locks the unified columnar→row-major path and proves split
+	// pages carry canonical V2 Cell_Entry{ptr,key} pointers: every row must
+	// decode with its exact rowid/value after splitting.
+	ctx := setup_tree(t, "colsplit")
+	defer teardown_tree(&ctx)
+
+	N_FIRST :: 300
+	for i in 1 ..= N_FIRST {
+		vs := make([]types.Value, 1, context.temp_allocator)
+		vs[0] = types.value_int(i64(i))
+		ierr := btree.tree_insert(&ctx.tree, types.Row_ID(i), vs)
+		testing.expect(t, ierr == .None, "seed insert succeeds")
+		if ierr != .None { return }
+	}
+
+	// Flip the root page to columnar.
+	off := btree.get_page_header_offset(1)
+	pg, pg_err := pager.get_page(ctx.pager, 1)
+	testing.expect(t, pg_err == .None, "get page 1")
+	if pg_err != .None { return }
+
+	// NOTE: each row is built with an explicit make. A per-iteration
+	// []Value{...} literal was observed to share one backing array here
+	// (every row decoded as the last value), while tree_insert copies
+	// synchronously so either form is safe for the seed inserts above.
+	{
+		rowids := make([]types.Row_ID, N_FIRST, context.temp_allocator)
+		vals := make([][]types.Value, N_FIRST, context.temp_allocator)
+		for i in 0 ..< N_FIRST {
+			rowids[i] = types.Row_ID(i + 1)
+			vs := make([]types.Value, 1, context.temp_allocator)
+			vs[0] = types.value_int(i64(i + 1))
+			vals[i] = vs
+		}
+		cols := []types.Column{{name = "val", type = .INTEGER}}
+		testing.expect(t, cell.serialize_columnar(pg.data[off:], rowids, vals, cols), "serialize columnar")
+		for v in vals { delete(v, context.temp_allocator) }
+
+		hdr := btree.get_leaf_header(pg.data, 1)
+		hdr.page_type = .LEAF_TABLE_COLUMNAR
+		hdr.cell_count = u16le(N_FIRST)
+		hdr.cell_content_offset = u16le(8 + len(cols) * 12)
+		pager.mark_dirty(ctx.pager, 1)
+	}
+	pager.unpin_page(ctx.pager, 1)
+
+	// Phase A: the 300 columnar rows expand past one row-major page, so the
+	// insert must fail loudly and lose nothing (no silent tail truncation).
+	{
+		vs := make([]types.Value, 1, context.temp_allocator)
+		vs[0] = types.value_int(301)
+		ierr := btree.tree_insert(&ctx.tree, 301, vs)
+		testing.expect(t, ierr == .Cell_Deserialize_Failed, "overflowing conversion fails loudly")
+	}
+	testing.expect(t, verify_dense_rows(t, &ctx.tree, N_FIRST), "all 300 rows intact after failed conversion")
+
+	// Phase B: a small columnar page converts in place, then growth splits.
+	teardown_tree(&ctx)
+	ctx = setup_tree(t, "colsplit2")
+
+	M_FIRST :: 50
+	M_TOTAL :: 600
+	for i in 1 ..= M_FIRST {
+		vs := make([]types.Value, 1, context.temp_allocator)
+		vs[0] = types.value_int(i64(i))
+		if ierr := btree.tree_insert(&ctx.tree, types.Row_ID(i), vs); ierr != .None {
+			testing.expect(t, false, "seed insert succeeds")
+			return
+		}
+	}
+	off2 := btree.get_page_header_offset(1)
+	pg2, pg2_err := pager.get_page(ctx.pager, 1)
+	testing.expect(t, pg2_err == .None, "get page 1")
+	if pg2_err != .None { return }
+	{
+		rowids := make([]types.Row_ID, M_FIRST, context.temp_allocator)
+		vals := make([][]types.Value, M_FIRST, context.temp_allocator)
+		for i in 0 ..< M_FIRST {
+			rowids[i] = types.Row_ID(i + 1)
+			vs := make([]types.Value, 1, context.temp_allocator)
+			vs[0] = types.value_int(i64(i + 1))
+			vals[i] = vs
+		}
+		cols := []types.Column{{name = "val", type = .INTEGER}}
+		testing.expect(t, cell.serialize_columnar(pg2.data[off2:], rowids, vals, cols), "serialize columnar")
+		for v in vals { delete(v, context.temp_allocator) }
+		hdr := btree.get_leaf_header(pg2.data, 1)
+		hdr.page_type = .LEAF_TABLE_COLUMNAR
+		hdr.cell_count = u16le(M_FIRST)
+		hdr.cell_content_offset = u16le(8 + len(cols) * 12)
+		pager.mark_dirty(ctx.pager, 1)
+	}
+	pager.unpin_page(ctx.pager, 1)
+	for i in M_FIRST + 1 ..= M_TOTAL {
+		vs := make([]types.Value, 1, context.temp_allocator)
+		vs[0] = types.value_int(i64(i))
+		if ierr := btree.tree_insert(&ctx.tree, types.Row_ID(i), vs); ierr != .None {
+			testing.expect(t, false, "post-conversion insert succeeds")
+			return
+		}
+	}
+	pages := make(map[u32]bool, context.temp_allocator)
+	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
+	testing.expect(t, len(pages) > 1, "conversion + growth split the tree")
+	testing.expect(t, verify_dense_rows(t, &ctx.tree, M_TOTAL), "all rows exact after conversion + splits")
+}
+
 @(test)
 test_columnar_update_conversion :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
