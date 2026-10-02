@@ -63,7 +63,7 @@ Order_By_Column :: struct {
 	nulls_first: bool,
 }
 
-Aggregate_Func :: enum {
+Aggregate_Func :: enum u8 {
 	COUNT,
 	SUM,
 	AVG,
@@ -79,13 +79,13 @@ Aggregate_Expr :: struct {
 // Select_Column_Kind tags each entry of Select_Stmt.columns so the executor
 // can distinguish aggregate slots from literal slots (e.g. SELECT 0,
 // COUNT(*)) and bare columns (still a clean error beside aggregates).
-Select_Column_Kind :: enum {
+Select_Column_Kind :: enum u8 {
 	COLUMN,
 	LITERAL,
 	AGGREGATE,
 }
 
-Join_Type :: enum {
+Join_Type :: enum u8 {
 	INNER,
 	CROSS,
 	LEFT,
@@ -152,7 +152,7 @@ Drop_Stmt :: struct {
 	table_name: string,
 }
 
-Txn_Op :: enum {
+Txn_Op :: enum u8 {
 	BEGIN,
 	COMMIT,
 	ROLLBACK,
@@ -162,7 +162,7 @@ Txn_Stmt :: struct {
 	op: Txn_Op,
 }
 
-Set_Op :: enum {
+Set_Op :: enum u8 {
 	UNION,
 	UNION_ALL,
 	INTERSECT,

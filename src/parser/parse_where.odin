@@ -125,7 +125,7 @@ parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bo
 }
 
 @(private="file")
-Between_Parse :: enum {
+Between_Parse :: enum u8 {
 	Not_Between, // lookahead says this isn't a BETWEEN expression; keep parsing
 	Parsed, // BETWEEN parsed (node owns its strings)
 	Error, // BETWEEN detected but malformed; p.err_msg is set
@@ -268,21 +268,10 @@ condition_cleanup :: proc(cond: ^Condition, allocator: mem.Allocator) {
 @(private="file")
 parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Condition, ok: bool) {
 	cond.column = parse_qualified_identifier(p, allocator) or_return
-	// Aggregate reference in a condition: COUNT(*), COUNT(v), SUM(v), ...
-	if peek(p).type == .LPAREN {
-		advance(p)
-		if !match(p, .ASTERISK) {
-			arg, arg_ok := parse_qualified_identifier(p, allocator)
-			if !arg_ok {
-				condition_cleanup(&cond, allocator); return {}, false
-			}
-			cond.agg_column = arg
-		}
-		if !expect_match(p, .RPAREN, "Expected ) after aggregate reference") {
-			condition_cleanup(&cond, allocator); return {}, false
-		}
+	if !parse_aggregate_ref(p, &cond, allocator) {
+		condition_cleanup(&cond, allocator)
+		return {}, false
 	}
-	// col NOT IN (...) / col NOT LIKE 'x'
 	if match(p, .NOT) {
 		cond.negated = true
 	}
@@ -292,59 +281,14 @@ parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Conditio
 	case .EQUALS, .NOT_EQUALS, .LESS_THAN, .GREATER_THAN, .LESS_EQUAL, .GREATER_EQUAL, .LIKE:
 		cond.operator = op_token.type; advance(p)
 	case .IN:
-		cond.operator = .IN; advance(p)
-		if !match(p, .LPAREN) {
-			condition_cleanup(&cond, allocator); return {}, false
-		}
-		if peek(p).type == .SELECT {
-			advance(p)
-			subq_variant, subq_ok := parse_select(p, allocator)
-			if !subq_ok {
-				condition_cleanup(&cond, allocator); return {}, false
-			}
-
-			subq_ptr := new(Select_Stmt, allocator)
-			subq_ptr^ = subq_variant.(Select_Stmt)
-			cond.in_subquery = subq_ptr
-			if !match(p, .RPAREN) {
-				statement_free(Statement{type = subq_ptr^, sql = ""}, allocator)
-				free(subq_ptr, allocator)
-				condition_cleanup(&cond, allocator); return {}, false
-			}
-		} else {
-			in_vals := make([dynamic]types.Value, allocator)
-			for {
-				val, val_ok := parse_value(p, allocator)
-				if !val_ok {
-					for v in in_vals { types.value_delete(v, allocator) }
-					delete(in_vals); condition_cleanup(&cond, allocator)
-					return {}, false
-				}
-
-				append(&in_vals, val)
-				if match(p, .RPAREN) { break }
-				if !match(p, .COMMA) {
-					for v in in_vals { types.value_delete(v, allocator) }
-					delete(in_vals); condition_cleanup(&cond, allocator)
-					return {}, false
-				}
-			}
-			cond.in_values = in_vals[:]
+		if !parse_in_condition(p, &cond, allocator) {
+			condition_cleanup(&cond, allocator)
+			return {}, false
 		}
 	case .IS:
-		// `col IS [NOT] NULL`. A NOT directly before IS (`col NOT IS NULL`)
-		// is not valid SQL — NOT belongs after IS.
-		if cond.negated {
-			if p.err_msg == "" { p.err_msg = "Expected NULL after IS" }
-			condition_cleanup(&cond, allocator); return {}, false
-		}
-
-		advance(p)
-		if match(p, .NOT) { cond.negated = true }
-
-		cond.operator = .IS
-		if !expect_match(p, .NULL, "Expected NULL after IS [NOT]") {
-			condition_cleanup(&cond, allocator); return {}, false
+		if !parse_is_null_condition(p, &cond) {
+			condition_cleanup(&cond, allocator)
+			return {}, false
 		}
 	case:
 		if p.err_msg == "" { p.err_msg = "Expected comparison operator in WHERE condition" }
@@ -352,20 +296,117 @@ parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Conditio
 	}
 
 	if cond.operator != .IN && cond.operator != .IS {
-		if peek(p).type == .IDENTIFIER {
-			rhs_str, rhs_ok := parse_qualified_identifier(p, allocator)
-			if !rhs_ok {
-				condition_cleanup(&cond, allocator); return {}, false
-			}
-			cond.rhs = rhs_str
-		} else {
-			val, val_ok := parse_value(p, allocator)
-			if !val_ok {
-				condition_cleanup(&cond, allocator)
-				return {}, false
-			}
-			cond.rhs = val
+		if !parse_condition_rhs(p, &cond, allocator) {
+			condition_cleanup(&cond, allocator)
+			return {}, false
 		}
 	}
 	return cond, true
+}
+
+// parse_aggregate_ref consumes an optional `(...)` aggregate argument after a
+// column reference: COUNT(*), COUNT(v), SUM(v), ... Sets cond.agg_column and
+// advances past the closing paren. No paren → nothing to do (true).
+@(private="file")
+parse_aggregate_ref :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
+	if peek(p).type != .LPAREN { return true }
+	advance(p)
+	if !match(p, .ASTERISK) {
+		arg, arg_ok := parse_qualified_identifier(p, allocator)
+		if !arg_ok { return false }
+		cond.agg_column = arg
+	}
+	return expect_match(p, .RPAREN, "Expected ) after aggregate reference")
+}
+
+// parse_in_condition handles `col [NOT] IN (subquery | value, ...)`. The
+// operator token is IN and still unconsumed on entry.
+@(private="file")
+parse_in_condition :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
+	cond.operator = .IN; advance(p)
+	if !match(p, .LPAREN) { return false }
+	if peek(p).type == .SELECT {
+		return parse_in_subquery(p, cond, allocator)
+	}
+	return parse_in_value_list(p, cond, allocator)
+}
+
+@(private="file")
+parse_in_subquery :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
+	advance(p)
+	subq_variant, subq_ok := parse_select(p, allocator)
+	if !subq_ok { return false }
+
+	subq_ptr := new(Select_Stmt, allocator)
+	subq_ptr^ = subq_variant.(Select_Stmt)
+	cond.in_subquery = subq_ptr
+	if !match(p, .RPAREN) {
+		statement_free(Statement{type = subq_ptr^, sql = ""}, allocator)
+		free(subq_ptr, allocator)
+		return false
+	}
+	return true
+}
+
+@(private="file")
+parse_in_value_list :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
+	in_vals := make([dynamic]types.Value, allocator)
+	for {
+		val, val_ok := parse_value(p, allocator)
+		if !val_ok {
+			cleanup_in_values(&in_vals, allocator)
+			return false
+		}
+
+		append(&in_vals, val)
+		if match(p, .RPAREN) { break }
+		if !match(p, .COMMA) {
+			cleanup_in_values(&in_vals, allocator)
+			return false
+		}
+	}
+
+	cond.in_values = in_vals[:]
+	return true
+}
+
+@(private="file")
+cleanup_in_values :: proc(in_vals: ^[dynamic]types.Value, allocator: mem.Allocator) {
+	for v in in_vals { types.value_delete(v, allocator) }
+	delete(in_vals^)
+}
+
+// parse_is_null_condition handles `col IS [NOT] NULL`. The operator token is
+// IS and still unconsumed on entry. A NOT directly before IS is invalid SQL.
+@(private="file")
+parse_is_null_condition :: proc(p: ^Parser, cond: ^Condition) -> bool {
+	if cond.negated {
+		if p.err_msg == "" { p.err_msg = "Expected NULL after IS" }
+		return false
+	}
+
+	advance(p)
+	if match(p, .NOT) { cond.negated = true }
+
+	cond.operator = .IS
+	return expect_match(p, .NULL, "Expected NULL after IS [NOT]")
+}
+
+// parse_condition_rhs parses the right-hand side of a binary comparison: either
+// a qualified column (column-to-column) or a literal value.
+@(private="file")
+parse_condition_rhs :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
+	if peek(p).type == .IDENTIFIER {
+		rhs_str, rhs_ok := parse_qualified_identifier(p, allocator)
+		if !rhs_ok { return false }
+
+		cond.rhs = rhs_str
+		return true
+	}
+
+	val, val_ok := parse_value(p, allocator)
+	if !val_ok { return false }
+
+	cond.rhs = val
+	return true
 }

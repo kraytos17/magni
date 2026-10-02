@@ -1,5 +1,6 @@
 package executor
 
+import "core:bytes"
 import "core:log"
 import "core:strings"
 import "src:parser"
@@ -147,66 +148,8 @@ exec_select_aggregate_data :: proc(
 			) { continue }
 		}
 
-		out := make([]types.Value, len(stmt.columns), context.temp_allocator)
-		// Kind-dispatched projection: LITERAL slots read their literal (borrowed
-		// header, same as group keys and MIN/MAX below — the statement outlives
-		// execution), AGGREGATE slots consume agg_vals in order (select-list
-		// aggregates come first; HAVING-only aggregates are appended after),
-		// COLUMN slots take the next group key or error if there is none.
-		// Hand-built statements without kinds fall back to the legacy
-		// positional path (first N slots are group keys).
-		agg_cursor, group_cursor := 0, 0
-		use_kinds := len(stmt.col_kinds) == len(stmt.columns) &&
-			len(stmt.col_literal_idx) == len(stmt.columns)
-		for i in 0 ..< len(stmt.columns) {
-			if use_kinds {
-				#partial switch stmt.col_kinds[i] {
-				case .LITERAL:
-					li := stmt.col_literal_idx[i]
-					if li < 0 || li >= len(stmt.literal_values) {
-						log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
-						return nil, nil, false
-					}
-
-					out[i] = stmt.literal_values[li]
-					continue
-				case .AGGREGATE:
-					if agg_cursor >= len(agg_vals) {
-						log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
-						return nil, nil, false
-					}
-
-					out[i] = agg_vals[agg_cursor]
-					agg_cursor += 1
-					continue
-				case .COLUMN:
-					if group_cursor < len(groups[gi].key_values) {
-						out[i] = groups[gi].key_values[group_cursor]
-						group_cursor += 1
-						continue
-					}
-
-					log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
-					return nil, nil, false
-				}
-			}
-			if group_cursor < len(group_by_indices) {
-				out[i] = groups[gi].key_values[group_cursor]
-				group_cursor += 1
-			} else {
-				// A bare column (e.g. SELECT name, COUNT(*) ...) occupies a
-				// column slot with no corresponding aggregate value — that
-				// is a clean error, not an out-of-range index.
-				agg_idx := agg_cursor
-				if agg_idx < 0 || agg_idx >= len(agg_vals) {
-					log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", stmt.columns[i])
-					return nil, nil, false
-				}
-
-				out[i] = agg_vals[agg_idx]
-				agg_cursor += 1
-			}
-		}
+		out, proj_ok := project_group_row(stmt, groups[gi].key_values, agg_vals, len(group_by_indices))
+		if !proj_ok { return nil, nil, false }
 		append(&result, Row_Entry{rowid = types.Row_ID(gi), values = out})
 	}
 
@@ -225,6 +168,84 @@ exec_select_aggregate_data :: proc(
 		cols[i] = types.Column{name = display, type = col_type}
 	}
 	return result[:], cols, true
+}
+
+// Group_Proj_Cursor walks the two independent value streams a grouped
+// projection consumes: aggregate results and group keys.
+Group_Proj_Cursor :: struct {
+	agg:   int,
+	group: int,
+}
+
+// project_group_row materializes one group's output row. Kind-dispatched:
+// LITERAL slots read their literal (borrowed header, same as group keys and
+// MIN/MAX — the statement outlives execution), AGGREGATE slots consume agg_vals
+// in order (select-list aggregates first; HAVING-only aggregates appended
+// after), COLUMN slots take the next group key. Hand-built statements without
+// kinds fall back to the legacy positional path (first N slots are group keys).
+@(private="file")
+project_group_row :: proc(
+	stmt: parser.Select_Stmt,
+	key_values: []types.Value,
+	agg_vals: []types.Value,
+	group_key_count: int,
+) -> (
+	out: []types.Value,
+	ok: bool,
+) {
+	out = make([]types.Value, len(stmt.columns), context.temp_allocator)
+	cur := Group_Proj_Cursor{}
+	use_kinds := len(stmt.col_kinds) == len(stmt.columns) &&
+		len(stmt.col_literal_idx) == len(stmt.columns)
+	for i in 0 ..< len(stmt.columns) {
+		if use_kinds {
+			#partial switch stmt.col_kinds[i] {
+			case .LITERAL:
+				li := stmt.col_literal_idx[i]
+				if li < 0 || li >= len(stmt.literal_values) {
+					return nil, mix_error(stmt.columns[i])
+				}
+
+				out[i] = stmt.literal_values[li]
+				continue
+			case .AGGREGATE:
+				if cur.agg >= len(agg_vals) { return nil, mix_error(stmt.columns[i]) }
+
+				out[i] = agg_vals[cur.agg]
+				cur.agg += 1
+				continue
+			case .COLUMN:
+				if cur.group < len(key_values) {
+					out[i] = key_values[cur.group]
+					cur.group += 1
+					continue
+				}
+				return nil, mix_error(stmt.columns[i])
+			}
+		}
+		if cur.group < group_key_count {
+			out[i] = key_values[cur.group]
+			cur.group += 1
+		} else {
+			// A bare column (e.g. SELECT name, COUNT(*)) occupies a column
+			// slot with no aggregate value — a clean error, not OOB.
+			if cur.agg < 0 || cur.agg >= len(agg_vals) {
+				return nil, mix_error(stmt.columns[i])
+			}
+
+			out[i] = agg_vals[cur.agg]
+			cur.agg += 1
+		}
+	}
+	return out, true
+}
+
+// mix_error logs the non-aggregate-column-beside-aggregates error and reports
+// the shared failure code (always false).
+@(private="file")
+mix_error :: proc(col: string) -> bool {
+	log.errorf("Error: Cannot mix non-aggregate column '%s' with aggregates", col)
+	return false
 }
 
 // literal_column_type maps a literal value to its display column type.
@@ -256,6 +277,9 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	if types.is_null(a) && types.is_null(b) do return 0
 	if types.is_null(a) do return -1
 	if types.is_null(b) do return 1
+
+	ra, rb := value_rank(a), value_rank(b)
+	if ra != rb do return -1 if ra < rb else 1
 	#partial switch va in a {
 	case i64:
 		#partial switch vb in b {
@@ -283,8 +307,24 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 		if vb, ok := b.(string); ok {
 			return strings.compare(va, vb)
 		}
+	case []u8:
+		if vb, ok := b.([]u8); ok {
+			return bytes.compare(va, vb)
+		}
 	}
 	return 0
+}
+
+// value_rank orders storage classes for compare_values. Null never reaches
+// here (handled above); the fallback keeps the order total for any future
+// variant without ever equating distinct classes.
+@(private="file")
+value_rank :: proc(v: types.Value) -> int {
+	if _, ok := v.(i64); ok { return 0 }
+	if _, ok := v.(f64); ok { return 0 }
+	if _, ok := v.(string); ok { return 1 }
+	if _, ok := v.([]u8); ok { return 2 }
+	return 3
 }
 
 @(private)
@@ -362,7 +402,7 @@ sum_count :: proc(ai: Agg_Input) -> (sum: f64, count: int) {
 	return sum, count
 }
 
-Extremum_Dir :: enum {
+Extremum_Dir :: enum u8 {
 	Min,
 	Max,
 }

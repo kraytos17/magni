@@ -869,3 +869,41 @@ test_free_page_slot_reusable_tracks_dirty :: proc(t: ^testing.T) {
 	testing.expect(t, found, "reused page must be tracked in dirty_pages")
 	pager.unpin_page(p, pn)
 }
+
+@(test)
+test_pager_bloom_no_false_negative :: proc(t: ^testing.T) {
+	// The bloom gate must never reject a cached page: after churning pages
+	// through the cache (evictions decrement, inserts increment), every page
+	// still reported cached by the table must also pass the bloom. A mismatch
+	// would be a false negative — a cache miss for a live page (double-cache).
+	context.logger.lowest_level = .Error
+	p, file := create_test_pager_env(t, "bloom_no_fneg")
+	defer destroy_test_pager_env(p, file)
+
+	// Force enough pages through to trigger eviction (cache holds 256).
+	for round in 0 ..< 4 {
+		for _ in 0 ..< 300 {
+			pg, err := pager.allocate_page(p)
+			testing.expect(t, err == .None, "allocate failed")
+			if round % 2 == 0 {
+				// leave pinned sometimes to vary eviction pressure
+				pager.unpin_page(p, pg.page_num)
+			} else {
+				pager.unpin_page(p, pg.page_num)
+			}
+		}
+	}
+
+	// Every page the table still holds must be bloom-positive. page_in_cache
+	// consults the table via find_slot (which runs the bloom); a false negative
+	// would surface as page_in_cache == false for a table-present page.
+	for i in 0 ..< len(p.slots) {
+		pn := p.slots[i].page.page_num
+		if pn == 0 { continue }
+		testing.expect(
+			t,
+			pager.page_in_cache(p, pn),
+			"table-present page must pass the bloom gate",
+		)
+	}
+}

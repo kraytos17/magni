@@ -178,69 +178,94 @@ parse_select_columns :: proc(
 	b: ^Select_Builder,
 	allocator := context.allocator,
 ) -> bool {
-	if match(p, .ASTERISK) {  } else {
-		for {
-			tok := peek(p)
-			if tok.type == .IDENTIFIER &&
-			   p.current + 1 < len(p.tokens) &&
-			   p.tokens[p.current + 1].type == .LPAREN {
-				agg_func, agg_ok := resolve_aggregate_name(tok.lexeme)
-				if !agg_ok {
-					col, cok := parse_identifier(p, allocator)
-					if !cok { return false }
-
-					append(&b.columns, col)
-					append(&b.col_kinds, Select_Column_Kind.COLUMN)
-					append(&b.col_literal_idx, -1)
-				} else {
-					advance(p); advance(p)
-					is_star := match(p, .ASTERISK)
-					arg_col: string
-					if !is_star {
-						var, acok := parse_qualified_identifier(p, allocator)
-						if !acok { return false }
-						arg_col = var
-					}
-					if !match(p, .RPAREN) { return false }
-
-					arg_display := "*" if is_star else arg_col
-					display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
-
-					append(&b.columns, display)
-					append(&b.col_kinds, Select_Column_Kind.AGGREGATE)
-					append(&b.col_literal_idx, -1)
-
-					agg_col := "" if is_star else arg_col
-					append(&b.aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
-				}
-			} else {
-				// Literal tokens (NUMBER/STRING/BLOB_LITERAL/NULL) are captured
-				// for materialization. FROM-less SELECTs read them via
-				// literal_values; mixed literal+aggregate SELECTs map each
-				// LITERAL slot through col_literal_idx (single owner:
-				// literal_values, so no double-free).
-				#partial switch tok.type {
-				case .NUMBER, .STRING, .BLOB_LITERAL, .NULL:
-					val, vok := parse_value(p, allocator)
-					if !vok { return false }
-
-					append(&b.columns, strings.clone(tok.lexeme, allocator))
-					append(&b.col_kinds, Select_Column_Kind.LITERAL)
-					append(&b.col_literal_idx, len(b.literal_values))
-					append(&b.literal_values, val)
-				case:
-					col, cok := parse_qualified_identifier(p, allocator)
-					if !cok { return false }
-
-					append(&b.columns, col)
-					append(&b.col_kinds, Select_Column_Kind.COLUMN)
-					append(&b.col_literal_idx, -1)
-				}
-			}
-
-			consume_column_alias(p, &b.aliases, allocator)
-			if !match(p, .COMMA) { break }
+	if match(p, .ASTERISK) { return true }
+	for {
+		tok := peek(p)
+		if tok.type == .IDENTIFIER &&
+		   p.current + 1 < len(p.tokens) &&
+		   p.tokens[p.current + 1].type == .LPAREN {
+			if !parse_column_or_aggregate(p, b, tok, allocator) { return false }
+		} else {
+			if !parse_column_or_literal(p, b, tok, allocator) { return false }
 		}
+
+		consume_column_alias(p, &b.aliases, allocator)
+		if !match(p, .COMMA) { break }
+	}
+	return true
+}
+
+// parse_column_or_aggregate handles a `name(` token: an aggregate when the name
+// resolves (COUNT/SUM/...), otherwise a bare column identifier.
+@(private="file")
+parse_column_or_aggregate :: proc(
+	p: ^Parser,
+	b: ^Select_Builder,
+	tok: Token,
+	allocator: mem.Allocator,
+) -> bool {
+	agg_func, agg_ok := resolve_aggregate_name(tok.lexeme)
+	if !agg_ok {
+		col, cok := parse_identifier(p, allocator)
+		if !cok { return false }
+
+		append(&b.columns, col)
+		append(&b.col_kinds, Select_Column_Kind.COLUMN)
+		append(&b.col_literal_idx, -1)
+		return true
+	}
+
+	advance(p); advance(p) // name (
+	is_star := match(p, .ASTERISK)
+	arg_col: string
+	if !is_star {
+		var, acok := parse_qualified_identifier(p, allocator)
+		if !acok { return false }
+		arg_col = var
+	}
+	if !match(p, .RPAREN) { return false }
+
+	arg_display := "*" if is_star else arg_col
+	display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
+
+	append(&b.columns, display)
+	append(&b.col_kinds, Select_Column_Kind.AGGREGATE)
+	append(&b.col_literal_idx, -1)
+
+	agg_col := "" if is_star else arg_col
+	append(&b.aggregates, Aggregate_Expr{func = agg_func, column = agg_col})
+	return true
+}
+
+// parse_column_or_literal handles a non-`name(` column slot: a literal token
+// (captured for materialization) or a (possibly qualified) column.
+@(private="file")
+parse_column_or_literal :: proc(
+	p: ^Parser,
+	b: ^Select_Builder,
+	tok: Token,
+	allocator: mem.Allocator,
+) -> bool {
+	// Literal tokens (NUMBER/STRING/BLOB_LITERAL/NULL) are captured for
+	// materialization. FROM-less SELECTs read them via literal_values; mixed
+	// literal+aggregate SELECTs map each LITERAL slot through col_literal_idx
+	// (single owner: literal_values, so no double-free).
+	#partial switch tok.type {
+	case .NUMBER, .STRING, .BLOB_LITERAL, .NULL:
+		val, vok := parse_value(p, allocator)
+		if !vok { return false }
+
+		append(&b.columns, strings.clone(tok.lexeme, allocator))
+		append(&b.col_kinds, Select_Column_Kind.LITERAL)
+		append(&b.col_literal_idx, len(b.literal_values))
+		append(&b.literal_values, val)
+	case:
+		col, cok := parse_qualified_identifier(p, allocator)
+		if !cok { return false }
+
+		append(&b.columns, col)
+		append(&b.col_kinds, Select_Column_Kind.COLUMN)
+		append(&b.col_literal_idx, -1)
 	}
 	return true
 }
@@ -335,49 +360,53 @@ consume_column_alias :: proc(
 @(private="file")
 parse_join_clauses :: proc(p: ^Parser, left_alias: string, allocator := context.allocator) -> [dynamic]Join_Clause {
 	joins := make([dynamic]Join_Clause, allocator)
-	cur_left := left_alias
+	state := Join_Parse_State{left = left_alias}
 	for {
-		if match(p, .COMMA) {
-			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false, cur_left)
-			if !jc_ok { break }
-			if jc.alias != "" { cur_left = jc.alias }
-			append(&joins, jc)
-		} else if match(p, .JOIN) {
-			jc, jc_ok := parse_single_join(p, allocator, .INNER, false, cur_left)
-			if !jc_ok { break }
-			if jc.alias != "" { cur_left = jc.alias }
-			append(&joins, jc)
-		} else if match(p, .INNER) {
-			if !match(p, .JOIN) { break }
-			jc, jc_ok := parse_single_join(p, allocator, .INNER, true, cur_left)
-			if !jc_ok { break }
-			if jc.alias != "" { cur_left = jc.alias }
-			append(&joins, jc)
-		} else if match(p, .CROSS) {
-			if !match(p, .JOIN) { break }
-			jc, jc_ok := parse_single_join(p, allocator, .CROSS, false, cur_left)
-			if !jc_ok { break }
-			if jc.alias != "" { cur_left = jc.alias }
-			append(&joins, jc)
-		} else if match(p, .LEFT) {
-			match(p, .OUTER)
-			if !match(p, .JOIN) { break }
-			jc, jc_ok := parse_single_join(p, allocator, .LEFT, true, cur_left)
-			if !jc_ok { break }
-			if jc.alias != "" { cur_left = jc.alias }
-			append(&joins, jc)
-		} else if match(p, .RIGHT) {
-			match(p, .OUTER)
-			if !match(p, .JOIN) { break }
-			jc, jc_ok := parse_single_join(p, allocator, .RIGHT, true, cur_left)
-			if !jc_ok { break }
-			if jc.alias != "" { cur_left = jc.alias }
-			append(&joins, jc)
-		} else {
-			break
-		}
+		jt, explicit, matched := match_join_keyword(p)
+		if !matched { break }
+
+		jc, jc_ok := parse_single_join(p, allocator, jt, explicit, state.left)
+		if !jc_ok { break }
+
+		state.left = jc.alias if jc.alias != "" else state.left
+		append(&joins, jc)
 	}
 	return joins
+}
+
+// Join_Parse_State tracks the left-most alias as join clauses chain, so the
+// next clause's ON resolution sees the preceding table alias.
+Join_Parse_State :: struct {
+	left: string,
+}
+
+// match_join_keyword consumes a join introducer and reports its type and
+// whether an ON clause is permitted (inner/cross are implicit-on). Returns
+// matched=false when the next token does not start a join clause. A dangling
+// INNER/CROSS/LEFT/RIGHT without JOIN is treated as no-join (matched=false).
+@(private="file")
+match_join_keyword :: proc(p: ^Parser) -> (jt: Join_Type, explicit: bool, matched: bool) {
+	switch {
+	case match(p, .COMMA):
+		return .CROSS, false, true
+	case match(p, .JOIN):
+		return .INNER, false, true
+	case match(p, .INNER):
+		if !match(p, .JOIN) { return .INNER, false, false }
+		return .INNER, true, true
+	case match(p, .CROSS):
+		if !match(p, .JOIN) { return .CROSS, false, false }
+		return .CROSS, false, true
+	case match(p, .LEFT):
+		match(p, .OUTER)
+		if !match(p, .JOIN) { return .LEFT, false, false }
+		return .LEFT, true, true
+	case match(p, .RIGHT):
+		match(p, .OUTER)
+		if !match(p, .JOIN) { return .RIGHT, false, false }
+		return .RIGHT, true, true
+	}
+	return .INNER, false, false
 }
 
 @(private)

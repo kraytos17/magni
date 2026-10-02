@@ -63,7 +63,7 @@ exec_create :: proc(
 	return true, new_root, Mutated_Table_Info{name = stmt.table_name, root = root_page.page_num}
 }
 
-Mutation_Mode :: enum {
+Mutation_Mode :: enum u8 {
 	Direct,
 	COW,
 }
@@ -71,13 +71,13 @@ Mutation_Mode :: enum {
 // Violation_Policy decides whether a constraint-violating row fails the
 // statement (Fail) or is skipped with a warning (Skip, Direct scans where
 // siblings still apply).
-Violation_Policy :: enum {
+Violation_Policy :: enum u8 {
 	Fail,
 	Skip,
 }
 
 // Row_Check names which validation stage (if any) rejected a candidate row.
-Row_Check :: enum {
+Row_Check :: enum u8 {
 	Ok,
 	Type_Error,
 	Check_Error,
@@ -363,12 +363,20 @@ resolve_mutation_filter :: proc(f: ^Mutation_Filter, cols: []types.Column) {
 }
 
 // pk_target_rowid extracts a PK rowid from an equality filter, if usable.
-// Shared prologue for update_by_pk and delete_by_pk.
+// Shared prologue for update_by_pk and delete_by_pk. table_name lets a
+// qualified `t.pk` / alias filter resolve to the same seek.
 @(private="file")
-pk_target_rowid :: proc(tbl: types.Table, filter: Maybe(parser.Where_Clause)) -> (types.Row_ID, bool) {
+pk_target_rowid :: proc(
+	tbl: types.Table,
+	table_name: string,
+	filter: Maybe(parser.Where_Clause),
+) -> (
+	types.Row_ID,
+	bool,
+) {
 	where_clause, has_where := filter.?
 	if !has_where { return 0, false }
-	return try_pk_lookup(tbl, where_clause)
+	return try_pk_lookup(tbl, where_clause, table_name)
 }
 
 // commit_cow_root publishes a COW-mutated table root to the schema.
@@ -455,7 +463,7 @@ update_by_pk :: proc(
 	root: u32,
 	info: Mutated_Table_Info,
 ) {
-	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.filter)
+	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
 	if !pk_ok { return false, false, 0, {} }
 
 	c, find_err := btree.tree_find(table_tree, target_rowid, context.temp_allocator)
@@ -670,7 +678,7 @@ delete_by_pk :: proc(
 	root: u32,
 	info: Mutated_Table_Info,
 ) {
-	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.filter)
+	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
 	if !pk_ok { return false, false, 0, {} }
 	if plan.direct {
 		if btree.tree_delete(table_tree, target_rowid) == .None {

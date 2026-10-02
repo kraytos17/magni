@@ -30,7 +30,7 @@ Config :: struct #all_or_none {
 	check_duplicates: bool,
 }
 
-Error :: enum {
+Error :: enum u8 {
 	None,
 	Page_Read_Failed,
 	Invalid_Page_Header,

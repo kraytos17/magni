@@ -138,6 +138,8 @@ where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition
 try_pk_lookup :: proc(
 	table: types.Table,
 	clause: parser.Where_Clause,
+	table_name: string = "",
+	table_alias: string = "",
 ) -> (
 	rowid: types.Row_ID,
 	ok: bool,
@@ -148,11 +150,28 @@ try_pk_lookup :: proc(
 
 	pk_idx, has_pk := schema.get_pk_column(table.columns)
 	if !has_pk { return }
-	if table.columns[pk_idx].name != cond.column { return }
+
+	pk_name := table.columns[pk_idx].name
+	if cond.column != pk_name {
+		qual, col, has_qual := split_qualifier(cond.column)
+		if !has_qual || col != pk_name { return }
+
+		matches := qual == table_name || (table_alias != "" && qual == table_alias)
+		if !matches { return }
+	}
 
 	val, is_int := cond.rhs.(types.Value).(i64)
 	if !is_int { return }
 	return types.Row_ID(val), true
+}
+
+// split_qualifier splits "t.col" into ("t", "col"); has=false when unqualified.
+@(private="file")
+split_qualifier :: proc(name: string) -> (qual: string, col: string, has: bool) {
+	if i := strings.last_index_byte(name, '.'); i >= 0 {
+		return name[:i], name[i + 1:], true
+	}
+	return "", name, false
 }
 
 @(private)

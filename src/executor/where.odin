@@ -353,20 +353,20 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 		}
 		if scan {
 			for c in rc.in_mem.values {
-				if compare_values(v, c) == 0 { return true }
+				if !types.is_null(v) && compare_values(v, c) == 0 { return true }
 			}
 		}
 		return false
 	case .Subquery:
 		for c in rc.in_mem.values {
-			if compare_values(v, c) == 0 { return true }
+			if !types.is_null(v) && compare_values(v, c) == 0 { return true }
 		}
 		return false
 	}
 	if rc.in_subquery != nil {
 		subq_rows, _ := exec_subquery(schema_tree, rc.in_subquery^)
 		for sr in subq_rows {
-			if len(sr.values) > 0 && compare_values(v, sr.values[0]) == 0 { return true }
+			if !types.is_null(v) && len(sr.values) > 0 && compare_values(v, sr.values[0]) == 0 { return true }
 		}
 	}
 	return false
@@ -412,6 +412,11 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 		if !text_ok || !pat_ok { return false }
 		return like_match(pattern, text)
 	}
+	// NULL is UNKNOWN in any comparison: = NULL (either operand), != NULL,
+	// ordered comparisons, and IN (...) membership all fail. IS NULL stays
+	// the null test. NULL is two-valued-false in the filter, so NOT over it
+	// must not resurrect NULL rows either.
+	if types.is_null(val) || types.is_null(target) { return false }
 
 	cmp := compare_values(val, target)
 	#partial switch op {

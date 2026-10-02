@@ -79,7 +79,7 @@ db_error_string :: proc(err: DB_Error) -> string {
 }
 
 // Txn_State tracks whether a transaction is currently in progress.
-Txn_State :: enum {
+Txn_State :: enum u8 {
 	None,
 	Active,
 }

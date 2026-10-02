@@ -49,7 +49,7 @@ Serial_Type :: enum u64 {
 	// >= 13 (odd): TEXT with length (N-13)/2
 }
 
-Column_Type :: enum {
+Column_Type :: enum u8 {
 	INTEGER,
 	TEXT,
 	REAL,

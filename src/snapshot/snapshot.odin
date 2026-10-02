@@ -88,7 +88,7 @@ headers_on_page :: proc(data: []u8) -> []Snapshot_Header {
 // Snapshot_Query selects one chain link by id or by timestamp. The match
 // condition travels as data (not a closure) because walk callbacks are
 // proc literals and cannot capture locals.
-Snapshot_Query_Kind :: enum { By_Id, By_Timestamp }
+Snapshot_Query_Kind :: enum u8 { By_Id, By_Timestamp }
 
 Snapshot_Query :: struct {
 	kind:      Snapshot_Query_Kind,

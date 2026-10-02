@@ -14,6 +14,7 @@ import "core:os"
 import "core:strings"
 import "core:time"
 import "src:db"
+import "src:pager"
 
 DB_NAME :: "perf_bench.db"
 
@@ -139,4 +140,6 @@ main :: proc() {
 	db.execute(d, "COMMIT;")
 	timed_query(d, "join", "1000x1000 join",
 		"SELECT t.id, b.w FROM t JOIN b ON t.id = b.id;", 1000)
+
+	pager.pager_stats_report(d.pager)
 }

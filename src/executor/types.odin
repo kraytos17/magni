@@ -136,7 +136,7 @@ Resolved_Condition :: struct {
 }
 
 // In_Kind names which membership source an IN condition resolved to.
-In_Kind :: enum {
+In_Kind :: enum u8 {
 	None,
 	Values, // literal IN list (+ fingerprint prefilter)
 	Subquery, // materialized IN (SELECT ...) results

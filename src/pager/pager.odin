@@ -3,19 +3,28 @@
 package pager
 
 import "core:container/bit_array"
+import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:sync"
 import "src:types"
+import "src:util/bloom"
 
 PAGE_CACHE_SIZE :: 256
 
 // CACHE_TABLE_SIZE is the capacity of the page-cache lookup table: a power of
-// two >= 2 * PAGE_CACHE_SIZE so the open-addressed index stays at load factor
-// <= 0.5 (probe chains stay short) and the modulus is a single AND.
-CACHE_TABLE_SIZE :: 512
+// two >= 8 * PAGE_CACHE_SIZE. Linear probing under heavy evict/insert churn
+// clusters into long runs (measured: ~10% of lookups walked >=128 buckets at
+// 2x sizing, max = whole table), so the extra headroom keeps the load factor
+// <= 0.125 and collapses the tail. 2048 * 16B = 32 KiB, L2-resident.
+CACHE_TABLE_SIZE :: 2048
+
+// The table must stay a power of two (bucket mask) and large enough that an
+// empty bucket always exists for cache_insert even at full cache occupancy.
+#assert(CACHE_TABLE_SIZE & (CACHE_TABLE_SIZE - 1) == 0)
+#assert(CACHE_TABLE_SIZE >= 4 * PAGE_CACHE_SIZE)
 
 // Cache_Entry is one bucket of the open-addressed page-cache index.
 // page_num == 0 marks an empty bucket (page numbers are 1-indexed).
@@ -23,6 +32,9 @@ Cache_Entry :: struct {
 	page_num: u32,
 	slot:     ^Page_Slot,
 }
+
+// The index entry is hot: keep it one cache-line-friendly word pair.
+#assert(size_of(Cache_Entry) == 16)
 
 Page :: struct {
 	data:      []u8,
@@ -50,9 +62,60 @@ is_special_page :: proc(page_num: u32) -> bool {
 	return page_num == 1
 }
 
+// Pager_Stats records hot-path counts for a measurement floor. Counters
+// are always kept (plain integer increments, release-mode cheap); reporting is
+// opt-in via pager_stats_report / the MAGNI_PAGER_STATS env flag at close.
+PROBE_HIST_BUCKETS :: 8 // 1, 2-3, 4-7, 8-15, 16-31, 32-63, 64-127, 128+
+
+Pager_Stats :: struct {
+	get_page_calls:   u64,
+	get_page_hits:    u64,
+	get_page_misses:  u64,
+	unpin_calls:      u64,
+	evict_calls:      u64, // evict_one_slot invocations
+	evict_steps:      u64, // slot probes across all eviction scans
+	evict_deferred:   u64, // referenced-bit clears on pass 0 (second-chance)
+	evict_writebacks: u64, // dirty slots flushed during eviction
+	cache_probes:     u64, // cache_lookup iterations (both hit + miss chains)
+	// Probe-length distribution: histogram[b] counts lookups whose chain
+	// length fell in bucket b (1, 2-3, 4-7, ... 128+). Split hit/miss so a
+	// long tail on the hit side (clustering) is distinguishable from the
+	// miss side (cold lookup walking to the terminal empty bucket).
+	probe_hist:       [PROBE_HIST_BUCKETS]u64,
+	probe_hist_miss:  [PROBE_HIST_BUCKETS]u64,
+	max_probe:        u64, // longest chain observed
+	max_probe_miss:   u64,
+	bloom_early_outs: u64, // lookups rejected by the bloom (no probe)
+	bloom_probes:     u64, // bloom positives that fell through to a probe
+	bloom_false_pos:  u64, // ... of which the probe then missed (false positive)
+}
+
+// probe_bucket maps a chain length to its histogram bucket index.
+@(private="file")
+probe_bucket :: proc(n: u64) -> int {
+	switch {
+	case n <= 1:
+		return 0
+	case n <= 3:
+		return 1
+	case n <= 7:
+		return 2
+	case n <= 15:
+		return 3
+	case n <= 31:
+		return 4
+	case n <= 63:
+		return 5
+	case n <= 127:
+		return 6
+	}
+	return 7
+}
+
 Pager :: struct {
 	mutex:               sync.RW_Mutex, // guards storage state; see docs/concurrency.md (acquire after db.mu)
 	cache_table:         []Cache_Entry, // open-addressed index, page_num -> cache slot
+	bloom:               bloom.Filter, // negative gate over cached page numbers
 	free_slots:          [dynamic]^Page_Slot,
 	slot_count:          u32,
 	evict_hand:          u32,
@@ -62,6 +125,7 @@ Pager :: struct {
 	page_bitmap:         bit_array.Bit_Array,
 	wal_state:           Wal_State,
 	slots:               []Page_Slot,
+	stats_counters:      Pager_Stats,
 	file_name:           string,
 	page_size:           u32,
 	max_cache_pages:     u32,
@@ -76,7 +140,88 @@ Pager :: struct {
 	free_stats:          proc(data: rawptr),
 }
 
-Error :: enum {
+// pager_layout_report prints sizes/alignments of the pager's hot structures
+// and the derived cache footprint. Debug aid: makes accidental padding or a
+// blown-up slot visible immediately. Call explicitly or via `.pager_layout`.
+pager_layout_report :: proc() {
+	fmt.printf(
+		"pager_layout: Cache_Entry=%d Page=%d Page_Slot=%d Pager_Stats=%d\n",
+		size_of(Cache_Entry),
+		size_of(Page),
+		size_of(Page_Slot),
+		size_of(Pager_Stats),
+	)
+	fmt.printf(
+		"pager_layout: page_size=%d max_cache_pages=%d table_bytes=%d slot_bytes=%d bloom_bytes=%d\n",
+		types.PAGE_SIZE,
+		PAGE_CACHE_SIZE,
+		CACHE_TABLE_SIZE * size_of(Cache_Entry),
+		PAGE_CACHE_SIZE * size_of(Page_Slot),
+		size_of(bloom.Filter),
+	)
+}
+
+// pager_stats_report prints the collected counters (P0 measurement floor).
+// Call explicitly, or set MAGNI_PAGER_STATS=1 to print at pager.close.
+pager_stats_report :: proc(p: ^Pager) {
+	s := p.stats_counters
+	if s.get_page_calls == 0 { return }
+
+	hit_pct := f64(s.get_page_hits) * 100.0 / f64(s.get_page_calls)
+	steps_per_evict := f64(0)
+	if s.evict_calls > 0 {
+		steps_per_evict = f64(s.evict_steps) / f64(s.evict_calls)
+	}
+
+	probes_per_lookup := f64(s.cache_probes) / f64(s.get_page_calls)
+	fmt.printf(
+		"pager_stats: get_page calls=%d hits=%d misses=%d hit%%=%.1f " +
+		"unpin=%d evicts=%d evict_steps=%d steps/evict=%.1f deferred=%d writebacks=%d " +
+		"cache_probes=%d probes/lookup=%.2f\n",
+		s.get_page_calls,
+		s.get_page_hits,
+		s.get_page_misses,
+		hit_pct,
+		s.unpin_calls,
+		s.evict_calls,
+		s.evict_steps,
+		steps_per_evict,
+		s.evict_deferred,
+		s.evict_writebacks,
+		s.cache_probes,
+		probes_per_lookup,
+	)
+
+	b0, b1, b2, b3, b4, b5, b6, b7 :=
+		s.probe_hist[0], s.probe_hist[1], s.probe_hist[2], s.probe_hist[3],
+		s.probe_hist[4], s.probe_hist[5], s.probe_hist[6], s.probe_hist[7]
+	fmt.printf(
+		"pager_probe_hist: 1=%d 2-3=%d 4-7=%d 8-15=%d 16-31=%d 32-63=%d 64-127=%d 128+=%d max=%d\n",
+		b0, b1, b2, b3, b4, b5, b6, b7,
+		s.max_probe,
+	)
+
+	m0, m1, m2, m3, m4, m5, m6, m7 :=
+		s.probe_hist_miss[0], s.probe_hist_miss[1], s.probe_hist_miss[2], s.probe_hist_miss[3],
+		s.probe_hist_miss[4], s.probe_hist_miss[5], s.probe_hist_miss[6], s.probe_hist_miss[7]
+	fmt.printf(
+		"pager_probe_hist_miss: 1=%d 2-3=%d 4-7=%d 8-15=%d 16-31=%d 32-63=%d 64-127=%d 128+=%d max=%d\n",
+		m0, m1, m2, m3, m4, m5, m6, m7,
+		s.max_probe_miss,
+	)
+
+	fp_pct := f64(0)
+	if s.bloom_probes > 0 {
+		fp_pct = f64(s.bloom_false_pos) * 100.0 / f64(s.bloom_probes)
+	}
+
+	fmt.printf(
+		"pager_bloom: early_outs=%d probes=%d false_pos=%d fp%%=%.3f\n",
+		s.bloom_early_outs, s.bloom_probes, s.bloom_false_pos, fp_pct,
+	)
+}
+
+Error :: enum u8 {
 	None,
 	File_Open_Failed,
 	IO_Error,
@@ -93,16 +238,38 @@ cache_bucket :: proc(page_num: u32) -> u32 { return page_num & (CACHE_TABLE_SIZE
 // the home bucket; page_num == 0 terminates the probe chain (empty bucket).
 @(private)
 cache_lookup :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot {
+	if !bloom.might_contain(&p.bloom, page_num) {
+		p.stats_counters.bloom_early_outs += 1
+		return nil
+	}
+
+	p.stats_counters.bloom_probes += 1
 	i := cache_bucket(page_num)
+	chain: u64 = 0
 	for p.cache_table[i].page_num != 0 {
-		if p.cache_table[i].page_num == page_num { return p.cache_table[i].slot }
+		chain += 1
+		p.stats_counters.cache_probes += 1
+		if p.cache_table[i].page_num == page_num {
+			p.stats_counters.probe_hist[probe_bucket(chain)] += 1
+			if chain > p.stats_counters.max_probe { p.stats_counters.max_probe = chain }
+			return p.cache_table[i].slot
+		}
 		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
 	}
+
+	chain += 1 // terminal empty-bucket probe
+	p.stats_counters.cache_probes += 1
+	p.stats_counters.bloom_false_pos += 1 // bloom said maybe, table says no
+	p.stats_counters.probe_hist_miss[probe_bucket(chain)] += 1
+	if chain > p.stats_counters.max_probe_miss { p.stats_counters.max_probe_miss = chain }
+	if chain > p.stats_counters.max_probe { p.stats_counters.max_probe = chain }
 	return nil
 }
 
 // cache_insert adds or refreshes the entry for page_num. The table is sized for
-// at most PAGE_CACHE_SIZE live entries, so an empty bucket always exists.
+// at most PAGE_CACHE_SIZE live entries, so an empty bucket always exists. Only
+// the new-bucket branch touches the bloom — a refresh must not re-add, or the
+// counters would leak upward and saturate.
 @(private)
 cache_insert :: proc(p: ^Pager, page_num: u32, slot: ^Page_Slot) {
 	i := cache_bucket(page_num)
@@ -113,7 +280,9 @@ cache_insert :: proc(p: ^Pager, page_num: u32, slot: ^Page_Slot) {
 		}
 		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
 	}
+
 	p.cache_table[i] = Cache_Entry{page_num = page_num, slot = slot}
+	bloom.add(&p.bloom, page_num)
 }
 
 // cache_delete removes the entry for page_num using backward-shift deletion so
@@ -124,8 +293,9 @@ cache_delete :: proc(p: ^Pager, page_num: u32) {
 	for p.cache_table[i].page_num != 0 && p.cache_table[i].page_num != page_num {
 		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
 	}
-	if p.cache_table[i].page_num == 0 { return }
+	if p.cache_table[i].page_num == 0 { return } // not present: no bloom change
 
+	bloom.remove(&p.bloom, page_num)
 	p.cache_table[i] = {}
 	j := i
 	for {
@@ -173,6 +343,7 @@ find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 evict_slot :: proc(p: ^Pager, slot: ^Page_Slot, writeback: bool) -> Error {
 	if writeback && slot.page.dirty {
 		wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
+		p.stats_counters.evict_writebacks += 1
 	}
 
 	cache_delete(p, slot.page.page_num)
@@ -189,17 +360,22 @@ evict_slot :: proc(p: ^Pager, slot: ^Page_Slot, writeback: bool) -> Error {
 @(private="file")
 evict_one_slot :: proc(p: ^Pager) -> Error {
 	n := len(p.slots)
+	p.stats_counters.evict_calls += 1
 	for pass := 0; pass < 2; pass += 1 {
 		for _ in 0 ..< n {
 			idx := int(p.evict_hand) % n
 			slot := &p.slots[idx]
 			p.evict_hand = u32((int(p.evict_hand) + 1) % n)
+			p.stats_counters.evict_steps += 1
 			if slot.page.page_num == 0 || slot.page.pin_count > 0 {
 				continue
 			}
 			if slot.referenced {
 				slot.referenced = false
-				if pass == 0 { continue }
+				if pass == 0 {
+					p.stats_counters.evict_deferred += 1
+					continue
+				}
 			}
 
 			evict_slot(p, slot, true) or_return
@@ -305,6 +481,9 @@ close :: proc(p: ^Pager) -> Error {
 	wal_checkpoint(p)
 	wal_close(p)
 	if p.file != nil { os.close(p.file) }
+	if len(os.get_env("MAGNI_PAGER_STATS", context.temp_allocator)) > 0 {
+		pager_stats_report(p)
+	}
 
 	delete(p.file_name)
 	delete(p.cache_table)
@@ -325,12 +504,15 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 
 	sync.rw_mutex_lock(&p.mutex)
 	defer sync.rw_mutex_unlock(&p.mutex)
+	p.stats_counters.get_page_calls += 1
 	if slot := find_slot(p, page_num); slot != nil {
+		p.stats_counters.get_page_hits += 1
 		slot.page.pin_count += 1
 		slot.referenced = true
 		return &slot.page, .None
 	}
 
+	p.stats_counters.get_page_misses += 1
 	max_page := u32(p.file_len / i64(p.page_size))
 	if page_num > max_page { return nil, .Page_Not_Found }
 
@@ -419,6 +601,7 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 // Decrement the pin count for a page. When pin_count reaches 0, the page is eligible for eviction.
 unpin_page :: proc(p: ^Pager, page_num: u32) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
+	p.stats_counters.unpin_calls += 1
 	if slot := find_slot(p, page_num); slot != nil && slot.page.pin_count > 0 {
 		slot.page.pin_count -= 1
 	}

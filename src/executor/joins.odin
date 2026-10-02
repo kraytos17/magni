@@ -35,6 +35,28 @@ join_emit_null_left_row :: proc(right_row: Row_Entry, left_col_count: int, new_r
 	append(new_rows, Row_Entry{0, null_row})
 }
 
+// emit_unmatched_outer null-extends every row of an outer join side when the
+// ON clause is unresolvable (matches nothing): LEFT pads each left row with
+// nulls, RIGHT pads each right row.
+@(private="file")
+emit_unmatched_outer :: proc(
+	is_left, is_right: bool,
+	rows, right_rows: []Row_Entry,
+	left_col_count, right_col_count: int,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	if is_left {
+		for outer_row in rows {
+			join_emit_null_row(outer_row, right_col_count, new_rows)
+		}
+	}
+	if is_right {
+		for ri in 0 ..< len(right_rows) {
+			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
+		}
+	}
+}
+
 // Join_Side bundles one side of a hash join: its rows, the join column
 // (absolute index into the combined row), and the side's full row width
 // (for the OOB guard and null-extended outer rows).
@@ -78,7 +100,8 @@ join_match_compare :: proc(a, b: types.Value) -> bool {
 
 // join_hash_probe is the shared hash-join engine behind the former
 // join_hash_i64 / join_hash_string twins. key_of fingerprints one key value
-// (false = skip); verify confirms a fingerprint hit.
+// (false = skip); verify confirms a fingerprint hit. The smaller side is built
+// into the bucket table; the other probes it.
 @(private="file")
 join_hash_probe :: proc(
 	left, right: Join_Side,
@@ -93,64 +116,48 @@ join_hash_probe :: proc(
 	}
 
 	build_left := len(left.rows) <= len(right.rows)
-	build_cap := len(left.rows) if build_left else len(right.rows)
+	build := left if build_left else right
+	probe := right if build_left else left
+	build_cap := len(build.rows)
 	ht := make(map[u64][dynamic]int, build_cap, context.temp_allocator)
-	if build_left {
-		for row, ri in left.rows {
-			key, ok := key_of(row.values[left.col])
-			if !ok { continue }
+	for row, ri in build.rows {
+		key, ok := key_of(row.values[build.col])
+		if !ok { continue }
 
-			bucket := ht[key]
-			append(&bucket, ri)
-			ht[key] = bucket
-		}
-	} else {
-		for r_row, ri in right.rows {
-			key, ok := key_of(r_row.values[right.col])
-			if !ok { continue }
-
-			bucket := ht[key]
-			append(&bucket, ri)
-			ht[key] = bucket
-		}
+		bucket := ht[key]
+		append(&bucket, ri)
+		ht[key] = bucket
 	}
 
-	matched_left := make(map[int]bool, len(left.rows), context.temp_allocator)
-	matched_right := make(map[int]bool, len(right.rows), context.temp_allocator)
-	if build_left {
-		for r_row, ri in right.rows {
-			rv := r_row.values[right.col]
-			key, ok := key_of(rv)
-			if !ok { continue }
-			if matches, has := ht[key]; has {
-				for li in matches {
-					if !verify(left.rows[li].values[left.col], rv) { continue }
+	matched_build := make(map[int]bool, len(build.rows), context.temp_allocator)
+	matched_probe := make(map[int]bool, len(probe.rows), context.temp_allocator)
+	for p_row, pi in probe.rows {
+		pv := p_row.values[probe.col]
+		key, ok := key_of(pv)
+		if !ok { continue }
 
-					matched_left[li] = true
-					matched_right[ri] = true
-					join_emit_combined(left.rows[li], r_row.values, new_rows)
-				}
-			}
-		}
-	} else {
-		for l_row, li in left.rows {
-			lv := l_row.values[left.col]
-			key, ok := key_of(lv)
-			if !ok { continue }
-			if matches, has := ht[key]; has {
-				for ri in matches {
-					if !verify(lv, right.rows[ri].values[right.col]) { continue }
+		matches, has := ht[key]
+		if !has { continue }
+		for bi in matches {
+			if !verify(build.rows[bi].values[build.col], pv) { continue }
 
-					matched_left[li] = true
-					matched_right[ri] = true
-					join_emit_combined(l_row, right.rows[ri].values, new_rows)
-				}
+			matched_build[bi] = true
+			matched_probe[pi] = true
+			if build_left {
+				join_emit_combined(build.rows[bi], p_row.values, new_rows)
+			} else {
+				join_emit_combined(p_row, build.rows[bi].values, new_rows)
 			}
 		}
 	}
 
 	for _, bucket in ht do delete(bucket)
 	delete(ht)
+
+	// Null-extend unmatched rows of either side; `outer.left/right` name the
+	// logical sides, so map the matched sets back accordingly.
+	matched_left := matched_build if build_left else matched_probe
+	matched_right := matched_probe if build_left else matched_build
 	if outer.left {
 		for li in 0 ..< len(left.rows) {
 			if li in matched_left { continue }
@@ -164,8 +171,8 @@ join_hash_probe :: proc(
 		}
 	}
 
-	delete(matched_left)
-	delete(matched_right)
+	delete(matched_build)
+	delete(matched_probe)
 }
 
 @(private="file")
@@ -384,17 +391,8 @@ nested_loop_join :: proc(
 	if on_cl, has := jc.on_clause.?; has {
 		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, nil, context.temp_allocator)
 		if _, ok := filter.?; !ok {
-			// Still emit null-extended rows for outer joins.
-			if is_left {
-				for outer_row in rows {
-					join_emit_null_row(outer_row, right_col_count, new_rows)
-				}
-			}
-			if is_right {
-				for ri in 0 ..< len(right_rows) {
-					join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
-				}
-			}
+			// Unresolvable ON: still emit null-extended rows for outer joins.
+			emit_unmatched_outer(is_left, is_right, rows, right_rows, left_col_count, right_col_count, new_rows)
 			return
 		}
 	}

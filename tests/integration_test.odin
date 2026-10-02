@@ -2736,22 +2736,30 @@ test_pk_seek_filter_shapes :: proc(t: ^testing.T) {
 	testing.expect(t, rng.ok, "range filter must succeed")
 	testing.expect_value(t, len(rng.rows), 2)
 
-	// Text literal vs int pk: the scan path drops the mismatched comparison
-	// (returns all rows); the seek falls back to scan, so identical.
+	// Text literal vs int pk: cross-type comparisons are never equal.
 	txt := db.query(d, "SELECT id FROM t WHERE id = '2';")
 	testing.expect(t, txt.ok, "text rhs must succeed")
-	testing.expect_value(t, len(txt.rows), 3)
+	testing.expect_value(t, len(txt.rows), 0)
 
 	// NULL never matches.
 	nul := db.query(d, "SELECT id FROM t WHERE id = NULL;")
 	testing.expect(t, nul.ok, "null rhs must succeed")
 	testing.expect_value(t, len(nul.rows), 0)
 
-	// Qualified column: the scan path ignores the qualifier (returns all rows);
-	// the seek falls back to scan, so results stay identical.
+	// Qualified column matching the table resolves like the bare name.
 	qual := db.query(d, "SELECT id, v FROM t WHERE t.id = 2;")
 	testing.expect(t, qual.ok, "qualified filter must succeed")
-	testing.expect_value(t, len(qual.rows), 3)
+	testing.expect_value(t, len(qual.rows), 1)
+	if len(qual.rows) == 1 {
+		testing.expect_value(t, qual.rows[0][1].(i64), 20)
+	}
+
+	// Unknown column is a clean error, never a silent full scan.
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	bad := db.query(d, "SELECT id FROM t WHERE nosuchcol = 1;")
+	context = restore_logger(saved)
+	testing.expect(t, !bad.ok, "unknown column must fail")
 
 	// Extra conjunct: AND root is not a single COND, scan path, same row.
 	andc := db.query(d, "SELECT id, v FROM t WHERE id = 2 AND v = 20;")
@@ -3018,4 +3026,156 @@ test_txn_deferred_as_of_sees_committed :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(old.rows), 1)
 	if len(old.rows) == 1 { testing.expect_value(t, old.rows[0][0].(i64), 10) }
 	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback failed")
+}
+
+// Cross-type comparison: values of different storage classes are never
+// equal (SQLite class rank). compare_values used to fall through to 0
+// (equal) for mismatched pairs, matching every row.
+@(test)
+test_compare_cross_type_never_equal :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "cmp_xtype")
+	defer teardown_db(d, "cmp_xtype")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER, name TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c');")
+
+	// Int column vs text literal: no match.
+	nt := db.query(d, "SELECT id FROM t WHERE id = '2';")
+	testing.expect(t, nt.ok, "int-vs-text must succeed")
+	testing.expect_value(t, len(nt.rows), 0)
+
+	// Text column vs int literal: no match.
+	tn := db.query(d, "SELECT id FROM t WHERE name = 5;")
+	testing.expect(t, tn.ok, "text-vs-int must succeed")
+	testing.expect_value(t, len(tn.rows), 0)
+
+	// Int vs float stays numeric: 2.0 equals 2.
+	nf := db.query(d, "SELECT id FROM t WHERE id = 2.0;")
+	testing.expect(t, nf.ok, "int-vs-float must succeed")
+	testing.expect_value(t, len(nf.rows), 1)
+
+	// Mixed IN list: only the type-correct member matches.
+	inm := db.query(d, "SELECT id FROM t WHERE id IN (2, 'x');")
+	testing.expect(t, inm.ok, "mixed IN must succeed")
+	testing.expect_value(t, len(inm.rows), 1)
+
+	// Same-type aggregates unaffected.
+	mn := db.query(d, "SELECT MIN(v), MAX(v) FROM t;")
+	testing.expect(t, mn.ok, "min/max must succeed")
+	if len(mn.rows) == 1 {
+		testing.expect_value(t, mn.rows[0][0].(i64), 10)
+		testing.expect_value(t, mn.rows[0][1].(i64), 30)
+	}
+}
+
+@(test)
+test_compare_cross_type_order :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "cmp_xorder")
+	defer teardown_db(d, "cmp_xorder")
+
+	// TEXT columns admit both strings and blobs: cross-type ORDER BY must
+	// follow class rank (text before blob), not compare-equal.
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 'b');")
+	db.execute(d, "INSERT INTO t VALUES (2, X'AA');")
+	db.execute(d, "INSERT INTO t VALUES (3, 'a');")
+
+	q := db.query(d, "SELECT id FROM t ORDER BY v;")
+	testing.expect(t, q.ok, "mixed order must succeed")
+	testing.expect_value(t, len(q.rows), 3)
+	if len(q.rows) == 3 {
+		testing.expect_value(t, q.rows[0][0].(i64), 3)
+		testing.expect_value(t, q.rows[1][0].(i64), 1)
+		testing.expect_value(t, q.rows[2][0].(i64), 2)
+	}
+}
+
+// NULL comparison semantics: any comparison involving NULL is UNKNOWN and
+// never matches (v = NULL matches nothing — SQLite/Postgres), while IS NULL
+// still tests nullness. compare_condition used to let the null==null arm of
+// compare_values make `v = NULL` true.
+@(test)
+test_null_comparison_never_matches :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "null_cmp")
+	defer teardown_db(d, "null_cmp")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, NULL), (2, 5), (3, NULL);")
+
+	eq := db.query(d, "SELECT id FROM t WHERE v = NULL;")
+	testing.expect(t, eq.ok, "v = NULL must succeed")
+	testing.expect_value(t, len(eq.rows), 0)
+
+	ne := db.query(d, "SELECT id FROM t WHERE v != NULL;")
+	testing.expect(t, ne.ok, "v != NULL must succeed")
+	testing.expect_value(t, len(ne.rows), 0)
+
+	lt := db.query(d, "SELECT id FROM t WHERE v < NULL;")
+	testing.expect(t, lt.ok, "v < NULL must succeed")
+	testing.expect_value(t, len(lt.rows), 0)
+
+	// IS NULL is the correct null test and stays working.
+	isn := db.query(d, "SELECT id FROM t WHERE v IS NULL;")
+	testing.expect(t, isn.ok, "IS NULL must succeed")
+	testing.expect_value(t, len(isn.rows), 2)
+
+	notn := db.query(d, "SELECT id FROM t WHERE v IS NOT NULL;")
+	testing.expect(t, notn.ok, "IS NOT NULL must succeed")
+	testing.expect_value(t, len(notn.rows), 1)
+
+	// NOT over an UNKNOWN comparison: the engine is two-valued (comparison
+	// false → NOT true), so NOT v = NULL returns all rows — consistent with
+	// SQLite's NOT over a false filter. Pin the behavior, not SQL three-
+	// valued logic.
+	not_eq := db.query(d, "SELECT id FROM t WHERE NOT v = NULL;")
+	testing.expect(t, not_eq.ok, "NOT v = NULL must succeed")
+	testing.expect_value(t, len(not_eq.rows), 3)
+
+	// NULL IN (...) never matches, including an explicit NULL member.
+	inl := db.query(d, "SELECT id FROM t WHERE v IN (NULL);")
+	testing.expect(t, inl.ok, "v IN (NULL) must succeed")
+	testing.expect_value(t, len(inl.rows), 0)
+
+	// NULL ordering in ORDER BY is unaffected.
+	ord := db.query(d, "SELECT id FROM t ORDER BY v;")
+	testing.expect(t, ord.ok, "null order must succeed")
+	testing.expect_value(t, len(ord.rows), 3)
+	if len(ord.rows) == 3 {
+		testing.expect_value(t, ord.rows[0][0].(i64), 2) // 5 first (ASC nulls last)
+	}
+}
+
+// Mutation PK seek with a qualified column: `UPDATE/DELETE ... WHERE t.pk = N`
+// must take the same seek path as the bare column (previously it fell back
+// to a full scan; correctness was already fine, this pins the semantics).
+@(test)
+test_mutation_pk_seek_qualified :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "mut_pk_qual")
+	defer teardown_db(d, "mut_pk_qual")
+
+	db.execute(d, "CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);")
+
+	db.execute(d, "UPDATE t SET v = 77 WHERE t.id = 2;")
+	q := db.query(d, "SELECT v FROM t WHERE id = 2;")
+	testing.expect(t, q.ok, "post-update read must succeed")
+	testing.expect_value(t, len(q.rows), 1)
+	if len(q.rows) == 1 { testing.expect_value(t, q.rows[0][0].(i64), 77) }
+
+	db.execute(d, "DELETE FROM t WHERE t.id = 1;")
+	gone := db.query(d, "SELECT v FROM t WHERE id = 1;")
+	testing.expect(t, gone.ok, "post-delete read must succeed")
+	testing.expect_value(t, len(gone.rows), 0)
+
+	// A qualifier naming a different table must NOT be treated as this pk
+	// (falls back to scan; here it names an unknown table -> no match).
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	other := db.query(d, "SELECT v FROM t WHERE other.id = 3;")
+	context = restore_logger(saved)
+	testing.expect(t, !other.ok || len(other.rows) == 0, "foreign qualifier must not match this pk")
 }

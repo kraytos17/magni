@@ -11,6 +11,7 @@ import "core:sys/posix"
 import "src:admin"
 import "src:db"
 import "src:linedit"
+import "src:pager"
 import "src:schema"
 
 PROMPT :: "magni> "
@@ -151,7 +152,7 @@ Dot_Handler :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> 
 // instead of hand-written literals.
 // Dot_Match selects how a table entry matches input: exact command word,
 // or leading-prefix (entry name includes the trailing space, e.g. ".dump ").
-Dot_Match :: enum { Exact, Prefix }
+Dot_Match :: enum u8 { Exact, Prefix }
 
 Dot_Command :: struct {
 	name:    string,
@@ -330,6 +331,16 @@ dot_cmd_integrity :: proc(database: ^db.Database, args: string, cmd: ^Dot_Comman
 	return false
 }
 
+dot_cmd_pager_stats :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+	pager.pager_stats_report(database.pager)
+	return false
+}
+
+dot_cmd_pager_layout :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+	pager.pager_layout_report()
+	return false
+}
+
 @(private="file")
 dot_cmd_snapshot_tag :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
@@ -434,6 +445,8 @@ DOT_COMMANDS := []Dot_Command{
 	{".checkpoint", .Exact, dot_cmd_checkpoint, ""},
 	{".vacuum", .Exact, dot_cmd_vacuum, ""},
 	{".integrity", .Exact, dot_cmd_integrity, ""},
+	{".pager_stats", .Exact, dot_cmd_pager_stats, ""},
+	{".pager_layout", .Exact, dot_cmd_pager_layout, ""},
 	{".rollforward", .Exact, dot_cmd_rollforward, ""},
 	{".snapshot tag ", .Prefix, dot_cmd_snapshot_tag, "Usage: .snapshot tag <id> <label>"},
 	{".snapshot restore ", .Prefix, dot_cmd_snapshot_restore, "Usage: .snapshot restore <id>"},

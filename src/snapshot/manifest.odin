@@ -14,7 +14,7 @@ Manifest_Entry :: struct #packed {
 	name_len:  u16,
 }
 
-Table_Change :: enum {
+Table_Change :: enum u8 {
 	CREATED,
 	DROPPED,
 	MODIFIED,

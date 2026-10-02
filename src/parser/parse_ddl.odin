@@ -35,90 +35,12 @@ parse_create_table :: proc(
 	}
 	for {
 		if match(p, .FOREIGN) {
-			if !expect_match(p, .KEY, "Expected KEY after FOREIGN") { return nil, false }
-			if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") {
-				return nil, false
-			}
-
-			fk_col := parse_identifier(p, allocator) or_return
-			if !expect_match(
-				p,
-				.RPAREN,
-				"Expected ) after foreign key column",
-			) { return nil, false }
-			if !expect_match(
-				p,
-				.REFERENCES,
-				"Expected REFERENCES after FOREIGN KEY",
-			) { return nil, false }
-
-			fk_table := parse_identifier(p, allocator) or_return
-			if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") {
-				return nil, false
-			}
-
-			fk_ref_col := parse_identifier(p, allocator) or_return
-			if !expect_match(
-				p,
-				.RPAREN,
-				"Expected ) after referenced column",
-			) { return nil, false }
-			append(&fks, Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col})
+			fk, fk_ok := parse_foreign_key_clause(p, allocator)
+			if !fk_ok { return nil, false }
+			append(&fks, fk)
 		} else {
-			col := types.Column {
-				name = parse_identifier(p, allocator) or_return,
-			}
-
-			type_token := peek(p)
-			#partial switch type_token.type {
-			case .INTEGER:
-				col.type = .INTEGER; advance(p)
-			case .TEXT:
-				col.type = .TEXT; advance(p)
-			case .REAL:
-				col.type = .REAL; advance(p)
-			case .BLOB:
-				col.type = .BLOB; advance(p)
-			case:
-				return err(p, "Expected column type (INTEGER, TEXT, REAL, or BLOB)")
-			}
-
-			for {
-				if match(p, .PRIMARY) {
-					if !expect_match(p, .KEY, "Expected KEY after PRIMARY") {
-						return nil, false
-					}
-					col.pk = true
-				} else if match(p, .NOT) {
-					if !expect_match(p, .NULL, "Expected NULL after NOT") {
-						return nil, false
-					}
-					col.not_null = true
-				} else if match(p, .DEFAULT) {
-					val, val_ok := parse_value(p, allocator)
-					if !val_ok { return err(p, "Invalid DEFAULT value") }
-					col.default_value = val
-				} else if match(p, .CHECK) {
-					if !expect_match(p, .LPAREN, "Expected ( after CHECK") {
-						return nil, false
-					}
-
-					b := strings.builder_make(allocator)
-					depth := 1
-					for depth > 0 {
-						tok := peek(p); advance(p)
-						if tok.type == .EOF {
-							strings.builder_destroy(&b)
-							return err(p, "Expected ) in CHECK constraint")
-						}
-						if tok.type == .LPAREN { depth += 1 }
-						if tok.type == .RPAREN { depth -= 1; if depth == 0 { break } }
-						if strings.builder_len(b) > 0 { strings.write_byte(&b, ' ') }
-						strings.write_string(&b, tok.lexeme)
-					}
-					col.check_expr = strings.to_string(b)
-				} else { break }
-			}
+			col, col_ok := parse_column_def(p, allocator)
+			if !col_ok { return nil, false }
 			append(&columns, col)
 		}
 		if match(
@@ -127,6 +49,91 @@ parse_create_table :: proc(
 		) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column definition") { return nil, false }
 	}
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
+}
+
+// parse_foreign_key_clause parses `FOREIGN KEY (col) REFERENCES table(col)`.
+// The caller has already consumed FOREIGN.
+@(private)
+parse_foreign_key_clause :: proc(p: ^Parser, allocator := context.allocator) -> (fk: Foreign_Key, ok: bool) {
+	if !expect_match(p, .KEY, "Expected KEY after FOREIGN") { return }
+	if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") { return }
+
+	fk_col := parse_identifier(p, allocator) or_return
+	if !expect_match(p, .RPAREN, "Expected ) after foreign key column") { return }
+	if !expect_match(p, .REFERENCES, "Expected REFERENCES after FOREIGN KEY") { return }
+
+	fk_table := parse_identifier(p, allocator) or_return
+	if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") { return }
+
+	fk_ref_col := parse_identifier(p, allocator) or_return
+	if !expect_match(p, .RPAREN, "Expected ) after referenced column") { return }
+	return Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col}, true
+}
+
+// parse_column_def parses one `name TYPE [modifiers]` column definition.
+@(private)
+parse_column_def :: proc(p: ^Parser, allocator := context.allocator) -> (col: types.Column, ok: bool) {
+	col.name = parse_identifier(p, allocator) or_return
+	type_token := peek(p)
+	#partial switch type_token.type {
+	case .INTEGER:
+		col.type = .INTEGER; advance(p)
+	case .TEXT:
+		col.type = .TEXT; advance(p)
+	case .REAL:
+		col.type = .REAL; advance(p)
+	case .BLOB:
+		col.type = .BLOB; advance(p)
+	case:
+		err(p, "Expected column type (INTEGER, TEXT, REAL, or BLOB)")
+		return {}, false
+	}
+
+	for {
+		if match(p, .PRIMARY) {
+			if !expect_match(p, .KEY, "Expected KEY after PRIMARY") { return {}, false }
+			col.pk = true
+		} else if match(p, .NOT) {
+			if !expect_match(p, .NULL, "Expected NULL after NOT") { return {}, false }
+			col.not_null = true
+		} else if match(p, .DEFAULT) {
+			val, val_ok := parse_value(p, allocator)
+			if !val_ok {
+				err(p, "Invalid DEFAULT value")
+				return {}, false
+		 	}
+			col.default_value = val
+		} else if match(p, .CHECK) {
+			expr, expr_ok := parse_check_expr(p, allocator)
+			if !expr_ok { return {}, false }
+
+			col.check_expr = expr
+		} else { break }
+	}
+	return col, true
+}
+
+// parse_check_expr captures the raw text of a parenthesised CHECK expression,
+// tracking nesting depth. The caller has consumed CHECK.
+@(private)
+parse_check_expr :: proc(p: ^Parser, allocator := context.allocator) -> (expr: string, ok: bool) {
+	if !expect_match(p, .LPAREN, "Expected ( after CHECK") { return }
+
+	b := strings.builder_make(allocator)
+	depth := 1
+	for depth > 0 {
+		tok := peek(p); advance(p)
+		if tok.type == .EOF {
+			strings.builder_destroy(&b)
+			err(p, "Expected ) in CHECK constraint")
+			return "", false
+		}
+		if tok.type == .LPAREN { depth += 1 }
+		if tok.type == .RPAREN { depth -= 1; if depth == 0 { break } }
+		if strings.builder_len(b) > 0 { strings.write_byte(&b, ' ') }
+		strings.write_string(&b, tok.lexeme)
+	}
+	return strings.to_string(b), true
 }
 
 @(private)

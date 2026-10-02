@@ -13,7 +13,7 @@ import "src:types"
 // (warned no-ops, never errors) so existing flows that expire mid-txn keep
 // working, minus the corruption: uncommitted COW pages exist in no snapshot
 // live set, so a sweep would free them out from under the txn.
-Reclaim_Decision :: enum {
+Reclaim_Decision :: enum u8 {
 	Proceed,
 	Empty_No_Snapshots,
 	Blocked_Active_Txn,

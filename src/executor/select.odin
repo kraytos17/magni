@@ -123,12 +123,8 @@ fetch_single_rows :: proc(
 		{table_name = from_name, start_col = 0, col_count = len(tbl.columns)},
 	}
 
-	// PK-seek fast path: a lone `pk = const` filter resolves to one tree_find
-	// instead of a full scan. A miss yields zero rows; downstream
-	// (sort/project/dedup/limit/aggregates) is shared with the scan path, so
-	// result shape is identical. Anything else falls through to scan_table.
 	if wc, has_wc := stmt.where_clause.?; has_wc {
-		if rowid, seek_ok := try_pk_lookup(tbl, wc); seek_ok {
+		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
 			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
 		}
 	}
@@ -141,6 +137,7 @@ fetch_single_rows :: proc(
 		t,
 		allocator,
 		cache,
+		single_range,
 	)
 	if scan_err { return nil, nil, nil, false }
 	return rows, tbl.columns, single_range, true
@@ -348,13 +345,26 @@ scan_table :: proc(
 	schema_tree: ^btree.Tree = nil,
 	allocator := context.allocator,
 	cache: ^schema.Table_Cache = nil,
+	table_ranges: []Table_Col_Range = nil,
 ) -> (
 	rows: []Row_Entry,
 	err: bool,
 ) {
-	plan := build_scan_plan(tree, table, where_clause, max_rows, schema_tree, allocator, cache)
-	r := make([dynamic]Row_Entry, allocator)
+	plan, plan_ok := build_scan_plan(
+		tree,
+		table,
+		where_clause,
+		max_rows,
+		schema_tree,
+		allocator,
+		cache,
+		table_ranges,
+	)
+	if !plan_ok {
+		return nil, true
+	}
 
+	r := make([dynamic]Row_Entry, allocator)
 	cursor, c_err := btree.cursor_start(tree, allocator)
 	if c_err != .None { return nil, true }
 	if plan.skip_start > 0 {
@@ -406,22 +416,28 @@ build_scan_plan :: proc(
 	schema_tree: ^btree.Tree,
 	allocator := context.allocator,
 	cache: ^schema.Table_Cache = nil,
-) -> Scan_Plan {
-	plan := Scan_Plan{max_rows = max_rows}
-	if wc, has_wc := where_clause.?; has_wc {
-		if ctx, ok := init_where_ctx(&wc, table.columns, nil, schema_tree, allocator, cache).?; ok && ctx.root != nil {
+	table_ranges: []Table_Col_Range = nil,
+) -> (
+	plan: Scan_Plan,
+	ok: bool,
+) {
+	plan = Scan_Plan{max_rows = max_rows}
+	if wc, has_wc := where_clause.?; has_wc && wc.root != nil {
+		ctx, ctx_ok := init_where_ctx(&wc, table.columns, table_ranges, schema_tree, allocator, cache).?
+		if !ctx_ok {
+			log.error("Error: Could not resolve WHERE clause")
+			return {}, false
+		}
+		if ctx.root != nil {
 			plan.filter = ctx
 		}
 	}
-	if _, has_f := plan.filter.?; !has_f { return plan }
 
-	// Skip-index bounds are only safe for a top-level AND chain of single-column
-	// integer comparisons on the indexed column. OR subtrees (or nested boolean
-	// groups) disable skipping; the operator decides which side of the page
-	// window a condition can bound (e.g. `>` only gives a lower bound, `<` only
-	// an upper bound).
+	ok = true
+	if _, has_f := plan.filter.?; !has_f { return plan, true }
+
 	plan.skip_conds = skip_chain_conditions(plan.filter.?.root)
-	if table.skip_root == 0 { return plan }
+	if table.skip_root == 0 { return plan, true }
 	for rc in plan.skip_conds {
 		if rc.has_right_col || rc.has_in { continue }
 		if val, is_int := rc.rhs.(i64); is_int {
@@ -441,7 +457,7 @@ build_scan_plan :: proc(
 			}
 		}
 	}
-	return plan
+	return plan, true
 }
 
 // maybe_build_skip_index auto-builds a skip index for the first qualifying
