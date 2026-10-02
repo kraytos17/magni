@@ -2,6 +2,7 @@ package executor
 
 import "core:hash"
 import "core:log"
+import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "src:parser"
@@ -175,7 +176,9 @@ try_pk_lookup :: proc(
 		if !matches { return }
 	}
 
-	val, is_int := cond.rhs.(types.Value).(i64)
+	val_untyped, is_val := cond.rhs.(types.Value)
+	if !is_val { return }
+	val, is_int := val_untyped.(i64)
 	if !is_int { return }
 	return types.Row_ID(val), true
 }
@@ -211,22 +214,123 @@ values_equal_by_indices :: proc(
 	return true
 }
 
-// bucket_add appends a row position to a fingerprint bucket index
-// (fetch/append/store). Shared by DISTINCT dedup, set-op membership, and
-// GROUP BY grouping, which all probe map[u64][dynamic]int the same way.
-@(private)
-bucket_add :: proc(index: ^map[u64][dynamic]int, fp: u64, pos: int) {
-	bucket := index^[fp]
-	append(&bucket, pos)
-	index^[fp] = bucket
+// Fp_Buckets is a linear-probe fingerprint bucket index: the cache-friendly
+// successor to map[u64][dynamic]int for hot dedup/group/join paths. Slot
+// probes walk inline (one cache line per step); positions chain through
+// parallel arrays instead of per-bucket heap maps. Grows by doubling at 3/4
+// load — size it from the input length when known (dedup), small otherwise
+// (groups). Walk a probe hit with b.next[h] (-1 ends), reading positions
+// from b.rows[h].
+Fp_Buckets :: struct {
+	slots:     []u64, // slot fingerprint (valid when head[i] >= 0)
+	head:      []int, // head position-node, -1 = empty slot
+	rows:      [dynamic]int, // row positions in insertion order
+	fps:       [dynamic]u64, // entry fingerprints parallel to rows (rehash)
+	next:      [dynamic]int, // chain links parallel to rows, -1 = end
+	mask:      int,
+	allocator: mem.Allocator,
 }
 
-// bucket_index_destroy frees a fingerprint bucket index built with
-// bucket_add. Deferred by every builder: `defer bucket_index_destroy(&index)`.
 @(private)
-bucket_index_destroy :: proc(index: ^map[u64][dynamic]int) {
-	for _, bucket in index^ { delete(bucket) }
-	delete(index^)
+fp_buckets_make :: proc(n: int, allocator: mem.Allocator) -> Fp_Buckets {
+	cap := 16
+	for cap < 2 * (n + 1) { cap *= 2 }
+
+	b := Fp_Buckets{mask = cap - 1, allocator = allocator}
+	b.slots = make([]u64, cap, allocator)
+	b.head = make([]int, cap, allocator)
+	for i in 0 ..< cap { b.head[i] = -1 }
+
+	b.rows = make([dynamic]int, 0, n, allocator)
+	b.fps = make([dynamic]u64, 0, n, allocator)
+	b.next = make([dynamic]int, 0, n, allocator)
+	return b
+}
+
+// fp_slot spreads a fingerprint over the slot mask (splitmix64 finalizer;
+// FNV's own low bits are too weak to index with directly).
+@(private="file")
+fp_slot :: proc(fp: u64, mask: int) -> int {
+	h := fp + 0x9E3779B97F4A7C15
+	h = (h ~ (h >> 30)) * 0xBF58476D1CE4E5B9
+	h = (h ~ (h >> 27)) * 0x94D049BB133111EB
+	return int((h ~ (h >> 31)) & u64(mask))
+}
+
+// fp_buckets_insert_slot links (fp, pos) at a known-empty slot; rows/next/
+// fps stay parallel by construction.
+@(private="file")
+fp_buckets_insert_slot :: proc(b: ^Fp_Buckets, s: int, fp: u64, pos: int) {
+	b.slots[s] = fp
+	b.head[s] = len(b.rows)
+
+	append(&b.rows, pos)
+	append(&b.fps, fp)
+	append(&b.next, -1)
+}
+
+// fp_buckets_grow doubles the slot table and reinserts every entry.
+@(private="file")
+fp_buckets_grow :: proc(b: ^Fp_Buckets) {
+	old_slots, old_head := b.slots, b.head
+	old_rows, old_fps := b.rows[:], b.fps[:]
+	cap := 2 * len(old_slots)
+	b.slots = make([]u64, cap, b.allocator)
+	b.head = make([]int, cap, b.allocator)
+	for i in 0 ..< cap { b.head[i] = -1 }
+
+	b.mask = cap - 1
+	clear(&b.rows)
+	clear(&b.fps)
+	clear(&b.next)
+	for i in 0 ..< len(old_rows) {
+		fp_buckets_add(b, old_fps[i], old_rows[i])
+	}
+
+	delete(old_slots, b.allocator)
+	delete(old_head, b.allocator)
+}
+
+@(private)
+fp_buckets_add :: proc(b: ^Fp_Buckets, fp: u64, pos: int) {
+	if len(b.rows) >= (3 * len(b.slots)) / 4 { fp_buckets_grow(b) }
+	s := fp_slot(fp, b.mask)
+	for {
+		if b.head[s] == -1 {
+			fp_buckets_insert_slot(b, s, fp, pos)
+			return
+		}
+		if b.slots[s] == fp {
+			append(&b.rows, pos)
+			append(&b.fps, fp)
+			append(&b.next, b.head[s])
+
+			b.head[s] = len(b.rows) - 1
+			return
+		}
+		s = (s + 1) & b.mask
+	}
+}
+
+// fp_buckets_probe returns the head chain node for fp (walk with b.next,
+// -1 ends; positions live in b.rows). Misses never allocate.
+@(private)
+fp_buckets_probe :: proc(b: ^Fp_Buckets, fp: u64) -> (int, bool) {
+	s := fp_slot(fp, b.mask)
+	for {
+		if b.head[s] == -1 { return 0, false }
+		if b.slots[s] == fp { return b.head[s], true }
+		s = (s + 1) & b.mask
+	}
+}
+
+@(private)
+fp_buckets_destroy :: proc(b: ^Fp_Buckets) {
+	delete(b.slots, b.allocator)
+	delete(b.head, b.allocator)
+	delete(b.rows)
+	delete(b.fps)
+	delete(b.next)
 }
 
 @(private)

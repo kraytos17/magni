@@ -80,16 +80,19 @@ materialize_subquery_rows :: proc(
 	append(&rows, ..inner_rows)
 
 	alias := stmt.from_alias
-	single_range = []Table_Col_Range {
-		{table_name = alias, start_col = 0, col_count = len(virtual_cols)},
-	}
-
+	// NOTE: built with explicit make, not a []Table_Col_Range{...} literal:
+	// slice-of-struct literals with runtime fields miscompile on odin
+	// dev-2026-09-nightly at -o:none (verified segfault; struct literal + make
+	// is exact and stable). Don't "simplify" this back to a literal.
+	tr := Table_Col_Range{table_name = alias, start_col = 0, col_count = len(virtual_cols)}
+	sr := make([]Table_Col_Range, 1, context.temp_allocator)
+	sr[0] = tr
 	if where_clause, has_where := stmt.where_clause.?; has_where {
-		filtered := filter_rows(rows[:], &where_clause, virtual_cols, single_range)
+		filtered := filter_rows(rows[:], &where_clause, virtual_cols, sr)
 		clear(&rows)
 		append(&rows, ..filtered)
 	}
-	return rows, single_range
+	return rows, sr
 }
 
 // exec_subquery_data evaluates a SELECT whose FROM is a subquery and returns

@@ -145,13 +145,13 @@ In_Kind :: enum u8 {
 }
 
 // In_Membership bundles one IN condition's resolved state: its source kind,
-// the candidate values, and the fingerprint prefilter over Values (nil =
-// linear scan, e.g. hand-built nodes). Values borrows the parser's list;
-// Subquery results are owned (made at resolve time).
+// the candidate values, and the sorted fingerprint prefilter over Values
+// (empty = linear scan, e.g. hand-built nodes). Values borrows the parser's
+// list; Subquery results are owned (made at resolve time).
 In_Membership :: struct {
 	kind:   In_Kind,
 	values: []types.Value,
-	set:    map[u64]bool,
+	fps:    []u64,
 }
 
 Where_Eval_Ctx :: struct {
@@ -173,7 +173,6 @@ Mutation_Filter :: struct {
 // build_scan_plan, consumed by the cursor loop in scan_table.
 Scan_Plan :: struct {
 	filter:     Maybe(Where_Eval_Ctx),
-	skip_conds: []Resolved_Condition,
 	skip_start: u32,
 	skip_end:   u32,
 	max_rows:   Maybe(u64),

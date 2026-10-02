@@ -359,6 +359,32 @@ class TestSubqueries(MagniCLITestCase):
             "SELECT * FROM (SELECT * FROM t WHERE a > 1) AS sub;")
         self.assertHas(p, "2")
 
+    def test_from_subquery_without_alias(self):
+        p = self.run_stdin(
+            "CREATE TABLE t (a INT); INSERT INTO t VALUES (1); "
+            "INSERT INTO t VALUES (2); "
+            "SELECT * FROM (SELECT * FROM t WHERE a > 1);")
+        self.assertHas(p, "2")
+
+    def test_from_subquery_qualified_projection(self):
+        p = self.run_stdin(
+            "CREATE TABLE t (a INT); INSERT INTO t VALUES (1); "
+            "INSERT INTO t VALUES (2); "
+            "SELECT sub.a FROM (SELECT * FROM t WHERE a > 1) AS sub;")
+        self.assertHas(p, "2")
+
+    def test_from_subquery_unknown_qualified_column_errors(self):
+        p = self.run_stdin(
+            "CREATE TABLE t (a INT); "
+            "SELECT nosuch.a FROM (SELECT * FROM t) AS sub;")
+        self.assertIsErr(p)
+        self.assertNotEqual(p.returncode, 0)
+
+    def test_malformed_sql_errors_and_fails(self):
+        p = self.run_eval("SELECT * FROM t WHERE (a = 1;")
+        self.assertIsErr(p)
+        self.assertNotEqual(p.returncode, 0)
+
 
 class TestSetOperations(MagniCLITestCase):
     AB = ("CREATE TABLE a (x INT); INSERT INTO a VALUES (1); "

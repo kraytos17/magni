@@ -226,9 +226,6 @@ exec_insert_impl :: proc(
 	pending: ^Pending_Roots = nil,
 ) -> (bool, u32, Mutated_Table_Info) {
 	is_direct := mode == .Direct
-	// Resolve CHECK constraints once per statement (not per row). Skipped
-	// for row-less inserts, which never evaluate a row and must keep
-	// passing through today.
 	checks: []Resolved_Check
 	if len(stmt.values) > 0 {
 		rc, rc_ok := resolve_table_checks(table)
@@ -331,7 +328,7 @@ apply_update :: proc(
 		if rc, rc_ok := resolve_table_checks(plan.tbl); rc_ok {
 			plan.checks = rc
 		} else {
-			return nil, true // true = had an error (already logged)
+			return nil, true
 		}
 	}
 

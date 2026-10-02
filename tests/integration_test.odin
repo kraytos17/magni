@@ -973,6 +973,71 @@ test_integration_skip_index_range :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(r7.rows), 500)
 }
 
+// Regression: a table large enough to need >MAX_SKIP_ENTRIES zone entries.
+// Even-stepped scores (step 2) defeat range coalescing, so ~20k rows produce
+// ~200 entries — more than one skip page holds. The writer used to slice the
+// page past its 4KB bound: a bounds panic in debug builds and silent heap
+// corruption in release. Build must succeed and queries stay exact.
+@(test)
+test_integration_skip_index_overflow :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "skipoverflow")
+	defer teardown_db(d, "skipoverflow")
+
+	db.execute(d, "CREATE TABLE t (id INT, score INT);")
+	ROWS :: 20000
+	CHUNK :: 1000
+	for chunk in 0 ..< ROWS / CHUNK {
+		sb: strings.Builder
+		strings.builder_init(&sb, context.temp_allocator)
+		strings.write_string(&sb, "INSERT INTO t VALUES ")
+		for i in 0 ..< CHUNK {
+			if i > 0 { strings.write_string(&sb, ",") }
+			id := chunk * CHUNK + i + 1
+			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
+		}
+		
+		strings.write_string(&sb, ";")
+		ok := db.execute(d, strings.to_string(sb)) == .None
+		testing.expect(t, ok, "chunk insert")
+	}
+
+	st := db.Schema_Tree(d)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	testing.expect(t, len(tables) >= 1, "table listed")
+	if len(tables) == 0 { return }
+	tree := btree.init(d.pager, tables[0].root_page)
+
+	// More zone entries than one page holds: the build must merge them, not
+	// overflow. (ROWS>0 with step-2 scores guarantees ~20 entries/chunk.)
+	skip_idx, build_err := btree.build_skip_index(&tree, 1)
+	testing.expect(t, build_err == .None, "large skip index builds within one page")
+	if build_err != .None { return }
+	if new_root, up_ok := schema.update_skip_root_cow(&st, "t", skip_idx.root); up_ok {
+		d.schema_root_page = new_root
+	} else {
+		testing.expect(t, false, "persist large skip index root")
+		return
+	}
+
+	// Exact answers through the merged (widened, still conservative) zones.
+	r := db.query(d, "SELECT id FROM t WHERE score > 30000;")
+	testing.expect(t, r.ok, "large indexed >")
+	testing.expect_value(t, len(r.rows), 5000)
+
+	r2 := db.query(d, "SELECT id FROM t WHERE score = 39998;")
+	testing.expect(t, r2.ok, "large indexed =")
+	testing.expect_value(t, len(r2.rows), 1)
+	if len(r2.rows) > 0 {
+		id0, _ := r2.rows[0][0].(i64)
+		testing.expect_value(t, id0, i64(19999))
+	}
+
+	r3 := db.query(d, "SELECT id FROM t WHERE score < 100;")
+	testing.expect(t, r3.ok, "large indexed <")
+	testing.expect_value(t, len(r3.rows), 49)
+}
+
 @(test)
 test_columnar_integration :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
@@ -3319,4 +3384,84 @@ test_mutation_pk_seek_qualified :: proc(t: ^testing.T) {
 	other := db.query(d, "SELECT v FROM t WHERE other.id = 3;")
 	context = restore_logger(saved)
 	testing.expect(t, !other.ok || len(other.rows) == 0, "foreign qualifier must not match this pk")
+}
+
+// Differential: vector scan (MAGNI_VECTOR=1) must return byte-identical
+// results to the scalar path (unset) across filter shapes, projections,
+// ORDER BY (sort key inside and outside the projection), DISTINCT, and
+// LIMIT/OFFSET — over ints, reals, text, and NULLs. Single-threaded suite,
+// so process-env toggling is safe. Env restored at the end.
+@(test)
+test_vector_scan_differential :: proc(t: ^testing.T) {
+	d := setup_db(t, "vecdiff")
+	defer teardown_db(d, "vecdiff")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT, r REAL, name TEXT);")
+	sb: strings.Builder
+	strings.builder_init(&sb, context.temp_allocator)
+	strings.write_string(&sb, "INSERT INTO t VALUES ")
+	for i in 1 ..= 200 {
+		if i > 1 { strings.write_string(&sb, ",") }
+		if i % 10 == 0 {
+			fmt.sbprintf(&sb, "(%d,NULL,NULL,NULL)", i)
+		} else if i % 3 == 0 {
+			fmt.sbprintf(&sb, "(%d,%d,%f,'n%d')", i, i * 2, f64(i) + 0.5, i)
+		} else {
+			fmt.sbprintf(&sb, "(%d,%d,%f,'n%d')", i, i * 2, f64(i) + 0.25, i)
+		}
+	}
+	strings.write_string(&sb, ";")
+	testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "bulk insert")
+
+	queries := []string{
+		"SELECT * FROM t;",
+		"SELECT id FROM t;",
+		"SELECT name, v FROM t;",
+		"SELECT * FROM t WHERE v > 200;",
+		"SELECT id FROM t WHERE v > 200;",
+		"SELECT id FROM t WHERE v < 10;",
+		"SELECT id FROM t WHERE v = 100;",
+		"SELECT id FROM t WHERE v >= 100 AND v <= 120;",
+		"SELECT id FROM t WHERE v < 50 OR v > 350;",
+		"SELECT id FROM t WHERE NOT v = 100;",
+		"SELECT id FROM t WHERE name LIKE 'n1%';",
+		"SELECT id FROM t WHERE v IS NULL;",
+		"SELECT id FROM t WHERE v IN (10, 20, 30);",
+		"SELECT id FROM t WHERE id = v;",
+		"SELECT id FROM t WHERE v > 10000;",
+		"SELECT id, v FROM t ORDER BY v DESC;",
+		"SELECT id FROM t ORDER BY v DESC;",
+		"SELECT v FROM t ORDER BY id LIMIT 10;",
+		"SELECT DISTINCT v FROM t WHERE v > 100;",
+		"SELECT id FROM t WHERE v > 50 LIMIT 5 OFFSET 10;",
+		"SELECT r FROM t WHERE r > 100.0;",
+		"SELECT id FROM t WHERE name = 'n42';",
+	}
+
+	vec_rows_equal :: proc(a, b: db.Query_Result) -> bool {
+		if a.ok != b.ok { return false }
+		if !a.ok { return true }
+		if len(a.rows) != len(b.rows) { return false }
+		if len(a.columns) != len(b.columns) { return false }
+		for c, i in a.columns {
+			if c != b.columns[i] || a.col_types[i] != b.col_types[i] { return false }
+		}
+		for r, i in a.rows {
+			if len(r) != len(b.rows[i]) { return false }
+			for v, j in r {
+				if !types.value_compare(v, b.rows[i][j]) { return false }
+			}
+		}
+		return true
+	}
+
+	os.set_env("MAGNI_VECTOR", "0")
+	for q, i in queries {
+		scalar := db.query(d, q)
+		os.set_env("MAGNI_VECTOR", "1")
+		vec := db.query(d, q)
+		os.set_env("MAGNI_VECTOR", "0")
+		testing.expect(t, vec_rows_equal(scalar, vec), fmt.tprintf("vec/scalar mismatch q%d: %s", i, q))
+	}
+	os.unset_env("MAGNI_VECTOR")
 }

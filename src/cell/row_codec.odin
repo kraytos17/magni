@@ -186,6 +186,106 @@ deserialize :: proc(
 	return cell, pos - offset, true
 }
 
+// deserialize_needed decodes one row-major cell but materializes only the
+// columns flagged in `needed` (index = serial position). Unneeded columns are
+// still walked (payload skipped via content size) so bytes_consumed matches
+// deserialize exactly, but no value is produced for them: the slot is set to
+// Null and no allocation or clone happens.
+//
+// TEXT/BLOB values for needed columns are ALWAYS borrowed from `src`:
+// the caller must clone survivors before the page is unpinned/evicted. The
+// cursor pins only the current page (load_cached_page unpins on page move;
+// eviction reuses the slot buffer), so borrowed strings are valid only
+// while the cursor stays on the page. Non-survivor rows cost zero
+// allocations by construction: ints/reals/Null are by value, text/blob are
+// borrows, and `out_values` is caller storage (stack or reused batch buffer).
+//
+// `out_values` must have len >= serial count; `needed` shorter than the
+// serial count treats trailing positions as not needed. Malformed input
+// fails exactly where deserialize fails.
+// Returns the rowid, bytes consumed, and ok=false on invalid input.
+deserialize_needed :: proc(
+	src: []u8,
+	offset: int,
+	needed: []bool,
+	out_values: []types.Value,
+) -> (
+	rowid: types.Row_ID,
+	bytes_consumed: int,
+	ok: bool,
+) {
+	if offset >= len(src) {
+		return 0, 0, false
+	}
+
+	pos := offset
+	_, n, ok_payload := varint.decode(src, pos)
+	if !ok_payload { return 0, 0, false }
+
+	pos += n
+	rowid_val, n2, ok_rowid := varint.decode(src, pos)
+	if !ok_rowid { return 0, 0, false }
+
+	pos += n2
+	header_size, n3, ok_header := varint.decode(src, pos)
+	if !ok_header { return 0, 0, false }
+
+	pos += n3
+	header_start := pos
+	serial_types: [types.MAX_COLS]u64
+	serial_count := 0
+	for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
+		st, n4, ok_st := varint.decode(src, pos)
+		if !ok_st { return 0, 0, false }
+
+		serial_types[serial_count] = st
+		serial_count += 1
+		pos += n4
+	}
+	if len(out_values) < serial_count { return 0, 0, false }
+	for st_idx in 0 ..< serial_count {
+		st := serial_types[st_idx]
+		content_size, _ := types.serial_type_content_size(st)
+		type_code := types.Serial_Type(st)
+		if pos + content_size > len(src) {
+			return 0, 0, false
+		}
+
+		want := st_idx < len(needed) && needed[st_idx]
+		if !want {
+			pos += content_size
+			out_values[st_idx] = types.value_null()
+			continue
+		}
+		if type_code == .ZERO {
+			out_values[st_idx] = types.value_int(0)
+		} else if type_code == .ONE {
+			out_values[st_idx] = types.value_int(1)
+		} else if st == u64(types.Serial_Type.NULL) {
+			out_values[st_idx] = types.value_null()
+		} else if st >= u64(types.Serial_Type.INT8) && st <= u64(types.Serial_Type.INT64) {
+			int_val, _ := read_int_by_size(src, pos, content_size)
+			out_values[st_idx] = types.value_int(int_val)
+			pos += content_size
+		} else if type_code == .FLOAT64 {
+			float_val, _ := endian.get_f64(src[pos:], .Big)
+			out_values[st_idx] = types.value_real(float_val)
+			pos += 8
+		} else if is_text_serial(st) {
+			text_bytes := src[pos:pos + content_size]
+			out_values[st_idx] = types.value_text(string(text_bytes))
+			pos += content_size
+		} else if is_blob_serial(st) {
+			blob_bytes := src[pos:pos + content_size]
+			out_values[st_idx] = types.value_blob(blob_bytes)
+			pos += content_size
+		} else {
+			return 0, 0, false
+		}
+	}
+	return types.Row_ID(rowid_val), pos - offset, true
+}
+
 @(private="file")
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
 	if offset + size > len(data) { return 0, false }

@@ -7,6 +7,10 @@ import "src:pager"
 
 SKIP_FORMAT_MAGIC :: u32(0x4B495054)
 
+// MAX_SKIP_ENTRIES bounds one skip page: the 12-byte header plus packed
+// entries must fit in PAGE_SIZE. Larger zone sets are merged down before write.
+MAX_SKIP_ENTRIES :: (PAGE_SIZE - 12) / size_of(Skip_Entry)
+
 // Skip_Op selects how a skip-index range bound is derived from a comparison
 // operator. Only these operators can be safely answered from the zone-map
 // min/max ranges; anything else disables skipping entirely.
@@ -71,7 +75,29 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 		if a.min_int > b.min_int { return 1 }
 		return 0
 	})
-	return write_skip_page(t, entries[:], col_index)
+
+	// A page holds at most MAX_SKIP_ENTRIES zones. Merge adjacent zones until
+	// the set fits: widening a zone's range keeps query_skip_index_range a
+	// safe superset window (rows are still filtered afterwards); only pruning
+	// granularity drops. Pairs merge left-first, preserving min-sorted order.
+	n := len(entries)
+	for n > MAX_SKIP_ENTRIES {
+		out := 0
+		for i := 0; i < n; i += 2 {
+			e := entries[i]
+			if i + 1 < n {
+				f := entries[i + 1]
+				if f.max_int > e.max_int { e.max_int = f.max_int }
+				if f.page_min < e.page_min { e.page_min = f.page_min }
+				if f.page_max > e.page_max { e.page_max = f.page_max }
+			}
+
+			entries[out] = e
+			out += 1
+		}
+		n = out
+	}
+	return write_skip_page(t, entries[:n], col_index)
 }
 
 // Skip_Accumulator coalesces adjacent pages whose integer ranges overlap or
@@ -152,7 +178,11 @@ scan_page_int_range :: proc(node: Node, page_id: u32, cell_count: int, col_index
 	if col_index == -1 { return min_val, max_val }
 	for i in 0 ..< cell_count {
 		ptr := get_cell_ptr(node.data, page_id, i, node.layout.stride)
-		c, _, ok := cell.deserialize(node.data, int(ptr), cell.Config{zero_copy = true})
+		c, _, ok := cell.deserialize(
+			node.data,
+			int(ptr),
+			cell.Config{zero_copy = true, allocator = context.temp_allocator},
+		)
 		if !ok { continue }
 		if col_index < len(c.values) {
 			if v, is_int := c.values[col_index].(i64); is_int {
@@ -160,7 +190,7 @@ scan_page_int_range :: proc(node: Node, page_id: u32, cell_count: int, col_index
 				if v > max_val { max_val = v }
 			}
 		}
-		cell.destroy(&c)
+		cell.destroy(&c, context.temp_allocator)
 	}
 	return min_val, max_val
 }
@@ -173,6 +203,8 @@ write_skip_page :: proc(t: ^Tree, entries: []Skip_Entry, col_index: int) -> (Ski
 	if a_err != .None { return {}, .Page_Full }
 
 	n := len(entries)
+	if 12 + n * size_of(Skip_Entry) > PAGE_SIZE { return {}, .Page_Full }
+
 	data := page.data[:12 + n * size_of(Skip_Entry)]
 	endian.unchecked_put_u32le(data[0:4], SKIP_FORMAT_MAGIC)
 	endian.unchecked_put_u32le(data[4:8], u32(n))

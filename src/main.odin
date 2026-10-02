@@ -59,20 +59,23 @@ main :: proc() {
 		log.fatalf("Could not open database '%s': %s", cli.database, db.db_error_string(open_err))
 		os.exit(1)
 	}
-	defer db.close(database)
 
+	ok := true
 	stop_on_error := cli.stop_on_error
 	if len(cli.file) > 0 {
-		execute_script_file(database, cli.file, stop_on_error)
+		ok = execute_script_file(database, cli.file, stop_on_error)
 	} else if len(cli.eval) > 0 {
-		execute_sql(database, cli.eval, stop_on_error)
+		ok = execute_sql(database, cli.eval, stop_on_error)
 	} else if os.is_tty(os.stdin) {
 		fmt.printf("MagniDB v%s\nEnter .help for usage hints.\n", APP_VERSION)
 		context.logger.lowest_level = .Error
 		repl(database)
 	} else {
-		execute_script_stream(database, stop_on_error)
+		ok = execute_script_stream(database, stop_on_error)
 	}
+
+	db.close(database)
+	if !ok { os.exit(1) }
 }
 
 @(private="file")

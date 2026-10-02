@@ -76,12 +76,16 @@ exec_select_literals :: proc(
 	return rows, cols, true
 }
 
-@(private="file")
-single_range_for :: proc(col_count: int) -> []Table_Col_Range {
-	range0 := []Table_Col_Range {
-		{table_name = "", start_col = 0, col_count = col_count},
-	}
-	return range0
+@(private)
+// limit_pushable reports whether LIMIT may be pushed into the scan: only for
+// plain row-returning scans. ORDER BY and DISTINCT need the full row set,
+// and aggregates/GROUP BY/HAVING change cardinality — pushing LIMIT into
+// those scans silently truncates the aggregation input. Shared by
+// fetch_single_rows and the vector fetch path so the rule cannot diverge.
+limit_pushable :: proc(stmt: parser.Select_Stmt, has_order: bool) -> bool {
+	_, has_lim := stmt.limit.?
+	return has_lim && !has_order && !stmt.is_distinct &&
+		len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil
 }
 
 @(private)
@@ -109,13 +113,9 @@ fetch_single_rows :: proc(
 		has_order = true
 	}
 
-	_, has_lim := stmt.limit.?
-	// LIMIT pushdown is only valid for plain row-returning scans. ORDER BY
-	// and DISTINCT need the full row set, and aggregates/GROUP BY/HAVING
-	// change cardinality — pushing LIMIT into those scans silently truncates
-	// the aggregation input.
-	pushable := has_lim && !has_order && !stmt.is_distinct &&
-		len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil
+	// LIMIT pushdown is only valid for plain row-returning scans; see
+	// limit_pushable for the rule (shared with the vector fetch path).
+	pushable := limit_pushable(stmt, has_order)
 
 	max_rows := stmt.limit if pushable else nil
 	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
@@ -225,6 +225,26 @@ exec_select_single_data :: proc(
 		return rows_mat, cols_mat, true
 	}
 
+	// Vector scan route (Phase 2, MAGNI_VECTOR=1): same fetch contract via
+	// fetch_single_rows_vec, same finish_select tail. Excluded exactly where
+	// the aggregate tail takes over (aggregates/GROUP BY/HAVING change
+	// cardinality and resolve their own columns). Joins/subqueries/setops
+	// never reach this proc. All error paths log canonically through the
+	// shared helpers, identical to the scalar route.
+	if len(stmt.aggregates) == 0 && len(stmt.group_by) == 0 && stmt.having == nil &&
+	   vec_scan_enabled() {
+		vrows, vcols, vranges, v_ok := fetch_single_rows_vec(
+			t,
+			table^,
+			tbl_name,
+			stmt,
+			context.temp_allocator,
+			cache,
+		)
+		if !v_ok { return nil, nil, false }
+		return finish_select(stmt, vrows, vcols, vranges)
+	}
+
 	rows, cols, single_range, f_ok := fetch_single_rows(
 		t,
 		table^,
@@ -233,7 +253,6 @@ exec_select_single_data :: proc(
 		context.temp_allocator,
 		cache,
 	)
-
 	if !f_ok { return nil, nil, false }
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, cols, single_range)
@@ -416,13 +435,20 @@ scan_table :: proc(
 		btree.cursor_advance(&cursor)
 	}
 
-	maybe_build_skip_index(&plan, tree, table, schema_tree)
+	// No auto skip-index build here: reads hold db.mu shared and can never
+	// publish the new schema root, so a build would be silently discarded —
+	// a repeated full-table scan plus leaked pages. Skip indexes are built
+	// explicitly (btree.build_skip_index + schema.update_skip_root_cow); a
+	// future write-path integration can reintroduce auto-build where root
+	// publication is guaranteed.
 	return r[:], false
 }
 
 // build_scan_plan resolves the WHERE clause once and computes skip-index
 // page bounds. A filter with nil root normalizes to nil (no filtering).
-@(private="file")
+// Package-visible (not file-private): the vector scan path in scan_vec.odin
+// shares plan construction so the two scans can never diverge.
+@(private)
 build_scan_plan :: proc(
 	tree: ^btree.Tree,
 	table: ^types.Table,
@@ -451,9 +477,8 @@ build_scan_plan :: proc(
 	ok = true
 	if _, has_f := plan.filter.?; !has_f { return plan, true }
 
-	plan.skip_conds = skip_chain_conditions(plan.filter.?.root)
 	if table.skip_root == 0 { return plan, true }
-	for rc in plan.skip_conds {
+	for rc in skip_chain_conditions(plan.filter.?.root) {
 		if rc.has_right_col || rc.has_in { continue }
 		if val, is_int := rc.rhs.(i64); is_int {
 			op, op_ok := skip_op_from_token(rc.operator)
@@ -473,37 +498,6 @@ build_scan_plan :: proc(
 		}
 	}
 	return plan, true
-}
-
-// maybe_build_skip_index auto-builds a skip index for the first qualifying
-// integer column when the table has none yet.
-@(private="file")
-maybe_build_skip_index :: proc(
-	plan: ^Scan_Plan,
-	tree: ^btree.Tree,
-	table: ^types.Table,
-	schema_tree: ^btree.Tree,
-) {
-	if _, has_f := plan.filter.?; !has_f { return }
-	if table.skip_root != 0 || schema_tree == nil { return }
-	for rc in plan.skip_conds {
-		if rc.has_right_col || rc.has_in { continue }
-		if _, is_int := rc.rhs.(i64); !is_int { continue }
-		if _, op_ok := skip_op_from_token(rc.operator); !op_ok { continue }
-
-		skip_idx, build_err := btree.build_skip_index(tree, rc.col_idx)
-		if build_err == .None {
-			new_schema_root, ok := schema.update_skip_root_cow(
-				schema_tree,
-				table.name,
-				skip_idx.root,
-			)
-			if ok {
-				schema_tree.root = new_schema_root
-			}
-		}
-		break // only build for the first qualifying column
-	}
 }
 
 // skip_chain_conditions collects the leaf conditions of a top-level AND chain.

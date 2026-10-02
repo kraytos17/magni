@@ -22,8 +22,6 @@ execute :: proc(
 	case parser.Create_Stmt:
 		ok, new_root, mutated = exec_create(schema_tree, s, stmt.sql)
 		schema_tree.root = new_root
-		// Immediate publish bumps the root and wipes staged overlays —
-		// re-apply them onto the fresh generation.
 		if ok && pending != nil { pending_reoverlay(schema_tree, pending, cache) }
 		return ok, new_root, mutated
 	case parser.Insert_Stmt:
@@ -59,8 +57,6 @@ execute :: proc(
 	case parser.Drop_Stmt:
 		ok, new_root, mutated = exec_drop(schema_tree, s)
 		schema_tree.root = new_root
-		// A dropped table must never be resurrected by the COMMIT flush;
-		// other staged tables re-overlay onto the fresh generation.
 		if ok && pending != nil {
 			pending_drop(pending, s.table_name)
 			pending_reoverlay(schema_tree, pending, cache)

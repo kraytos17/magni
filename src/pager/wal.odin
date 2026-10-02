@@ -134,6 +134,7 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	buf: [types.WAL_HEADER_SIZE]u8
 	header := (^WAL_Header)(raw_data(buf[:]))
 	copy(header.magic[:], types.WAL_MAGIC)
+
 	header.format_version = u32le(WAL_FORMAT_VERSION)
 	header.page_size = u32le(types.PAGE_SIZE)
 	header.salt1 = u32le(ws.salt1)
@@ -192,11 +193,6 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 
 wal_abort_txn :: proc(p: ^Pager) -> Evict_Report {
 	ws := &p.wal_state
-	// Drop aborted frames from the WAL file (same committed_upto rule as
-	// wal_recover/wal_checkpoint). Otherwise a later checkpoint copies them
-	// to main, resurrecting aborted content and regrowing files that
-	// rollback rewound. A commit marker appended afterwards must not
-	// legitimize them.
 	if ws.file != nil {
 		if file_size, serr := os.file_size(ws.file); serr == nil {
 			committed_upto := wal_scan_committed_upto(ws, file_size, false)

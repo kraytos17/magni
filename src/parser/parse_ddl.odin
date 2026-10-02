@@ -39,7 +39,7 @@ parse_create_table :: proc(
 			if !fk_ok { return nil, false }
 			append(&fks, fk)
 		} else {
-			col, col_ok := parse_column_def(p, allocator)
+			col, col_ok := parse_column_def(p, &fks, allocator)
 			if !col_ok { return nil, false }
 			append(&columns, col)
 		}
@@ -71,12 +71,14 @@ parse_foreign_key_clause :: proc(p: ^Parser, allocator := context.allocator) -> 
 }
 
 // parse_column_modifier parses one trailing column modifier (PRIMARY KEY,
-// NOT NULL, DEFAULT, CHECK) after the type. Returns handled=false when the
-// next token starts no modifier (caller breaks); ok=false on error.
+// NOT NULL, DEFAULT, CHECK, REFERENCES) after the type. Returns handled=false
+// when the next token starts no modifier (caller breaks); ok=false on error.
+// REFERENCES appends a table-level Foreign_Key for the column being defined.
 @(private="file")
 parse_column_modifier :: proc(
 	p: ^Parser,
 	col: ^types.Column,
+	fks: ^[dynamic]Foreign_Key,
 	allocator := context.allocator,
 ) -> (
 	handled: bool,
@@ -105,13 +107,46 @@ parse_column_modifier :: proc(
 
 		col.check_expr = expr
 		return true, true
+	} else if match(p, .REFERENCES) {
+		ref_table, rt_ok := parse_identifier(p, allocator)
+		if !rt_ok { return true, false }
+		if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") {
+			delete(ref_table, allocator)
+			return true, false
+		}
+
+		ref_col, rc_ok := parse_identifier(p, allocator)
+		if !rc_ok {
+			delete(ref_table, allocator)
+			return true, false
+		}
+		if !expect_match(p, .RPAREN, "Expected ) after referenced column") {
+			delete(ref_table, allocator)
+			delete(ref_col, allocator)
+			return true, false
+		}
+
+		append(
+			fks,
+			Foreign_Key {
+				col = strings.clone(col.name, allocator),
+				ref_table = ref_table,
+				ref_col = ref_col,
+			},
+		)
+		return true, true
 	}
 	return false, true
 }
 
 // parse_column_def parses one `name TYPE [modifiers]` column definition.
+// REFERENCES modifiers append to `fks` (table-level FK list).
 @(private)
-parse_column_def :: proc(p: ^Parser, allocator := context.allocator) -> (col: types.Column, ok: bool) {
+parse_column_def :: proc(
+	p: ^Parser,
+	fks: ^[dynamic]Foreign_Key,
+	allocator := context.allocator,
+) -> (col: types.Column, ok: bool) {
 	col.name = parse_identifier(p, allocator) or_return
 	type_token := peek(p)
 	#partial switch type_token.type {
@@ -129,7 +164,7 @@ parse_column_def :: proc(p: ^Parser, allocator := context.allocator) -> (col: ty
 	}
 
 	for {
-		handled, mok := parse_column_modifier(p, &col, allocator)
+		handled, mok := parse_column_modifier(p, &col, fks, allocator)
 		if !mok { return {}, false }
 		if !handled { break }
 	}

@@ -150,12 +150,9 @@ join_hash_probe :: proc(
 			}
 		}
 	}
-
 	for _, bucket in ht do delete(bucket)
-	delete(ht)
 
-	// Null-extend unmatched rows of either side; `outer.left/right` name the
-	// logical sides, so map the matched sets back accordingly.
+	delete(ht)
 	matched_left := matched_build if build_left else matched_probe
 	matched_right := matched_probe if build_left else matched_build
 	if outer.left {
@@ -201,6 +198,7 @@ resolve_from_source :: proc(
 	} else if vt, is_vt := stmt.from.(^parser.Select_Stmt); is_vt {
 		inner_rows, inner_cols := exec_subquery(t, vt^, cache)
 		if inner_rows == nil { return false }
+
 		ctx^ = Table_Context {
 			info = {virtual = Virtual_Table{columns = inner_cols, rows = inner_rows}},
 			range = {table_name = stmt.from_alias, start_col = 0, col_count = len(inner_cols)},
@@ -270,7 +268,6 @@ execute_single_join :: proc(
 	if vt, is_vt := jb.ctxs[info_idx].info.virtual.?; is_vt {
 		right_rows = vt.rows
 	} else {
-		// Materialize the right table once, then match against every left row
 		right_rows, _ = scan_table(
 			&jb.ctxs[info_idx].info.tree,
 			&jb.ctxs[info_idx].info.table,
@@ -383,7 +380,6 @@ nested_loop_join :: proc(
 	if on_cl, has := jc.on_clause.?; has {
 		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, nil, context.temp_allocator)
 		if _, ok := filter.?; !ok {
-			// Unresolvable ON: still emit null-extended rows for outer joins.
 			emit_unmatched_outer(is_left, is_right, rows, right_rows, left_col_count, right_col_count, new_rows)
 			return
 		}

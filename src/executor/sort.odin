@@ -13,18 +13,42 @@ row_fingerprint :: proc(values: []types.Value) -> u64 {
 	return hash_values(values)
 }
 
+// build_fp_index returns the sorted fingerprints of vals for binary-search
+// membership prefiltering (empty input yields an empty index = scan all).
+// Callers verify index hits exactly: fingerprints can collide.
+@(private)
+build_fp_index :: proc(vals: []types.Value, allocator := context.temp_allocator) -> []u64 {
+	if len(vals) == 0 { return nil }
+
+	fps := make([]u64, len(vals), allocator)
+	for v, i in vals { fps[i] = hash_value(v) }
+
+	slice.sort(fps)
+	return fps
+}
+
+// fp_index_hit binary-searches the sorted fingerprint index. An empty index
+// (e.g. hand-built nodes) hits everything, falling back to the linear scan.
+@(private)
+fp_index_hit :: proc(fps: []u64, fp: u64) -> bool {
+	if len(fps) == 0 { return true }
+
+	_, found := slice.binary_search(fps, fp)
+	return found
+}
+
 dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	if len(rows) <= 1 { return rows }
-	seen := make(map[u64][dynamic]int, len(rows), context.temp_allocator)
-	result := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
-	defer bucket_index_destroy(&seen)
 
+	seen := fp_buckets_make(len(rows), context.temp_allocator)
+	result := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
+	defer fp_buckets_destroy(&seen)
 	for r in rows {
 		fp := row_fingerprint(r.values)
 		is_dup := false
-		if bucket, ok := seen[fp]; ok {
-			for idx in bucket {
-				if values_equal(r.values, result[idx].values) {
+		if h, ok := fp_buckets_probe(&seen, fp); ok {
+			for n := h; n != -1; n = seen.next[n] {
+				if values_equal(r.values, result[seen.rows[n]].values) {
 					is_dup = true
 					break
 				}
@@ -32,7 +56,7 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 		}
 		if !is_dup {
 			append(&result, r)
-			bucket_add(&seen, fp, len(result) - 1)
+			fp_buckets_add(&seen, fp, len(result) - 1)
 		}
 	}
 	return result[:]
@@ -78,8 +102,10 @@ sort_rows :: proc(
 }
 
 // resolve_sort_indices maps each ORDER BY column to its absolute index in the
-// row. Logs and returns false on an unknown column.
-@(private="file")
+// row. Logs and returns false on an unknown column. Package-visible (not
+// file-private): the vector scan path needs sort keys for its needed-column
+// mask (sort runs on full rows before projection, so sort keys must decode).
+@(private)
 resolve_sort_indices :: proc(
 	order_clause: []parser.Order_By_Column,
 	resolver: Column_Resolver,

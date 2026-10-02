@@ -342,6 +342,122 @@ test_columnar_empty :: proc(t: T) {
 }
 
 @(test)
+test_deserialize_needed_all_parity :: proc(t: T) {
+	original_values := []types.Value {
+		types.value_int(0),
+		types.value_int(1),
+		types.value_int(-999999),
+		types.value_real(2.5),
+		types.value_text("Hello Needed"),
+		types.value_blob([]u8{0x01, 0x02, 0x03}),
+		types.value_null(),
+	}
+	buffer := make([]u8, 1024)
+	defer delete(buffer)
+
+	ci := cell.compute_info(7, original_values)
+	written, wok := cell.serialize(buffer, 7, original_values, ci)
+	testing.expect(t, wok, "serialize failed")
+
+	full, consumed_full, fok := cell.deserialize(buffer, 0)
+	testing.expect(t, fok, "baseline deserialize failed")
+	defer cell.destroy(&full)
+
+	needed := []bool{true, true, true, true, true, true, true}
+	out_vals := make([]types.Value, 7)
+	defer delete(out_vals)
+	rowid, consumed, ok := cell.deserialize_needed(buffer, 0, needed, out_vals)
+	testing.expect(t, ok, "deserialize_needed failed")
+	testing.expect_value(t, rowid, full.rowid)
+	testing.expect_value(t, consumed, consumed_full)
+	testing.expect_value(t, len(out_vals), len(full.values))
+	for i in 0 ..< len(full.values) {
+		testing.expect(
+			t,
+			types.value_compare(out_vals[i], full.values[i]),
+			"all-needed parity mismatch",
+		)
+	}
+	// Borrowed text/blob point into the source buffer (no clone).
+	if s, is_str := out_vals[4].(string); is_str {
+		testing.expect(t, raw_data(s) != nil, "borrowed string must be non-nil")
+	}
+}
+
+@(test)
+test_deserialize_needed_subset :: proc(t: T) {
+	original_values := []types.Value {
+		types.value_int(42),
+		types.value_text("SkipMe"),
+		types.value_real(1.5),
+		types.value_text("KeepMe"),
+	}
+	buffer := make([]u8, 1024)
+	defer delete(buffer)
+
+	ci := cell.compute_info(9, original_values)
+	written, wok := cell.serialize(buffer, 9, original_values, ci)
+	testing.expect(t, wok, "serialize failed")
+
+	needed := []bool{true, false, false, true}
+	out_vals := make([]types.Value, 4)
+	defer delete(out_vals)
+	rowid, consumed, ok := cell.deserialize_needed(buffer, 0, needed, out_vals)
+	testing.expect(t, ok, "subset decode failed")
+	testing.expect_value(t, rowid, 9)
+	testing.expect_value(t, consumed, written)
+	testing.expect_value(t, out_vals[0].(i64), 42)
+	testing.expect(t, types.is_null(out_vals[1]), "skipped col must be Null")
+	testing.expect(t, types.is_null(out_vals[2]), "skipped col must be Null")
+	testing.expect_value(t, out_vals[3].(string), "KeepMe")
+	// Borrow check: no clone happened, pointer inside buffer.
+	s := out_vals[3].(string)
+	is_inside :=
+		uintptr(raw_data(s)) >= uintptr(raw_data(buffer)) &&
+		uintptr(raw_data(s)) < uintptr(raw_data(buffer)) + uintptr(len(buffer))
+	testing.expect(t, is_inside, "subset text must borrow from source buffer")
+}
+
+@(test)
+test_deserialize_needed_none_and_malformed :: proc(t: T) {
+	original_values := []types.Value{types.value_int(5), types.value_text("x")}
+	buffer := make([]u8, 256)
+	defer delete(buffer)
+
+	ci := cell.compute_info(3, original_values)
+	written, wok := cell.serialize(buffer, 3, original_values, ci)
+	testing.expect(t, wok, "serialize failed")
+
+	// All-false: still consumes identical bytes, all Null.
+	needed := []bool{false, false}
+	out_vals := make([]types.Value, 2)
+	defer delete(out_vals)
+	rowid, consumed, ok := cell.deserialize_needed(buffer, 0, needed, out_vals)
+	testing.expect(t, ok, "all-skipped decode failed")
+	testing.expect_value(t, rowid, 3)
+	testing.expect_value(t, consumed, written)
+	testing.expect(t, types.is_null(out_vals[0]), "unwanted col must be Null")
+	testing.expect(t, types.is_null(out_vals[1]), "unwanted col must be Null")
+
+	// Undersized output buffer fails loudly.
+	small := make([]types.Value, 1)
+	defer delete(small)
+	_, _, ok2 := cell.deserialize_needed(buffer, 0, needed, small)
+	testing.expect(t, !ok2, "undersized out_values must fail")
+
+	// Truncated input fails like deserialize.
+	trunc := make([]u8, 2)
+	defer delete(trunc)
+	big_out := make([]types.Value, 2)
+	defer delete(big_out)
+	_, _, ok3 := cell.deserialize_needed(trunc, 0, needed, big_out)
+	testing.expect(t, !ok3, "truncated buffer must fail")
+
+	_, _, ok4 := cell.deserialize_needed(buffer, 999, needed, big_out)
+	testing.expect(t, !ok4, "OOB offset must fail")
+}
+
+@(test)
 test_columnar_text_blob_types :: proc(t: T) {
 	columns := []types.Column{{name = "t", type = .TEXT}, {name = "b", type = .BLOB}}
 	rowids := []types.Row_ID{1, 2}

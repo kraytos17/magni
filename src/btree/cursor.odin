@@ -13,24 +13,52 @@ Cursor_Stack_Item :: struct {
 }
 
 Cursor :: struct {
-	tree:              ^Tree,
-	path:              [MAX_TREE_DEPTH]Cursor_Stack_Item,
-	depth:             u8,
-	is_valid:          bool,
-	cached_page_id:    u32,
-	cached_page_data:  []u8,
+	tree:             ^Tree,
+	path:             [MAX_TREE_DEPTH]Cursor_Stack_Item,
+	depth:            u8,
+	is_valid:         bool,
+	cached_page_id:   u32,
+	cached_page_data: []u8,
 	cached_cell_count: u16,
-	cached_is_leaf:    bool,
-	col_num_cols:      u8, // >0 when on a columnar page; caches the column count
-	col_rowid:         u64, // accumulated rowid at the current cell_index on a columnar page
-	col_rowid_pos:     int, // byte position in the rowid region for the current row
-	// Incremental per-column decode state for columnar pages (mirrors the rowid
-	// cache so a sequential scan decodes in O(R·C) instead of O(R²·C)).
-	col_encodings: [types.MAX_COLS]u8,  // cell.ENCODING_RAW / cell.ENCODING_DELTA
-	col_offsets:   [types.MAX_COLS]u32, // byte offset of each column's data (relative to page data)
-	col_val_pos:   [types.MAX_COLS]int, // byte position after the current DELTA value
-	col_mins:      [types.MAX_COLS]i64, // per-column min (added to each delta to recover the value)
-	col_running:   [types.MAX_COLS]i64, // current value at cell_index (DELTA columns = min + delta)
+	cached_is_leaf:   bool,
+	// Incremental columnar decode state, nil unless positioned on a
+	// columnar page — row-major scans don't pay for it. Statement-scoped
+	// (temp arena); freed on page-leave/destroy, else reclaimed with it.
+	col: ^Columnar_Cursor_State,
+}
+
+// Columnar_Cursor_State caches the column count plus the incremental
+// per-column decode state for columnar pages (mirrors the rowid cache so a
+// sequential scan decodes in O(R·C) instead of O(R²·C)).
+Columnar_Cursor_State :: struct {
+	num_cols:  u8, // >0 when synced to a columnar page; caches the column count
+	rowid:     u64, // accumulated rowid at the current cell_index
+	rowid_pos: int, // byte position in the rowid region for the current row
+	encodings: [types.MAX_COLS]u8, // cell.ENCODING_RAW / cell.ENCODING_DELTA
+	offsets:   [types.MAX_COLS]u32, // byte offset of each column's data (relative to page data)
+	val_pos:   [types.MAX_COLS]int, // byte position after the current DELTA value
+	mins:      [types.MAX_COLS]i64, // per-column min (added to each delta to recover the value)
+	running:   [types.MAX_COLS]i64, // current value at cell_index (DELTA columns = min + delta)
+}
+
+// cursor_col_state returns the columnar decode state, allocating it on first
+// landing on a columnar page.
+@(private="file")
+cursor_col_state :: proc(c: ^Cursor) -> ^Columnar_Cursor_State {
+	if c.col == nil {
+		c.col = new(Columnar_Cursor_State, context.temp_allocator)
+	}
+	return c.col
+}
+
+// cursor_col_clear drops the columnar decode state when leaving a columnar
+// page (or destroying the cursor). Row-major pages never hold state.
+@(private="file")
+cursor_col_clear :: proc(c: ^Cursor) {
+	if c.col != nil {
+		free(c.col, context.temp_allocator)
+		c.col = nil
+	}
 }
 
 @(private="file")
@@ -65,6 +93,7 @@ cursor_destroy :: proc(c: ^Cursor) {
 	if c.cached_page_id != 0 {
 		pager.unpin_page(c.tree.pager, c.cached_page_id)
 	}
+	cursor_col_clear(c)
 }
 
 // Initialize a cursor for in-order traversal starting at the leftmost leaf.
@@ -130,9 +159,8 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 	c.cached_page_data = nil
 	c.cached_cell_count = 0
 	c.cached_is_leaf = false
-	c.col_num_cols = 0
-	c.col_rowid = 0
-	c.col_rowid_pos = 0
+	cursor_col_clear(c)
+
 	curr := c.tree.root
 	for {
 		if int(c.depth) >= MAX_TREE_DEPTH { return .Invalid_Page_Header }
@@ -192,8 +220,8 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 
 	c.cached_page_id = page_id
 	c.cached_page_data = page.data
-	c.col_num_cols = 0
-	c.col_rowid_pos = 0
+	cursor_col_clear(c)
+
 	n, n_err := node_from_bytes(page_id, page.data, get_layout(c.tree.pager.page_format_version))
 	if n_err != .None { return {}, n_err }
 
@@ -217,7 +245,7 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 			return .None
 		}
 
-		c.col_num_cols = 0
+		cursor_col_clear(c)
 		c.depth -= 1
 		if c.depth == 0 {
 			c.is_valid = false
@@ -232,18 +260,22 @@ cursor_advance :: proc(c: ^Cursor) -> Error {
 // by cell_index, so they carry no state.
 @(private="file")
 columnar_advance_state :: proc(c: ^Cursor) {
-	if c.col_num_cols == 0 || c.col_rowid_pos == 0 { return }
-	delta, n, ok := varint.decode(c.cached_page_data, c.col_rowid_pos)
+	if c.col == nil { return }
+
+	cs := c.col
+	if cs.num_cols == 0 || cs.rowid_pos == 0 { return }
+
+	delta, n, ok := varint.decode(c.cached_page_data, cs.rowid_pos)
 	if ok {
-		c.col_rowid += delta
-		c.col_rowid_pos += n
+		cs.rowid += delta
+		cs.rowid_pos += n
 	}
-	for col_i in 0 ..< int(c.col_num_cols) {
-		if c.col_encodings[col_i] == cell.ENCODING_DELTA {
-			d, dn, d_ok := varint.decode(c.cached_page_data, c.col_val_pos[col_i])
+	for col_i in 0 ..< int(cs.num_cols) {
+		if cs.encodings[col_i] == cell.ENCODING_DELTA {
+			d, dn, d_ok := varint.decode(c.cached_page_data, cs.val_pos[col_i])
 			if d_ok {
-				c.col_running[col_i] = c.col_mins[col_i] + i64(d)
-				c.col_val_pos[col_i] += dn
+				cs.running[col_i] = cs.mins[col_i] + i64(d)
+				cs.val_pos[col_i] += dn
 			}
 		}
 	}
@@ -283,6 +315,114 @@ descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
 
 	c.is_valid = false
 	return .None
+}
+
+// cursor_get_cell_needed decodes the cell at the current cursor position but
+// materializes only the columns flagged in `needed` (index = serial
+// position) into `out_values` (caller storage: stack or reused batch
+// buffer). Unneeded positions are set to Null. TEXT/BLOB for needed
+// columns are ALWAYS borrowed from the page: valid only while the cursor
+// stays on the page (single-page pin, slot-buffer reuse on eviction) —
+// clone survivors before advancing.
+//
+// Row-major pages decode via cell.deserialize_needed: zero allocations.
+// Columnar pages fall back to a full decode into the allocator with needed
+// slots cloned out of it (columnar values are int/real/Null in practice;
+// string/blob variants are cloned defensively). Fallback costs one temp
+// slice per row on columnar pages — same as cursor_get_cell today.
+cursor_get_cell_needed :: proc(
+	c: ^Cursor,
+	needed: []bool,
+	out_values: []types.Value,
+	allocator := context.allocator,
+) -> (
+	rowid: types.Row_ID,
+	err: Error,
+) {
+	if !c.is_valid || c.depth == 0 {
+		return 0, .Cell_Not_Found
+	}
+
+	item := c.path[c.depth - 1]
+	node, l_err := load_cached_page(c, item.page_id)
+	if l_err != .None {
+		return 0, l_err
+	}
+	if !is_leaf(node) {
+		return 0, .Invalid_Page_Header
+	}
+
+	if is_columnar(node.data, item.page_id) {
+		return cursor_get_cell_needed_columnar(c, node, item, needed, out_values, allocator)
+	}
+
+	stride := node.layout.stride
+	cell_count := get_cell_count(node.data, item.page_id)
+	if int(item.cell_index) >= cell_count {
+		return 0, .Cell_Not_Found
+	}
+
+	cell_ptr := get_cell_ptr(node.data, item.page_id, int(item.cell_index), stride)
+	rid, _, ok := cell.deserialize_needed(node.data, int(cell_ptr), needed, out_values)
+	if !ok {
+		return 0, .Cell_Deserialize_Failed
+	}
+	return rid, .None
+}
+
+// cursor_get_cell_needed_columnar serves cursor_get_cell_needed on columnar
+// pages: full decode into the allocator, needed slots cloned/copied out,
+// temp cell destroyed. Same file so the private columnar state is in reach.
+@(private="file")
+cursor_get_cell_needed_columnar :: proc(
+	c: ^Cursor,
+	node: Node,
+	item: Cursor_Stack_Item,
+	needed: []bool,
+	out_values: []types.Value,
+	allocator: mem.Allocator,
+) -> (
+	types.Row_ID,
+	Error,
+) {
+	actual_alloc := allocator
+	if actual_alloc.procedure == nil {
+		actual_alloc = context.allocator
+	}
+	tmp, t_err := read_columnar_cursor_cell(c, node, item, actual_alloc)
+	if t_err != .None {
+		return 0, t_err
+	}
+	defer cell.destroy(&tmp, actual_alloc)
+	if len(tmp.values) > len(out_values) {
+		return 0, .Cell_Deserialize_Failed
+	}
+	for v, i in tmp.values {
+		if i >= len(needed) || !needed[i] {
+			out_values[i] = types.value_null()
+			continue
+		}
+		#partial switch _ in v {
+		case string:
+			cloned, c_err := types.value_clone(v, actual_alloc)
+			if c_err != nil {
+				return 0, .Cell_Deserialize_Failed
+			}
+			out_values[i] = cloned
+		case []u8:
+			cloned, c_err := types.value_clone(v, actual_alloc)
+			if c_err != nil {
+				return 0, .Cell_Deserialize_Failed
+			}
+			out_values[i] = cloned
+		case:
+			out_values[i] = v
+		}
+	}
+	// Positions past the decoded width stay as the caller left them; the
+	// scan loop sizes `needed`/`out` to MAX_COLS so trailing slots are
+	// always overwritten per row by the caller-owned mask extension.
+	return tmp.rowid, .None
 }
 
 // Deserialize and return the cell at the current cursor position.
@@ -342,8 +482,9 @@ read_columnar_cursor_cell :: proc(
 	num_cols, found := detect_columnar_col_count(node.data, item.page_id)
 	if !found || int(item.cell_index) < 0 { return {}, .Cell_Not_Found }
 
-	c.col_num_cols = u8(num_cols)
-	if c.col_rowid_pos == 0 {
+	cs := cursor_col_state(c)
+	cs.num_cols = u8(num_cols)
+	if cs.rowid_pos == 0 {
 		if !columnar_sync_to_cell(c, node, item, num_cols) {
 			return {}, .Cell_Deserialize_Failed
 		}
@@ -352,7 +493,7 @@ read_columnar_cursor_cell :: proc(
 	values, v_ok := columnar_assemble_row(c, node, item, num_cols, allocator)
 	if !v_ok { return {}, .Cell_Deserialize_Failed }
 	return cell.Cell {
-			rowid     = types.Row_ID(c.col_rowid),
+			rowid     = types.Row_ID(cs.rowid),
 			values    = values,
 			owns_data = !c.tree.config.zero_copy,
 		},
@@ -363,22 +504,23 @@ read_columnar_cursor_cell :: proc(
 // at the cursor's current cell_index on first access to a columnar page.
 @(private="file")
 columnar_sync_to_cell :: proc(c: ^Cursor, node: Node, item: Cursor_Stack_Item, num_cols: int) -> bool {
+	cs := c.col
 	boff := get_page_header_offset(item.page_id)
-	c.col_rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
-	c.col_rowid = 0
+	cs.rowid_pos = boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
+	cs.rowid = 0
 	for _ in 0 ..= int(item.cell_index) {
-		delta, n, ok := varint.decode(node.data, c.col_rowid_pos)
+		delta, n, ok := varint.decode(node.data, cs.rowid_pos)
 		if !ok { break }
 
-		c.col_rowid += delta
-		c.col_rowid_pos += n
+		cs.rowid += delta
+		cs.rowid_pos += n
 	}
 	for col_i in 0 ..< num_cols {
 		h, h_ok := cell.read_col_header(node.data, col_i, boff)
 		if !h_ok { return false }
 
-		c.col_encodings[col_i] = h.encoding
-		c.col_offsets[col_i] = u32(boff + int(h.byte_offset))
+		cs.encodings[col_i] = h.encoding
+		cs.offsets[col_i] = u32(boff + int(h.byte_offset))
 		if h.encoding == cell.ENCODING_DELTA {
 			if !columnar_sync_delta_col(c, node, col_i, h, boff) { return false }
 		}
@@ -402,7 +544,8 @@ columnar_sync_delta_col :: proc(
 	if !ok1 { return false }
 
 	pos += n1
-	c.col_mins[col_i] = i64(min)
+	cs := c.col
+	cs.mins[col_i] = i64(min)
 	running := i64(min)
 	for _ in 0 ..= int(c.path[c.depth - 1].cell_index) {
 		d, n2, ok2 := varint.decode(node.data, pos)
@@ -412,8 +555,8 @@ columnar_sync_delta_col :: proc(
 		pos += n2
 	}
 
-	c.col_running[col_i] = running
-	c.col_val_pos[col_i] = pos
+	cs.running[col_i] = running
+	cs.val_pos[col_i] = pos
 	return true
 }
 
@@ -429,11 +572,12 @@ columnar_assemble_row :: proc(
 	allocator: mem.Allocator,
 ) -> ([]types.Value, bool) {
 	scratch: [dynamic; types.MAX_COLS]types.Value
+	cs := c.col
 	for col_i in 0 ..< num_cols {
-		if c.col_encodings[col_i] == cell.ENCODING_DELTA {
-			append(&scratch, types.value_int(c.col_running[col_i]))
+		if cs.encodings[col_i] == cell.ENCODING_DELTA {
+			append(&scratch, types.value_int(cs.running[col_i]))
 		} else {
-			pos := int(c.col_offsets[col_i]) + int(item.cell_index) * 8
+			pos := int(cs.offsets[col_i]) + int(item.cell_index) * 8
 			if pos + 8 <= len(node.data) {
 				if fv, fv_ok := endian.get_f64(node.data[pos:], .Big); fv_ok {
 					append(&scratch, types.value_real(fv))

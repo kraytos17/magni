@@ -1983,3 +1983,63 @@ test_exec_update_check_enforcement :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+test_collect_needed_cols_filter_only :: proc(t: ^testing.T) {
+	cond := executor.Resolved_Condition{col_idx = 2, operator = .EQUALS}
+	node := executor.Resolved_Node{kind = .COND, cond = cond}
+	needed := executor.collect_needed_cols(&node, nil, nil, 4)
+	testing.expect(t, len(needed) == 4, "mask length = total cols")
+	testing.expect(t, needed[2], "filter col marked")
+	testing.expect(t, !needed[0] && !needed[1] && !needed[3], "others clear")
+}
+
+@(test)
+test_collect_needed_cols_unions :: proc(t: ^testing.T) {
+	c0 := executor.Resolved_Node {
+		kind = .COND,
+		cond = executor.Resolved_Condition{col_idx = 0, operator = .EQUALS},
+	}
+	c1 := executor.Resolved_Node {
+		kind = .COND,
+		cond = executor.Resolved_Condition{
+			col_idx = 3,
+			operator = .GREATER_THAN,
+			has_right_col = true,
+			right_idx = 1,
+		},
+	}
+	kids := []^executor.Resolved_Node{&c0, &c1}
+	root := executor.Resolved_Node{kind = .AND, children = kids}
+	needed := executor.collect_needed_cols(&root, []int{3}, []int{0}, 4)
+	testing.expect(t, needed[0] && needed[1] && needed[3], "filter+proj+sort union")
+	testing.expect(t, !needed[2], "unreferenced clear")
+}
+
+@(test)
+test_collect_needed_cols_or_not_and_oob :: proc(t: ^testing.T) {
+	inner := executor.Resolved_Node {
+		kind = .COND,
+		cond = executor.Resolved_Condition{col_idx = 1, operator = .EQUALS},
+	}
+	or_node := executor.Resolved_Node{kind = .OR, children = []^executor.Resolved_Node{&inner}}
+	not_node := executor.Resolved_Node {
+		kind     = .NOT,
+		children = []^executor.Resolved_Node{&or_node},
+	}
+	// Out-of-range proj/sort indices and col_idx are ignored, never OOB.
+	bad := executor.Resolved_Node {
+		kind = .COND,
+		cond = executor.Resolved_Condition{col_idx = 99, operator = .EQUALS},
+	}
+	kids := []^executor.Resolved_Node{&not_node, &bad}
+	root := executor.Resolved_Node{kind = .AND, children = kids}
+	needed := executor.collect_needed_cols(&root, []int{99, -1}, []int{100}, 4)
+	testing.expect(t, needed[1], "nested OR/NOT col collected")
+	testing.expect(t, !needed[0] && !needed[2] && !needed[3], "nothing else marked")
+
+	empty := executor.collect_needed_cols(nil, nil, nil, 0)
+	testing.expect(t, empty == nil, "non-positive cols returns nil")
+	none := executor.collect_needed_cols(nil, nil, nil, 3)
+	testing.expect(t, len(none) == 3 && !none[0] && !none[1] && !none[2], "nil root marks nothing")
+}

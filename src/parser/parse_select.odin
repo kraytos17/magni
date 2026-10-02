@@ -46,13 +46,20 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 			free(subq, allocator); return {}
 		}
 
-		match(p, .AS)
-		al, al_ok := parse_identifier(p, allocator)
-		if !al_ok {
-			free(subq, allocator)
-			return {}
+		has_as := match(p, .AS)
+		// A subquery source may omit the alias. Without AS, only a plain
+		// identifier counts — a following keyword (WHERE, GROUP, ...) starts
+		// the next clause and must not be eaten as an alias. With AS, keep
+		// the historical permissive parse (keywords are valid aliases).
+		if has_as || is_alias(p) {
+			al, al_ok := parse_identifier(p, allocator)
+			if !al_ok {
+				free(subq, allocator)
+				return {}
+			}
+			return {source = subq, alias = al, success = true}
 		}
-		return {source = subq, alias = al, success = true}
+		return {source = subq, alias = "", success = true}
 	}
 
 	tbl, tbl_ok := parse_identifier(p, allocator)

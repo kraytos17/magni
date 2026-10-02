@@ -24,7 +24,7 @@ ROLES ?=
 .PHONY: all build release run rebuild clean clean-all
 .PHONY: test test-verbose test-single test-py test-cli test-cli-full smoke quick ci
 .PHONY: check vet vet-all
-.PHONY: perf bench
+.PHONY: perf bench census
 .PHONY: fuzz-build fuzz-test fuzz-exec-build fuzz-exec-test
 .PHONY: fuzz-corpus fuzz-exec-corpus fuzz-cov fuzz-run fuzz-campaign fuzz-status fuzz-stop
 .PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-one-exec fuzz-grammar-test
@@ -85,6 +85,9 @@ vet-all: ## vet via build+test (LLVM, strict-style, shadowing)
 
 perf: ## run timing baseline (release flags)
 	$(ODIN) run tests/perf $(COLLECTIONS) $(RELEASE_FLAGS)
+
+census: ## per-query allocation census: counts/bytes, heap vs temp (counts only, not timing)
+	$(ODIN) run tests/census $(COLLECTIONS) $(RELEASE_FLAGS)
 
 bench: perf ## alias for perf
 

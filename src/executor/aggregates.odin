@@ -9,7 +9,7 @@ import "src:types"
 
 @(private)
 find_existing_group :: proc(
-	group_map: map[u64][dynamic]int,
+	buckets: ^Fp_Buckets,
 	groups: []Group,
 	hash: u64,
 	row_entry: Row_Entry,
@@ -18,15 +18,16 @@ find_existing_group :: proc(
 	int,
 	bool,
 ) {
-	if bucket, ok := group_map[hash]; ok {
-		for gi in bucket {
-			if values_equal_by_indices(
-				row_entry.values,
-				groups[gi].key_values,
-				group_by_indices,
-			) {
-				return gi, true
-			}
+	h, ok := fp_buckets_probe(buckets, hash)
+	if !ok { return -1, false }
+	for n := h; n != -1; n = buckets.next[n] {
+		gi := buckets.rows[n]
+		if values_equal_by_indices(
+			row_entry.values,
+			groups[gi].key_values,
+			group_by_indices,
+		) {
+			return gi, true
 		}
 	}
 	return -1, false
@@ -68,8 +69,8 @@ build_groups :: proc(
 	}
 
 	groups = make([dynamic]Group, context.temp_allocator)
-	group_map := make(map[u64][dynamic]int, context.temp_allocator)
-	defer bucket_index_destroy(&group_map)
+	group_map := fp_buckets_make(0, context.temp_allocator)
+	defer fp_buckets_destroy(&group_map)
 	for row_entry, _ in rows {
 		if len(group_by_indices) == 0 {
 			if len(groups) == 0 {
@@ -79,7 +80,7 @@ build_groups :: proc(
 		} else {
 			hash := group_key_hash(row_entry.values, group_by_indices)
 			gi, exists := find_existing_group(
-				group_map,
+				&group_map,
 				groups[:],
 				hash,
 				row_entry,
@@ -95,7 +96,7 @@ build_groups :: proc(
 
 				new_grp_rows := make([dynamic]Row_Entry, context.temp_allocator)
 				append(&new_grp_rows, row_entry)
-				bucket_add(&group_map, hash, len(groups))
+				fp_buckets_add(&group_map, hash, len(groups))
 				append(&groups, Group{key_values = key_vals, rows = new_grp_rows})
 			}
 		}
@@ -223,8 +224,6 @@ project_group_row :: proc(
 			out[i] = key_values[cur.group]
 			cur.group += 1
 		} else {
-			// A bare column (e.g. SELECT name, COUNT(*)) occupies a column
-			// slot with no aggregate value — a clean error, not OOB.
 			if cur.agg < 0 || cur.agg >= len(agg_vals) {
 				return nil, mix_error(stmt.columns[i])
 			}

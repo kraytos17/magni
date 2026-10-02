@@ -137,6 +137,7 @@ column_table_index :: proc(
 	bool,
 ) {
 	if strings.contains(name, ".") { return -1, false }
+
 	matches := 0
 	found := -1
 	for tr, ti in table_ranges {
@@ -239,7 +240,7 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 		if n.cond.in_mem.kind == .Subquery {
 			delete(n.cond.in_mem.values, allocator)
 		}
-		delete(n.cond.in_mem.set)
+		delete(n.cond.in_mem.fps, allocator)
 	case .AND, .OR, .NOT:
 		for child in n.children { free_resolved_node(child, allocator) }
 		delete(n.children, allocator)
@@ -267,7 +268,6 @@ resolve_condition :: proc(
 		right_idx     = 0,
 		in_subquery   = nil,
 	}
-
 	if rhs_str, is_col := cond.rhs.(string); is_col {
 		right_idx, rc_found := resolve(resolver, rhs_str)
 		if !rc_found { return {}, false }
@@ -281,10 +281,7 @@ resolve_condition :: proc(
 	if cond.in_values != nil {
 		rc.in_mem.kind = .Values
 		rc.in_mem.values = cond.in_values
-		rc.in_mem.set = make(map[u64]bool, len(cond.in_values), allocator)
-		for v in cond.in_values {
-			rc.in_mem.set[hash_value(v)] = true
-		}
+		rc.in_mem.fps = build_fp_index(cond.in_values, allocator)
 	}
 	if cond.in_subquery != nil {
 		rc.in_subquery = cond.in_subquery
@@ -342,13 +339,9 @@ evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Va
 membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: types.Value) -> bool {
 	#partial switch rc.in_mem.kind {
 	case .Values:
-		// Prefilter on the fingerprint set; verify hits exactly. A nil set
-		// (hand-built node) falls back to the linear scan.
-		scan := true
-		if rc.in_mem.set != nil {
-			_, scan = rc.in_mem.set[hash_value(v)]
-		}
-		if scan {
+		// Prefilter on the sorted fingerprint index; verify hits exactly.
+		// An empty index (hand-built node) falls back to the linear scan.
+		if fp_index_hit(rc.in_mem.fps, hash_value(v)) {
 			for c in rc.in_mem.values {
 				if !types.is_null(v) && compare_values(v, c) == 0 { return true }
 			}
@@ -374,7 +367,6 @@ evaluate_resolved_condition :: proc(ctx: Where_Eval_Ctx, rc: Resolved_Condition,
 	left_val := row[rc.col_idx]
 	cond_result: bool
 	if rc.operator == .IS {
-		// SQL null test: = NULL never matches; IS NULL checks nullness.
 		cond_result = types.is_null(left_val)
 	} else if rc.has_right_col {
 		cond_result = compare_condition(left_val, rc.operator, row[rc.right_idx])
@@ -435,7 +427,6 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 
 @(private="file")
 like_match :: proc(pattern: string, text: string) -> bool {
-	// Fast path: pattern ending with %, no underscore = plain prefix match
 	if len(pattern) > 1 && pattern[len(pattern) - 1] == '%' {
 		if strings.index_byte(pattern[:len(pattern) - 1], '_') < 0 {
 			prefix := pattern[:len(pattern) - 1]

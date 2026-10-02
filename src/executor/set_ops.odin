@@ -55,42 +55,41 @@ union_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 		append(a, ..out)
 	}
 
-	index := make(map[u64][dynamic]int, len(a^) + len(b), context.temp_allocator)
-	defer bucket_index_destroy(&index)
+	index := fp_buckets_make(len(a^) + len(b), context.temp_allocator)
+	defer fp_buckets_destroy(&index)
 	for i in 0 ..< len(a^) {
-		bucket_add(&index, row_fingerprint(a^[i].values), i)
+		fp_buckets_add(&index, row_fingerprint(a^[i].values), i)
 	}
 	for r in b {
 		fp := row_fingerprint(r.values)
 		is_dup := false
-		if bucket, has := index[fp]; has {
-			// All bucket indices address a^ (original + newly appended rows).
-			for bi in bucket {
-				if values_equal(r.values, a^[bi].values) { is_dup = true; break }
+		if h, has := fp_buckets_probe(&index, fp); has {
+			for n := h; n != -1; n = index.next[n] {
+				if values_equal(r.values, a^[index.rows[n]].values) { is_dup = true; break }
 			}
 		}
 		if is_dup { continue }
 
 		append(a, r)
-		bucket_add(&index, fp, len(a^) - 1)
+		fp_buckets_add(&index, fp, len(a^) - 1)
 	}
 }
 
 // intersect keeps rows present in both a and b, deduplicated. Builds a
 // fingerprint index of b once, then probes it per row of a.
 intersect :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
-	index := make(map[u64][dynamic]int, len(b), context.temp_allocator)
-	defer bucket_index_destroy(&index)
+	index := fp_buckets_make(len(b), context.temp_allocator)
+	defer fp_buckets_destroy(&index)
 	for i in 0 ..< len(b) {
-		bucket_add(&index, row_fingerprint(b[i].values), i)
+		fp_buckets_add(&index, row_fingerprint(b[i].values), i)
 	}
 
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
 		fp := row_fingerprint(ra.values)
-		if bucket, has := index[fp]; has {
-			for bi in bucket {
-				if values_equal(ra.values, b[bi].values) {
+		if h, has := fp_buckets_probe(&index, fp); has {
+			for n := h; n != -1; n = index.next[n] {
+				if values_equal(ra.values, b[index.rows[n]].values) {
 					append(&out, ra)
 					break
 				}
@@ -106,19 +105,20 @@ intersect :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 // caps on hash collision.
 @(private="file")
 intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
-	seen_b := make(map[u64][dynamic]int, len(b), context.temp_allocator)
-	defer bucket_index_destroy(&seen_b)
+	seen_b := fp_buckets_make(len(b), context.temp_allocator)
+	defer fp_buckets_destroy(&seen_b)
 	for i in 0 ..< len(b) {
-		bucket_add(&seen_b, row_fingerprint(b[i].values), i)
+		fp_buckets_add(&seen_b, row_fingerprint(b[i].values), i)
 	}
 
 	consumed := make([]bool, len(b), context.temp_allocator)
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
 		fp := row_fingerprint(ra.values)
-		bucket, has := seen_b[fp]
+		h, has := fp_buckets_probe(&seen_b, fp)
 		if !has { continue }
-		for bi in bucket {
+		for n := h; n != -1; n = seen_b.next[n] {
+			bi := seen_b.rows[n]
 			if consumed[bi] { continue }
 			if values_equal(ra.values, b[bi].values) {
 				consumed[bi] = true
@@ -133,19 +133,19 @@ intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 // except keeps rows in a not present in b, deduplicated. O(n+m): builds a
 // fingerprint index of b once, then probes it per row of a.
 except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
-	index := make(map[u64][dynamic]int, len(b), context.temp_allocator)
-	defer bucket_index_destroy(&index)
+	index := fp_buckets_make(len(b), context.temp_allocator)
+	defer fp_buckets_destroy(&index)
 	for i in 0 ..< len(b) {
-		bucket_add(&index, row_fingerprint(b[i].values), i)
+		fp_buckets_add(&index, row_fingerprint(b[i].values), i)
 	}
 
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
 		fp := row_fingerprint(ra.values)
 		found := false
-		if bucket, has := index[fp]; has {
-			for bi in bucket {
-				if values_equal(ra.values, b[bi].values) { found = true; break }
+		if h, has := fp_buckets_probe(&index, fp); has {
+			for n := h; n != -1; n = index.next[n] {
+				if values_equal(ra.values, b[index.rows[n]].values) { found = true; break }
 			}
 		}
 		if !found { append(&out, ra) }
@@ -158,10 +158,10 @@ except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 // fingerprint-only comparison would wrongly drop distinct rows on collision.
 @(private="file")
 except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
-	seen_b := make(map[u64][dynamic]int, len(b), context.temp_allocator)
-	defer bucket_index_destroy(&seen_b)
+	seen_b := fp_buckets_make(len(b), context.temp_allocator)
+	defer fp_buckets_destroy(&seen_b)
 	for i in 0 ..< len(b) {
-		bucket_add(&seen_b, row_fingerprint(b[i].values), i)
+		fp_buckets_add(&seen_b, row_fingerprint(b[i].values), i)
 	}
 
 	consumed := make([]bool, len(b), context.temp_allocator)
@@ -169,8 +169,9 @@ except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	for ra in a {
 		fp := row_fingerprint(ra.values)
 		skipped := false
-		if bucket, has := seen_b[fp]; has {
-			for bi in bucket {
+		if h, has := fp_buckets_probe(&seen_b, fp); has {
+			for n := h; n != -1; n = seen_b.next[n] {
+				bi := seen_b.rows[n]
 				if consumed[bi] { continue }
 				if values_equal(ra.values, b[bi].values) {
 					consumed[bi] = true

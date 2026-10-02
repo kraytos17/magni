@@ -165,15 +165,14 @@ try_parse_between :: proc(
 		(peek0.type != .NOT && peek1_type == .NOT && peek2_type == .BETWEEN)
 	if !is_between && !is_not_between { return nil, .Not_Between }
 
-	// Detect negation: consume leading NOT(s) and optional NOT before BETWEEN
 	negated := false
 	for peek(p).type == .NOT { match(p, .NOT); negated = !negated }
 
 	col_name, col_ok := parse_qualified_identifier(p, allocator)
 	if !col_ok { return nil, .Error }
 	if peek(p).type == .NOT { match(p, .NOT); negated = !negated }
-	advance(p) // consume BETWEEN
 
+	advance(p)
 	lower_val, lower_ok := parse_value(p, allocator)
 	if !lower_ok { delete(col_name, allocator); return nil, .Error }
 	if !expect_match(p, .AND, "Expected AND in BETWEEN expression") {
