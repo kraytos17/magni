@@ -73,9 +73,14 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 	return t
 }
 
-@(private)
+// is_leaf is public: the leaf/interior question is asked by every page
+// reader (and pinned by tests for each new page type).
 is_leaf :: #force_inline proc "contextless" (n: Node) -> bool {
-	return n.header.page_type == .LEAF_TABLE || n.header.page_type == .LEAF_TABLE_COLUMNAR
+	return(
+		n.header.page_type == .LEAF_TABLE ||
+		n.header.page_type == .LEAF_TABLE_COLUMNAR ||
+		n.header.page_type == .LEAF_SLOTDIR \
+	)
 }
 
 @(private)

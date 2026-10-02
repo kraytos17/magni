@@ -6,10 +6,6 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
-// Phase A2 additive coverage: the new interfaces agree with the legacy
-// free functions, reject garbage loudly, and both codecs round-trip with
-// order-preserving encodings. No existing behavior is touched.
-
 @(test)
 test_iface_compat_parity :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
@@ -82,12 +78,13 @@ test_iface_compat_parity :: proc(t: ^testing.T) {
 
 @(test)
 test_iface_stubs_fail_closed :: proc(t: ^testing.T) {
-	// V3 tables exist as constructors but every op is loud until its phase.
 	dense := btree.dense_u64_interior_layout()
 	_, k_err := dense.vtable.key_at(nil, btree.Page_Id(2), 0)
-	testing.expect(t, k_err == .Unsupported_Format, "dense interior stub key_at")
+
+	testing.expect(t, k_err == .Invalid_Page_Header, "dense key_at on nil data fails")
 	_, lb_err := dense.vtable.lower_bound_rowid(nil, btree.Page_Id(2), 1)
-	testing.expect(t, lb_err == .Unsupported_Format, "dense interior stub lower_bound")
+
+	testing.expect(t, lb_err == .Invalid_Page_Header, "dense search on nil data fails")
 	testing.expect(
 		t,
 		dense.vtable.slot_insert(nil, btree.Page_Id(2), 0, 1, btree.Cell_Off(0)) ==

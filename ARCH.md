@@ -583,18 +583,49 @@ execute(db, sql):
   unlock(mu)
 ```
 
-#### 3f. Page Format Versioning — `btree/format.odin`
+#### 3f. Page Format Versioning — `btree/layout.odin`, `btree/layout_iface.odin`
 
 Cell layout is v2-only: 10-byte `Cell_Entry` values with an embedded 8-byte key,
 read directly with no body decode. The legacy v1 layout (2-byte `Cell_Pointer`
-offsets, keys decoded from the cell body) was removed; the layout registry
-retains its shape for a future v3.
+offsets, keys decoded from the cell body) was removed. The old `Cell_Layout`
+vtable + format registry were removed in turn: page mechanics now go through
+the `Page_Layout` interface (`layout_iface.odin`), with the V2 behavior in
+the `compat` table and key semantics in the statically-dispatched `Key_Kind`
+(`.Rowid` / `.Text`).
 
 `page_format_version` is a **database-wide** value stored in the database header
 (`PAGE_FORMAT_VERSION :: 2`). New databases are created with v2; the pager
 defaults to v2. Files stamped with any other version are rejected at open with
 `DB_Error.Unsupported_Format` (clean error, never a crash) — export with
 `.dump` under an older binary and reimport to migrate.
+
+#### 3f-ii. V3 Dense Page Vocabulary — `btree/layout_v3.odin` (defined, not written)
+
+Two new discriminants exist: `INTERIOR_DENSE` (6) and
+`LEAF_SLOTDIR` (15). The dispatcher resolves both (dense interiors to a
+real table since B2 — search/read/validate/child/insert wired in
+`layout_iface.odin`; slot leaves still stubbed, every op
+`Unsupported_Format`), but no production path creates them
+(`V3_FORMAT_VERSION :: 3` is reserved; the flip ticket owns the bump) — so a
+V3 page can be recognized but never silently misread. Layout, in brief:
+
+- Dense interiors: 24-byte header (shared 8-byte `Page_Header` prefix, then
+  `rightmost u32le`, `flags u16le`, `base u64le`, `reserved u16le`), then
+  dense sorted keys (`u64le`, or `u32le` deltas from `base` when
+  `DENSE_FLAG_FOR` and `max−min ≤ max(u32)`), then `count+1` `u32le`
+  children. Fanout ≈340 full / ≈510 FOR. All arrays little-endian;
+  RowIDs sign-biased so unsigned order == numeric order.
+- Slotdir leaves: stock 8-byte `Leaf_Header` + freeblock semantics, with
+  10-byte `Slot{rowid u64le, off u16le}` entries (same size as `Cell_Entry`,
+  so capacity math is unchanged).
+- Headers, pure accessors, validators, builders, and init procs are
+  unit-tested in `tests/btree_v3_test.odin` (header layout, roundtrips vs
+  independent endian writes, search-vs-oracle, FOR boundary, corruption
+  loudness, table behavior through the dispatcher). A standalone search
+  microbench lives in `tests/perf_dense/` (manual release run, not part of
+  `make perf`): dense search costs ~20–30ns on full pages vs ~800ns per
+  point-lookup level — SIMD probing was dropped on that evidence (saves
+  ~20ns of 800ns even at 4×; see B2 notes).
 
 #### 3g. Columnar Page Format — `cell/columnar.odin`
 

@@ -11,6 +11,8 @@ Page_Type :: enum u8 {
 	INTERIOR_TABLE      = 5, // Internal node: pointers to pages
 	LEAF_TABLE          = 13, // Leaf node: pointers to data (row-major)
 	LEAF_TABLE_COLUMNAR = 14, // Leaf node: columnar-encoded data
+	INTERIOR_DENSE      = 6, // V3: dense u64/FOR keys + u32le childrens
+	LEAF_SLOTDIR        = 15, // V3: sorted (rowid, offset) slotss
 }
 
 Cell_Pointer :: distinct u16le
@@ -48,9 +50,18 @@ get_page_header_offset :: #force_inline proc "contextless" (page_num: u32) -> in
 	return int(page_num == 1 ? types.DATABASE_HEADER_SIZE : 0)
 }
 
-@(private)
 page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> int {
-	return int(page_type == .INTERIOR_TABLE ? size_of(Interior_Header) : size_of(Leaf_Header))
+	// Assigned, not returned, per arm: adding a Page_Type is a compile
+	// error here, forcing a conscious size decision
+	sz := size_of(Leaf_Header)
+	switch page_type {
+	case .INTERIOR_TABLE:
+		sz = size_of(Interior_Header)
+	case .INTERIOR_DENSE:
+		sz = size_of(Dense_Interior_Header)
+	case .LEAF_TABLE, .LEAF_TABLE_COLUMNAR, .LEAF_SLOTDIR:
+	}
+	return sz
 }
 
 get_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Page_Header {

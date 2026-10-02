@@ -79,6 +79,16 @@ Page_Layout_VTable :: struct {
 		rowid: types.Row_ID,
 		off: Cell_Off,
 	) -> Error,
+	// child_at returns child page i, range 0..=count (index count is the
+	// rightmost child). Leaf tables fail closed (no children exist).
+	child_at         : proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u32, Error),
+	separator_insert : proc "contextless" (
+		data: []u8,
+		id: Page_Id,
+		idx: int,
+		key: types.Row_ID,
+		child: u32,
+	) -> Error,
 	validate         : proc "contextless" (data: []u8, id: Page_Id) -> Error,
 }
 
@@ -172,7 +182,7 @@ key_encoded_len :: #force_inline proc "contextless" (kind: Key_Kind, val: types.
 // unsigned byte order == signed numeric order (negatives sort first).
 @(private = "file")
 rowid_encode_u64 :: #force_inline proc "contextless" (v: types.Row_ID) -> u64 {
-	return u64(i64(v) ~ min(i64))
+	return rowid_bias_encode(v)
 }
 
 @(private = "file")
@@ -251,6 +261,13 @@ compat_key_at :: #force_inline proc "contextless" (
 
 	hdr_sz := page_header_size(hdr.page_type)
 	start := off + hdr_sz
+	// Span check (not just i < count): count comes from on-disk bytes, so
+	// a corrupt count must fail here — under -no-bounds-check the slice
+	// below would otherwise read out of bounds instead of trapping.
+	if intrinsics.unlikely(start + (i + 1) * CELL_ENTRY_STRIDE > len(data)) {
+		return 0, .Cell_Deserialize_Failed
+	}
+
 	entry := (^Cell_Entry)(raw_data(data[start + i * CELL_ENTRY_STRIDE:]))
 	return entry.key, .None
 }
@@ -293,6 +310,9 @@ compat_slot_insert :: proc "contextless" (
 	hdr_sz := page_header_size(hdr.page_type)
 	start := off0 + hdr_sz
 	cell_count := int(hdr.cell_count)
+	if intrinsics.unlikely(start + (cell_count + 1) * CELL_ENTRY_STRIDE > len(data)) {
+		return .Invalid_Bounds
+	}
 	if idx < cell_count {
 		src := data[start + idx * CELL_ENTRY_STRIDE:start + cell_count * CELL_ENTRY_STRIDE]
 		dst := data[start + (idx + 1) * CELL_ENTRY_STRIDE:]
@@ -317,8 +337,12 @@ compat_slot_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> 
 	hdr_sz := page_header_size(hdr.page_type)
 	start := off0 + hdr_sz
 	cell_count := int(hdr.cell_count)
+	if intrinsics.unlikely(start + cell_count * CELL_ENTRY_STRIDE > len(data)) {
+		return .Invalid_Bounds
+	}
 	if idx < cell_count - 1 {
 		src := data[start + (idx + 1) * CELL_ENTRY_STRIDE:start + cell_count * CELL_ENTRY_STRIDE]
+
 		dst := data[start + idx * CELL_ENTRY_STRIDE:]
 		copy(dst, src)
 	}
@@ -341,6 +365,9 @@ compat_cell_ptr_at :: #force_inline proc "contextless" (
 
 	hdr_sz := page_header_size(hdr.page_type)
 	start := off + hdr_sz
+	if intrinsics.unlikely(start + (i + 1) * CELL_ENTRY_STRIDE > len(data)) {
+		return 0, .Cell_Deserialize_Failed
+	}
 	return u16((^u16le)(raw_data(data[start + i * CELL_ENTRY_STRIDE:]))^), .None
 }
 
@@ -359,6 +386,10 @@ compat_slot_repoint :: proc "contextless" (
 	off0 := get_page_header_offset(u32(id))
 	hdr_sz := page_header_size(hdr.page_type)
 	start := off0 + hdr_sz
+	if intrinsics.unlikely(start + (idx + 1) * CELL_ENTRY_STRIDE > len(data)) {
+		return .Invalid_Bounds
+	}
+
 	entry := (^Cell_Entry)(raw_data(data[start + idx * CELL_ENTRY_STRIDE:]))
 	entry^ = Cell_Entry {
 		ptr = Cell_Pointer(u16(off)),
@@ -394,12 +425,98 @@ compat_page_table := Page_Layout_VTable {
 	slot_delete       = compat_slot_delete,
 	cell_ptr_at       = compat_cell_ptr_at,
 	slot_repoint      = compat_slot_repoint,
+	child_at          = v3_stub_child,
+	separator_insert  = v3_stub_separator,
 	validate          = compat_validate,
 }
 
 @(private)
 compat_page_layout :: proc() -> Page_Layout {
 	return Page_Layout{vtable = &compat_page_table}
+}
+
+// dense_separator_insert inserts (key, child) at idx on a dense interior
+// page and OWNS the cell_count bump (Option A: mirrors insert_interior_cell
+// legacy; asymmetric with slot_insert by lineage, each family consistent).
+// FOR pages reject keys outside the page's [base, base+max(u32)] with
+// .Page_Full (no silent re-encoding; the caller splits and the halves
+// re-derive their encodings). Full pages fail only on capacity.
+@(private = "file", require_results)
+dense_separator_insert :: proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	idx: int,
+	key: types.Row_ID,
+	child: u32,
+) -> Error {
+	keys_off, children_off, count, use_for, base, g_err := dense_geometry(data, id)
+	if g_err != .None { return g_err }
+	if intrinsics.unlikely(idx < 0 || idx > count) { return .Invalid_Bounds }
+
+	bk := rowid_bias_encode(key)
+	if use_for && intrinsics.unlikely(bk < base || bk - base > u64(max(u32))) {
+		return .Page_Full
+	}
+
+	kwidth := DENSE_DELTA_WIDTH if use_for else DENSE_FULL_KEY_WIDTH
+	off := get_page_header_offset(u32(id))
+	if off +
+		   size_of(Dense_Interior_Header) +
+		   (count + 1) * kwidth +
+		   (count + 2) * DENSE_CHILD_WIDTH >
+	   len(data) {
+		return .Page_Full
+	}
+
+	// Relocation order matters: the children block's START depends on the
+	// key count, so it moves first (whole block right by one key width),
+	// then the keys tail shifts inside the fixed keys region, then the new
+	// key+child land in the new geometry. All moves are rightward memmoves
+	// into prechecked free space. (Shifting children in the OLD geometry
+	// and bumping after — the naive order — strands them under the new
+	// offset and returns stale children.)
+	new_children_off := keys_off + (count + 1) * kwidth
+	copy(
+		data[new_children_off:],
+		data[children_off:children_off + (count + 1) * DENSE_CHILD_WIDTH],
+	)
+	copy(
+		data[keys_off + (idx + 1) * kwidth:],
+		data[keys_off + idx * kwidth:keys_off + count * kwidth],
+	)
+	if use_for {
+		if !endian.put_u32(data[keys_off + idx * kwidth:], .Little, u32(bk - base)) {
+			return .Serialization_Failed
+		}
+	} else {
+		if !endian.put_u64(data[keys_off + idx * kwidth:], .Little, bk) {
+			return .Serialization_Failed
+		}
+	}
+	if !endian.put_u32(data[new_children_off + idx * DENSE_CHILD_WIDTH:], .Little, child) {
+		return .Serialization_Failed
+	}
+
+	h := get_dense_interior_header(data, u32(id))
+	if h == nil { return .Invalid_Page_Header }
+
+	h.cell_count += 1
+	return .None
+}
+
+@(private = "file")
+dense_interior_table := Page_Layout_VTable {
+	header_size       = compat_header_size,
+	cell_count        = compat_cell_count,
+	key_at            = dense_key_at,
+	lower_bound_rowid = dense_page_lower_bound,
+	slot_insert       = v3_stub_insert,
+	slot_delete       = v3_stub_delete,
+	cell_ptr_at       = v3_stub_cell_ptr_at,
+	slot_repoint      = v3_stub_repoint,
+	child_at          = dense_child_at,
+	separator_insert  = dense_separator_insert,
+	validate          = validate_dense_interior,
 }
 
 @(private = "file", cold)
@@ -493,6 +610,30 @@ v3_stub_repoint :: proc "contextless" (
 	return .Unsupported_Format
 }
 
+@(private = "file", cold, require_results)
+v3_stub_child :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u32, Error) {
+	_ = data
+	_ = id
+	_ = i
+	return 0, .Unsupported_Format
+}
+
+@(private = "file", cold, require_results)
+v3_stub_separator :: proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	idx: int,
+	key: types.Row_ID,
+	child: u32,
+) -> Error {
+	_ = data
+	_ = id
+	_ = idx
+	_ = key
+	_ = child
+	return .Unsupported_Format
+}
+
 @(private = "file")
 v3_stub_table := Page_Layout_VTable {
 	header_size       = v3_stub_int,
@@ -503,11 +644,13 @@ v3_stub_table := Page_Layout_VTable {
 	slot_delete       = v3_stub_delete,
 	cell_ptr_at       = v3_stub_cell_ptr_at,
 	slot_repoint      = v3_stub_repoint,
+	child_at          = v3_stub_child,
+	separator_insert  = v3_stub_separator,
 	validate          = v3_stub_validate,
 }
 
 dense_u64_interior_layout :: proc() -> Page_Layout {
-	return Page_Layout{vtable = &v3_stub_table}
+	return Page_Layout{vtable = &dense_interior_table}
 }
 
 slot_dir_leaf_layout :: proc() -> Page_Layout {
@@ -537,6 +680,8 @@ columnar_readonly_table := Page_Layout_VTable {
 	slot_delete       = v3_stub_delete,
 	cell_ptr_at       = v3_stub_cell_ptr_at,
 	slot_repoint      = v3_stub_repoint,
+	child_at          = v3_stub_child,
+	separator_insert  = v3_stub_separator,
 	validate          = compat_validate,
 }
 
@@ -563,6 +708,10 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 		return compat_page_layout(), .Rowid, .None
 	case .LEAF_TABLE_COLUMNAR:
 		return columnar_readonly_layout(), .Rowid, .None
+	case .INTERIOR_DENSE:
+		return dense_u64_interior_layout(), .Rowid, .None
+	case .LEAF_SLOTDIR:
+		return slot_dir_leaf_layout(), .Rowid, .None
 	case:
 		return {}, {}, .Invalid_Page_Header
 	}
