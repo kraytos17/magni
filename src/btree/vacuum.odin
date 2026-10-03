@@ -10,13 +10,9 @@ import "src:types"
 // next garbage-collection pass. It is an O(n) maintenance operation intended
 // for an explicit VACUUM, not for hot-path use.
 tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
-	layout, l_err := layout_for_version(t.pager.page_format_version)
-	if l_err != .None { return 0, l_err }
-
 	handles := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
 	vc := vacuum_ctx {
 		t          = t,
-		layout     = layout,
 		leaf_empty = true,
 		handles    = &handles,
 	}
@@ -35,8 +31,11 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 	if len(handles) == 0 {
 		page, a_err := pager.allocate_page(t.pager)
 		if a_err != .None { return 0, .Page_Full }
+		if !init_slot_leaf_page(page.data, page.page_num) {
+			pager.unpin_page(t.pager, page.page_num)
+			return 0, .Invalid_Page_Header
+		}
 
-		init_leaf_page(page.data, page.page_num)
 		root := page.page_num
 		pager.unpin_page(t.pager, root)
 		return root, .None
@@ -49,30 +48,48 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 		next := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
 		i := 0
 		for i < len(level) {
-			page, a_err := pager.allocate_page(t.pager)
-			if a_err != .None { return 0, .Page_Full }
-
-			init_interior_page(page.data, page.page_num)
-			j := i
-			for j < len(level) - 1 {
-				if !insert_interior_cell(
-					page.data,
-					page.page_num,
-					level[j].id,
-					level[j].max_key,
-					layout,
-				) {
+			// Greedy chunk: children [i..e] with separators max_keys[i..e)
+			// (the last child becomes the rightmost). Capacity from the
+			// chunk range via the FOR rule — arithmetic only, no trial
+			// builds. Single-child chunks always fit (~40 bytes).
+			e := i
+			for e + 1 < len(level) {
+				first := level[i].max_key
+				last := level[e].max_key
+				use_for, _ := dense_choose_encoding(first, last)
+				kw := DENSE_DELTA_WIDTH if use_for else DENSE_FULL_KEY_WIDTH
+				m_new := e + 2 - i
+				if size_of(Dense_Interior_Header) + (m_new - 1) * kw + m_new * DENSE_CHILD_WIDTH > PAGE_SIZE {
 					break
 				}
-				j += 1
+				e += 1
 			}
 
-			set_right_ptr(page.data, page.page_num, level[j].id)
-			max_key := level[j].max_key
+			ckeys := make([dynamic]types.Row_ID, 0, e - i + 1, context.temp_allocator)
+			cchildren := make([dynamic]u32, 0, e - i + 2, context.temp_allocator)
+			for k in i ..< e {
+				append(&ckeys, level[k].max_key)
+				append(&cchildren, level[k].id)
+			}
+			append(&cchildren, level[e].id)
+
+			page, a_err := pager.allocate_page(t.pager)
+			if a_err != .None { return 0, .Page_Full }
+			if b_err := dense_build_from_sorted(
+				page.data,
+				Page_Id(page.page_num),
+				ckeys[:],
+				cchildren[:],
+			); b_err != .None {
+				pager.unpin_page(t.pager, page.page_num)
+				return 0, b_err
+			}
+
+			max_key := level[e].max_key
 			page_id := page.page_num
 			pager.unpin_page(t.pager, page_id)
 			append(&next, Node_Handle{id = page_id, max_key = max_key})
-			i = j + 1
+			i = e + 1
 		}
 		level = next
 	}
@@ -91,7 +108,6 @@ Node_Handle :: struct {
 @(private)
 vacuum_ctx :: struct {
 	t         : ^Tree,
-	layout    : Page_Layout,
 	leaf      : Node,
 	leaf_empty: bool,
 	handles   : ^[dynamic]Node_Handle,
@@ -137,9 +153,18 @@ vacuum_collect_cb :: proc(c: ^cell.Cell, ud: rawptr) -> bool {
 vacuum_start_leaf :: proc(vc: ^vacuum_ctx) -> Error {
 	page, a_err := pager.allocate_page(vc.t.pager)
 	if a_err != .None { return .Page_Full }
+	if !init_slot_leaf_page(page.data, page.page_num) {
+		pager.unpin_page(vc.t.pager, page.page_num)
+		return .Invalid_Page_Header
+	}
 
-	init_leaf_page(page.data, page.page_num)
-	n, n_err := node_from_bytes(page.page_num, page.data, vc.layout)
+	leaf_layout, _, l_err := layout_for_page(page.data, Page_Id(page.page_num))
+	if l_err != .None {
+		pager.unpin_page(vc.t.pager, page.page_num)
+		return l_err
+	}
+
+	n, n_err := node_from_bytes(page.page_num, page.data, leaf_layout)
 	if n_err != .None {
 		pager.unpin_page(vc.t.pager, page.page_num)
 		return n_err

@@ -235,209 +235,10 @@ rowid_encoded_len :: #force_inline proc "contextless" (val: types.Value) -> int 
 	return ROWID_INDEX_ENCODED_LEN if ok else 0
 }
 
-@(private = "file")
-compat_header_size :: #force_inline proc "contextless" (pt: Page_Type) -> int {
-	return page_header_size(pt)
-}
-
-@(private = "file")
-compat_cell_count :: #force_inline proc "contextless" (data: []u8, id: Page_Id) -> int {
-	return get_cell_count(data, u32(id))
-}
-
-@(private = "file", require_results)
-compat_key_at :: #force_inline proc "contextless" (
-	data: []u8,
-	id: Page_Id,
-	i: int,
-) -> (
-	types.Row_ID,
-	Error,
-) {
-	off := get_page_header_offset(u32(id))
-	hdr := get_header(data, u32(id))
-	if intrinsics.unlikely(hdr == nil) { return 0, .Invalid_Page_Header }
-	if intrinsics.unlikely(i < 0 || i >= int(hdr.cell_count)) { return 0, .Cell_Not_Found }
-
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off + hdr_sz
-	// Span check (not just i < count): count comes from on-disk bytes, so
-	// a corrupt count must fail here — under -no-bounds-check the slice
-	// below would otherwise read out of bounds instead of trapping.
-	if intrinsics.unlikely(start + (i + 1) * CELL_ENTRY_STRIDE > len(data)) {
-		return 0, .Cell_Deserialize_Failed
-	}
-
-	entry := (^Cell_Entry)(raw_data(data[start + i * CELL_ENTRY_STRIDE:]))
-	return entry.key, .None
-}
-
-@(private = "file", require_results)
-compat_lower_bound_rowid :: proc "contextless" (
-	data: []u8,
-	id: Page_Id,
-	key: types.Row_ID,
-) -> (
-	int,
-	Error,
-) {
-	count := get_cell_count(data, u32(id))
-	left, right := 0, count
-	for left < right {
-		mid := left + (right - left) / 2
-		k, k_err := compat_key_at(data, id, mid)
-		if k_err != .None { return 0, k_err }
-		if k < key { left = mid + 1 } else { right = mid }
-	}
-	return left, .None
-}
-
-@(private = "file", require_results)
-compat_slot_insert :: proc "contextless" (
-	data: []u8,
-	id: Page_Id,
-	idx: int,
-	rowid: types.Row_ID,
-	off: Cell_Off,
-) -> Error {
-	hdr := get_header(data, u32(id))
-	if intrinsics.unlikely(hdr == nil) { return .Invalid_Page_Header }
-	if intrinsics.unlikely(idx < 0 || idx > int(hdr.cell_count)) { return .Invalid_Bounds }
-
-	// Former insert_cell_at body, inlined so the free function can die:
-	// shift entries [idx..count) right by one, then write the new entry.
-	off0 := get_page_header_offset(u32(id))
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off0 + hdr_sz
-	cell_count := int(hdr.cell_count)
-	if intrinsics.unlikely(start + (cell_count + 1) * CELL_ENTRY_STRIDE > len(data)) {
-		return .Invalid_Bounds
-	}
-	if idx < cell_count {
-		src := data[start + idx * CELL_ENTRY_STRIDE:start + cell_count * CELL_ENTRY_STRIDE]
-		dst := data[start + (idx + 1) * CELL_ENTRY_STRIDE:]
-		copy(dst, src)
-	}
-
-	entry := (^Cell_Entry)(raw_data(data[start + idx * CELL_ENTRY_STRIDE:]))
-	entry^ = Cell_Entry {
-		ptr = Cell_Pointer(u16(off)),
-		key = rowid,
-	}
-	return .None
-}
-
-@(private = "file", require_results)
-compat_slot_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Error {
-	hdr := get_header(data, u32(id))
-	if intrinsics.unlikely(hdr == nil) { return .Invalid_Page_Header }
-	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
-
-	off0 := get_page_header_offset(u32(id))
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off0 + hdr_sz
-	cell_count := int(hdr.cell_count)
-	if intrinsics.unlikely(start + cell_count * CELL_ENTRY_STRIDE > len(data)) {
-		return .Invalid_Bounds
-	}
-	if idx < cell_count - 1 {
-		src := data[start + (idx + 1) * CELL_ENTRY_STRIDE:start + cell_count * CELL_ENTRY_STRIDE]
-
-		dst := data[start + idx * CELL_ENTRY_STRIDE:]
-		copy(dst, src)
-	}
-	return .None
-}
-
-@(private = "file", require_results)
-compat_cell_ptr_at :: #force_inline proc "contextless" (
-	data: []u8,
-	id: Page_Id,
-	i: int,
-) -> (
-	u16,
-	Error,
-) {
-	off := get_page_header_offset(u32(id))
-	hdr := get_header(data, u32(id))
-	if intrinsics.unlikely(hdr == nil) { return 0, .Invalid_Page_Header }
-	if intrinsics.unlikely(i < 0 || i >= int(hdr.cell_count)) { return 0, .Cell_Not_Found }
-
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off + hdr_sz
-	if intrinsics.unlikely(start + (i + 1) * CELL_ENTRY_STRIDE > len(data)) {
-		return 0, .Cell_Deserialize_Failed
-	}
-	return u16((^u16le)(raw_data(data[start + i * CELL_ENTRY_STRIDE:]))^), .None
-}
-
-@(private = "file", require_results)
-compat_slot_repoint :: proc "contextless" (
-	data: []u8,
-	id: Page_Id,
-	idx: int,
-	rowid: types.Row_ID,
-	off: Cell_Off,
-) -> Error {
-	hdr := get_header(data, u32(id))
-	if intrinsics.unlikely(hdr == nil) { return .Invalid_Page_Header }
-	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
-
-	off0 := get_page_header_offset(u32(id))
-	hdr_sz := page_header_size(hdr.page_type)
-	start := off0 + hdr_sz
-	if intrinsics.unlikely(start + (idx + 1) * CELL_ENTRY_STRIDE > len(data)) {
-		return .Invalid_Bounds
-	}
-
-	entry := (^Cell_Entry)(raw_data(data[start + idx * CELL_ENTRY_STRIDE:]))
-	entry^ = Cell_Entry {
-		ptr = Cell_Pointer(u16(off)),
-		key = rowid,
-	}
-	return .None
-}
-
-@(private = "file", require_results)
-compat_validate :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
-	hdr := get_header(data, u32(id))
-	if intrinsics.unlikely(hdr == nil) { return .Invalid_Page_Header }
-	if hdr.page_type == .LEAF_TABLE_COLUMNAR { return .None }
-
-	count := int(hdr.cell_count)
-	prev: types.Row_ID = min(types.Row_ID)
-	for i in 0 ..< count {
-		k, k_err := compat_key_at(data, id, i)
-		if k_err != .None { return k_err }
-		if i > 0 && k < prev { return .Cell_Deserialize_Failed }
-		prev = k
-	}
-	return .None
-}
-
-@(private = "file")
-compat_page_table := Page_Layout_VTable {
-	header_size       = compat_header_size,
-	cell_count        = compat_cell_count,
-	key_at            = compat_key_at,
-	lower_bound_rowid = compat_lower_bound_rowid,
-	slot_insert       = compat_slot_insert,
-	slot_delete       = compat_slot_delete,
-	cell_ptr_at       = compat_cell_ptr_at,
-	slot_repoint      = compat_slot_repoint,
-	child_at          = v3_stub_child,
-	separator_insert  = v3_stub_separator,
-	validate          = compat_validate,
-}
-
-@(private)
-compat_page_layout :: proc() -> Page_Layout {
-	return Page_Layout{vtable = &compat_page_table}
-}
 
 // dense_separator_insert inserts (key, child) at idx on a dense interior
-// page and OWNS the cell_count bump (Option A: mirrors insert_interior_cell
-// legacy; asymmetric with slot_insert by lineage, each family consistent).
+// page and OWNS the cell_count bump (Option A: mirrors the deleted V2
+// builder; asymmetric with slot_insert by lineage, each family consistent).
 // FOR pages reject keys outside the page's [base, base+max(u32)] with
 // .Page_Full (no silent re-encoding; the caller splits and the halves
 // re-derive their encodings). Full pages fail only on capacity.
@@ -504,10 +305,26 @@ dense_separator_insert :: proc "contextless" (
 	return .None
 }
 
+// shared_cell_count adapts the header reader to the vtable slot type.
+@(private = "file")
+shared_cell_count :: #force_inline proc "contextless" (data: []u8, id: Page_Id) -> int {
+	return get_cell_count(data, u32(id))
+}
+
+// columnar_validate preserves the old compat contract for columnar pages
+// (validate is a no-op there; anything else is invalid input).
+@(private = "file", require_results)
+columnar_validate :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
+	hdr := get_header(data, u32(id))
+	if hdr == nil { return .Invalid_Page_Header }
+	if hdr.page_type != .LEAF_TABLE_COLUMNAR { return .Invalid_Page_Header }
+	return .None
+}
+
 @(private = "file")
 dense_interior_table := Page_Layout_VTable {
-	header_size       = compat_header_size,
-	cell_count        = compat_cell_count,
+	header_size       = page_header_size,
+	cell_count        = shared_cell_count,
 	key_at            = dense_key_at,
 	lower_bound_rowid = dense_page_lower_bound,
 	slot_insert       = v3_stub_insert,
@@ -517,6 +334,137 @@ dense_interior_table := Page_Layout_VTable {
 	child_at          = dense_child_at,
 	separator_insert  = dense_separator_insert,
 	validate          = validate_dense_interior,
+}
+
+// slot_leaf_* are the LEAF_SLOTDIR mechanics: same shift/write shapes as
+// the slot ops, Slot-typed. They check the page type:
+// the tables route by discriminant, but a direct call on V2 bytes must fail
+// never reinterpret a Cell_Entry as a Slot.
+@(private = "file", require_results)
+slot_leaf_key_at :: #force_inline proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	i: int,
+) -> (
+	types.Row_ID,
+	Error,
+) {
+	k, _, k_err := slot_at(data, id, i)
+	if k_err != .None { return 0, k_err }
+	return k, .None
+}
+
+@(private = "file", require_results)
+slot_leaf_cell_ptr_at :: #force_inline proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	i: int,
+) -> (
+	u16,
+	Error,
+) {
+	_, off, o_err := slot_at(data, id, i)
+	if o_err != .None { return 0, o_err }
+	return off, .None
+}
+
+@(private = "file", require_results)
+slot_leaf_insert :: proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	idx: int,
+	rowid: types.Row_ID,
+	off: Cell_Off,
+) -> Error {
+	hdr := get_header(data, u32(id))
+	if hdr == nil { return .Invalid_Page_Header }
+	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) { return .Invalid_Page_Header }
+	if intrinsics.unlikely(idx < 0 || idx > int(hdr.cell_count)) { return .Invalid_Bounds }
+
+	off0 := get_page_header_offset(u32(id))
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off0 + hdr_sz
+	cell_count := int(hdr.cell_count)
+	if intrinsics.unlikely(start + (cell_count + 1) * size_of(Slot) > len(data)) {
+		return .Invalid_Bounds
+	}
+	if idx < cell_count {
+		src := data[start + idx * size_of(Slot):start + cell_count * size_of(Slot)]
+		dst := data[start + (idx + 1) * size_of(Slot):]
+		copy(dst, src)
+	}
+
+	entry := (^Slot)(raw_data(data[start + idx * size_of(Slot):]))
+	entry^ = Slot {
+		rowid = u64le(rowid_bias_encode(rowid)),
+		off   = u16le(u16(off)),
+	}
+	return .None
+}
+
+@(private = "file", require_results)
+slot_leaf_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Error {
+	hdr := get_header(data, u32(id))
+	if hdr == nil { return .Invalid_Page_Header }
+	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) { return .Invalid_Page_Header }
+	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
+
+	off0 := get_page_header_offset(u32(id))
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off0 + hdr_sz
+	cell_count := int(hdr.cell_count)
+	if intrinsics.unlikely(start + cell_count * size_of(Slot) > len(data)) {
+		return .Invalid_Bounds
+	}
+	if idx < cell_count - 1 {
+		src := data[start + (idx + 1) * size_of(Slot):start + cell_count * size_of(Slot)]
+		dst := data[start + idx * size_of(Slot):]
+		copy(dst, src)
+	}
+	return .None
+}
+
+@(private = "file", require_results)
+slot_leaf_repoint :: proc "contextless" (
+	data: []u8,
+	id: Page_Id,
+	idx: int,
+	rowid: types.Row_ID,
+	off: Cell_Off,
+) -> Error {
+	hdr := get_header(data, u32(id))
+	if hdr == nil { return .Invalid_Page_Header }
+	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) { return .Invalid_Page_Header }
+	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
+
+	off0 := get_page_header_offset(u32(id))
+	hdr_sz := page_header_size(hdr.page_type)
+	start := off0 + hdr_sz
+	if intrinsics.unlikely(start + (idx + 1) * size_of(Slot) > len(data)) {
+		return .Invalid_Bounds
+	}
+
+	entry := (^Slot)(raw_data(data[start + idx * size_of(Slot):]))
+	entry^ = Slot {
+		rowid = u64le(rowid_bias_encode(rowid)),
+		off   = u16le(u16(off)),
+	}
+	return .None
+}
+
+@(private = "file")
+slot_leaf_table := Page_Layout_VTable {
+	header_size       = page_header_size,
+	cell_count        = shared_cell_count,
+	key_at            = slot_leaf_key_at,
+	lower_bound_rowid = slot_lower_bound,
+	slot_insert       = slot_leaf_insert,
+	slot_delete       = slot_leaf_delete,
+	cell_ptr_at       = slot_leaf_cell_ptr_at,
+	slot_repoint      = slot_leaf_repoint,
+	child_at          = v3_stub_child,
+	separator_insert  = v3_stub_separator,
+	validate          = validate_slot_leaf,
 }
 
 @(private = "file", cold)
@@ -654,7 +602,7 @@ dense_u64_interior_layout :: proc() -> Page_Layout {
 }
 
 slot_dir_leaf_layout :: proc() -> Page_Layout {
-	return Page_Layout{vtable = &v3_stub_table}
+	return Page_Layout{vtable = &slot_leaf_table}
 }
 
 prefix_leaf_layout :: proc() -> Page_Layout {
@@ -672,7 +620,7 @@ columnar_readonly_count :: proc "contextless" (data: []u8, id: Page_Id) -> int {
 
 @(private = "file")
 columnar_readonly_table := Page_Layout_VTable {
-	header_size       = compat_header_size,
+	header_size       = page_header_size,
 	cell_count        = columnar_readonly_count,
 	key_at            = v3_stub_key_at,
 	lower_bound_rowid = v3_stub_lower_bound,
@@ -682,7 +630,7 @@ columnar_readonly_table := Page_Layout_VTable {
 	slot_repoint      = v3_stub_repoint,
 	child_at          = v3_stub_child,
 	separator_insert  = v3_stub_separator,
-	validate          = compat_validate,
+	validate          = columnar_validate,
 }
 
 // columnar_readonly_layout serves test-only columnar pages: reads resolve,
@@ -701,11 +649,9 @@ columnar_readonly_layout :: proc() -> Page_Layout {
 layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Error) {
 	hdr := get_header(data, u32(id))
 	if intrinsics.unlikely(hdr == nil) { return {}, {}, .Invalid_Page_Header }
+	// No V2 arms exist (variants deleted): unknown bytes land in `case:`
+	// below. Never re-add a V2 route without a migration story.
 	switch hdr.page_type {
-	case .INTERIOR_TABLE:
-		return compat_page_layout(), .Rowid, .None
-	case .LEAF_TABLE:
-		return compat_page_layout(), .Rowid, .None
 	case .LEAF_TABLE_COLUMNAR:
 		return columnar_readonly_layout(), .Rowid, .None
 	case .INTERIOR_DENSE:
@@ -715,14 +661,4 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 	case:
 		return {}, {}, .Invalid_Page_Header
 	}
-}
-
-// layout_for_version resolves the compat layout for a pager format version.
-// V3 page kinds dispatch per-page via layout_for_page once their phases
-// land; this stays the version-level entry until then.
-// require_results: same nil-vtable hazard as layout_for_page.
-@(require_results)
-layout_for_version :: proc(version: u32) -> (Page_Layout, Error) {
-	if version == 2 { return compat_page_layout(), .None }
-	return {}, .Unsupported_Format
 }

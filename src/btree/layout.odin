@@ -1,27 +1,21 @@
 package btree
 
-import "core:mem"
 import "src:cell"
 import "src:types"
 import "src:util/varint"
 
 PAGE_SIZE :: types.PAGE_SIZE
 
+// Page types are exactly the live encodings. V2 row-major variants were
+// removed in the full V3 migration: nothing writes them, and
+// layout_for_page rejects their bytes loudly, so keeping the discriminants
+// would only invite dead routes.
 Page_Type :: enum u8 {
-	INTERIOR_TABLE      = 5, // Internal node: pointers to pages
-	LEAF_TABLE          = 13, // Leaf node: pointers to data (row-major)
-	LEAF_TABLE_COLUMNAR = 14, // Leaf node: columnar-encoded data
-	INTERIOR_DENSE      = 6, // V3: dense u64/FOR keys + u32le childrens
-	LEAF_SLOTDIR        = 15, // V3: sorted (rowid, offset) slotss
+	LEAF_TABLE_COLUMNAR = 14, // Leaf node: columnar-encoded data (test-only)
+	INTERIOR_DENSE      = 6, // Interior node: dense u64/FOR keys + u32le children
+	LEAF_SLOTDIR        = 15, // Leaf node: sorted (rowid, offset) slots
 }
 
-Cell_Pointer :: distinct u16le
-
-Cell_Entry :: struct #packed {
-	ptr: Cell_Pointer,
-	key: types.Row_ID,
-}
-#assert(size_of(Cell_Entry) == 10)
 
 Page_Header :: struct #packed #simple {
 	page_type          : Page_Type, // Byte 0
@@ -32,11 +26,6 @@ Page_Header :: struct #packed #simple {
 }
 #assert(size_of(Page_Header) == 8)
 
-Interior_Header :: struct #packed #simple {
-	using common : Page_Header,
-	rightmost_ptr: u32be,
-}
-#assert(size_of(Interior_Header) == 12)
 
 Leaf_Header :: struct #packed #simple {
 	using common: Page_Header,
@@ -55,11 +44,9 @@ page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> i
 	// error here, forcing a conscious size decision
 	sz := size_of(Leaf_Header)
 	switch page_type {
-	case .INTERIOR_TABLE:
-		sz = size_of(Interior_Header)
 	case .INTERIOR_DENSE:
 		sz = size_of(Dense_Interior_Header)
-	case .LEAF_TABLE, .LEAF_TABLE_COLUMNAR, .LEAF_SLOTDIR:
+	case .LEAF_TABLE_COLUMNAR, .LEAF_SLOTDIR:
 	}
 	return sz
 }
@@ -68,16 +55,6 @@ get_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Pa
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Page_Header) { return nil }
 	return (^Page_Header)(raw_data(data[off:]))
-}
-
-@(private)
-get_interior_header :: #force_inline proc "contextless" (
-	data: []u8,
-	page_id: u32,
-) -> ^Interior_Header {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Interior_Header) { return nil }
-	return (^Interior_Header)(raw_data(data[off:]))
 }
 
 get_leaf_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Leaf_Header {
@@ -90,32 +67,6 @@ get_leaf_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -
 is_columnar :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> bool {
 	h := get_header(data, page_id)
 	return h != nil && h.page_type == .LEAF_TABLE_COLUMNAR
-}
-
-@(private)
-init_interior_page :: proc(data: []u8, page_id: u32) {
-	off := get_page_header_offset(page_id)
-	mem.zero_slice(data[off:])
-
-	header := (^Interior_Header)(raw_data(data[off:]))
-	header.page_type = .INTERIOR_TABLE
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	header.rightmost_ptr = 0
-}
-
-init_leaf_page :: proc(data: []u8, page_id: u32) {
-	off := get_page_header_offset(page_id)
-	mem.zero_slice(data[off:])
-
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .LEAF_TABLE
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
 }
 
 // Columnar_Decode is a columnar page fully decoded into row-major rows,
@@ -170,15 +121,17 @@ decode_columnar_page :: proc(
 	return Columnar_Decode{rowids = rowids, values = values}, true
 }
 
-// reinsert_row_major reinitializes the page as row-major LEAF_TABLE and
-// serializes every decoded row with canonical V2 Cell_Entry{ptr, key}
-// pointers — the u16-only pointer array must never be written again.
+// reinsert_row_major reinitializes the page as a slotdir leaf
+// (LEAF_SLOTDIR) and serializes every decoded row with Slot{rowid, off}
+// entries — row-major cells plus a slot directory. (Post-flip there are no
+// Cell_Entry leaves; the slot size equals the old stride, so the capacity
+// math is unchanged.)
 // Atomic: the expansion is measured first and .Page_Full returns with the
 // page untouched when it cannot fit (a half-converted page would silently
 // drop the tail rows, so callers must fail the op instead).
 @(private, cold)
 reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -> Error {
-	total := size_of(Leaf_Header) + len(decoded.rowids) * CELL_ENTRY_STRIDE
+	total := size_of(Leaf_Header) + len(decoded.rowids) * size_of(Slot)
 	for ri in 0 ..< len(decoded.rowids) {
 		if decoded.values[ri] == nil { continue }
 		total += cell.compute_info(decoded.rowids[ri], decoded.values[ri]).total_size
@@ -186,7 +139,8 @@ reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -
 	if total > PAGE_SIZE { return .Page_Full }
 
 	off := get_page_header_offset(page_id)
-	init_leaf_page(data, page_id)
+	if !init_slot_leaf_page(data, page_id) { return .Invalid_Page_Header }
+
 	header := (^Leaf_Header)(raw_data(data[off:]))
 	for ri in 0 ..< len(decoded.rowids) {
 		if decoded.values[ri] == nil { continue }
@@ -194,12 +148,10 @@ reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -
 		info := cell.compute_info(decoded.rowids[ri], decoded.values[ri])
 		dest_off := int(header.cell_content_offset) - info.total_size
 		if dest_off <
-		   off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * CELL_ENTRY_STRIDE {
+		   off + int(size_of(Leaf_Header)) + (int(header.cell_count) + 1) * size_of(Slot) {
 			return .Page_Full
 		}
 
-		// Loud on short write: the space was measured above, so failure
-		// here is a bug that would otherwise leave a half-written cell.
 		bytes_written, ser_ok := cell.serialize(
 			data[dest_off:dest_off + info.total_size],
 			decoded.rowids[ri],
@@ -209,16 +161,14 @@ reinsert_row_major :: proc(data: []u8, page_id: u32, decoded: Columnar_Decode) -
 		if !ser_ok || bytes_written != info.total_size { return .Serialization_Failed }
 
 		header.cell_content_offset = u16le(dest_off)
-		entry := (^Cell_Entry)(
+		entry := (^Slot)(
 			raw_data(
-				data[off +
-				int(size_of(Leaf_Header)) +
-				int(header.cell_count) * CELL_ENTRY_STRIDE:],
+				data[off + int(size_of(Leaf_Header)) + int(header.cell_count) * size_of(Slot):],
 			),
 		)
-		entry^ = Cell_Entry {
-			ptr = Cell_Pointer(u16(dest_off)),
-			key = decoded.rowids[ri],
+		entry^ = Slot {
+			rowid = u64le(rowid_bias_encode(decoded.rowids[ri])),
+			off   = u16le(u16(dest_off)),
 		}
 		header.cell_count = u16le(int(header.cell_count) + 1)
 	}
@@ -265,7 +215,6 @@ detect_columnar_col_count :: proc(data: []u8, page_id: u32) -> (int, bool) {
 	return n, true
 }
 
-CELL_ENTRY_STRIDE :: size_of(Cell_Entry) // 10
 
 get_cell_count :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> int {
 	hdr := get_header(data, page_id)
@@ -307,19 +256,4 @@ move_cells_to :: proc(
 		dst[dst_start_off:dst_start_off + byte_count],
 		src[src_start_off:src_start_off + byte_count],
 	)
-}
-
-@(private)
-get_right_ptr :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> u32 {
-	h := get_interior_header(data, page_id)
-	if h == nil { return 0 }
-	return u32(h.rightmost_ptr)
-}
-
-@(private)
-set_right_ptr :: #force_inline proc "contextless" (data: []u8, page_id: u32, ptr: u32) {
-	h := get_interior_header(data, page_id)
-	if h != nil {
-		h.rightmost_ptr = u32be(ptr)
-	}
 }

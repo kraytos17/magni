@@ -80,16 +80,10 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 		defer pager.unpin_page(c.tree.pager, node.id)
 
 		if is_leaf(node) { break }
-		if node.header.cell_count > 0 {
-			ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, Page_Id(curr), 0)
-			if p_err != .None { return .Invalid_Cell_Pointer }
 
-			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
-			if !ok { return .Invalid_Cell_Pointer }
-			curr = child
-		} else {
-			curr = get_right_ptr(node.data, curr)
-		}
+		child, c_err := node.layout.vtable.child_at(node.data, Page_Id(curr), 0)
+		if c_err != .None { return .Invalid_Cell_Pointer }
+		curr = child
 	}
 	return .None
 }
@@ -190,6 +184,7 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 		}
 
 		cell_count := get_cell_count(node.data, curr)
+		nid := Page_Id(curr)
 		idx := find_interior_cell_for_child(node.data, curr, page_id, node.layout)
 		if idx >= 0 {
 			c.path[c.depth] = Cursor_Stack_Item {
@@ -198,13 +193,14 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 			}
 
 			c.depth += 1
-			ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, Page_Id(curr), idx)
-			if p_err != .None { return .Invalid_Cell_Pointer }
-
-			child, ok := endian.get_u32(node.data[int(ptr):], .Big)
-			if !ok { return .Invalid_Cell_Pointer }
+			child, c_err := node.layout.vtable.child_at(node.data, nid, idx)
+			if c_err != .None { return .Invalid_Cell_Pointer }
 			curr = child
-		} else if get_right_ptr(node.data, curr) == page_id {
+		} else {
+			right, r_err := node.layout.vtable.child_at(node.data, nid, cell_count)
+			if r_err != .None { return .Invalid_Cell_Pointer }
+			if right != page_id { return .Cell_Not_Found }
+
 			c.path[c.depth] = Cursor_Stack_Item {
 				page_id    = curr,
 				cell_index = u16(cell_count),
@@ -212,8 +208,6 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 
 			c.depth += 1
 			curr = page_id
-		} else {
-			return .Cell_Not_Found
 		}
 	}
 }
@@ -323,20 +317,13 @@ descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
 			c.depth -= 1
 		} else {
 			if int(item.cell_index) <= limit {
-				child_page: u32
-				if int(item.cell_index) == limit {
-					child_page = get_right_ptr(node.data, item.page_id)
-				} else {
-					nid := Page_Id(item.page_id)
-					ptr, p_err := node.layout.vtable.cell_ptr_at(
-						node.data,
-						nid,
-						int(item.cell_index),
-					)
-					if p_err != .None { return .Invalid_Cell_Pointer }
-					child_page, _ = endian.get_u32(node.data[int(ptr):], .Big)
-				}
-				return drill_down_leftmost(c, child_page)
+				child, c_err := node.layout.vtable.child_at(
+					node.data,
+					Page_Id(item.page_id),
+					int(item.cell_index),
+				)
+				if c_err != .None { return .Invalid_Cell_Pointer }
+				return drill_down_leftmost(c, child)
 			}
 			c.depth -= 1
 		}
@@ -415,9 +402,7 @@ cursor_get_cell_needed_columnar :: proc(
 	Error,
 ) {
 	num_cols, found := detect_columnar_col_count(node.data, item.page_id)
-	if !found || int(item.cell_index) < 0 { return 0, .Cell_Not_Found }
-	// The fixed decode-state arrays are MAX_COLS wide; a wider page is
-	// corrupt — fail loudly instead of indexing past them.
+	if !found || int(item.cell_index) < 0 { return 0, .Cell_Not_Found }\
 	if num_cols > types.MAX_COLS || num_cols > len(out_values) {
 		return 0, .Cell_Deserialize_Failed
 	}

@@ -74,8 +74,7 @@ text_index_encode :: proc "contextless" (
 
 // text_index_decode parses key bytes back into (text borrow, rowid).
 // The text slice borrows src — valid while the page is pinned only.
-// Exact-length match: truncation or trailing garbage fails loudly.
-// require_results: decoding garbage as valid corrupts ordering — check ok.
+// Exact-length match: truncation or trailing garbage fails.
 @(require_results)
 text_index_decode :: proc "contextless" (
 	src: []u8,

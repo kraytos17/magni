@@ -1090,12 +1090,13 @@ test_columnar_integration :: proc(t: ^testing.T) {
 		}
 	}
 
-	// Test: convert_columnar_to_row_major preserves data
+	// Test: convert_columnar_to_row_major preserves data (as a slotdir
+	// leaf post-flip: row-major cells plus a slot directory).
 	btree.convert_columnar_to_row_major(buf[:], page_id, 2)
 	hdr := btree.get_leaf_header(buf[:], page_id)
 	testing.expect(t, hdr != nil, "got leaf header after conversion")
 	testing.expect_value(t, int(hdr.cell_count), 3)
-	testing.expect(t, hdr.page_type == .LEAF_TABLE, "page type is LEAF_TABLE after conversion")
+	testing.expect(t, hdr.page_type == .LEAF_SLOTDIR, "page type is LEAF_SLOTDIR after conversion")
 
 	// Verify: deserialize cells from row-major page
 	il, _, il_err := btree.layout_for_page(buf[:], btree.Page_Id(page_id))
@@ -1372,8 +1373,8 @@ verify_dense_rows :: proc(t: ^testing.T, tree: ^btree.Tree, n: int) -> bool {
 test_columnar_conversion_then_split :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	// Bulk columnar page → conversion on first insert → splits on later
-	// inserts. Locks the unified columnar→row-major path and proves split
-	// pages carry canonical V2 Cell_Entry{ptr,key} pointers: every row must
+	// inserts. Locks the unified columnar→slotdir path and proves split
+	// pages carry canonical Slot{rowid,off} entries: every row must
 	// decode with its exact rowid/value after splitting.
 	ctx := setup_tree(t, "colsplit")
 	defer teardown_tree(&ctx)

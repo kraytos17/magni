@@ -302,9 +302,12 @@ initialize :: proc(db: ^Database) -> DB_Error {
 	if s_err != .None {
 		return .Alloc_Failed
 	}
-	defer pager.unpin_page(db.pager, schema_page.page_num)
 
-	btree.init_leaf_page(schema_page.data, schema_page.page_num)
+	defer pager.unpin_page(db.pager, schema_page.page_num)
+	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
+		return .Alloc_Failed
+	}
+
 	pager.mark_dirty(db.pager, schema_page.page_num)
 	db.schema_root_page = schema_page.page_num
 	header.schema_root_page = u32le(schema_page.page_num); header.latest_snapshot_page = 0

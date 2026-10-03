@@ -32,28 +32,15 @@ relocate_copied_page1 :: proc(page: ^pager.Page) -> bool {
 	SRC_HDR_OFF :: types.DATABASE_HEADER_SIZE
 	DST_HDR_OFF :: 0
 
-	if is_columnar(page.data, 1) {
-		// Columnar page: move entire data area (header + column directory + data) from offset 100 to 0.
-		data_sz := types.PAGE_SIZE - SRC_HDR_OFF
-		tmp := make([]u8, data_sz, context.temp_allocator)
-		copy(tmp, page.data[SRC_HDR_OFF:])
-
-		mem.zero_slice(page.data[SRC_HDR_OFF:])
-		copy(page.data[DST_HDR_OFF:], tmp)
-	} else {
-		hdr_sz := page_header_size(hdr.page_type)
-		cell_count := int(hdr.cell_count)
-		ptr_sz := cell_count * CELL_ENTRY_STRIDE
-		total_sz := hdr_sz + ptr_sz
-		tmp := make([]u8, total_sz, context.temp_allocator)
-
-		copy(tmp, page.data[SRC_HDR_OFF:])
-		mem.zero_slice(page.data[SRC_HDR_OFF:SRC_HDR_OFF + total_sz])
-		copy(page.data[DST_HDR_OFF:], tmp[:hdr_sz])
-		if ptr_sz > 0 {
-			copy(page.data[DST_HDR_OFF + hdr_sz:], tmp[hdr_sz:])
-		}
-	}
+	// Whole-area move (header + all bytes uniformly down by 100): the
+	// only layout-correct move now that fixed-stride V2 entries are gone.
+	// All live layouts (slotdir, dense, columnar) are preserved verbatim
+	// by a uniform shift.
+	data_sz := types.PAGE_SIZE - SRC_HDR_OFF
+	tmp := make([]u8, data_sz, context.temp_allocator)
+	copy(tmp, page.data[SRC_HDR_OFF:])
+	mem.zero_slice(page.data[SRC_HDR_OFF:])
+	copy(page.data[DST_HDR_OFF:], tmp)
 	return true
 }
 
@@ -95,26 +82,18 @@ tree_insert_cow :: proc(
 		new_root_page, a_err := pager.allocate_page(t.pager)
 		if a_err != .None { return 0, .Page_Full }
 
-		init_interior_page(new_root_page.data, new_root_page.page_num)
-		set_right_ptr(new_root_page.data, new_root_page.page_num, result.right_page)
-		nr_layout, _, nr_err := layout_for_page(
+		// Single-separator dense root: keys=[split_key], children are
+		// the split halves (left = new_page, rightmost = right_page).
+		rkeys := [1]types.Row_ID{result.split_key}
+		rchildren := [2]u32{result.new_page, result.right_page}
+		if b_err := dense_build_from_sorted(
 			new_root_page.data,
 			Page_Id(new_root_page.page_num),
-		)
-
-		if nr_err != .None {
+			rkeys[:],
+			rchildren[:],
+		); b_err != .None {
 			pager.unpin_page(t.pager, new_root_page.page_num)
-			return 0, nr_err
-		}
-		if !insert_interior_cell(
-			new_root_page.data,
-			new_root_page.page_num,
-			result.new_page,
-			result.split_key,
-			nr_layout,
-		) {
-			pager.unpin_page(t.pager, new_root_page.page_num)
-			return 0, .Serialization_Failed
+			return 0, b_err
 		}
 
 		pager.mark_dirty(t.pager, new_root_page.page_num)

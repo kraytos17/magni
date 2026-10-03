@@ -38,9 +38,13 @@ exec_create :: proc(
 		log.error("Error: Failed to allocate table root page")
 		return false, t.root, {}
 	}
-	defer pager.unpin_page(t.pager, root_page.page_num)
 
-	btree.init_leaf_page(root_page.data, root_page.page_num)
+	defer pager.unpin_page(t.pager, root_page.page_num)
+	if !btree.init_slot_leaf_page(root_page.data, root_page.page_num) {
+		log.error("Error: Failed to initialize table root page")
+		return false, t.root, {}
+	}
+
 	pager.mark_dirty(t.pager, root_page.page_num)
 	for fk in stmt.foreign_keys {
 		if !schema.table_exists(t, fk.ref_table) {

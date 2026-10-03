@@ -1,10 +1,8 @@
 package btree
 
-import "core:encoding/endian"
 import "src:cell"
 import "src:pager"
 import "src:types"
-import "src:util/varint"
 
 Split_Result :: struct #all_or_none {
 	did_split : bool,
@@ -56,48 +54,6 @@ move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> b
 	}
 
 	dst.header.cell_content_offset = u16le(dst_off)
-	return true
-}
-
-// move_interior_cells moves count cells to an interior sibling through the
-// layout primitives. Same fresh-dst pre-bump contract as move_leaf_cells.
-@(private)
-move_interior_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
-	if is_leaf(src^) || is_leaf(dst^) || count == 0 { return count == 0 }
-	if start_idx + count > move_src_count(src) { return false }
-
-	dst_int := node_interior(dst^)
-	dst_off := int(dst_int.cell_content_offset)
-	dst_cell_count := int(dst_int.cell_count)
-	dst_int.cell_count = u16le(dst_cell_count + count)
-	for i in 0 ..< count {
-		idx := start_idx + i
-		src_off, p_err := src.layout.vtable.cell_ptr_at(src.data, Page_Id(src.id), idx)
-		if p_err != .None { return false }
-
-		src_key, k_err := src.layout.vtable.key_at(src.data, Page_Id(src.id), idx)
-		if k_err != .None { return false }
-
-		cell_sz := interior_cell_size_from_page(src.data, int(src_off))
-		// Zero-size interior cells are corrupt (child + varint ≥ 5 bytes):
-		// fail instead of aliasing two slots at one offset.
-		if cell_sz == 0 { return false }
-
-		dst_off -= cell_sz
-		copy(dst.data[dst_off:dst_off + cell_sz], src.data[int(src_off):int(src_off) + cell_sz])
-
-		if rp_err := dst.layout.vtable.slot_repoint(
-			dst.data,
-			Page_Id(dst.id),
-			dst_cell_count + i,
-			src_key,
-			Cell_Off(u16(dst_off)),
-		); rp_err != .None {
-			return false
-		}
-	}
-
-	dst_int.cell_content_offset = u16le(dst_off)
 	return true
 }
 
@@ -169,17 +125,11 @@ pack_left_half :: proc(
 	return true
 }
 
-// leaf_cell_size / interior_cell_size adapt the two cell-size queries to
-// pack_left_half's function parameter.
+// leaf_cell_size adapts the cell-size query to pack_left_half's function
+// parameter.
 @(private = "file")
 leaf_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
 	return cell.get_size(data, off)
-}
-
-@(private = "file")
-interior_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
-	sz := interior_cell_size_from_page(data, off)
-	return sz, sz != 0
 }
 
 @(private)
@@ -188,12 +138,24 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if is_columnar(curr.data, curr.id) {
 		if err := convert_columnar_leaf_to_row_major(curr); err != .None { return {}, err }
 	}
+	// Slotdir-only: V2 leaves cannot occur (unloadable since full
+	// migration) — anything else fails fast, never reinterpreted.
+	if curr.header.page_type != .LEAF_SLOTDIR {
+		return {}, .Invalid_Page_Header
+	}
 
+	cl, _, cl_err := layout_for_page(curr.data, Page_Id(curr.id))
+	if cl_err != .None { return {}, cl_err }
+
+	curr.layout = cl
 	new_page, err := pager.allocate_page(t.pager)
 	if err != nil { return {}, .Page_Full }
 
 	defer pager.unpin_page(t.pager, new_page.page_num)
-	init_leaf_page(new_page.data, new_page.page_num)
+	if !init_slot_leaf_page(new_page.data, new_page.page_num) {
+		return {}, .Invalid_Page_Header
+	}
+
 	right_layout, _, rl_err := layout_for_page(new_page.data, Page_Id(new_page.page_num))
 	if rl_err != .None { return {}, rl_err }
 
@@ -216,9 +178,9 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 }
 
 // convert_columnar_leaf_to_row_major rewrites a columnar leaf in place as
-// row-major through the shared layout core (canonical V2 Cell_Entry
-// pointers). Used before a split, which operates on fixed-stride
-// row-major cells. Unreachable in practice — inserts convert via
+// slotdir through the shared layout core (canonical Slot{rowid, off}
+// entries). Used before a split, which operates on slotdir pages.
+// Unreachable in practice — inserts convert via
 // ensure_row_major first — but must stay correct if ever reached.
 @(private = "file")
 convert_columnar_leaf_to_row_major :: proc(curr: ^Node) -> Error {
@@ -232,47 +194,47 @@ convert_columnar_leaf_to_row_major :: proc(curr: ^Node) -> Error {
 
 @(private)
 split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
-	new_page, err := pager.allocate_page(t.pager)
-	if err != nil { return {}, .Page_Full }
-
-	defer pager.unpin_page(t.pager, new_page.page_num)
-	init_interior_page(new_page.data, new_page.page_num)
-	right_layout, _, rl_err := layout_for_page(new_page.data, Page_Id(new_page.page_num))
-	if rl_err != .None { return {}, rl_err }
-
-	right_node, _ := node_from_bytes(new_page.page_num, new_page.data, right_layout)
-	total := int(node_interior(curr^).cell_count)
-	mid := total / 2
-
-	sep: types.Row_ID
-	child_from_mid_cell: u32
+	pid := Page_Id(curr.id)
+	total := int(curr.header.cell_count)
 	if total == 0 { return {}, .Invalid_Cell_Pointer }
 
-	mid_ptr, mp_err := curr.layout.vtable.cell_ptr_at(curr.data, Page_Id(curr.id), mid)
-	if mp_err != .None { return {}, .Invalid_Cell_Pointer }
+	keys := make([dynamic]types.Row_ID, 0, total, context.temp_allocator)
+	children := make([dynamic]u32, 0, total + 1, context.temp_allocator)
+	for i in 0 ..< total {
+		k, k_err := curr.layout.vtable.key_at(curr.data, pid, i)
+		if k_err != .None { return {}, k_err }
 
-	sep_u64, _, ok := varint.decode(curr.data, int(mid_ptr) + 4)
-	if !ok { return {}, .Invalid_Cell_Pointer }
-
-	sep = types.Row_ID(sep_u64)
-	child_from_mid_cell, _ = endian.get_u32(curr.data[int(mid_ptr):], .Big)
-	count_right := total - (mid + 1)
-	if count_right > 0 {
-		if !move_interior_cells(curr, &right_node, mid + 1, count_right) {
-			return {}, .Serialization_Failed
-		}
+		append(&keys, k)
+		c, c_err := curr.layout.vtable.child_at(curr.data, pid, i)
+		if c_err != .None { return {}, c_err }
+		append(&children, c)
 	}
 
-	orig_rightmost := get_right_ptr(curr.data, curr.id)
-	set_right_ptr(right_node.data, right_node.id, orig_rightmost)
-	if !pack_left_half(curr, mid, interior_cell_size) {
-		return {}, .Serialization_Failed
+	rc, rc_err := curr.layout.vtable.child_at(curr.data, pid, total)
+	if rc_err != .None { return {}, rc_err }
+	append(&children, rc)
+
+	mid := dense_split_mid(total)
+	sep := keys[mid]
+	new_page, err := pager.allocate_page(t.pager)
+	if err != nil { return {}, .Page_Full }
+	defer pager.unpin_page(t.pager, new_page.page_num)
+	if lb_err := dense_build_from_sorted(curr.data, pid, keys[:mid], children[:mid + 1]);
+	   lb_err != .None {
+		return {}, lb_err
+	}
+	if rb_err := dense_build_from_sorted(
+		new_page.data,
+		Page_Id(new_page.page_num),
+		keys[mid + 1:],
+		children[mid + 1:],
+	); rb_err != .None {
+		return {}, rb_err
 	}
 
-	set_right_ptr(curr.data, curr.id, child_from_mid_cell)
 	pager.mark_dirty(t.pager, curr.id)
-	pager.mark_dirty(t.pager, right_node.id)
-	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
+	pager.mark_dirty(t.pager, new_page.page_num)
+	return Split_Result{did_split = true, right_page = new_page.page_num, split_key = sep}, .None
 }
 
 @(private)
@@ -296,9 +258,12 @@ split_leaf_root :: proc(
 
 	right_id := right_page.page_num
 	defer pager.unpin_page(t.pager, right_id)
-
-	init_leaf_page(left_page.data, left_page.page_num)
-	init_leaf_page(right_page.data, right_page.page_num)
+	if !init_slot_leaf_page(left_page.data, left_page.page_num) {
+		return 0, .Invalid_Page_Header
+	}
+	if !init_slot_leaf_page(right_page.data, right_page.page_num) {
+		return 0, .Invalid_Page_Header
+	}
 
 	l_layout, _ := layout_for_page(left_page.data, Page_Id(left_page.page_num)) or_return
 	left_node, _ := node_from_bytes(left_page.page_num, left_page.data, l_layout)
@@ -306,10 +271,16 @@ split_leaf_root :: proc(
 	right_node, _ := node_from_bytes(right_page.page_num, right_page.data, r_layout)
 	root_node, load_err := load_node(t, root_page)
 	if load_err != .None { return 0, load_err }
+
 	defer unpin_node(t, root_node)
 	if !is_leaf(root_node) { return 0, .Invalid_Page_Header }
 	if node_leaf(root_node).cell_count == 0 { return 0, .Page_Full }
+	if root_node.header.page_type != .LEAF_SLOTDIR { return 0, .Invalid_Page_Header }
 
+	rl, _, rl_err := layout_for_page(root_node.data, Page_Id(root_node.id))
+	if rl_err != .None { return 0, rl_err }
+
+	root_node.layout = rl
 	total := int(node_leaf(root_node).cell_count)
 	mid := total / 2
 	if !move_leaf_cells(&root_node, &left_node, 0, mid) {
@@ -335,70 +306,67 @@ split_leaf_root :: proc(
 		}
 	}
 
-	init_interior_page(root_node.data, root_node.id)
-	pager.mark_dirty(t.pager, root_node.id)
-	unpin_node(t, root_node)
-
-	root_node, load_err = load_node(t, root_page)
-	if load_err != .None { return 0, load_err }
-
-	set_right_ptr(root_node.data, root_node.id, right_node.id)
-	if !insert_interior_cell(root_node.data, root_node.id, left_node.id, sep, root_node.layout) {
-		unpin_node(t, root_node)
-		return 0, .Serialization_Failed
+	rkeys := [1]types.Row_ID{sep}
+	rchildren := [2]u32{left_node.id, right_node.id}
+	if rb_err := dense_build_from_sorted(
+		root_node.data,
+		Page_Id(root_page),
+		rkeys[:],
+		rchildren[:],
+	); rb_err != .None {
+		return 0, rb_err
 	}
 
 	pager.mark_dirty(t.pager, left_node.id)
 	pager.mark_dirty(t.pager, right_node.id)
 	pager.mark_dirty(t.pager, root_node.id)
-	unpin_node(t, root_node)
 	return root_page, .None
 }
 
 @(private)
-split_interior_root :: proc(t: ^Tree, split: Split_Result) -> Error {
-	left_page, err := pager.allocate_page(t.pager)
-	if err != nil { return .Page_Full }
-
-	defer pager.unpin_page(t.pager, left_page.page_num)
-	init_interior_page(left_page.data, left_page.page_num)
-	l_layout, _, l_err := layout_for_page(left_page.data, Page_Id(left_page.page_num))
-	if l_err != .None { return .Invalid_Page_Header }
-
-	left_node, lb_err := node_from_bytes(left_page.page_num, left_page.data, l_layout)
-	if lb_err != .None { return .Invalid_Page_Header }
-
+split_interior_root :: proc(t: ^Tree, split: Split_Result) -> (err: Error) {
 	root_node := load_node(t, t.root) or_return
-	if is_leaf(root_node) { unpin_node(t, root_node); return .Invalid_Page_Header }
+	defer unpin_node(t, root_node)
+	if is_leaf(root_node) { return .Invalid_Page_Header }
 
-	total := int(node_interior(root_node).cell_count)
-	if !move_interior_cells(&root_node, &left_node, 0, total) {
-		unpin_node(t, root_node)
-		return .Serialization_Failed
+	rpid := Page_Id(t.root)
+	total := int(root_node.header.cell_count)
+	keys := make([dynamic]types.Row_ID, 0, total, context.temp_allocator)
+	children := make([dynamic]u32, 0, total + 1, context.temp_allocator)
+	for i in 0 ..< total {
+		k, k_err := root_node.layout.vtable.key_at(root_node.data, rpid, i)
+		if k_err != .None { return k_err }
+
+		append(&keys, k)
+		c, c_err := root_node.layout.vtable.child_at(root_node.data, rpid, i)
+		if c_err != .None { return c_err }
+		append(&children, c)
 	}
 
-	old_right := get_right_ptr(root_node.data, root_node.id)
-	set_right_ptr(left_node.data, left_node.id, old_right)
-	init_interior_page(root_node.data, root_node.id)
+	rc, rc_err := root_node.layout.vtable.child_at(root_node.data, rpid, total)
+	if rc_err != .None { return rc_err }
+	append(&children, rc)
 
-	pager.mark_dirty(t.pager, t.root)
-	unpin_node(t, root_node)
-	root_node = load_node(t, t.root) or_return
+	left_page, a_err := pager.allocate_page(t.pager)
+	if a_err != nil { return .Page_Full }
+	defer pager.unpin_page(t.pager, left_page.page_num)
+	if lb_err := dense_build_from_sorted(
+		left_page.data,
+		Page_Id(left_page.page_num),
+		keys[:],
+		children[:],
+	); lb_err != .None {
+		return lb_err
+	}
 
-	set_right_ptr(root_node.data, root_node.id, split.right_page)
-	if !insert_interior_cell(
-		root_node.data,
-		root_node.id,
-		left_node.id,
-		split.split_key,
-		root_node.layout,
-	) {
-		unpin_node(t, root_node)
-		return .Serialization_Failed
+	rkeys := [1]types.Row_ID{split.split_key}
+	rchildren := [2]u32{left_page.page_num, split.right_page}
+	if rb_err := dense_build_from_sorted(root_node.data, rpid, rkeys[:], rchildren[:]);
+	   rb_err != .None {
+		return rb_err
 	}
 
 	pager.mark_dirty(t.pager, t.root)
-	pager.mark_dirty(t.pager, left_node.id)
-	unpin_node(t, root_node)
+	pager.mark_dirty(t.pager, left_page.page_num)
 	return .None
 }

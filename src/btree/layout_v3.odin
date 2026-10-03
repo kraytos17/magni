@@ -19,8 +19,6 @@ import "src:types"
 // fallible, bounds-checked page indexing (dense counts come from on-disk
 // bytes — corrupt counts trap, never read out of bounds).
 
-V3_FORMAT_VERSION :: 3
-
 // DENSE_FLAG_FOR selects u32le delta keys (base + delta) over full u64le
 // keys. Decided per page at split time (Phase B2); bit validated strict
 // (unknown flag bits fail closed).
@@ -43,15 +41,14 @@ Dense_Interior_Header :: struct #packed {
 }
 #assert(size_of(Dense_Interior_Header) == 24)
 
-// Slot is the 10-byte entry of a LEAF_SLOTDIR page: same SIZE as Cell_Entry
-// (capacity math unchanged) but rowid-first order for dense comparison.
-// rowid is sign-biased (rowid_bias_encode) so raw u64 order == numeric.
+// Slot is the 10-byte entry of a LEAF_SLOTDIR page: rowid-first order for
+// dense comparison. rowid is sign-biased (rowid_bias_encode) so raw u64
+// order == numeric order.
 Slot :: struct #packed {
 	rowid: u64le, // 8: biased Row_ID
-	off  : u16le, // 2: cell-area offset (same role as Cell_Entry.ptr)
+	off  : u16le, // 2: cell-area offset
 }
-#assert(size_of(Slot) == 10)
-#assert(size_of(Slot) == CELL_ENTRY_STRIDE)
+#assert(size_of(Slot) == 10) // slot capacity math assumes 10-byte entries
 
 // rowid_bias_encode/decode is the canonical order-preserving bias:
 // encoded u64 = u64(i64 ^ MIN_I64), so unsigned byte order == signed
@@ -125,7 +122,7 @@ dense_geometry :: proc "contextless" (
 }
 
 // dense_key_at returns the separator key at slot i (unbiased Row_ID).
-// OOB index or short buffer fails loudly.
+// OOB index or short buffer fails.
 @(require_results)
 dense_key_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (types.Row_ID, Error) {
 	keys_off, _, count, use_for, base, g_err := dense_geometry(data, id)
@@ -350,25 +347,25 @@ slot_lower_bound :: proc "contextless" (
 	target: types.Row_ID,
 ) -> (
 	int,
-	bool,
+	Error,
 ) {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return 0, false }
-	if hdr.page_type != .LEAF_SLOTDIR { return 0, false }
+	if hdr == nil { return 0, .Invalid_Page_Header }
+	if hdr.page_type != .LEAF_SLOTDIR { return 0, .Invalid_Page_Header }
 
 	count := int(hdr.cell_count)
 	left, right := 0, count
 	for left < right {
 		mid := left + (right - left) / 2
 		k, _, k_err := slot_at(data, id, mid)
-		if k_err != .None { return left, false }
+		if k_err != .None { return left, k_err }
 		if k < target { left = mid + 1 } else { right = mid }
 	}
-	return left, true
+	return left, .None
 }
 
 // init_dense_interior_page zeroes and headers a fresh INTERIOR_DENSE page.
-// Public like init_leaf_page (tests build pages through it). Returns false
+// Public like init_slot_leaf_page (tests build pages through it). Returns false
 // on a short buffer instead of writing out of bounds.
 @(require_results)
 init_dense_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {

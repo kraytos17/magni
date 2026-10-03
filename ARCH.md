@@ -585,29 +585,34 @@ execute(db, sql):
 
 #### 3f. Page Format Versioning — `btree/layout.odin`, `btree/layout_iface.odin`
 
-Cell layout is v2-only: 10-byte `Cell_Entry` values with an embedded 8-byte key,
-read directly with no body decode. The legacy v1 layout (2-byte `Cell_Pointer`
-offsets, keys decoded from the cell body) was removed. The old `Cell_Layout`
-vtable + format registry were removed in turn: page mechanics now go through
-the `Page_Layout` interface (`layout_iface.odin`), with the V2 behavior in
-the `compat` table and key semantics in the statically-dispatched `Key_Kind`
-(`.Rowid` / `.Text`).
+Live layouts (V3, post-B4b full migration): slotdir leaves (10-byte
+`Slot{rowid, off}` entries, keys read directly with no body decode) and
+dense interiors (position-dependent key/child arrays); test-only columnar
+leaves round out the dispatcher. The V2 row-major layout (10-byte
+`Cell_Entry`) and its `compat` table were removed outright — no frozen
+branches, no migration path. Page mechanics go through the `Page_Layout`
+interface (`layout_iface.odin`), with key semantics in the
+statically-dispatched `Key_Kind` (`.Rowid` / `.Text`).
 
 `page_format_version` is a **database-wide** value stored in the database header
-(`PAGE_FORMAT_VERSION :: 2`). New databases are created with v2; the pager
-defaults to v2. Files stamped with any other version are rejected at open with
-`DB_Error.Unsupported_Format` (clean error, never a crash) — export with
-`.dump` under an older binary and reimport to migrate.
+(`PAGE_FORMAT_VERSION :: 3` since the B4a flip; was 2). New databases are
+created at the current version; the pager defaults to it. Files stamped with
+any other version are rejected at open with `DB_Error.Unsupported_Format`
+(clean error, never a crash) — export with `.dump` under an older binary
+and reimport to migrate. V2-stamped files are rejected the same way:
+no V2 reader remains, so old files migrate via dump/reimport only.
 
-#### 3f-ii. V3 Dense Page Vocabulary — `btree/layout_v3.odin` (defined, not written)
+#### 3f-ii. V3 Dense Page Vocabulary — `btree/layout_v3.odin`
 
-Two new discriminants exist: `INTERIOR_DENSE` (6) and
-`LEAF_SLOTDIR` (15). The dispatcher resolves both (dense interiors to a
-real table since B2 — search/read/validate/child/insert wired in
-`layout_iface.odin`; slot leaves still stubbed, every op
-`Unsupported_Format`), but no production path creates them
-(`V3_FORMAT_VERSION :: 3` is reserved; the flip ticket owns the bump) — so a
-V3 page can be recognized but never silently misread. Layout, in brief:
+Live discriminants: `INTERIOR_DENSE` (6) and `LEAF_SLOTDIR` (15), each
+with a real table since B2/B3 — dense interiors
+(search/read/validate/child/insert) and slot leaves (slot
+mechanics/read/search/validate). Only cross-kind ops (leaf slots on
+interiors, separators/children on leaves) and the not-yet-designed
+prefix pages refuse with `Unsupported_Format`. V2 bytes
+(`INTERIOR_TABLE`/`LEAF_TABLE`) have no dispatcher arm and fail closed
+at resolve — never reinterpreted. All production writers emit V3 only:
+fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
 
 - Dense interiors: 24-byte header (shared 8-byte `Page_Header` prefix, then
   `rightmost u32le`, `flags u16le`, `base u64le`, `reserved u16le`), then
@@ -616,8 +621,10 @@ V3 page can be recognized but never silently misread. Layout, in brief:
   children. Fanout ≈340 full / ≈510 FOR. All arrays little-endian;
   RowIDs sign-biased so unsigned order == numeric order.
 - Slotdir leaves: stock 8-byte `Leaf_Header` + freeblock semantics, with
-  10-byte `Slot{rowid u64le, off u16le}` entries (same size as `Cell_Entry`,
-  so capacity math is unchanged).
+  10-byte `Slot{rowid u64le, off u16le}` entries (same 10-byte stride the
+  removed V2 `Cell_Entry` used, so capacity math is unchanged). In
+  production since B4a (fresh pages, splits, vacuum output); since B4b
+  the tree is V3-only — no V2 encoding remains to upgrade or read.
 - Headers, pure accessors, validators, builders, and init procs are
   unit-tested in `tests/btree_v3_test.odin` (header layout, roundtrips vs
   independent endian writes, search-vs-oracle, FOR boundary, corruption
@@ -641,14 +648,14 @@ row 2: [a2, b2, c2]        col C: [c0, c1, c2, ...]
 - Integers use delta encoding (the column minimum is stored once, then each value as a
   delta from that minimum) for compression.
 - Columnar pages are **read-only** — any mutation (insert, update, delete) or page split
-  triggers `ensure_row_major()`, converting the page back to row format.
+  triggers `ensure_row_major()`, converting the page back to slotdir row format.
 - The cursor (`cursor.odin`) reads columnar pages transparently, assembling rows on demand.
 - Column count is detected via `detect_columnar_col_count()` from the page header.
 - Benefits: better compression for integer-heavy data, cache-friendly column scans.
 - **Write path is currently unused**: `serialize_columnar` has no production
-  callers — normal DML writes row-major pages, so columnar pages appear only in
-  tests and in data written by older builds. The read/convert paths are kept for
-  compatibility and are exercised by the test suite.
+  callers — normal DML writes slotdir pages, so columnar pages appear only in
+  tests. The read/convert paths are kept for compatibility and are exercised
+  by the test suite.
 
 #### 3h. Skip Index — `btree/skip_index.odin`
 

@@ -25,7 +25,7 @@ Storage_Config :: struct {
 
 MAGIC_STRING          :: "MAGNI_DB"
 SCHEMA_VERSION        :: 2
-PAGE_FORMAT_VERSION   :: 2
+PAGE_FORMAT_VERSION   :: 3
 WAL_MAGIC             :: "MAGNIWAL"
 WAL_HEADER_SIZE       :: 32
 WAL_FRAME_HEADER_SIZE :: 24

@@ -32,7 +32,10 @@ setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, str
 
 	schema_page, alloc_err := pager.allocate_page(p)
 	testing.expect(t, alloc_err == .None, "Failed to allocate schema page")
-	btree.init_leaf_page(schema_page.data, schema_page.page_num)
+	// Schema roots are slotdir post-flip (mirrors production creators).
+	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
+		testing.fail_now(t, "Failed to init slotdir schema page")
+	}
 	pager.mark_dirty(p, schema_page.page_num)
 	pager.unpin_page(p, schema_page.page_num)
 
@@ -248,7 +251,8 @@ test_page_splitting_stress :: proc(t: ^testing.T) {
 	table, _ := schema.get_table(&tree, "stress", context.temp_allocator)
 	root_page, _ := pager.get_page(tree.pager, table.root_page)
 	header := btree.get_header(root_page.data, table.root_page)
-	is_interior := header.page_type == .INTERIOR_TABLE
+	// Post-flip root splits produce dense interiors (never V2).
+	is_interior := header.page_type == .INTERIOR_DENSE
 	testing.expect(t, is_interior, "Root page did not split! It is still a Leaf Node.")
 	if is_interior {
 		fmt.printf(

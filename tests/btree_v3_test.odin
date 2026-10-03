@@ -3,6 +3,8 @@ package tests
 import "core:encoding/endian"
 import "core:testing"
 import "src:btree"
+import "src:cell"
+import "src:pager"
 import "src:types"
 
 W3 :: btree.Page_Id
@@ -66,8 +68,7 @@ v3_build_dense :: proc(
 test_v3_header_layout :: proc(t: ^testing.T) {
 	testing.expect_value(t, size_of(btree.Dense_Interior_Header), 24)
 	testing.expect_value(t, size_of(btree.Slot), 10)
-	testing.expect_value(t, size_of(btree.Slot), btree.CELL_ENTRY_STRIDE)
-	testing.expect_value(t, btree.V3_FORMAT_VERSION, 3)
+	testing.expect_value(t, types.PAGE_FORMAT_VERSION, 3)
 
 	// Discriminator bytes land where get_header reads them, and the common
 	// 8-byte prefix parses through the shared header view.
@@ -304,8 +305,8 @@ test_v3_slot_leaf :: proc(t: ^testing.T) {
 	// Search incl gaps.
 	slot_cases := [5][2]int{{99, 0}, {100, 0}, {150, 1}, {400, 3}, {401, 4}}
 	for c in slot_cases {
-		idx, ok := btree.slot_lower_bound(buf, pid, types.Row_ID(c[0]))
-		testing.expect(t, ok, "slot search succeeds")
+		idx, lb_err := btree.slot_lower_bound(buf, pid, types.Row_ID(c[0]))
+		testing.expect(t, lb_err == .None, "slot search succeeds")
 		testing.expect_value(t, idx, c[1])
 	}
 
@@ -536,21 +537,7 @@ test_v3_split_mid :: proc(t: ^testing.T) {
 
 @(test)
 test_v3_new_slots_fail_closed :: proc(t: ^testing.T) {
-	vbuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
-	btree.init_leaf_page(vbuf, 2)
-	vpid := btree.Page_Id(2)
-	vlayout, v_err := btree.layout_for_version(2)
-	testing.expect(t, v_err == .None, "compat resolves")
-
-	_, vc_err := vlayout.vtable.child_at(vbuf, vpid, 0)
-	testing.expect(t, vc_err == .Unsupported_Format, "compat child_at refused")
-	testing.expect(
-		t,
-		vlayout.vtable.separator_insert(vbuf, vpid, 0, 5, 9) == .Unsupported_Format,
-		"compat separator_insert refused",
-	)
-
-	// The dense table, by contrast, works on an empty page: child_at
+	// The dense table works on an empty page: child_at
 	// reports the missing child loudly, and the first separator insert
 	// succeeds and validates.
 	ibuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
@@ -598,7 +585,8 @@ test_v3_dispatcher_stubs :: proc(t: ^testing.T) {
 	testing.expect_value(t, skind, btree.Key_Kind.Rowid)
 	_, s_err := sl.vtable.key_at(sbuf, W3(2), 0)
 
-	testing.expect(t, s_err == .Unsupported_Format, "slot key_at is stubbed")
+	testing.expect(t, s_err == .Cell_Not_Found, "slot key_at on empty page fails by range")
+	testing.expect(t, sl.vtable.validate(sbuf, W3(2)) == .None, "slot empty page validates")
 	_, sc_err := sl.vtable.child_at(sbuf, W3(2), 0)
 	testing.expect(t, sc_err == .Unsupported_Format, "slot child_at is stubbed")
 	testing.expect(
@@ -621,10 +609,9 @@ test_v3_header_dispatch_arms :: proc(t: ^testing.T) {
 	testing.expect_value(t, btree.page_header_size(.LEAF_SLOTDIR), size_of(btree.Leaf_Header))
 	testing.expect_value(
 		t,
-		btree.page_header_size(.INTERIOR_TABLE),
-		size_of(btree.Interior_Header),
+		btree.page_header_size(.LEAF_TABLE_COLUMNAR),
+		size_of(btree.Leaf_Header),
 	)
-	testing.expect_value(t, btree.page_header_size(.LEAF_TABLE), size_of(btree.Leaf_Header))
 
 	mk_node :: proc(buf: []u8, id: u32) -> btree.Node {
 		h := btree.get_header(buf, id)
@@ -639,4 +626,235 @@ test_v3_header_dispatch_arms :: proc(t: ^testing.T) {
 	sbuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
 	testing.expect(t, btree.init_slot_leaf_page(sbuf, 2), "init slot leaf")
 	testing.expect(t, btree.is_leaf(mk_node(sbuf, 2)), "slot leaf is leaf")
+}
+
+@(test)
+test_v3_slot_table_ops :: proc(t: ^testing.T) {
+	// Slot table through the dispatcher over a page with real cell bytes:
+	// every op agrees with the free fns and the cell codec, and V2 bytes
+	// are refused (no Cell_Entry/Slot reinterpretation).
+	page := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	testing.expect(t, btree.init_slot_leaf_page(page, 2), "init slot leaf")
+	pid := W3(2)
+	layout, _, l_err := btree.layout_for_page(page, pid)
+	testing.expect(t, l_err == .None, "slot page resolves")
+
+	// Serialize 4 rows top-down, register slots through the table.
+	hdr := btree.get_leaf_header(page, 2)
+	testing.expect(t, hdr != nil, "slot header readable")
+	off := int(types.PAGE_SIZE)
+	for i in 1 ..= 4 {
+		vals := []types.Value{types.value_int(i64(i * 10))}
+		info := cell.compute_info(types.Row_ID(i), vals)
+		off -= info.total_size
+		_, ser_ok := cell.serialize(page[off:], types.Row_ID(i), vals, info)
+		testing.expect(t, ser_ok, "serialize slot row succeeds")
+		testing.expect(
+			t,
+			layout.vtable.slot_insert(
+				page,
+				pid,
+				i - 1,
+				types.Row_ID(i),
+				btree.Cell_Off(u16(off)),
+			) ==
+			.None,
+			"table slot_insert succeeds",
+		)
+		hdr.cell_count += 1
+	}
+
+	hdr.cell_content_offset = u16le(off)
+	testing.expect(t, layout.vtable.validate(page, pid) == .None, "validate built page")
+
+	// Keys, search, and cell pointers all agree with the codec.
+	for i in 1 ..= 4 {
+		k, k_err := layout.vtable.key_at(page, pid, i - 1)
+		testing.expect(t, k_err == .None, "table key_at succeeds")
+		testing.expect_value(t, k, types.Row_ID(i))
+
+		ptr, p_err := layout.vtable.cell_ptr_at(page, pid, i - 1)
+		testing.expect(t, p_err == .None, "table cell_ptr_at succeeds")
+		c, _, des_ok := cell.deserialize(
+			page,
+			int(ptr),
+			cell.Config{allocator = context.temp_allocator},
+		)
+		testing.expect(t, des_ok, "cell at table ptr deserializes")
+		if des_ok {
+			testing.expect_value(t, c.rowid, types.Row_ID(i))
+			cell.destroy(&c, context.temp_allocator)
+		}
+	}
+	lb_cases := [5][2]int{{0, 0}, {1, 0}, {2, 1}, {4, 3}, {5, 4}}
+	for c in lb_cases {
+		idx, lb_err := layout.vtable.lower_bound_rowid(page, pid, types.Row_ID(c[0]))
+		testing.expect(t, lb_err == .None, "table search succeeds")
+		testing.expect_value(t, idx, c[1])
+	}
+
+	// Repoint slot 0 from rowid 1 to rowid 0 (same bytes): order holds
+	// (0,2,3,4) and search follows the new key.
+	op, op_err := layout.vtable.cell_ptr_at(page, pid, 0)
+	testing.expect(t, op_err == .None, "ptr before repoint succeeds")
+	testing.expect(
+		t,
+		layout.vtable.slot_repoint(page, pid, 0, 0, btree.Cell_Off(u16(op))) == .None,
+		"table repoint succeeds",
+	)
+	rk, rk_err := layout.vtable.key_at(page, pid, 0)
+	testing.expect(t, rk_err == .None, "key_at after repoint succeeds")
+	testing.expect_value(t, rk, types.Row_ID(0))
+	testing.expect(t, layout.vtable.validate(page, pid) == .None, "validate after repoint")
+
+	// Delete slot 0: order collapses, count owned by the caller.
+	testing.expect(t, layout.vtable.slot_delete(page, pid, 0) == .None, "table delete succeeds")
+	hdr.cell_count -= 1
+	dk, dk_err := layout.vtable.key_at(page, pid, 0)
+	testing.expect(t, dk_err == .None, "key_at after delete succeeds")
+	testing.expect_value(t, dk, types.Row_ID(2))
+	testing.expect(t, layout.vtable.validate(page, pid) == .None, "validate after delete")
+
+	// Out-of-range and wrong-type calls fail loudly.
+	testing.expect(
+		t,
+		layout.vtable.slot_insert(page, pid, 99, 9, btree.Cell_Off(100)) == .Invalid_Bounds,
+		"insert past end fails",
+	)
+	// A non-slotdir discriminant (here a columnar page, whose bytes the
+	// slot reader must never interpret) is refused without reading further.
+	v2buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	v2buf[0] = u8(btree.Page_Type.LEAF_TABLE_COLUMNAR)
+	slot_layout := btree.slot_dir_leaf_layout()
+	_, v2_err := slot_layout.vtable.key_at(v2buf, pid, 0)
+	testing.expect(t, v2_err == .Invalid_Page_Header, "slot table refuses foreign bytes")
+}
+
+@(test)
+test_v3_split_produces_slotdir :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	ctx := setup_tree(t, "v3split")
+	defer teardown_tree(&ctx)
+
+	// Enough wide rows to force leaf splits (and a root split).
+	payload := make_large_text(context.temp_allocator, 100)
+	for i in 1 ..= 200 {
+		vals := []types.Value{types.value_int(i64(i)), types.value_text(payload)}
+		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
+		if err != .None {
+			testing.fail_now(t, "insert failed before split coverage")
+		}
+	}
+	testing.expect(t, btree.tree_verify(&ctx.tree), "tree verifies after splits")
+
+	// Every leaf is slotdir (split output, B4a); every interior is
+	// dense (split output, B4b) — the full-migration census: no V2 of
+	// any kind may remain in a fresh tree.
+	pages := make(map[u32]bool, context.temp_allocator)
+	defer delete(pages)
+	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
+	testing.expect(t, len(pages) > 2, "splits actually happened")
+	n_leaf, n_interior := 0, 0
+	for page_id in pages {
+		pg, pg_err := pager.get_page(ctx.pager, page_id)
+		testing.expect(t, pg_err == nil, "page readable")
+		if pg_err != nil { continue }
+		h := btree.get_header(pg.data, page_id)
+		testing.expect(t, h != nil, "header readable")
+		if h == nil {
+			pager.unpin_page(ctx.pager, page_id)
+			continue
+		}
+		#partial switch h.page_type {
+		case .LEAF_SLOTDIR:
+			n_leaf += 1
+			testing.expect(
+				t,
+				btree.validate_slot_leaf(pg.data, btree.Page_Id(page_id)) == .None,
+				"split leaf validates",
+			)
+		case .INTERIOR_DENSE:
+			n_interior += 1
+			testing.expect(
+				t,
+				btree.validate_dense_interior(pg.data, btree.Page_Id(page_id)) == .None,
+				"split interior validates",
+			)
+		case:
+			testing.expect(t, false, "unexpected page type after splits")
+		}
+		pager.unpin_page(ctx.pager, page_id)
+	}
+	testing.expect(t, n_leaf >= 2, "multiple slotdir leaves exist")
+	testing.expect(t, n_interior >= 1, "dense interior level exists")
+
+	// Full readback: every row survives the split format.
+	for i in 1 ..= 200 {
+		c, f_err := btree.tree_find(&ctx.tree, types.Row_ID(i), context.temp_allocator)
+		testing.expect(t, f_err == .None, "row readable after splits")
+		if f_err == .None {
+			testing.expect_value(t, c.values[0].(i64), i64(i))
+			cell.destroy(&c, context.temp_allocator)
+		}
+	}
+}
+
+
+@(test)
+test_separator_boundary_routing :: proc(t: ^testing.T) {
+	// Separator-equality routing: a key equal to an interior separator
+	// must descend to the RIGHT sibling (separators are exclusive upper
+	// bounds of the left child). A lower-bound-only port once misrouted
+	// every split-boundary key to the left leaf (missed finds/deletes);
+	// this test finds every row incl. all separators, then deletes a
+	// strided subset incl. boundaries and recounts. Encoding-agnostic
+	// (vtable-routed): covers V2 interiors today, dense interiors after
+	// B4b with zero changes.
+	context.logger.lowest_level = .Error
+	ctx := setup_tree(t, "seproute")
+	defer teardown_tree(&ctx)
+
+	payload := make_large_text(context.temp_allocator, 100)
+	for i in 1 ..= 200 {
+		vals := []types.Value{types.value_int(i64(i)), types.value_text(payload)}
+		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
+		if err != .None {
+			testing.fail_now(t, "seed insert failed before routing coverage")
+		}
+	}
+	testing.expect(t, btree.tree_verify(&ctx.tree), "tree verifies after splits")
+
+	// Every rowid — including every separator — must resolve exactly.
+	for i in 1 ..= 200 {
+		c, f_err := btree.tree_find(&ctx.tree, types.Row_ID(i), context.temp_allocator)
+		testing.expect(t, f_err == .None, "boundary find succeeds")
+		if f_err == .None {
+			testing.expect_value(t, c.values[0].(i64), i64(i))
+			cell.destroy(&c, context.temp_allocator)
+		}
+	}
+
+	// Delete a strided subset (hits separators and interiors alike).
+	for i := 7; i <= 200; i += 7 {
+		d_err := btree.tree_delete(&ctx.tree, types.Row_ID(i))
+		testing.expect(t, d_err == .None, "boundary delete succeeds")
+	}
+	n, c_err := btree.tree_count_rows(&ctx.tree)
+	testing.expect(t, c_err == .None, "recount succeeds")
+	testing.expect_value(t, n, 200 - 200 / 7)
+	testing.expect(t, btree.tree_verify(&ctx.tree), "tree verifies after deletes")
+
+	// Survivors readable, deleted gone.
+	for i in 1 ..= 200 {
+		c, f_err := btree.tree_find(&ctx.tree, types.Row_ID(i), context.temp_allocator)
+		if i % 7 == 0 {
+			testing.expect(t, f_err == .Cell_Not_Found, "deleted stays gone")
+		} else {
+			testing.expect(t, f_err == .None, "survivor readable")
+			if f_err == .None {
+				testing.expect_value(t, c.values[0].(i64), i64(i))
+				cell.destroy(&c, context.temp_allocator)
+			}
+		}
+	}
 }

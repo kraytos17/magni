@@ -19,7 +19,10 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 
 	schema_page, aerr := pager.allocate_page(p)
 	testing.expect(t, aerr == .None, "Failed to allocate schema page")
-	btree.init_leaf_page(schema_page.data, schema_page.page_num)
+	// Schema roots are slotdir post-flip (mirrors production creators).
+	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
+		testing.fail_now(t, "Failed to init slotdir schema page")
+	}
 	pager.mark_dirty(p, schema_page.page_num)
 	pager.unpin_page(p, schema_page.page_num)
 

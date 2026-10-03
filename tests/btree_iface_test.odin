@@ -7,7 +7,7 @@ import "src:pager"
 import "src:types"
 
 @(test)
-test_iface_compat_parity :: proc(t: ^testing.T) {
+test_iface_dispatcher_parity :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "ifacecompat")
 	defer teardown_tree(&ctx)
@@ -68,12 +68,6 @@ test_iface_compat_parity :: proc(t: ^testing.T) {
 	bn, _ := btree.key_encode(kind, types.value_int(0), 0, rb[:])
 	testing.expect(t, an == 9 && bn == 9, "rowid encodes")
 	testing.expect(t, btree.key_compare(kind, ra[:an], rb[:bn]) < 0, "static dispatch orders")
-
-	// layout_for_version: V2 resolves, unknown fails closed.
-	_, v_err := btree.layout_for_version(2)
-	testing.expect(t, v_err == .None, "version 2 resolves")
-	_, vu_err := btree.layout_for_version(999)
-	testing.expect(t, vu_err == .Unsupported_Format, "unknown version fails closed")
 }
 
 @(test)
