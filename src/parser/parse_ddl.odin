@@ -51,6 +51,34 @@ parse_create_table :: proc(
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }
 
+// parse_create_index parses `CREATE INDEX name ON table (column)` — V3.0:
+// single-column text indexes only (type checked at execution). The caller
+// consumed CREATE INDEX. Same arena-ownership + fail-cleanup discipline as
+// parse_create_table: partial nodes die with the arena on failure.
+@(private)
+parse_create_index :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
+	index_name := parse_identifier(p, allocator) or_return
+	defer if !ok { delete(index_name, allocator) }
+	if !expect_match(p, .ON, "Expected ON after index name") { return nil, false }
+
+	table_name := parse_identifier(p, allocator) or_return
+	defer if !ok { delete(table_name, allocator) }
+	if !expect_match(p, .LPAREN, "Expected ( after table name") { return nil, false }
+
+	column := parse_identifier(p, allocator) or_return
+	defer if !ok { delete(column, allocator) }
+	if !expect_match(p, .RPAREN, "Expected ) after column name") { return nil, false }
+
+	return Create_Index_Stmt{index_name = index_name, table_name = table_name, column = column},
+		true
+}
+
 // parse_foreign_key_clause parses `FOREIGN KEY (col) REFERENCES table(col)`.
 // The caller has already consumed FOREIGN.
 @(private)

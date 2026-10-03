@@ -625,6 +625,23 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   removed V2 `Cell_Entry` used, so capacity math is unchanged). In
   production since B4a (fresh pages, splits, vacuum output); since B4b
   the tree is V3-only — no V2 encoding remains to upgrade or read.
+- Text leaves (`LEAF_TEXT` = 16, `btree/layout_text.odin`): prefix-compressed
+  secondary text index leaves — stock `Leaf_Header` + `prefix_len u16le` +
+  shared prefix, 4-byte `Text_Slot{off, len}` entries, cells are
+  `[rowid u64be biased][suffix]`. Full-key text interiors (`TEXT_INTERIOR`
+  = 17) hold separators + dense `u32le` children. Online COW inserts,
+  deletes, splits, root growth, and multi-leaf equality scans live in
+  `btree/text_tree.odin`; the dispatcher resolves both text page types
+  with kind `.Text` (reads via `Key_Kind.Text` dispatch; every
+  `Row_ID`-keyed vtable slot refuses).
+- Index catalog: one text index per table — `Schema_Row`/`Table`
+  carry `index_root` + `index_column` (fixed `[6],[7]` wire slots, old rows
+  parse); root swaps reuse the `update_schema_root_cow` closure core;
+  pending maps stage both key spaces through commit/vacuum/rollback.
+  `CREATE INDEX name ON t (c)` (Phase D3: tokenizer + `Create_Index_Stmt`
+  + `exec_create_index` with loop backfill) publishes root+column atomically.
+  V3.0 scope: BINARY collation only,
+  NULL-not-indexed, single-column text, no DROP INDEX.
 - Headers, pure accessors, validators, builders, and init procs are
   unit-tested in `tests/btree_v3_test.odin` (header layout, roundtrips vs
   independent endian writes, search-vs-oracle, FOR boundary, corruption

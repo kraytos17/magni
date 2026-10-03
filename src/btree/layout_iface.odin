@@ -597,6 +597,36 @@ v3_stub_table := Page_Layout_VTable {
 	validate          = v3_stub_validate,
 }
 
+@(private = "file")
+text_interior_table := Page_Layout_VTable {
+	header_size       = page_header_size,
+	cell_count        = shared_cell_count,
+	key_at            = v3_stub_key_at,
+	lower_bound_rowid = v3_stub_lower_bound,
+	slot_insert       = v3_stub_insert,
+	slot_delete       = v3_stub_delete,
+	cell_ptr_at       = v3_stub_cell_ptr_at,
+	slot_repoint      = v3_stub_repoint,
+	child_at          = text_interior_child_at,
+	separator_insert  = v3_stub_separator,
+	validate          = text_validate_interior,
+}
+
+@(private = "file")
+text_leaf_table := Page_Layout_VTable {
+	header_size       = page_header_size,
+	cell_count        = shared_cell_count,
+	key_at            = v3_stub_key_at,
+	lower_bound_rowid = v3_stub_lower_bound,
+	slot_insert       = v3_stub_insert,
+	slot_delete       = v3_stub_delete,
+	cell_ptr_at       = v3_stub_cell_ptr_at,
+	slot_repoint      = v3_stub_repoint,
+	child_at          = v3_stub_child,
+	separator_insert  = v3_stub_separator,
+	validate          = text_validate_leaf,
+}
+
 dense_u64_interior_layout :: proc() -> Page_Layout {
 	return Page_Layout{vtable = &dense_interior_table}
 }
@@ -606,11 +636,13 @@ slot_dir_leaf_layout :: proc() -> Page_Layout {
 }
 
 prefix_leaf_layout :: proc() -> Page_Layout {
-	return Page_Layout{vtable = &v3_stub_table}
+	return Page_Layout{vtable = &text_leaf_table}
 }
 
 prefix_interior_layout :: proc() -> Page_Layout {
-	return Page_Layout{vtable = &v3_stub_table}
+	// C3a: vends the text interior table (TEXT_INTERIOR pages). Separators
+	// are full codec keys via the free functions; child_at is real.
+	return Page_Layout{vtable = &text_interior_table}
 }
 
 @(private = "file")
@@ -649,8 +681,6 @@ columnar_readonly_layout :: proc() -> Page_Layout {
 layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Error) {
 	hdr := get_header(data, u32(id))
 	if intrinsics.unlikely(hdr == nil) { return {}, {}, .Invalid_Page_Header }
-	// No V2 arms exist (variants deleted): unknown bytes land in `case:`
-	// below. Never re-add a V2 route without a migration story.
 	switch hdr.page_type {
 	case .LEAF_TABLE_COLUMNAR:
 		return columnar_readonly_layout(), .Rowid, .None
@@ -658,6 +688,10 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 		return dense_u64_interior_layout(), .Rowid, .None
 	case .LEAF_SLOTDIR:
 		return slot_dir_leaf_layout(), .Rowid, .None
+	case .LEAF_TEXT:
+		return prefix_leaf_layout(), .Text, .None
+	case .TEXT_INTERIOR:
+		return prefix_interior_layout(), .Text, .None
 	case:
 		return {}, {}, .Invalid_Page_Header
 	}

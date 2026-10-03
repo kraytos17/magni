@@ -121,6 +121,8 @@ snapshot_op :: proc(stmt: parser.Statement) -> snapshot.Snapshot_Operation {
 		return .DELETE
 	case parser.Create_Stmt:
 		return .CREATE
+	case parser.Create_Index_Stmt:
+		return .CREATE
 	case parser.Drop_Stmt:
 		return .DROP
 	}

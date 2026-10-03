@@ -2190,3 +2190,32 @@ test_collect_needed_cols_or_not_and_oob :: proc(t: ^testing.T) {
 	none := executor.collect_needed_cols(nil, nil, nil, 3)
 	testing.expect(t, len(none) == 3 && !none[0] && !none[1] && !none[2], "nil root marks nothing")
 }
+
+@(test)
+test_pending_index_roots :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	pr := executor.Pending_Roots{}
+	executor.pending_stage(&pr, "t", 10, context.temp_allocator)
+	executor.pending_stage_index(&pr, "t", 20, context.temp_allocator)
+	executor.pending_stage_index(&pr, "u", 30, context.temp_allocator)
+	testing.expect_value(t, pr.roots["t"], u32(10))
+	testing.expect_value(t, pr.index_roots["t"], u32(20))
+	testing.expect_value(t, pr.index_roots["u"], u32(30))
+
+	// Re-stage overwrites in place (same key, no second clone).
+	executor.pending_stage_index(&pr, "t", 21, context.temp_allocator)
+	testing.expect_value(t, pr.index_roots["t"], u32(21))
+	testing.expect_value(t, pr.roots["t"], u32(10))
+
+	// Drop clears both maps for the table.
+	executor.pending_drop(&pr, "t")
+	_, in_roots := pr.roots["t"]
+	testing.expect(t, !in_roots, "drop clears data root")
+	_, in_index := pr.index_roots["t"]
+	testing.expect(t, !in_index, "drop clears index root")
+	testing.expect_value(t, pr.index_roots["u"], u32(30))
+
+	// Clear empties everything (owns clones — no leaks past this).
+	executor.pending_clear(&pr)
+	testing.expect(t, pr.roots == nil && pr.index_roots == nil, "clear empties")
+}

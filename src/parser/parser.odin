@@ -94,6 +94,7 @@ Token_Type :: enum u8 {
 	BETWEEN,
 	USING,
 	IS,
+	INDEX,
 }
 
 // parse tokenizes and parses one SQL statement. The AST is arena-owned by
@@ -115,7 +116,14 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, 
 	success: bool
 	#partial switch first.type {
 	case .CREATE:
-		advance(&parser); variant, success = parse_create_table(&parser, allocator)
+		advance(&parser)
+		// CREATE TABLE vs CREATE INDEX: peek without consuming (match only
+		// advances on success — same non-consuming discipline as FOREIGN).
+		if match(&parser, .INDEX) {
+			variant, success = parse_create_index(&parser, allocator)
+		} else {
+			variant, success = parse_create_table(&parser, allocator)
+		}
 	case .INSERT:
 		advance(&parser); variant, success = parse_insert(&parser, allocator)
 	case .SELECT:

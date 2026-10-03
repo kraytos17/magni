@@ -3642,3 +3642,480 @@ test_columnar_needed_decode_parity :: proc(t: ^testing.T) {
 		testing.expect_value(t, n, 4)
 	}
 }
+
+@(test)
+test_create_index_empty :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxempty")
+	defer teardown_db(d, "idxempty")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found { return }
+	testing.expect(t, tbl.index_root > 0, "index root published")
+	testing.expect_value(t, tbl.index_column, "body")
+
+	idx_tree := btree.init(d.pager, tbl.index_root)
+	cnt, c_err := btree.tree_count_rows(&idx_tree)
+	testing.expect(t, c_err == .None && cnt == 0, "empty index has no rows")
+}
+
+@(test)
+test_create_index_backfill :: proc(t: ^testing.T) {
+	// Non-empty table with a MIDDLE text column (alignment), duplicate
+	// texts, and NULLs: every TEXT row indexed under its exact rowids,
+	// NULLs absent. Oracle is the test-side expectation map.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxfill")
+	defer teardown_db(d, "idxfill")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);") == .None,
+		"create",
+	)
+	bodies := []string{"alpha", "beta", "alpha", "", "gamma", "beta"}
+	// Heap-owned oracle (outlives per-iteration temp frees below).
+	expect := make(map[string][dynamic]i64, context.allocator)
+	defer {
+		for _, v in expect { delete(v) }
+		delete(expect)
+	}
+	n_indexed := 0
+	for i in 1 ..= 30 {
+		free_all(context.temp_allocator)
+		body := bodies[(i - 1) % len(bodies)]
+		sql := fmt.tprintf("INSERT INTO docs VALUES (%d, '%s', %d);", i, body, i * 10)
+		testing.expect(t, db.execute(d, sql) == .None, "insert succeeds")
+		// Every i inserts its TEXT row (always indexed); i%7==0 inserts an
+		// ADDITIONAL NULL-body row (never indexed, never in the oracle).
+		if i % 7 == 0 {
+			nil_sql := fmt.tprintf("INSERT INTO docs VALUES (%d, NULL, %d);", 100 + i, i)
+			testing.expect(t, db.execute(d, nil_sql) == .None, "null insert succeeds")
+		}
+		lst, lst_ok := expect[body]
+		if !lst_ok { lst = make([dynamic]i64, context.allocator) }
+		append(&lst, i64(i))
+		expect[body] = lst
+		n_indexed += 1
+	}
+	free_all(context.temp_allocator)
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found { return }
+	testing.expect(t, tbl.index_root > 0, "index root published")
+	idx_tree := btree.init(d.pager, tbl.index_root)
+	cnt, c_err := btree.tree_count_rows(&idx_tree)
+	testing.expect(t, c_err == .None, "count succeeds")
+	testing.expect_value(t, cnt, n_indexed)
+
+	for text, want in expect {
+		free_all(context.temp_allocator)
+		got, g_err := btree.text_find_rowids(&idx_tree, idx_tree.root, transmute([]u8)text)
+		testing.expect(t, g_err == .None, "find succeeds")
+		testing.expect(t, len(got) == len(want), "all rowids found")
+		for i in 0 ..< min(len(got), len(want)) {
+			testing.expect_value(t, got[i], types.Row_ID(want[i]))
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
+test_create_index_errors :: proc(t: ^testing.T) {
+	// Negative DDL paths log at .Error by design: suppress the expected
+	// noise (repo convention — see line ~1651), or the runner flags it.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxerr")
+	defer teardown_db(d, "idxerr")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create",
+	)
+	saved, quiet := suppress_expected_errors()
+	context = quiet
+	neg_table := db.execute(d, "CREATE INDEX i_nope ON missing (body);")
+	neg_col := db.execute(d, "CREATE INDEX i_nope ON docs (missing);")
+	neg_type := db.execute(d, "CREATE INDEX i_nope ON docs (id);")
+	context = restore_logger(saved)
+	testing.expect(t, neg_table != .None, "unknown table rejected")
+	testing.expect(t, neg_col != .None, "unknown column rejected")
+	testing.expect(t, neg_type != .None, "non-TEXT column rejected")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"first index succeeds",
+	)
+	saved2, quiet2 := suppress_expected_errors()
+	context = quiet2
+	dup := db.execute(d, "CREATE INDEX i_body2 ON docs (body);")
+	context = restore_logger(saved2)
+	testing.expect(t, dup != .None, "second index rejected")
+}
+
+@(test)
+test_create_index_in_txn :: proc(t: ^testing.T) {
+	// DDL publishes immediately even in-txn (like CREATE TABLE): later
+	// statements in the txn resolve the index; COMMIT keeps it.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxtxn")
+	defer teardown_db(d, "idxtxn")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO docs VALUES (1, 'hello');") == .None,
+		"insert",
+	)
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index in txn",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO docs VALUES (2, 'world');") == .None,
+		"insert in txn succeeds",
+	)
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
+
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
+	testing.expect(t, found, "table found after commit")
+	if !found { return }
+	testing.expect(t, tbl.index_root > 0, "index survives commit")
+	// Backfilled row present; in-txn row is NOT (fan-out is D4).
+	idx_tree := btree.init(d.pager, tbl.index_root)
+	hello, _ := btree.text_find_rowids(&idx_tree, idx_tree.root, []u8{'h', 'e', 'l', 'l', 'o'})
+	testing.expect(t, len(hello) == 1 && hello[0] == 1, "backfilled row indexed")
+	world, _ := btree.text_find_rowids(&idx_tree, idx_tree.root, []u8{'w', 'o', 'r', 'l', 'd'})
+	testing.expect(t, len(world) == 0, "post-DDL write not yet indexed (D4)")
+}
+
+// ---- Index DML differential oracle (Phase D4) ----
+//
+// expect maps indexed text -> sorted rowids (heap-owned; destroyed per
+// test). verify_text_index checks the catalog root, the total count, and
+// every text's exact rowid set — the whole index, no sampling.
+index_oracle_add :: proc(expect: ^map[string][dynamic]i64, text: string, rowid: i64) {
+	lst, ok := expect[text]
+	if !ok { lst = make([dynamic]i64, context.allocator) }
+	append(&lst, rowid)
+	for j := len(lst) - 1; j > 0; j -= 1 {
+		if lst[j] < lst[j - 1] {
+			lst[j], lst[j - 1] = lst[j - 1], lst[j]
+		} else {
+			break
+		}
+	}
+	expect[text] = lst
+}
+
+index_oracle_del :: proc(expect: ^map[string][dynamic]i64, text: string, rowid: i64) {
+	lst, ok := expect[text]
+	if !ok { return }
+	keep := make([dynamic]i64, 0, len(lst), context.allocator)
+	for r in lst {
+		if r != rowid { append(&keep, r) }
+	}
+	delete(lst)
+	if len(keep) == 0 {
+		delete_key(expect, text)
+	} else {
+		expect[text] = keep
+	}
+}
+
+destroy_expect :: proc(expect: ^map[string][dynamic]i64) {
+	for _, v in expect^ { delete(v) }
+	delete(expect^)
+}
+
+verify_text_index :: proc(
+	t: ^testing.T,
+	d: ^db.Database,
+	table_name: string,
+	expect: map[string][dynamic]i64,
+) {
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, table_name, context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found { return }
+	testing.expect(t, tbl.index_root > 0, "index present")
+	idx_tree := btree.init(d.pager, tbl.index_root)
+	total := 0
+	for _, want in expect { total += len(want) }
+	cnt, c_err := btree.tree_count_rows(&idx_tree)
+	testing.expect(t, c_err == .None, "count succeeds")
+	testing.expect_value(t, cnt, total)
+	for text, want in expect {
+		free_all(context.temp_allocator)
+		got, g_err := btree.text_find_rowids(&idx_tree, idx_tree.root, transmute([]u8)text)
+		testing.expect(t, g_err == .None, "find succeeds")
+		testing.expect(t, len(got) == len(want), "all rowids found")
+		for i in 0 ..< min(len(got), len(want)) {
+			testing.expect_value(t, got[i], types.Row_ID(want[i]))
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+// index_workload inserts N TEXT rows (bodies cycle, middle column) plus
+// two NULL rows, recording the oracle. Shared by the D4 fan-out tests.
+index_workload :: proc(
+	t: ^testing.T,
+	d: ^db.Database,
+	bodies: []string,
+	n: int,
+	expect: ^map[string][dynamic]i64,
+) {
+	for i in 1 ..= n {
+		free_all(context.temp_allocator)
+		body := bodies[(i - 1) % len(bodies)]
+		sql := fmt.tprintf("INSERT INTO docs VALUES (%d, '%s', %d);", i, body, i * 10)
+		testing.expect(t, db.execute(d, sql) == .None, "insert succeeds")
+		index_oracle_add(expect, body, i64(i))
+	}
+	null_ids := []int{101, 102}
+	for id in null_ids {
+		free_all(context.temp_allocator)
+		sql := fmt.tprintf("INSERT INTO docs VALUES (%d, NULL, %d);", id, id)
+		testing.expect(t, db.execute(d, sql) == .None, "null insert succeeds")
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
+test_index_insert_direct :: proc(t: ^testing.T) {
+	// Autocommit (Direct mode) fan-out: TEXT/dup/empty indexed, NULLs
+	// absent, middle-column alignment.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxinsdirect")
+	defer teardown_db(d, "idxinsdirect")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+	expect := make(map[string][dynamic]i64, context.allocator)
+	defer destroy_expect(&expect)
+	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 25, &expect)
+	verify_text_index(t, d, "docs", expect)
+}
+
+@(test)
+test_index_insert_cow :: proc(t: ^testing.T) {
+	// Same workload inside an explicit txn (COW fan-out + staged commit):
+	// identical oracle => Direct/COW parity by construction.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxinscow")
+	defer teardown_db(d, "idxinscow")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	expect := make(map[string][dynamic]i64, context.allocator)
+	defer destroy_expect(&expect)
+	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 25, &expect)
+	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
+	verify_text_index(t, d, "docs", expect)
+}
+
+@(test)
+test_index_update :: proc(t: ^testing.T) {
+	// pk + scan updates across both modes: indexed-col change moves the
+	// entry, non-indexed change is a perfect no-op, NULL transitions work.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxupd")
+	defer teardown_db(d, "idxupd")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+	expect := make(map[string][dynamic]i64, context.allocator)
+	defer destroy_expect(&expect)
+	// bodies cycle ["a","bb","a","c"]: ids 1:a 2:bb 3:a 4:c 5:a 6:bb 7:a 8:c ...
+	index_workload(t, d, []string{"a", "bb", "a", "c"}, 12, &expect)
+
+	// pk update of the indexed column: (a,3) -> (changed,3).
+	testing.expect(
+		t,
+		db.execute(d, "UPDATE docs SET body = 'changed' WHERE id = 3;") == .None,
+		"pk update indexed col",
+	)
+	index_oracle_del(&expect, "a", 3)
+	index_oracle_add(&expect, "changed", 3)
+
+	// pk update of a NON-indexed column: oracle identical.
+	st0 := db.Schema_Tree(d)
+	tbl0, _ := schema.find_table(&st0, "docs", context.temp_allocator)
+	root_before := tbl0.index_root
+	testing.expect(
+		t,
+		db.execute(d, "UPDATE docs SET v = 999 WHERE id = 4;") == .None,
+		"pk update plain col",
+	)
+	st1 := db.Schema_Tree(d)
+	tbl1, _ := schema.find_table(&st1, "docs", context.temp_allocator)
+	testing.expect(t, tbl1.index_root == root_before, "untouched index keeps its root")
+
+	// NULL -> text and text -> NULL transitions.
+	testing.expect(
+		t,
+		db.execute(d, "UPDATE docs SET body = 'x' WHERE id = 101;") == .None,
+		"null to text",
+	)
+	index_oracle_add(&expect, "x", 101)
+	testing.expect(
+		t,
+		db.execute(d, "UPDATE docs SET body = NULL WHERE id = 2;") == .None,
+		"text to null",
+	)
+	index_oracle_del(&expect, "bb", 2)
+
+	// Scan update (non-pk filter): v >= 110 hits ids 11,12.
+	testing.expect(
+		t,
+		db.execute(d, "UPDATE docs SET body = 's' WHERE v >= 110;") == .None,
+		"scan update",
+	)
+	index_oracle_del(&expect, "a", 11)
+	index_oracle_del(&expect, "c", 12)
+	index_oracle_add(&expect, "s", 11)
+	index_oracle_add(&expect, "s", 12)
+
+	verify_text_index(t, d, "docs", expect)
+}
+
+@(test)
+test_index_delete :: proc(t: ^testing.T) {
+	// pk delete, scan delete, and missing-row tolerance.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxdel")
+	defer teardown_db(d, "idxdel")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+	expect := make(map[string][dynamic]i64, context.allocator)
+	defer destroy_expect(&expect)
+	index_workload(t, d, []string{"a", "bb", "a", "c"}, 12, &expect)
+
+	testing.expect(t, db.execute(d, "DELETE FROM docs WHERE id = 3;") == .None, "pk delete")
+	index_oracle_del(&expect, "a", 3)
+	testing.expect(
+		t,
+		db.execute(d, "DELETE FROM docs WHERE v < 30;") == .None,
+		"scan delete",
+	)
+	index_oracle_del(&expect, "a", 1)
+	index_oracle_del(&expect, "bb", 2)
+	testing.expect(
+		t,
+		db.execute(d, "DELETE FROM docs WHERE id = 9999;") == .None,
+		"missing delete succeeds",
+	)
+	verify_text_index(t, d, "docs", expect)
+}
+
+@(test)
+test_index_txn_rollback_mixed :: proc(t: ^testing.T) {
+	// Mixed insert/update/delete inside a txn, then ROLLBACK: the index
+	// matches the pre-txn oracle exactly (staged roots discarded).
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxroll")
+	defer teardown_db(d, "idxroll")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+	expect := make(map[string][dynamic]i64, context.allocator)
+	defer destroy_expect(&expect)
+	index_workload(t, d, []string{"a", "bb", "a", "c"}, 12, &expect)
+	verify_text_index(t, d, "docs", expect)
+
+	st0 := db.Schema_Tree(d)
+	tbl0, _ := schema.find_table(&st0, "docs", context.temp_allocator)
+	root_before := tbl0.index_root
+
+	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO docs VALUES (50, 'nope', 1);") == .None,
+		"txn insert",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "UPDATE docs SET body = 'nope' WHERE id = 1;") == .None,
+		"txn update",
+	)
+	testing.expect(t, db.execute(d, "DELETE FROM docs WHERE id = 2;") == .None, "txn delete")
+	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback")
+
+	st1 := db.Schema_Tree(d)
+	tbl1, _ := schema.find_table(&st1, "docs", context.temp_allocator)
+	testing.expect(t, tbl1.index_root == root_before, "rollback restores index root")
+	verify_text_index(t, d, "docs", expect)
+}

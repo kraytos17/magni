@@ -14,6 +14,8 @@ Page_Type :: enum u8 {
 	LEAF_TABLE_COLUMNAR = 14, // Leaf node: columnar-encoded data (test-only)
 	INTERIOR_DENSE      = 6, // Interior node: dense u64/FOR keys + u32le children
 	LEAF_SLOTDIR        = 15, // Leaf node: sorted (rowid, offset) slots
+	LEAF_TEXT           = 16, // Leaf node: prefix-compressed secondary text index
+	TEXT_INTERIOR       = 17, // Interior node: full-key text separators + u32le children
 }
 
 
@@ -46,7 +48,10 @@ page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> i
 	switch page_type {
 	case .INTERIOR_DENSE:
 		sz = size_of(Dense_Interior_Header)
-	case .LEAF_TABLE_COLUMNAR, .LEAF_SLOTDIR:
+	case .LEAF_TABLE_COLUMNAR, .LEAF_SLOTDIR, .LEAF_TEXT, .TEXT_INTERIOR:
+	// LEAF_TEXT carries a variable prefix past the stock header
+	// (text_entry_area_end owns that math); TEXT_INTERIOR carries
+	// children + sep slots past it (interior geometry procs own it).
 	}
 	return sz
 }

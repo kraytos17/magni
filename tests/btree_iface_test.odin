@@ -89,8 +89,8 @@ test_iface_stubs_fail_closed :: proc(t: ^testing.T) {
 	prefix := btree.prefix_leaf_layout()
 	testing.expect(
 		t,
-		prefix.vtable.validate(nil, btree.Page_Id(2)) == .Unsupported_Format,
-		"prefix leaf stub validate",
+		prefix.vtable.validate(nil, btree.Page_Id(2)) == .Invalid_Page_Header,
+		"prefix leaf validate on nil fails closed",
 	)
 	pinterior := btree.prefix_interior_layout()
 	testing.expect(

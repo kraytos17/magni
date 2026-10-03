@@ -41,7 +41,7 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 	// In-txn staged roots must be published before the rebuild reads them:
 	// vacuum resolves tables from the committed schema tree and would
 	// otherwise rebuild (and clobber) pre-txn roots.
-	if len(database.txn_pending.roots) > 0 {
+	if len(database.txn_pending.roots) > 0 || len(database.txn_pending.index_roots) > 0 {
 		for name, root in database.txn_pending.roots {
 			nr, ok := schema.update_root_page_cow(&st, name, root)
 			if !ok {
@@ -49,9 +49,18 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 			}
 			st.root = nr
 		}
+		for name, root in database.txn_pending.index_roots {
+			nr, ok := schema.update_index_root_cow(&st, name, root)
+			if !ok {
+				return .Corrupted
+			}
+			st.root = nr
+		}
+
 		database.schema_root_page = st.root
 		executor.pending_clear(&database.txn_pending)
 	}
+
 	tables := schema.list_tables(&st, context.temp_allocator)
 	new_root := st.root
 	for table in tables {

@@ -216,6 +216,9 @@ Table :: struct {
 	sql         : string,
 	foreign_keys: []Foreign_Key,
 	skip_root   : u32, // root page of the skip index for this table (0 = none)
+	// Single secondary text index (V3.0: one per table): covering text->rowid.
+	index_root  : u32, // root page of the text index (0 = none)
+	index_column: string, // indexed column name (empty = none)
 }
 
 Foreign_Key :: struct {

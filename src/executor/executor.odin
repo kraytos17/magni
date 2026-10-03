@@ -62,6 +62,11 @@ execute :: proc(
 			pending_reoverlay(schema_tree, pending, cache)
 		}
 		return ok, new_root, mutated
+	case parser.Create_Index_Stmt:
+		ok, new_root, mutated = exec_create_index(schema_tree, s, stmt.sql)
+		schema_tree.root = new_root
+		if ok && pending != nil { pending_reoverlay(schema_tree, pending, cache) }
+		return ok, new_root, mutated
 	case parser.Explain_Stmt:
 		if out != nil {
 			sql := strings.trim_space(s.sql)

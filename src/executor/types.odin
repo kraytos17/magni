@@ -73,8 +73,11 @@ Mutated_Table_Info :: struct #all_or_none {
 // serving pending roots transparently. Autocommit never stages (nil pending
 // ⇒ immediate publish, exactly as before).
 Pending_Roots :: struct {
-	roots: map[string]u32, // table name → pending data root
-	alloc: mem.Allocator, // owns key clones + map; set on first stage
+	roots      : map[string]u32, // table name → pending data root
+	// Single secondary text index per table (V3.0): pending index roots
+	// ride beside data roots through stage/flush/clear/drop/overlay.
+	index_roots: map[string]u32, // table name → pending index root
+	alloc      : mem.Allocator, // owns key clones + maps; set on first stage
 }
 
 // pending_stage records a new data root. The name is cloned: callers pass
@@ -97,13 +100,39 @@ pending_stage :: proc(
 	p.roots[strings.clone(table_name, p.alloc)] = root
 }
 
+// pending_stage_index records a new secondary-index root: same ownership
+// contract as pending_stage, keyed by table name (V3.0: one index/table).
+pending_stage_index :: proc(
+	p: ^Pending_Roots,
+	table_name: string,
+	root: u32,
+	allocator := context.allocator,
+) {
+	if p.index_roots == nil {
+		p.index_roots = make(map[string]u32, 8, allocator)
+		p.alloc = allocator
+	}
+	if table_name in p.index_roots {
+		p.index_roots[table_name] = root
+		return
+	}
+	p.index_roots[strings.clone(table_name, p.alloc)] = root
+}
+
 // pending_drop forgets a staged root (DROP TABLE in txn). No-op when absent.
 pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
-	if p.roots == nil { return }
+	if p.roots == nil && p.index_roots == nil { return }
 	for k in p.roots {
 		if k == table_name {
 			delete(k, p.alloc)
 			delete_key(&p.roots, k)
+			break
+		}
+	}
+	for k in p.index_roots {
+		if k == table_name {
+			delete(k, p.alloc)
+			delete_key(&p.index_roots, k)
 			return
 		}
 	}
@@ -112,11 +141,18 @@ pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
 // pending_clear frees all staged entries. Called at COMMIT (after flush) and
 // ROLLBACK (discard).
 pending_clear :: proc(p: ^Pending_Roots) {
-	if p.roots == nil { return }
-	for k in p.roots { delete(k, p.alloc) }
+	if p.roots != nil {
+		for k in p.roots { delete(k, p.alloc) }
 
-	delete(p.roots)
-	p.roots = nil
+		delete(p.roots)
+		p.roots = nil
+	}
+	if p.index_roots != nil {
+		for k in p.index_roots { delete(k, p.alloc) }
+
+		delete(p.index_roots)
+		p.index_roots = nil
+	}
 }
 
 // Result captures the outcome of executing a statement: a result set for

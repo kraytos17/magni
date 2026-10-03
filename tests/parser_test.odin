@@ -1552,3 +1552,35 @@ test_keyword_bucket_offsets :: proc(t: ^testing.T) {
 		)
 	}
 }
+
+@(test)
+test_parse_create_index :: proc(t: ^testing.T) {
+	sql := "CREATE INDEX i_body ON docs (body);"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Parse failed")
+
+	idx_stmt, is_idx := stmt.type.(parser.Create_Index_Stmt)
+	testing.expect(t, is_idx, "Expected Create_Index_Stmt variant")
+	testing.expect(t, idx_stmt.index_name == "i_body", "Wrong index name")
+	testing.expect(t, idx_stmt.table_name == "docs", "Wrong table name")
+	testing.expect(t, idx_stmt.column == "body", "Wrong column")
+
+	// Lowercase folds through the keyword bucket.
+	lower, lok, _ := parser.parse("create index j on t (c);", context.temp_allocator)
+	testing.expect(t, lok, "lowercase parses")
+	_, lok_idx := lower.type.(parser.Create_Index_Stmt)
+	testing.expect(t, lok_idx, "lowercase is Create_Index_Stmt")
+
+	// CREATE TABLE still parses (INDEX peek must not consume TABLE).
+	ct, cok, _ := parser.parse("CREATE TABLE t (id INT);", context.temp_allocator)
+	testing.expect(t, cok, "CREATE TABLE parses")
+	_, cok_tbl := ct.type.(parser.Create_Stmt)
+	testing.expect(t, cok_tbl, "still Create_Stmt")
+
+	// Error cases fail closed (variant unusable).
+	bad_cases := []string{"CREATE INDEX i t (c);", "CREATE INDEX i ON t c);", "CREATE INDEX i ON t (c;", "CREATE INDEX ON t (c);"}
+	for bad in bad_cases {
+		_, bok, _ := parser.parse(bad, context.temp_allocator)
+		testing.expect(t, !bok, "bad DDL rejected")
+	}
+}

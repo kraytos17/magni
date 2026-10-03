@@ -99,7 +99,7 @@ Database :: struct {
 	snapshot_batch_threshold: int,
 	wal_size_threshold      : int, // 0 = disabled; auto-checkpoint when the WAL reaches this many frames
 	table_cache             : schema.Table_Cache, // in-memory catalog cache; invalidated on schema-root change
-	txn_pending             : executor.Pending_Roots, // staged data roots; flushed at COMMIT (explicit txn only)
+	txn_pending             : executor.Pending_Roots, // staged data + index roots; flushed at COMMIT (explicit txn only)
 	mu                      : sync.RW_Mutex, // guards database state; see docs/concurrency.md (acquire before pager.mutex)
 }
 

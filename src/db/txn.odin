@@ -42,10 +42,18 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 		}
 		st.root = new_r
 	}
-	if len(db.txn_pending.roots) > 0 {
+	for name, root in db.txn_pending.index_roots {
+		new_r, flush_ok := schema.update_index_root_cow(&st, name, root)
+		if !flush_ok {
+			return .IO_Error
+		}
+		st.root = new_r
+	}
+	if len(db.txn_pending.roots) > 0 || len(db.txn_pending.index_roots) > 0 {
 		db.schema_root_page = st.root
 		update_header(db)
 	}
+
 	executor.pending_clear(&db.txn_pending)
 	schema_tables := schema.list_tables(&st, context.temp_allocator)
 	tables := make([dynamic]types.Table, context.temp_allocator)

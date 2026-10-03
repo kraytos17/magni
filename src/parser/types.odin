@@ -45,6 +45,14 @@ Create_Stmt :: struct {
 	foreign_keys: []Foreign_Key,
 }
 
+// Create_Index_Stmt is `CREATE INDEX name ON table (column)` — V3.0:
+// single-column text indexes only (validated in exec_create_index).
+Create_Index_Stmt :: struct {
+	index_name: string,
+	table_name: string,
+	column    : string,
+}
+
 Foreign_Key :: struct {
 	col      : string,
 	ref_table: string,
@@ -191,6 +199,7 @@ Compound_Stmt :: struct {
 
 Statement_Variant :: union {
 	Create_Stmt,
+	Create_Index_Stmt,
 	Insert_Stmt,
 	Select_Stmt,
 	Compound_Stmt,

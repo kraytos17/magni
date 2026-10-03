@@ -76,7 +76,11 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 // is_leaf is public: the leaf/interior question is asked by every page
 // reader (and pinned by tests for each new page type).
 is_leaf :: #force_inline proc "contextless" (n: Node) -> bool {
-	return n.header.page_type == .LEAF_TABLE_COLUMNAR || n.header.page_type == .LEAF_SLOTDIR
+	return(
+		n.header.page_type == .LEAF_TABLE_COLUMNAR ||
+		n.header.page_type == .LEAF_SLOTDIR ||
+		n.header.page_type == .LEAF_TEXT \
+	)
 }
 
 @(private)
@@ -698,7 +702,7 @@ tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
 	return
 }
 
-@(private = "file", require_results)
+@(private, require_results)
 count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	if count, ok := stats_row_count_get(tree_stats(t), page_id); ok {
 		result = count
@@ -731,7 +735,7 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	return
 }
 
-@(private = "file")
+@(private)
 update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
 	s := tree_stats(t)
 	if count, ok := stats_row_count_get(s, page_id); ok {
