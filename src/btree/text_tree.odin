@@ -132,8 +132,8 @@ text_snapshot_with_pending :: proc(
 }
 
 // text_node_insert_leaf_cell inserts one entry into a text leaf, splitting
-// nothing (callers own Page_Full). Mirrors node_insert_leaf_cell: no
-// columnar concept here, and no duplicate check (non-UNIQUE index —
+// nothing (callers own Page_Full). Mirrors node_insert_leaf_cell with no
+// duplicate check (non-UNIQUE index —
 // duplicate texts with distinct rowids are legal; exact (text,rowid)
 // duplicates are caller bugs the validator rejects loudly).
 @(require_results)

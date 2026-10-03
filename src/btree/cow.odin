@@ -34,7 +34,7 @@ relocate_copied_page1 :: proc(page: ^pager.Page) -> bool {
 
 	// Whole-area move (header + all bytes uniformly down by 100): the
 	// only layout-correct move now that fixed-stride V2 entries are gone.
-	// All live layouts (slotdir, dense, columnar) are preserved verbatim
+	// All live layouts (slotdir, dense, text) are preserved verbatim
 	// by a uniform shift.
 	data_sz := types.PAGE_SIZE - SRC_HDR_OFF
 	tmp := make([]u8, data_sz, context.temp_allocator)

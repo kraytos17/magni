@@ -311,16 +311,6 @@ shared_cell_count :: #force_inline proc "contextless" (data: []u8, id: Page_Id) 
 	return get_cell_count(data, u32(id))
 }
 
-// columnar_validate preserves the old compat contract for columnar pages
-// (validate is a no-op there; anything else is invalid input).
-@(private = "file", require_results)
-columnar_validate :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
-	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if hdr.page_type != .LEAF_TABLE_COLUMNAR { return .Invalid_Page_Header }
-	return .None
-}
-
 @(private = "file")
 dense_interior_table := Page_Layout_VTable {
 	header_size       = page_header_size,
@@ -645,32 +635,6 @@ prefix_interior_layout :: proc() -> Page_Layout {
 	return Page_Layout{vtable = &text_interior_table}
 }
 
-@(private = "file")
-columnar_readonly_count :: proc "contextless" (data: []u8, id: Page_Id) -> int {
-	return get_cell_count(data, u32(id))
-}
-
-@(private = "file")
-columnar_readonly_table := Page_Layout_VTable {
-	header_size       = page_header_size,
-	cell_count        = columnar_readonly_count,
-	key_at            = v3_stub_key_at,
-	lower_bound_rowid = v3_stub_lower_bound,
-	slot_insert       = v3_stub_insert,
-	slot_delete       = v3_stub_delete,
-	cell_ptr_at       = v3_stub_cell_ptr_at,
-	slot_repoint      = v3_stub_repoint,
-	child_at          = v3_stub_child,
-	separator_insert  = v3_stub_separator,
-	validate          = columnar_validate,
-}
-
-// columnar_readonly_layout serves test-only columnar pages: reads resolve,
-// every write fails closed with .Unsupported_Format (never silent).
-columnar_readonly_layout :: proc() -> Page_Layout {
-	return Page_Layout{vtable = &columnar_readonly_table}
-}
-
 // layout_for_page resolves the (Page_Layout, Key_Kind) pair for the page in
 // front of the caller. One dynamic hop per page visit; key comparisons run
 // through the static key_* dispatch (zero further hops). Unknown or
@@ -682,8 +646,6 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 	hdr := get_header(data, u32(id))
 	if intrinsics.unlikely(hdr == nil) { return {}, {}, .Invalid_Page_Header }
 	switch hdr.page_type {
-	case .LEAF_TABLE_COLUMNAR:
-		return columnar_readonly_layout(), .Rowid, .None
 	case .INTERIOR_DENSE:
 		return dense_u64_interior_layout(), .Rowid, .None
 	case .LEAF_SLOTDIR:

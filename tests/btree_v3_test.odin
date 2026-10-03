@@ -607,11 +607,6 @@ test_v3_dispatcher_stubs :: proc(t: ^testing.T) {
 test_v3_header_dispatch_arms :: proc(t: ^testing.T) {
 	testing.expect_value(t, btree.page_header_size(.INTERIOR_DENSE), 24)
 	testing.expect_value(t, btree.page_header_size(.LEAF_SLOTDIR), size_of(btree.Leaf_Header))
-	testing.expect_value(
-		t,
-		btree.page_header_size(.LEAF_TABLE_COLUMNAR),
-		size_of(btree.Leaf_Header),
-	)
 
 	mk_node :: proc(buf: []u8, id: u32) -> btree.Node {
 		h := btree.get_header(buf, id)
@@ -721,10 +716,10 @@ test_v3_slot_table_ops :: proc(t: ^testing.T) {
 		layout.vtable.slot_insert(page, pid, 99, 9, btree.Cell_Off(100)) == .Invalid_Bounds,
 		"insert past end fails",
 	)
-	// A non-slotdir discriminant (here a columnar page, whose bytes the
+	// A non-slotdir discriminant (here a dense interior page, whose bytes the
 	// slot reader must never interpret) is refused without reading further.
 	v2buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
-	v2buf[0] = u8(btree.Page_Type.LEAF_TABLE_COLUMNAR)
+	v2buf[0] = u8(btree.Page_Type.INTERIOR_DENSE)
 	slot_layout := btree.slot_dir_leaf_layout()
 	_, v2_err := slot_layout.vtable.key_at(v2buf, pid, 0)
 	testing.expect(t, v2_err == .Invalid_Page_Header, "slot table refuses foreign bytes")

@@ -65,7 +65,7 @@ main :: proc() {
 	el := time.duration_milliseconds(time.since(start))
 	fmt.printf("perf_build:  100000-row batched insert in %.1f ms\n", el)
 
-	// Full scan (page-cache + cursor + columnar decode path). ~5000 pages, far
+	// Full scan (page-cache + cursor). ~5000 pages, far
 	// beyond the 256-slot cache, so eviction + find_slot dominate.
 	timed_query(d, "scan", "100000-row full scan", "SELECT * FROM t;", 100000)
 

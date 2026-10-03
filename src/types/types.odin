@@ -12,7 +12,7 @@ PAGE_SIZE            :: 4096
 DATABASE_HEADER_SIZE :: 100
 
 // MAX_COLS is the maximum number of columns a table can have. It's constrained by
-// the inline scratch buffers in cell.deserialize and read_columnar_cell, which use
+// the inline scratch buffers in cell.deserialize, which use
 // [dynamic; types.MAX_COLS]T for stack-allocated storage (no heap alloc per row).
 // Increasing this value increases stack frame size in the deserialization hot path.
 MAX_COLS :: 10

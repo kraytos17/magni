@@ -108,36 +108,32 @@ the conventions contributors must uphold.
    writes WAL frames back to the main file. `wal_abort_txn` discards uncommitted writes without
    touching the main file — no page leak on rollback.
 
-7. **Columnar page encoding** — Pages can be stored in column-major format with delta encoding for
-   integer compression. Read-only scans benefit from contiguous column data. Any mutation
-   (insert/update/delete) or split triggers `ensure_row_major()` conversion back to row format.
-
-8. **Page format versioning** — V3-only by policy (`PAGE_FORMAT_VERSION = 3`):
+7. **Page format versioning** — V3-only by policy (`PAGE_FORMAT_VERSION = 3`):
    dense interiors + slotdir leaves for data, prefix-compressed text
    leaves + full-key text interiors for the secondary index (§3f-ii).
    Files stamped with any other version (including V2) are rejected at
    open with `.Unsupported_Format` — no readers, no migration; move data
    via dump/reimport.
 
-9. **Explicitly-built skip indexes** — Integer value→page-range bounds
+8. **Explicitly-built skip indexes** — Integer value→page-range bounds
    (`=`, `<`, `<=`, `>`, `>=`) apply only when a skip index was built
    explicitly (`btree.build_skip_index`); reads never auto-build (a read
    holds `db.mu` shared and could never publish the new schema root).
-   See §3h for the operator-aware bound rules.
+   See §3g for the operator-aware bound rules.
 
-10. **Space reclamation via `.vacuum`** — Delete paths remove cells but do not merge sparse
+9. **Space reclamation via `.vacuum`** — Delete paths remove cells but do not merge sparse
     leaves, so delete-heavy workloads leave sparse pages behind. `btree.tree_vacuum`
     (data) and `btree.text_tree_vacuum` (secondary index) rebuild each tree into
     fresh, densely packed pages (COW-safe: old pages stay readable by
     snapshots and are reclaimed by the next GC pass), exposed as the `.vacuum` dot-command /
     `admin.vacuum`. Run it periodically to reclaim space.
 
-11. **Row count tracking** — Per-page row counts are maintained incrementally on insert/delete
+10. **Row count tracking** — Per-page row counts are maintained incrementally on insert/delete
     and cached in the pager. `COUNT(*)` with exactly one projected column and no WHERE/GROUP
     BY/DISTINCT/ORDER BY/LIMIT is served directly from the cache without scanning (companion
     columns take the general aggregate path).
 
-12. **Logging as a side channel** — Library code propagates errors via `DB_Error`/`or_return`;
+11. **Logging as a side channel** — Library code propagates errors via `DB_Error`/`or_return`;
     `core:log` messages are a side channel, not control flow. Logs go to stderr so stdout
     carries only query results. Tests that exercise expected-error paths silence them with
     the `suppress_expected_errors` / `restore_logger` helpers in `tests/test_util.odin` (nil
@@ -165,7 +161,7 @@ Layer 7  main
 | `types` | — | Shared domain model (`Value`, `Column`, `Table`, ...). Leaf. |
 | `util/varint` | — | Generic primitives, no database knowledge. Leaf. |
 | `sqltext` | — | Statement splitter. Leaf (core-only imports); shared by CLI + fuzz harness. |
-| `cell` | types, util/varint | Row/columnar cell codec. |
+| `cell` | types, util/varint | Row cell codec. |
 | `pager` | types | Page cache, WAL, freelist, page bitmap (`core:container/bit_array`). |
 | `parser` | types | Self-contained SQL front end — **must stay storage-independent**. |
 | `linedit` | — | Standalone line editor. **Must stay dependency-free.** |
@@ -642,8 +638,7 @@ execute(db, sql):
 
 Live layouts (V3, post-B4b full migration): slotdir leaves (10-byte
 `Slot{rowid, off}` entries, keys read directly with no body decode) and
-dense interiors (position-dependent key/child arrays); test-only columnar
-leaves round out the dispatcher. The V2 row-major layout (10-byte
+dense interiors (position-dependent key/child arrays). The V2 row-major layout (10-byte
 `Cell_Entry`) and its `compat` table were removed outright — no frozen
 branches, no migration path. Page mechanics go through the `Page_Layout`
 interface (`layout_iface.odin`), with key semantics in the
@@ -736,30 +731,7 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   point-lookup level — SIMD probing was dropped on that evidence (saves
   ~20ns of 800ns even at 4×; see B2 notes).
 
-#### 3g. Columnar Page Format — `cell/columnar.odin`
-
-Pages can be stored in column-major encoding (`LEAF_TABLE_COLUMNAR` page type = 14):
-
-```
-Row-major:                 Columnar:
-row 0: [a0, b0, c0]        col A: [a0, a1, a2, ...]
-row 1: [a1, b1, c1]  →     col B: [b0, b1, b2, ...]
-row 2: [a2, b2, c2]        col C: [c0, c1, c2, ...]
-```
-
-- Integers use delta encoding (the column minimum is stored once, then each value as a
-  delta from that minimum) for compression.
-- Columnar pages are **read-only** — any mutation (insert, update, delete) or page split
-  triggers `ensure_row_major()`, converting the page back to slotdir row format.
-- The cursor (`cursor.odin`) reads columnar pages transparently, assembling rows on demand.
-- Column count is detected via `detect_columnar_col_count()` from the page header.
-- Benefits: better compression for integer-heavy data, cache-friendly column scans.
-- **Write path is currently unused**: `serialize_columnar` has no production
-  callers — normal DML writes slotdir pages, so columnar pages appear only in
-  tests. The read/convert paths are kept for compatibility and are exercised
-  by the test suite.
-
-#### 3h. Skip Index — `btree/skip_index.odin`
+#### 3g. Skip Index — `btree/skip_index.odin`
 
 Explicitly-built integer column index that accelerates `WHERE int_col <op> <value>` queries for the
 comparison operators `=`, `<`, `<=`, `>`, `>=`:

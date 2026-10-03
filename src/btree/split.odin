@@ -135,9 +135,6 @@ leaf_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
 @(private)
 split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if node_leaf(curr^).cell_count == 0 { return {}, .Page_Full }
-	if is_columnar(curr.data, curr.id) {
-		if err := convert_columnar_leaf_to_row_major(curr); err != .None { return {}, err }
-	}
 	// Slotdir-only: V2 leaves cannot occur (unloadable since full
 	// migration) — anything else fails fast, never reinterpreted.
 	if curr.header.page_type != .LEAF_SLOTDIR {
@@ -175,21 +172,6 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	pager.mark_dirty(t.pager, curr.id)
 	pager.mark_dirty(t.pager, right_node.id)
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
-}
-
-// convert_columnar_leaf_to_row_major rewrites a columnar leaf in place as
-// slotdir through the shared layout core (canonical Slot{rowid, off}
-// entries). Used before a split, which operates on slotdir pages.
-// Unreachable in practice — inserts convert via
-// ensure_row_major first — but must stay correct if ever reached.
-@(private = "file")
-convert_columnar_leaf_to_row_major :: proc(curr: ^Node) -> Error {
-	num_cols, found := detect_columnar_col_count(curr.data, curr.id)
-	if !found { return .Page_Full }
-
-	decoded, ok := decode_columnar_page(curr.data, curr.id, num_cols)
-	if !ok { return .Serialization_Failed }
-	return reinsert_row_major(curr.data, curr.id, decoded)
 }
 
 @(private)

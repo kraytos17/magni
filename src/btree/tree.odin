@@ -9,7 +9,6 @@ import "core:strings"
 import "src:cell"
 import "src:pager"
 import "src:types"
-import "src:util/varint"
 
 MAX_TREE_DEPTH :: 12
 
@@ -77,7 +76,6 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 // reader (and pinned by tests for each new page type).
 is_leaf :: #force_inline proc "contextless" (n: Node) -> bool {
 	return(
-		n.header.page_type == .LEAF_TABLE_COLUMNAR ||
 		n.header.page_type == .LEAF_SLOTDIR ||
 		n.header.page_type == .LEAF_TEXT \
 	)
@@ -144,13 +142,6 @@ node_insert_leaf_cell :: proc(
 	values: []types.Value,
 ) -> Error {
 	if !is_leaf(n^) { return .Invalid_Page_Header }
-	// A columnar page that cannot expand to row-major in place fails the
-	// insert loudly (.Cell_Deserialize_Failed) instead of proceeding on
-	// undecodable bytes. .Page_Full is deliberately not used: it would send
-	// a doomed split down the abort path and leak the allocated right page.
-	if intrinsics.unlikely(!ensure_row_major(n.data, n.id)) {
-		return .Cell_Deserialize_Failed
-	}
 
 	rl, _, r_err := layout_for_page(n.data, Page_Id(n.id))
 	if r_err != .None { return r_err }
@@ -627,35 +618,6 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 	if err != .None { return {}, err }
 	defer unpin_node(t, leaf)
 
-	if intrinsics.unlikely(is_columnar(leaf.data, leaf.id)) {
-		num_cols, found := detect_columnar_col_count(leaf.data, leaf.id)
-		if !found { return {}, .Invalid_Cell_Pointer }
-
-		boff := get_page_header_offset(leaf.id)
-		row_count := int(leaf.header.cell_count)
-		rowid_pos := boff + cell.COLUMNAR_DIR_OFFSET + num_cols * size_of(cell.Col_Header)
-		current_rid: u64 = 0
-		for i in 0 ..< row_count {
-			delta, n, ok := varint.decode(leaf.data, rowid_pos)
-			if !ok { break }
-
-			current_rid += delta
-			rowid_pos += n
-			if types.Row_ID(current_rid) == key {
-				cc, cc_ok := cell.read_columnar_cell(
-					leaf.data,
-					num_cols,
-					i,
-					cell.Config{allocator = allocator, zero_copy = t.config.zero_copy},
-					boff,
-				)
-				if cc_ok { return cc, .None }
-				return {}, .Cell_Deserialize_Failed
-			}
-		}
-		return {}, .Cell_Not_Found
-	}
-
 	lid := Page_Id(leaf.id)
 	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key, leaf.layout)
 	if !ok { return {}, .Invalid_Cell_Pointer }
@@ -768,7 +730,6 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 @(private, require_results)
 delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error {
 	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
-	if !ensure_row_major(leaf_node.data, leaf_node.id) { return .Cell_Deserialize_Failed }
 
 	rl, _, r_err := layout_for_page(leaf_node.data, Page_Id(leaf_node.id))
 	if r_err != .None { return r_err }
