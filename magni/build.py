@@ -12,7 +12,8 @@ from .util import die, log, require_tool, run
 def cmd_build(args: argparse.Namespace) -> None:
     """Build debug, release, ASan, or coverage fuzz targets."""
     apply_rebuild_flag(args)
-    config.BUILD_DIR.mkdir(exist_ok=True)
+    config.TARGET_DEBUG.mkdir(parents=True, exist_ok=True)
+    config.TARGET_RELEASE.mkdir(parents=True, exist_ok=True)
     if args.asan:
         build_asan()
     elif args.cov:
@@ -26,17 +27,17 @@ def cmd_build(args: argparse.Namespace) -> None:
         build_exec()
     elif args.release:
         run([config.ODIN, "build", str(config.SRC_DIR),
-             f"-out:{config.BUILD_DIR}/magni_release",
+             f"-out:{config.TARGET_RELEASE}/magni_release",
              *config.COLLECTIONS, *config.RELEASE_FLAGS])
-        log(f"Built {config.BUILD_DIR}/magni_release (release)")
+        log(f"Built {config.TARGET_RELEASE}/magni_release (release)")
     elif args.check_only:
         run([config.ODIN, "check", str(config.SRC_DIR), *config.COLLECTIONS,
              "-warnings-as-errors"])
     else:
         run([config.ODIN, "build", str(config.SRC_DIR),
-             f"-out:{config.BUILD_DIR}/magni",
+             f"-out:{config.TARGET_DEBUG}/magni",
              *config.COLLECTIONS, *config.DEBUG_FLAGS])
-        log(f"Built {config.BUILD_DIR}/magni (debug)")
+        log(f"Built {config.TARGET_DEBUG}/magni (debug)")
 
 
 def build_asan() -> None:
@@ -63,18 +64,18 @@ def llvm_ir_sources(harness: str) -> list[str]:
     """Build a harness to LLVM IR, return the .ll file(s) to link.
 
     -o:speed emits a single merged module named ".ll"; the default emits one
-    .ll per package. Clears FUZZ_BUILD_DIR first.
+    .ll per package. Clears TARGET_FUZZ first.
     """
     require_tool("afl-clang-fast")
-    if config.FUZZ_BUILD_DIR.exists():
-        shutil.rmtree(config.FUZZ_BUILD_DIR)
-    config.FUZZ_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    if config.TARGET_FUZZ.exists():
+        shutil.rmtree(config.TARGET_FUZZ)
+    config.TARGET_FUZZ.mkdir(parents=True, exist_ok=True)
     run([config.ODIN, "build", harness, "-build-mode:llvm-ir",
-         *config.COLLECTIONS, "-o:speed", f"-out:{config.FUZZ_BUILD_DIR}"])
-    single = config.FUZZ_BUILD_DIR / ".ll"
-    ll_files = [single] if single.is_file() else sorted(config.FUZZ_BUILD_DIR.glob("*.ll"))
+         *config.COLLECTIONS, "-o:speed", f"-out:{config.TARGET_FUZZ}"])
+    single = config.TARGET_FUZZ / ".ll"
+    ll_files = [single] if single.is_file() else sorted(config.TARGET_FUZZ.glob("*.ll"))
     if not ll_files:
-        die(f"Error: no LLVM IR files in {config.FUZZ_BUILD_DIR}")
+        die(f"Error: no LLVM IR files in {config.TARGET_FUZZ}")
     return [str(f) for f in ll_files]
 
 

@@ -37,7 +37,7 @@ def stage_clean_corpus(src: Path) -> Path:
     the generator scripts — feeding Python source as SQL wastes cycles and
     produces junk-derived "crashes". The staging dir holds only real seeds.
     """
-    dst = config.FUZZ_BUILD_DIR / f"inputs_{src.name}"
+    dst = config.TARGET_FUZZ / f"inputs_{src.name}"
     if dst.exists():
         shutil.rmtree(dst)
     n = stage_corpus_into(src, dst)

@@ -1,6 +1,7 @@
 SRC_DIR     := src
 TEST_DIR    := tests
-BUILD_DIR   := build
+TARGET_DIR  := target
+TARGET_DEBUG := $(TARGET_DIR)/debug
 ODIN        ?= odin
 COLLECTIONS := -collection:src=$(SRC_DIR)
 
@@ -29,21 +30,21 @@ ROLES ?=
 
 all: build ## default: build debug binary
 
-build: ## build debug binary → build/magni
+build: ## build debug binary → target/debug/magni
 	@python3 magni.py build
 
-release: ## build release binary (LTO, no checks) → build/magni_release
+release: ## build release binary (LTO, no checks) → target/release/magni
 	@python3 magni.py build --release
 
 run: build ## build debug and run
-	@./$(BUILD_DIR)/magni
+	@./$(TARGET_DEBUG)/magni
 
 rebuild: clean build ## clean and rebuild debug
 
-clean: ## remove build/ only
+clean: ## remove target/debug + target/release only
 	@python3 magni.py clean
 
-clean-all: clean fuzz-clean ## remove build/ + fuzz artifacts (afl-output, build, corpus pycache)
+clean-all: clean fuzz-clean ## remove target/ + fuzz artifacts (afl-output, corpus pycache)
 
 test: ## run all Odin tests (debug)
 	@python3 magni.py test
@@ -58,10 +59,10 @@ test-single: ## run one test: make test-single NAME=test_foo
 test-py: ## run magni.py's own unit tests (no Odin/AFL needed)
 	@python3 magni.py test-py
 
-test-cli: build ## basic CLI smoke checks (needs build/magni)
+test-cli: build ## basic CLI smoke checks (needs target/debug/magni)
 	@python3 magni.py test-cli
 
-test-cli-full: build ## comprehensive CLI integration tests
+test-cli-full: build ## comprehensive CLI integration tests (needs target/debug/magni)
 	@python3 magni.py test-cli --full
 
 smoke: test test-cli ## quick smoke: unit tests + CLI
@@ -94,16 +95,16 @@ fuzz-corpus: ## regenerate seed corpus → fuzz/corpus/
 fuzz-exec-corpus: ## regenerate exec scripts → fuzz/corpus_exec/
 	@python3 magni.py corpus generate --exec
 
-fuzz-build: ## build ASan fuzz target → fuzz/build/fuzz_target
+fuzz-build: ## build ASan fuzz target → target/fuzz/fuzz_target
 	@python3 magni.py build --asan
 
-fuzz-cov: ## build coverage-instrumented target → fuzz/build/fuzz_target_cov
+fuzz-cov: ## build coverage-instrumented target → target/fuzz/fuzz_target_cov
 	@python3 magni.py build --cov
 
 fuzz-test: ## run every corpus seed under ASan (regression gate; target auto-rebuilds if stale)
 	@python3 magni.py corpus test
 
-fuzz-exec-build: ## build executor/storage target (coverage + ASan) → fuzz/build/fuzz_exec_target
+fuzz-exec-build: ## build executor/storage target (coverage + ASan) → target/fuzz/fuzz_exec_target
 	@python3 magni.py build --exec
 
 fuzz-exec-test: ## run every exec seed under ASan (regression gate; target auto-rebuilds if stale)
@@ -130,11 +131,11 @@ fuzz-promote: fuzz-cov ## merge grown queue → update gen_corpus.py (MIN=1 to m
 
 fuzz-one: fuzz-build ## repro one crash: make fuzz-one FILE=fuzz/afl-output/.../id:000000
 	@test -n "$(FILE)" || { echo "usage: make fuzz-one FILE=<path>" >&2; exit 2; }
-	@ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 ./fuzz/build/fuzz_target "$(FILE)"
+	@ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 ./target/fuzz/fuzz_target "$(FILE)"
 
 fuzz-one-exec: fuzz-exec-build ## repro one exec crash: make fuzz-one-exec FILE=fuzz/afl-exec-output/.../id:000000
 	@test -n "$(FILE)" || { echo "usage: make fuzz-one-exec FILE=<path>" >&2; exit 2; }
-	@ASAN_OPTIONS=abort_on_error=1:symbolize=0 ./fuzz/build/fuzz_exec_target "$(FILE)"
+	@ASAN_OPTIONS=abort_on_error=1:symbolize=0 ./target/fuzz/fuzz_exec_target "$(FILE)"
 
 fuzz-grammar-test: ## selftest the SQL-aware Python mutator (no AFL++ needed)
 	@python3 fuzz/grammar_mutator.py --selftest

@@ -10,15 +10,16 @@ from .util import log
 
 def cmd_clean(args: argparse.Namespace) -> None:
     """Remove build artifacts."""
-    if config.BUILD_DIR.exists():
-        shutil.rmtree(config.BUILD_DIR)
-        log(f"cleaned {config.BUILD_DIR}/")
+    for d in (config.TARGET_DEBUG, config.TARGET_RELEASE):
+        if d.exists():
+            shutil.rmtree(d)
+            log(f"cleaned {d}/")
     if args.all or args.fuzz_only:
         out = fuzz_out_dir()
         if out.exists():
             shutil.rmtree(out)
-        if config.FUZZ_BUILD_DIR.exists():
-            shutil.rmtree(config.FUZZ_BUILD_DIR)
+        if config.TARGET_FUZZ.exists():
+            shutil.rmtree(config.TARGET_FUZZ)
         pycache = config.CORPUS_DIR / "__pycache__"
         if pycache.exists():
             shutil.rmtree(pycache)

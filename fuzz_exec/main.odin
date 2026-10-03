@@ -6,10 +6,10 @@
 //
 // Build (coverage + AddressSanitizer combined):
 //   odin build fuzz_exec -build-mode:llvm-ir -collection:src=src -o:speed ...
-//   afl-clang-fast ...ll -fsanitize=address -o fuzz/build/fuzz_exec_target
+//   afl-clang-fast ...ll -fsanitize=address -o target/fuzz/fuzz_exec_target
 // Or via magni.py: python3 magni.py build --exec
 // Run:
-//   ./fuzz/build/fuzz_exec_target fuzz/corpus_exec/script_ddl
+//   ./target/fuzz/fuzz_exec_target fuzz/corpus_exec/script_ddl
 //
 // Dot-command lines (`.vacuum`, `.checkpoint`, `.expire [N]`) route to the
 // same admin handlers the REPL dispatches, so campaigns also cover the

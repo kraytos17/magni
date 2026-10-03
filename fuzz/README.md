@@ -15,12 +15,12 @@ All flows go through `magni.py` (or `make` wrappers) from the repo root.
 
 | Binary | Build | Use |
 |---|---|---|
-| `fuzz/build/fuzz_target` | `make fuzz-build` (`build --asan`) | regression gate, crash confirmation |
-| `fuzz/build/fuzz_target_cov` | `make fuzz-cov` (`build --cov`, AFL++ PCGUARD, no ASan) | fast parser campaigns |
-| `fuzz/build/fuzz_target_cmplog` / `_laf` | `build --cov --cmplog` / `--laf` | RedQueen / LAF-INTEL secondaries |
-| `fuzz/build/fuzz_exec_target` | `make fuzz-exec-build` (`build --exec`, coverage + ASan combined) | exec gate + campaigns (storage bugs are memory bugs: no sanitizer-free variant) |
+| `target/fuzz/fuzz_target` | `make fuzz-build` (`build --asan`) | regression gate, crash confirmation |
+| `target/fuzz/fuzz_target_cov` | `make fuzz-cov` (`build --cov`, AFL++ PCGUARD, no ASan) | fast parser campaigns |
+| `target/fuzz/fuzz_target_cmplog` / `_laf` | `build --cov --cmplog` / `--laf` | RedQueen / LAF-INTEL secondaries |
+| `target/fuzz/fuzz_exec_target` | `make fuzz-exec-build` (`build --exec`, coverage + ASan combined) | exec gate + campaigns (storage bugs are memory bugs: no sanitizer-free variant) |
 
-All binaries and `fuzz/build/` are gitignored build artifacts.
+All binaries and `target/` are gitignored build artifacts.
 
 ## Quickstart
 
@@ -69,7 +69,7 @@ python3 magni.py fuzz showmap       # coverage tuples for current corpus
 python3 magni.py fuzz cmin          # minimize corpus → /tmp/min
 ```
 
-Seed hygiene: campaigns stage clean inputs to `fuzz/build/inputs_*`,
+Seed hygiene: campaigns stage clean inputs to `target/fuzz/inputs_*`,
 excluding generator scripts (`*.py`) — afl-fuzz reads *every* file in `-i`,
 and feeding Python source as SQL wastes cycles plus produces junk-derived
 "crashes". `fuzz run` stages too.
@@ -113,7 +113,7 @@ own havoc. See `make fuzz-grammar-test`.
    FILE=fuzz/afl-output/.../id:000000,*` (ASan gate). Exec crash:
    `make fuzz-one-exec FILE=fuzz/afl-exec-output/.../id:000000,*`
    (equivalent to `ASAN_OPTIONS=abort_on_error=1:symbolize=0
-   ./fuzz/build/fuzz_exec_target FILE`). In dumb-mode runs, ASan
+   ./target/fuzz/fuzz_exec_target FILE`). In dumb-mode runs, ASan
    can emit non-reproducible `SIGILL` fork artifacts — unreproducible under
    the gate means not real.
 2. **Minimize** with `afl-tmin -i crash -o small.sql -- <target> @@`.
@@ -198,4 +198,4 @@ governor check) and `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` (system
 Every real crash: minimize with `afl-tmin`, confirm reproducible through the
 matching gate target, fix, and commit a regression test in `tests/` **plus** a
 corpus seed covering the path. Do not commit `fuzz/afl-output/`,
-`fuzz/afl-exec-output/`, `fuzz/build/`, or generated corpora.
+`fuzz/afl-exec-output/`, `target/fuzz/`, or generated corpora.

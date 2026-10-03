@@ -1,12 +1,12 @@
 MagniDB — magni.py help
 
   BUILD
-    magni.py build              build debug binary → build/magni
-    magni.py build --release    build release binary (LTO) → build/magni_release
-    magni.py build --asan       ASan fuzz target → fuzz/build/fuzz_target
-    magni.py build --cov        coverage target → fuzz/build/fuzz_target_cov
-    magni.py build --cov --cmplog  RedQueen binary → fuzz/build/fuzz_target_cmplog
-    magni.py build --cov --laf     LAF-INTEL binary → fuzz/build/fuzz_target_laf
+    magni.py build              build debug binary → target/debug/magni
+    magni.py build --release    build release binary (LTO) → target/release/magni
+    magni.py build --asan       ASan fuzz target → target/fuzz/fuzz_target
+    magni.py build --cov        coverage target → target/fuzz/fuzz_target_cov
+    magni.py build --cov --cmplog  RedQueen binary → target/fuzz/fuzz_target_cmplog
+    magni.py build --cov --laf     LAF-INTEL binary → target/fuzz/fuzz_target_laf
     magni.py build --exec         executor/storage target (coverage + ASan)
     magni.py build --check-only parse + type check (no vet)
 
@@ -15,7 +15,7 @@ MagniDB — magni.py help
     magni.py test --verbose     verbose (no fancy)
     magni.py test --name NAME   one test: --name test_integration_vacuum
     magni.py test-py            run magni.py's own unit tests (no Odin/AFL needed)
-    magni.py test-cli           basic CLI smoke (needs build/magni)
+    magni.py test-cli           basic CLI smoke (needs target/debug/magni)
     magni.py test-cli --full    comprehensive CLI integration
 
   VET
@@ -44,8 +44,8 @@ MagniDB — magni.py help
     magni.py corpus minimize               cmin + purge, rewrite promoted_seeds.py
 
   CLEAN
-    magni.py clean              remove build/ only
-    magni.py clean --all        remove build/ + fuzz artifacts
+    magni.py clean              remove target/debug + target/release only
+    magni.py clean --all        remove target/ + fuzz artifacts
 
   Env overrides: ODIN=odin, MAGNI_FUZZ_OUT=<dir>, MAGNI_REBUILD=1 (force rebuild)
 

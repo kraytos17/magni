@@ -19,7 +19,7 @@ make run
 make test
 
 # CLI example
-./build/magni mydb.db --eval "CREATE TABLE t (x INT); INSERT INTO t VALUES (42); SELECT * FROM t;"
+./target/debug/magni mydb.db --eval "CREATE TABLE t (x INT); INSERT INTO t VALUES (42); SELECT * FROM t;"
 ```
 
 ---
@@ -39,6 +39,10 @@ CREATE TABLE users (
 
 -- Drop table
 DROP TABLE users;
+
+-- Secondary text index (one single-column TEXT index per table;
+-- BINARY collation, NULLs not indexed, no DROP INDEX)
+CREATE INDEX i_name ON users (name);
 
 -- Table with CHECK constraint
 CREATE TABLE products (
@@ -81,6 +85,11 @@ SELECT * FROM users WHERE name IS NOT NULL;
 -- Boolean expressions: AND binds tighter than OR; parens group
 SELECT * FROM users WHERE (age < 30 OR age > 60) AND score > 50;
 
+-- Covering index read (answered from the secondary index alone)
+SELECT rowid FROM users WHERE name = 'Alice';
+-- Canonical prefix LIKE also routes: single trailing %, no %/_ in stem
+SELECT id FROM users WHERE name LIKE 'A%';
+
 -- Sorting & pagination
 SELECT * FROM users ORDER BY score DESC;
 SELECT * FROM users ORDER BY name ASC LIMIT 5 OFFSET 10;
@@ -109,7 +118,8 @@ SELECT x FROM t1 EXCEPT SELECT x FROM t2;
 -- FROM-less SELECT (literal columns)
 SELECT 1, 'a', NULL;
 
--- EXPLAIN
+-- EXPLAIN (renders the access plan: PK SEEK, INDEX SCAN ... USING col
+-- (eq|prefix|in, covering|fetch), or FULL SCAN)
 EXPLAIN SELECT * FROM users WHERE id = 1;
 ```
 
@@ -139,16 +149,16 @@ ROLLBACK;
 
 | Area | Capabilities |
 |---|---|
-| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE, IS [NOT] NULL), BETWEEN, column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/RIGHT/CROSS, ON and USING), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN, transactions, hex literals |
-| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-traversal UPDATE (delete + re-insert in one pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **Columnar page format** with delta compression (auto-converted to row-major on write). **Page format versioning** (v1 legacy, v2 current) via format registry. **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **Space reclamation** via `.vacuum` — rebuilds tables into densely packed pages (COW-safe; delete paths do not merge leaves automatically). **Row count tracking** with fast `COUNT(*)` via incremental cache. |
+| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, CREATE INDEX (single-column TEXT), WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE, IS [NOT] NULL), BETWEEN, covering `SELECT rowid`, column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/RIGHT/CROSS, ON and USING), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN (plan output), transactions, hex literals |
+| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-descent UPDATE (lookup, then delete + re-insert in one root-to-leaf pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **V3-only page format** (dense interiors, slotdir leaves, prefix-compressed text index pages; older stamps rejected, migrate via dump/reimport). Secondary text index (one TEXT column per table, BINARY collation, NULL-not-indexed). **Columnar page format** (test-only: read/convert paths kept, DML writes row-major). **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **Space reclamation** via `.vacuum` — rebuilds tables and text indexes into densely packed pages (COW-safe; delete paths do not merge leaves automatically). **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Commit/abort iterate only the dirtied-page list instead of scanning the whole page cache. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file; auto-checkpoint (`--wal-size-threshold`) reclaims the WAL proactively once it grows past a frame budget. |
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
 | **Concurrency** | `db.mu` uses `RW_Mutex` — SELECT and read-only admin commands take a shared lock (multiple can run); INSERT/UPDATE/DELETE/DDL take the exclusive lock. The pager uses a second `RW_Mutex`: read-only cache probes (`page_count`, `page_in_cache`) take a shared lock, while page-fetch/mutation ops (`get_page`, `allocate_page`, `unpin_page`, `mark_dirty`) take the exclusive lock. COW snapshots enable time-travel reads without blocking. |
-| **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown for plain scans (skipped when ORDER BY, DISTINCT, or aggregates change which rows survive). Auto-built skip indexes with operator-aware range pruning (`>`/`>=` seek the lower bound, `<`/`<=` stop at the upper). Page bitmap (`core:container/bit_array`) grows on demand (amortized O(1)) and enables O(1) 64-page GC range skips. WAL commit is O(pages dirtied), not O(cache size). GROUP BY/DISTINCT/set-ops use collision-safe chained hashing. Secondary text index routing (equality, canonical `LIKE 'stem%'`, literal `IN`; covering `SELECT rowid` skips data pages): 50k-row on-disk A/B (release binary, interleaved runs) — point lookup ≥20×, prefix fetch ~7×, 3-value `IN` ≥20× vs full scan (indexed point times at process-startup floor, so engine speedups are larger). |
+| **Performance** | Slab page cache (256 pages, 1MB contiguous, zero per-page heap allocs). O(1) slot allocation via free-list. Hash join (integer key, string fallback). Pre-resolved WHERE indices. LIMIT pushdown for plain scans (skipped when ORDER BY, DISTINCT, or aggregates change which rows survive). Explicitly-built skip indexes with operator-aware range pruning (`>`/`>=` seek the lower bound, `<`/`<=` stop at the upper). Page bitmap (`core:container/bit_array`) grows on demand (amortized O(1)) and enables O(1) 64-page GC range skips. WAL commit is O(pages dirtied), not O(cache size). GROUP BY/DISTINCT/set-ops use collision-safe chained hashing. Secondary text index routing (equality, canonical `LIKE 'stem%'`, literal `IN`; covering `SELECT rowid` skips data pages): 50k-row on-disk A/B (release binary, interleaved runs) — point lookup ≥20×, prefix fetch ~7×, 3-value `IN` ≥20× vs full scan (indexed point times at process-startup floor, so engine speedups are larger). |
 | **Logging** | `core:log` with configurable levels (debug/info/warn/error). `--log-level`, `--verbose`/`-v`, `MAGNI_LOG_LEVEL` env var. Logs go to stderr; query output stays clean on stdout. REPL runs at error level. |
 
-See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, all optimization internals, and the package layering and `@(private)` visibility rules contributors must uphold.
+See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tree, page cache, serialization, snapshot system, all optimization internals, and the package layering and `@(private)` visibility rules contributors must uphold. User and contributor guides (testing, indexing, snapshots, transactions, build) live in [docs/](docs/).
 
 ---
 
@@ -170,7 +180,7 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `.stats` | Database statistics |
 | `.integrity` | Verify all B-trees |
 | `.checkpoint` | Flush pages + garbage collect |
-| `.vacuum` | Rebuild all tables into densely packed pages (reclaims space from deletes) |
+| `.vacuum` | Rebuild tables and text indexes into densely packed pages (reclaims space from deletes) |
 | `.expire [keep]` | Expire old snapshots (default 20) and garbage collect |
 | `.snapshots` | Show snapshot chain |
 | `.snapdiff <a> <b>` | Diff two snapshots |
@@ -179,6 +189,8 @@ See [ARCH.md](ARCH.md) for detailed architecture documentation covering the B-tr
 | `.rollforward` | Advance current state to the most recent snapshot |
 | `.begin` / `.commit` / `.rollback` | Transaction control |
 | `.snapshot_debug` | Verbose snapshot chain dump |
+| `.pager_stats` | Pager cache statistics |
+| `.pager_layout` | Pager page layout dump |
 
 Tabular results (queries, `.snapshots`, `.snapdiff`, `.tables`, `.stats`,
 `.desc`, `.dump`) all render as markdown tables with an `(N rows)` footer;
@@ -209,6 +221,9 @@ diagnostics and errors go to stderr, never mixed into stdout.
 
 | Flag | Description |
 |---|---|
+| `database` (positional) | Database file path (default: `test.db`) |
+| `--eval <sql>` | Execute a single SQL statement and exit |
+| `--file <path>` | Execute SQL from file and exit |
 | `--help` | Print usage |
 | `--version` | Print version and exit |
 | `--stop-on-error` | Exit on first SQL error in script/pipe mode |
@@ -221,16 +236,16 @@ diagnostics and errors go to stderr, never mixed into stdout.
 
 ```bash
 # Interactive REPL (raw-mode line editor on TTY, bufio fallback on pipe)
-./build/magni [database]
+./target/debug/magni [database]
 
 # Single statement
-./build/magni mydb.db --eval "SELECT * FROM t;"
+./target/debug/magni mydb.db --eval "SELECT * FROM t;"
 
 # Execute SQL file
-./build/magni mydb.db --file script.sql
+./target/debug/magni mydb.db --file script.sql
 
 # Pipe mode (non-interactive, uses fallback reader)
-echo "SELECT * FROM t;" | ./build/magni mydb.db
+echo "SELECT * FROM t;" | ./target/debug/magni mydb.db
 ```
 
 ### Output Format
@@ -267,10 +282,10 @@ default `info`. The interactive REPL always runs at `error` level to keep the pr
 
 ```bash
 # Query results on stdout, log messages on stderr
-./build/magni mydb.db --eval "SELECT * FROM t;" 2>magni.log
+./target/debug/magni mydb.db --eval "SELECT * FROM t;" 2>magni.log
 
 # Debug diagnostics
-./build/magni --verbose mydb.db --eval "CREATE TABLE t (x INT);"
+./target/debug/magni --verbose mydb.db --eval "CREATE TABLE t (x INT);"
 ```
 
 ---
@@ -283,20 +298,24 @@ src/
 ├── repl.odin              Interactive REPL + dot-command dispatch table
 ├── script.odin            Script/pipe execution (statement loop over sqltext)
 ├── paths.odin             Path helpers
-├── btree/                 COW B+tree: tree ops, cursor, split, skip index,
-│                          vacuum (space reclamation), page format registry (v1/v2), columnar
-│                          conversion, COW helpers
+├── btree/                 COW B+tree (V3-only): dense interiors, slotdir leaves,
+│                          text index (leaves/interiors, inserts/deletes/splits,
+│                          prefix scans), cursor, split, skip index, vacuum
+│                          (data + text rebuilds), page format registry,
+│                          columnar conversion, COW helpers, stats
 ├── cell/                  Row/cell serialization: SQLite varint, columnar encoding
 ├── db/                    Database handle: open/close, execute/query (shared AS OF
 │                          prologue + result packing), snapshots, transactions,
 │                          programmatic Query_Result API
 ├── executor/              Statement dispatch, SELECT/JOIN/aggregates (evaluation +
 │                          HAVING in aggregates.odin), WHERE/IS NULL, DML (plan-based
-│                          UPDATE/DELETE), sort, set operations, result rendering
+│                          UPDATE/DELETE), index routing (index_scan.odin:
+│                          equality/prefix/IN, covering/fetch, EXPLAIN),
+│                          sort, set operations, result rendering
 │                          (core:text/table), shared types + utilities
 ├── linedit/               Raw-mode line editor (main + term/keys/buffer/render/
 │                          history/stub_windows)
-├── parser/                Lexer (79 token types), recursive-descent parser, AST,
+├── parser/                Lexer (80 token types), recursive-descent parser, AST,
 │                          free helpers
 ├── pager/                 Slab page cache, WAL, freelist, page bitmap, int range
 ├── schema/                Table metadata: schema B-tree, column blob serialization
@@ -305,12 +324,30 @@ src/
 │                          fuzz harness
 └── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
-└── *_test.odin            393 test functions across all packages
+└── *_test.odin            500+ test functions across all packages (run: `make test`, scalar: `MAGNI_VECTOR=0`)
 tests_magni/
 ├── clirunner.py           Shared black-box CLI harness (subprocess + timeouts)
 ├── test_cli_smoke.py      CLI smoke: binary surface basics (6 tests)
-├── test_cli_full.py       CLI integration: full binary surface (81 tests)
-└── test_*.py              magni.py orchestrator unit tests (run via `test-py`)
+├── test_cli_full.py       CLI integration: full binary surface (88 tests)
+└── test_*.py              Orchestrator unit tests incl. golden help surface (all run via `test-py`)
+fuzz/
+├── main.odin              Parser fuzz harness (parse-only, no execution)
+├── generators/            Seed generators (source of truth for both corpora)
+├── corpus/                Parser seeds (generated, gitignored)
+├── corpus_exec/           Exec scripts (generated, gitignored)
+├── grammar_mutator.py     SQL-aware AFL++ custom mutator + sql.dict tokens
+└── README.md              Fuzz workflows, roles, campaigns
+fuzz_exec/
+└── main.odin              Exec harness (full-stack SQL scripts + admin dot-commands)
+magni/
+└── *.py                   Build/test/fuzz orchestrator (`magni.py` entry; flags in config.py)
+docs/
+└── *.md                   User + contributor guides (testing, indexing, snapshots,
+                           transactions, build); internals stay in ARCH.md
+target/                    Build outputs, Rust-style (gitignored)
+├── debug/magni            Debug REPL/CLI binary
+├── release/magni_release  Release binary (LTO)
+└── fuzz/                  ASan/coverage/exec fuzz targets
 ```
 
 ---
@@ -318,13 +355,18 @@ tests_magni/
 ## Build System
 
 ```bash
-make build         # Debug build (default; bare `make` also builds)
-make release       # Release build (aggressive opt)
-make test          # Run all tests
+make build         # Debug build → target/debug/magni (default; bare `make` also builds)
+make release       # Release build (aggressive opt) → target/release/magni_release
+make test          # Run all tests (both vector paths via MAGNI_VECTOR)
+make test-single NAME=test_foo  # Run one test
+make test-cli      # CLI smoke tests (needs debug binary)
+make test-py       # Orchestrator unit tests + golden help surface
 make vet-all       # Full vet suite (build + test with all flags)
 make perf          # Timing baseline (release)
+make census        # Per-query allocation census (must stay deterministic)
 make fuzz-test     # Run the fuzz seed corpus under ASan (AFL++ setup in fuzz/)
-make clean         # Remove build directory
+make ci            # Full gate: vet-all + test + test-py + both ASan corpora
+make clean         # Remove target/debug + target/release
 ```
 
 Requires Odin (see [odin-lang.org](https://odin-lang.org)).
@@ -337,7 +379,7 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 
 ## Limitations
 
-- No user-managed secondary indexes (only the implicit primary-key B-tree and auto-built skip indexes exist)
+- Secondary text index is single-column TEXT only (BINARY collation, NULLs not indexed, one per table, no `DROP INDEX`); only equality, canonical `LIKE 'stem%'`, and literal `IN` route — everything else scans (see `docs/indexing.md`)
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100, >=, <=, =, !=)
 - Max 10 columns per table

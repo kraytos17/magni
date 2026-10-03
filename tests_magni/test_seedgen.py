@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fuzz"))
 
 import seedgen
+
 from magni.promote_exec import append_to_promoted, parse_exec_tables
 
 
@@ -91,7 +92,7 @@ class TestAppendToPromoted(unittest.TestCase):
             self.assertEqual(pys, ["promoted_seeds.py"])
         for target in (config.FUZZ_TARGET, config.FUZZ_TARGET_COV,
                        config.FUZZ_EXEC_TARGET):
-            self.assertEqual(target.parent, config.FUZZ_BUILD_DIR)
+            self.assertEqual(target.parent, config.TARGET_FUZZ)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-build
+target
 *.db
 *.bin
 *.wal
@@ -16,11 +16,3 @@ fuzz/corpus_exec/*
 fuzz/corpus_grown/
 fuzz/afl-output/
 fuzz/afl-exec-output/
-fuzz/build/
-
-# Fuzz target binaries (built via magni.py build --asan/--cov/--exec)
-fuzz/fuzz_target
-fuzz/fuzz_target_cov
-fuzz/fuzz_target_cmplog
-fuzz/fuzz_target_laf
-fuzz/fuzz_exec_target

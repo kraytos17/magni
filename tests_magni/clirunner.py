@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from magni import config
 
-BINARY = config.BUILD_DIR / "magni"
+BINARY = config.TARGET_DEBUG / "magni"
 
 # A hung binary fails instead of hanging CI. Normal cases finish in <2s;
 # bulk-load cases stay far below this. (The .snapshots shared-lock hang

@@ -61,11 +61,14 @@ the conventions contributors must uphold.
 **Data flow for a write query:**
 
 1. `parser.parse()` tokenizes and builds AST (no lock needed)
-2. `sync.rw_mutex_lock(&db.mu)` — exclusive lock for writes
-3. `executor.execute()` dispatches to DML-specific handler:
-   - Each mutation (INSERT/UPDATE/DELETE) uses COW B-tree operations
-   - Schema tree root is updated via `tree_update_cow` (single traversal)
+2. Statement class decides the lock: shared `db.mu` for reads, exclusive for writes
+3. `executor.execute()` dispatches to the statement handler with the staged-root
+   map (`pending`) when a transaction is active:
+   - DML mutates via COW B-tree operations, threading data (and index) roots
+     beside the schema root; in-txn roots stage into `pending`, otherwise the
+     schema root publishes (DDL always publishes immediately)
 4. After execution, a snapshot is created capturing the new schema root
+   (batched by threshold; none mid-transaction — one lands at `COMMIT`)
 5. `free_all(context.temp_allocator)` reclaims all temporary memory
 6. Lock is released
 
@@ -89,8 +92,10 @@ the conventions contributors must uphold.
    ref at the target snapshot and updates the schema root; history is not rewritten. The refs-page
    rollforward log records the previous ref so `rollforward` can undo a restore.
 
-3. **Single-traversal mutations** — Delete + re-insert (the core pattern for UPDATE) is done in
-   one root-to-leaf traversal, not two.
+3. **Single-descent mutations** — The UPDATE core (delete + re-insert on
+   one leaf visit) runs in a single root-to-leaf descent. Counting the
+   lookup that finds the target, an UPDATE costs 2 traversals (see the
+   trade-offs table, which breaks both numbers down).
 
 4. **Bulk memory management** — All per-statement allocations use `context.temp_allocator` and are
    freed in one shot via `free_all()`. No per-node freeing during parse or execute.
@@ -107,20 +112,25 @@ the conventions contributors must uphold.
    integer compression. Read-only scans benefit from contiguous column data. Any mutation
    (insert/update/delete) or split triggers `ensure_row_major()` conversion back to row format.
 
-8. **Page format versioning** — A format registry (up to 64 versions) decouples page layout from
-   code. Only v2 is registered: 10-byte cell entries with embedded 8-byte key, eliminating key
-   re-decoding. v1 files (SQLite-compatible 2-byte cell pointers) and the old single-header
-   snapshot layout are rejected at open with `.Unsupported_Format` — no migration, by policy.
+8. **Page format versioning** — V3-only by policy (`PAGE_FORMAT_VERSION = 3`):
+   dense interiors + slotdir leaves for data, prefix-compressed text
+   leaves + full-key text interiors for the secondary index (§3f-ii).
+   Files stamped with any other version (including V2) are rejected at
+   open with `.Unsupported_Format` — no readers, no migration; move data
+   via dump/reimport.
 
-9. **Auto-built skip indexes** — When a table scan encounters `WHERE col = <int>` without an
-   existing skip index, one is automatically built mapping integer value ranges to page ranges.
-   Subsequent queries skip irrelevant pages without scanning.
+9. **Explicitly-built skip indexes** — Integer value→page-range bounds
+   (`=`, `<`, `<=`, `>`, `>=`) apply only when a skip index was built
+   explicitly (`btree.build_skip_index`); reads never auto-build (a read
+   holds `db.mu` shared and could never publish the new schema root).
+   See §3h for the operator-aware bound rules.
 
 10. **Space reclamation via `.vacuum`** — Delete paths remove cells but do not merge sparse
-    leaves, so delete-heavy workloads leave sparse pages behind. `btree.tree_vacuum` rebuilds a
-    table's tree into fresh, densely packed pages (COW-safe: old pages stay readable by
+    leaves, so delete-heavy workloads leave sparse pages behind. `btree.tree_vacuum`
+    (data) and `btree.text_tree_vacuum` (secondary index) rebuild each tree into
+    fresh, densely packed pages (COW-safe: old pages stay readable by
     snapshots and are reclaimed by the next GC pass), exposed as the `.vacuum` dot-command /
-    `db.vacuum`. Run it periodically to reclaim space.
+    `admin.vacuum`. Run it periodically to reclaim space.
 
 11. **Row count tracking** — Per-page row counts are maintained incrementally on insert/delete
     and cached in the pager. `COUNT(*)` with exactly one projected column and no WHERE/GROUP
@@ -205,6 +215,8 @@ later needs it, removing the attribute is a deliberate, visible decision.
 
 ### Test layout
 
+Contributor gates and test conventions: [docs/testing.md](docs/testing.md).
+
 Tests currently live in the single `tests` package (per-package colocation is a
 planned follow-up). Because `tests` reaches into package internals, a symbol used
 by `tests` **cannot** be `@(private)`. When moving tests into package
@@ -217,10 +229,11 @@ directories, re-run the private-marking pass to tighten further.
 ### 1. SQL Layer — `parser/` and `executor/`
 
 **Parser** (`parser.odin`):
-- Lexer: character-by-character scanner producing `[]Token` (79 token types as `enum u8`,
+- Lexer: character-by-character scanner producing `[]Token` (80 token types as `enum u8`,
   including `.EOF`).
 - Recursive-descent parser: one function per grammar rule (`parse_create_table`,
-  `parse_insert`, `parse_select`, `parse_update`, `parse_delete`, `parse_drop_table`).
+  `parse_create_index`, `parse_insert`, `parse_select`, `parse_update`,
+  `parse_delete`, `parse_drop_table`).
 - `Select_Stmt` supports `AS OF SNAPSHOT <id>` and `AS OF TIMESTAMP <micros>`.
 - All AST nodes allocated on caller-provided allocator; no per-node cleanup needed.
 - `LIMIT` without `ORDER BY` uses pushdown: `scan_table` stops early when `max_rows` is reached.
@@ -228,7 +241,10 @@ directories, re-run the private-marking pass to tighten further.
   since all three change which rows survive.
 
 **Executor** (`executor.odin`):
-- Entry: `execute(schema_tree, stmt, out: ^Result = nil, cache: ^schema.Table_Cache = nil) -> (ok, new_schema_root)`.
+- Entry: `execute(schema_tree, stmt, out: ^Result = nil, cache: ^schema.Table_Cache = nil, pending: ^Pending_Roots = nil) -> (ok, new_schema_root, mutated)`.
+  `pending` carries the transaction's staged data/index roots (nil outside
+  explicit transactions); `mutated` reports the affected table for the
+  commit tail.
 - **Schema catalog cache**: `db.Database.table_cache` (a `schema.Table_Cache`) lazily caches
   deserialized `types.Table` catalog entries keyed by table name, invalidated implicitly by the
   schema-root version (`cache.root != t.root` clears it — any DDL changes the root). Executor
@@ -240,9 +256,12 @@ directories, re-run the private-marking pass to tighten further.
   `exec_select_join_data` / `exec_subquery_data`) and their rows/columns are captured into the
   optional `out: ^Result`. Rendering happens in the CLI layer (`db.execute` →
   `executor.render_result`), so the engine is embeddable behind any frontend.
-- `EXPLAIN` is **side-effect-free**: it returns a single-row `QUERY PLAN` description of the
-  statement instead of executing it.
-- DML dispatch (CREATE, INSERT, SELECT, UPDATE, DELETE, DROP).
+- `EXPLAIN` is **side-effect-free**: it renders the access decision from the
+  same resolvers execution uses, in the same order — `PK SEEK`, `INDEX SCAN
+  ... USING col (eq|prefix|in, covering|fetch)`, or `FULL SCAN` — as a
+  single-row `QUERY PLAN` result. Non-single-table statements keep the
+  legacy echo of the inner SQL.
+- DML dispatch (CREATE, CREATE INDEX, INSERT, SELECT, UPDATE, DELETE, DROP).
 - Stream COW: UPDATE/DELETE apply mutations directly in the scan loop instead of
   batch-collecting all ops first — O(1) peak memory per operation regardless of row count.
 - `INSERT` supports multi-row `VALUES (..),(..),...`; `exec_insert_cow` inserts each row with COW,
@@ -262,6 +281,7 @@ Key subroutines:
 |---|---|---|
 | `scan_table` | Full table scan via cursor | Moves cell values directly (no deep copy) |
 | `try_pk_lookup` | Fast-path: `WHERE pk = literal` | O(log n) tree_find vs full scan |
+| `resolve_index_covering` / `resolve_index_fetch` | Secondary-index routing (eq/prefix/IN) | Index seek + optional recheck vs full scan |
 | `evaluate_where_ctx` | Filter rows via boolean-expression tree (AND/OR/parens, short-circuit) | Columns pre-resolved once; recursive eval per row |
 | `try_join_match` | Combine rows + ON evaluation | Uses temp_allocator only on match |
 | `dedup_rows` | DISTINCT via hash-set (FNV fingerprint) | O(n), non-adjacent duplicates handled |
@@ -287,6 +307,16 @@ comparisons, `IN` lists, materialized `IN` subqueries), and `evaluate_where_ctx`
 short-circuiting (AND fails fast, OR succeeds fast, NOT inverts). The skip-index range optimization in
 `scan_table` only applies to a flat top-level AND chain of single-column integer comparisons; OR, NOT,
 or nested groups disable skipping (full scan).
+
+**Query planning** (`executor/index_scan.odin`, shared by the scalar and
+vector fetch paths): PK seek first (`try_pk_lookup`), then secondary-index
+routing for usable predicates on the indexed TEXT column — equality,
+canonical `LIKE 'stem%'`, literal `IN` (first usable conjunct of a flat
+AND chain; OR/NOT/nested/negated fall back). Covering `SELECT rowid`
+answers from the index alone; wider projections fetch per candidate and
+recheck the full filter. Index paths never push `LIMIT` down (candidates
+arrive in rowid order, so the shared tails slice exactly like the scan
+path). User guide: [docs/indexing.md](../docs/indexing.md).
 
 **GROUP BY** uses direct FNV-1a hashing of `Value` union data (raw bit pattern for `f64`,
 `u64` for `i64`, FNV of bytes for strings/blobs) keyed on `map[u64][dynamic]int` — a chain of
@@ -390,15 +420,28 @@ linedit/
 
 #### 3a. B+tree (`btree/`)
 
+V3-only since B4b: dense interiors (`INTERIOR_DENSE` = 6) and slotdir
+leaves (`LEAF_SLOTDIR` = 15) for primary data, prefix-compressed text
+leaves (`LEAF_TEXT` = 16) with full-key text interiors (`TEXT_INTERIOR`
+= 17) for the secondary index. Byte layouts live in §3f-ii (not repeated
+here). V2 bytes (`INTERIOR_TABLE`/`LEAF_TABLE`) have no dispatcher arm
+and fail closed at resolve — never reinterpreted; migrate via
+dump/reimport. All production writers (fresh pages, splits, COW roots,
+vacuum output) emit V3 only.
+
 **On-disk page layout (4096 bytes):**
 
 ```
 Page 1:
-  [DB Header: 100B] [B-tree offset 100: Page_Header|Cell_Pointers|Cells...]
+  [DB Header: 100B] [B-tree offset 100: Page_Header|page body...]
 
 Page N (N > 1):
-  [offset 0: Page_Header|Cell_Pointers|Cells...]
+  [offset 0: Page_Header|page body...]
 ```
+
+Page bodies are format-dependent (dense key/child arrays, slot arrays +
+cells, prefix-compressed text runs); every format shares the 8-byte
+header below, so the pager and cursor stay format-agnostic.
 
 **Page header (8 bytes, `#packed`):**
 
@@ -409,7 +452,9 @@ Page N (N > 1):
 └──────────┴─────────────────┴────────────┴──────────────────────┴──────────────────┘
 ```
 
-Interior pages append `rightmost_ptr: u32be` after the standard header (12 bytes total).
+Dense interiors carry their own trailing fields (including the rightmost
+child, `u32le`) after this prefix — there is no universal 12-byte
+interior header anymore.
 
 **In-memory `Node` struct:**
 
@@ -418,7 +463,7 @@ Node :: struct {
     id:     u32,
     data:   []u8,
     header: ^Page_Header,     // computed once on load
-    layout: ^Cell_Layout,     // resolved once per page from format registry
+    layout: Page_Layout,      // resolved once per page from format registry
 }
 ```
 
@@ -426,7 +471,8 @@ Node :: struct {
 no redundant pointer storage.
 
 **Freeblock chain:**
-Deleted cell space is tracked in a SQLite-compatible freeblock list:
+Deleted cell space is tracked in a SQLite-compatible freeblock list (shared
+by slotdir and text leaves):
 ```
 Page_Header.first_freeblock → [next: u16le] [size: u16le] [...] → 0
 ```
@@ -441,11 +487,12 @@ Page_Header.first_freeblock → [next: u16le] [size: u16le] [...] → 0
 | Operation | COW variant | Description | Traversals |
 |---|---|---|---|---|
 | `tree_insert` | `tree_insert_cow` | Insert cell, split when full. COW copies each page on path before modifying. | 1 |
-| `tree_find` | — | Binary search descending to leaf, then `leaf_lower_bound`. | 1 |
+| `tree_find` | — | Descend to leaf, then page lower bound. | 1 |
 | `tree_delete` | `tree_delete_cow` | Remove cell by rowid via binary search. COW variant COWs the full path. | 1 |
-| `tree_update` | `tree_update_cow` | Delete + re-insert on same leaf, single traversal. | 1 |
+| `tree_update` | `tree_update_cow` | Lookup, then delete + re-insert in a single root-to-leaf descent. | 2 (find + mutation) |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
-| `tree_vacuum` | — | Rebuild the whole tree into fresh, densely packed pages (COW-safe). Exposed via `.vacuum`. | full scan |
+| `tree_vacuum` / `text_tree_vacuum` | — | Rebuild data / text trees into fresh, densely packed pages (COW-safe). Surfaced as `.vacuum` via `admin.vacuum`. | full scan |
+| `text_find_rowids` / `text_find_prefix` | — | Multi-leaf equality / prefix scans over the text index (sibling-or-carry advance). | index range |
 
 **Cursor** — fixed-size path stack `[MAX_TREE_DEPTH]Cursor_Stack_Item` (12 entries, ~96 bytes).
 `MAX_TREE_DEPTH :: 12` is the single source of truth for both the cursor stack size and
@@ -489,9 +536,9 @@ Pager:
 ```
 
 - **Zero per-page heap allocations**: All 256 page buffers are inline in the slab.
-- **Lookup**: open-addressed `cache_table` (`[]Cache_Entry`, `page_num & 511`
-  home bucket, linear probing, backward-shift delete) — O(1) average, no hashing.
-- **Eviction**: Rotating-hand scan for first unpinned slot.
+- **Lookup**: open-addressed `cache_table` (`[]Cache_Entry`, 2048 buckets,
+  linear probing at load ≤ 0.125, backward-shift delete) — O(1) average, no hashing.
+- **Eviction**: second-chance (clock) scan for first unpinned slot.
 - **Free-list**: `free_slots: [dynamic]^Page_Slot` provides O(1) slot allocation.
 - **Freelist**: Linked list stored in-page. `first_free_page` persisted in database header.
 - **Concurrency**: `RW_Mutex` — reads use shared locks; writes use exclusive locks.
@@ -512,13 +559,18 @@ Schema is stored as a B-tree on page 1.
 
 | Index | Type | Content |
 |---|---|---|
-| RowID | i64 | `fnv64(table_name) & 0x7FFF...` |
+| RowID | i64 | `fnv64(table_name) & 0x7FFFFFFFFFFFFFFF` (63-bit, sign bit cleared) |
 | [0] | i64 | Kind discriminator (`0` = table) |
 | [1] | TEXT | Table name |
 | [2] | INT | B-tree root page number |
 | [3] | TEXT | Original CREATE TABLE statement |
 | [4] | BLOB | Serialized column definitions |
 | [5] | INT | Skip-index root page (present only when > 0) |
+| [6] | INT | Secondary text index root page (with [7] only) |
+| [7] | TEXT | Indexed column name (with [6] only) |
+
+Rows without an index stay 5/6-wide and keep parsing; index fields sit at
+fixed positions whenever either is set, so positions never shift.
 
 Column blob format:
 ```
@@ -550,6 +602,7 @@ Database :: struct {
     snapshot_batch_threshold: int,
     wal_size_threshold:       int, // 0 = disabled; auto-checkpoint the WAL at this many frames
     table_cache:              schema.Table_Cache, // schema catalog cache, invalidated on schema-root change
+    txn_pending:             executor.Pending_Roots, // staged data + index roots; flushed at COMMIT (explicit txn only)
     mu:                       sync.RW_Mutex,
 }
 ```
@@ -570,12 +623,14 @@ execute(db, sql):
   stmt = parse(sql, temp_allocator)      // no lock yet
   is_read = SELECT | Compound
   if is_read: lock_shared(mu) else lock_exclusive(mu)
-  ok, new_root = executor.execute(schema_tree, stmt, &result, &db.table_cache)
-  if ok && !is_read && txn_state == .None && !as_of_override:   // writes only
+  pending = &txn_pending if txn active else nil   // DML stages roots; DDL publishes immediately
+  ok, new_root, _ = executor.execute(schema_tree, stmt, &result, &db.table_cache, pending)
+  if !as_of_override && !is_read && !stmt_defers_root:   // writes only
     db.schema_root_page = new_root
     update_header(db)
+  if ok && !is_read:
     wal_begin_txn()
-    if snapshot_batch_count >= threshold:   // batched snapshot creation
+    if snapshot_batch_count >= threshold:   // batched snapshot creation (never mid-txn)
       create_snapshot()
       set_ref("main" → snap_id)
     wal_commit_txn()          // single fsync of WAL; iterates only the dirty-page list
@@ -706,11 +761,12 @@ row 2: [a2, b2, c2]        col C: [c0, c1, c2, ...]
 
 #### 3h. Skip Index — `btree/skip_index.odin`
 
-Auto-built integer column index that accelerates `WHERE int_col <op> <value>` queries for the
+Explicitly-built integer column index that accelerates `WHERE int_col <op> <value>` queries for the
 comparison operators `=`, `<`, `<=`, `>`, `>=`:
 
-- Built on demand during `scan_table` when a WHERE clause matches a single-column integer
-  comparison on a column without a skip index yet.
+- Built explicitly via `btree.build_skip_index` (reads never auto-build:
+  a read holds `db.mu` shared and could never publish the new schema root,
+  so an auto-build would be silently discarded).
 - Maps integer value ranges to page ranges: `Skip_Entry{page_min, page_max, min_int, max_int}`.
   The index page records which column it indexes (`col_index` in the header), and a bound is
   only applied to conditions on that column.
@@ -796,6 +852,8 @@ a nil logger would swallow those events and hide real failures (the runner attri
 ---
 
 ## Snapshot System
+
+User guide (time travel, lifecycle, restore, expiry): [docs/snapshots.md](docs/snapshots.md).
 
 ### Chain Structure
 
@@ -913,6 +971,8 @@ Two companion guarantees make this crash-safe:
 
 ## Transaction & Concurrency Model
 
+User guide (txn semantics, staged roots, commit/rollback): [docs/transactions.md](docs/transactions.md).
+
 ### Lock Hierarchy
 
 ```
@@ -1002,12 +1062,11 @@ assignment rather than relying on composite-literal aliasing.
 
 ### B-tree
 
-| Metric | Leaf page | Interior page |
+| Metric | Slotdir leaf | Dense interior |
 |---|---|---|
-| Max cells (INT8 key + 4B pointer) | ~400 | ~650 |
-| Avg cells (real-world) | ~100 | ~200 |
-| Tree depth (1M rows, 100 cells/page) | 3 | 3 |
-| Search complexity | O(log₁₀₀ n) | O(log₂₀₀ n) |
+| Fanout / capacity | ~300 small cells | ≈340 full keys, ≈510 FOR-compressed |
+| Tree depth (1M rows) | 3 | 3 |
+| Search complexity | O(log₃₀₀ n) | O(log₃₄₀ n) |
 | Insert: pages COW'd | depth + 1 | depth + 1 |
 | Delete: pages COW'd (COW variant) | depth | depth |
 
@@ -1018,9 +1077,9 @@ assignment rather than relying on composite-literal aliasing.
 | Slots | 256 |
 | Slot size | 4136 bytes (32 Page + 4096 data + referenced flag) |
 | Total memory | ~1 MB |
-| Lookup (hit, avg probes) | ~1.5 (open-addressed `cache_table`, linear probing at load ≤ 0.5) |
+| Lookup (hit, avg probes) | ~1 (open-addressed `cache_table`, 2048 buckets, linear probing at load ≤ 0.125) |
 | Slot allocation | O(1) — pop from `free_slots` |
-| Eviction | O(n) — rotating-hand scan, 256 slots max |
+| Eviction | O(n) — second-chance (clock) scan, 256 slots max |
 | Eviction cost | 1 `os.write_at` + 1 `os.read_at` |
 
 ### Snapshot
@@ -1048,7 +1107,7 @@ assignment rather than relying on composite-literal aliasing.
 | Metric | Value |
 |---|---|
 | Operation | `btree.tree_vacuum` — full COW-safe rebuild into packed pages |
-| Surface | `.vacuum` dot-command / `db.vacuum` |
+| Surface | `.vacuum` dot-command / `admin.vacuum` |
 | Cost | O(n) rebuild per table; old pages reclaimed by the next GC pass |
 | Scope | Manual maintenance; delete paths do not auto-merge sparse leaves |
 
@@ -1056,8 +1115,8 @@ assignment rather than relying on composite-literal aliasing.
 
 | Metric | Value |
 |---|---|
-| Cache location | `btree.Stats.row_counts: map[u32]int` (stored pager-scoped via the opaque `stats` handle so it survives transient `btree.Tree` instances) |
-| Update cost | O(1) per insert/delete (incremental) |
+| Cache location | Pager-attached `Stats` (`[dynamic]int row_counts`, page-id indexed, -1 = uncached; survives transient `btree.Tree` instances) |
+| Update cost | O(1) per mutation (exact counts written from the touched pages, no recounts) |
 | COUNT(*) fast path | O(1) if cached, O(pages) on first access |
 | Bypass conditions | Queries with WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT, or companion projected columns use full scan |
 
@@ -1069,7 +1128,7 @@ assignment rather than relying on composite-literal aliasing.
 
 | Aspect | COW + WAL (chosen) | WAL-only |
 |---|---|---|
-| Read concurrency | Single-threaded but historical reads via COW | Concurrent readers + writer |
+| Read concurrency | Concurrent shared-lock readers; historical reads via COW | Concurrent readers + writer |
 | Write amplification | Depth × 4KB per mutation + WAL append | ~1 page per mutation |
 | Snapshot isolation | Built-in (old pages persist via COW) | Requires separate version store |
 | Crash recovery | WAL replay on open | Requires WAL replay |
@@ -1084,9 +1143,9 @@ assignment rather than relying on composite-literal aliasing.
 | Slot allocation | O(1) free-list pop | O(cache_size) linear scan |
 | Eviction | Rotating-hand scan | HashMap iteration |
 
-### Single traversal vs Delete+Insert
+### Single descent vs Delete+Insert
 
-| Aspect | Single traversal | Delete + Insert |
+| Aspect | Single descent | Delete + Insert |
 |---|---|---|
 | Traversals per UPDATE | 2 (`tree_find` + `tree_update_cow`) | 3 (`tree_find` + `delete` + `insert`) |
 | Branch mispredictions | ~depth × 2 | ~depth × 3 |
@@ -1124,7 +1183,11 @@ context.allocator)`).
 ## Limitations
 
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
-- **No user-managed indexes**: Only the implicit primary-key B-tree and auto-built skip indexes exist.
+- **Secondary text index (V3.0 scope)**: one single-column TEXT index per
+  table (`CREATE INDEX`), BINARY collation, NULL-not-indexed, no
+  `DROP INDEX`. Routes equality, canonical `LIKE 'stem%'`, and literal
+  `IN` (covering `SELECT rowid`, fetch+recheck otherwise); everything else
+  scans. User guide: [docs/indexing.md](docs/indexing.md).
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100`, `>=`, `<=`, `=`, `!=` format.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (inline `[dynamic; N]T` scratch buffer).
 - **REPL line editor**: SQL keyword and table/column name completion only (no in-expression or JOIN completion).
@@ -1147,6 +1210,7 @@ context.allocator)`).
 | `.stats` | DB statistics | `admin.stats()` |
 | `.integrity` | Verify B-trees | `admin.integrity_check()` |
 | `.checkpoint` | Flush + GC | `admin.checkpoint()` |
+| `.vacuum` | Rebuild tables + text indexes into packed pages | `admin.vacuum()` |
 | `.snapshots` | Show chain | `admin.print_snapshots()` ← `snapshot.chain_infos()` |
 | `.snapdiff <a> <b>` | Diff snapshots | `db.snapshot_diff()` |
 | `.snapshot tag <id> <lbl>` | Tag snapshot | `db.snapshot_tag()` |
@@ -1158,7 +1222,7 @@ context.allocator)`).
 
 Output dialect: every tabular result (SELECT, `.snapshots`, `.snapdiff`,
 `.tables`, `.stats`, `.desc`, `.dump`) renders through the single shared
-`executor.render_table` markdown printer with an `(N rows)` footer; empty
+`render.render_table` markdown printer (via `executor.render_result`) with an `(N rows)` footer; empty
 results print the header plus `(0 rows)`. Snapshot timestamps render as
 `YYYY-MM-DD HH:MM:SS` (raw micros stay in `.snapshot_debug`). Results go to
 stdout; diagnostics and errors go to stderr (the file logger) — never mixed.
