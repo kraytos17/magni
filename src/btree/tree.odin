@@ -796,23 +796,6 @@ tree_delete :: proc(t: ^Tree, key: types.Row_ID) -> Error {
 }
 
 @(require_results)
-tree_update :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Error {
-	dk := Descend_Key_Ctx {
-		key = rowid,
-	}
-
-	leaf_node := descend_to_leaf(t, descend_by_key, &dk) or_return
-	defer unpin_node(t, leaf_node)
-	if d_err := delete_from_leaf(t, &leaf_node, rowid); d_err != .None { return d_err }
-	if i_err := node_insert_leaf_cell(t, &leaf_node, rowid, values); i_err != .None {
-		return i_err
-	}
-
-	stats_row_count_set(tree_stats(t), leaf_node.id, int(leaf_node.header.cell_count))
-	return .None
-}
-
-@(require_results)
 tree_foreach :: proc(
 	t: ^Tree,
 	callback: proc(c: ^cell.Cell, user_data: rawptr) -> bool,

@@ -479,35 +479,6 @@ test_page_one_header_offset :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_tree_update :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
-	ctx := setup_tree(t, "tree_update")
-	defer teardown_tree(&ctx)
-
-	vals := []types.Value{types.value_text("hello")}
-	testing.expect(t, btree.tree_insert(&ctx.tree, 10, vals) == .None, "insert 10")
-
-	new_vals := []types.Value{types.value_text("world")}
-	testing.expect(t, btree.tree_update(&ctx.tree, 10, new_vals) == .None, "update 10")
-
-	c, err := btree.tree_find(&ctx.tree, 10, context.temp_allocator)
-	testing.expect(t, err == .None, "find updated 10")
-	val, ok := c.values[0].(string)
-	testing.expect(t, ok && val == "world", "value should be 'world'")
-}
-
-@(test)
-test_tree_update_nonexistent :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
-	ctx := setup_tree(t, "tree_update_nonexist")
-	defer teardown_tree(&ctx)
-
-	vals := []types.Value{types.value_text("a")}
-	err := btree.tree_update(&ctx.tree, 99, vals)
-	testing.expect(t, err == .Cell_Not_Found, "update nonexistent should fail")
-}
-
-@(test)
 test_tree_update_cow :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "tree_update_cow")

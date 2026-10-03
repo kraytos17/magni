@@ -485,7 +485,7 @@ Page_Header.first_freeblock → [next: u16le] [size: u16le] [...] → 0
 | `tree_insert` | `tree_insert_cow` | Insert cell, split when full. COW copies each page on path before modifying. | 1 |
 | `tree_find` | — | Descend to leaf, then page lower bound. | 1 |
 | `tree_delete` | `tree_delete_cow` | Remove cell by rowid via binary search. COW variant COWs the full path. | 1 |
-| `tree_update` | `tree_update_cow` | Lookup, then delete + re-insert in a single root-to-leaf descent. | 2 (find + mutation) |
+| `tree_update_cow` | — | Lookup, then COW delete + re-insert in a single root-to-leaf descent. | 2 (find + mutation) |
 | `tree_foreach` | — | Full iteration via cursor. | full scan |
 | `tree_vacuum` / `text_tree_vacuum` | — | Rebuild data / text trees into fresh, densely packed pages (COW-safe). Surfaced as `.vacuum` via `admin.vacuum`. | full scan |
 | `text_find_rowids` / `text_find_prefix` | — | Multi-leaf equality / prefix scans over the text index (sibling-or-carry advance). | index range |
