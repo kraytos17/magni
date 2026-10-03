@@ -5,12 +5,11 @@ build
 *.db-wal
 __pycache__
 
-# AFL++ fuzzing seeds (generated; single source of truth is the generator script)
+# AFL++ fuzzing seeds (generated; single source of truth is the generator
+# script in fuzz/generators/)
 fuzz/corpus/*
-!fuzz/corpus/gen_corpus.py
 !fuzz/corpus/promoted_seeds.py
 fuzz/corpus_exec/*
-!fuzz/corpus_exec/gen_exec_corpus.py
 !fuzz/corpus_exec/promoted_seeds.py
 
 # AFL++ runtime outputs (generated)

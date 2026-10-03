@@ -3,10 +3,10 @@ MagniDB — magni.py help
   BUILD
     magni.py build              build debug binary → build/magni
     magni.py build --release    build release binary (LTO) → build/magni_release
-    magni.py build --asan       ASan fuzz target → fuzz/fuzz_target
-    magni.py build --cov        coverage target → fuzz/fuzz_target_cov
-    magni.py build --cov --cmplog  RedQueen binary → fuzz/fuzz_target_cmplog
-    magni.py build --cov --laf     LAF-INTEL binary → fuzz/fuzz_target_laf
+    magni.py build --asan       ASan fuzz target → fuzz/build/fuzz_target
+    magni.py build --cov        coverage target → fuzz/build/fuzz_target_cov
+    magni.py build --cov --cmplog  RedQueen binary → fuzz/build/fuzz_target_cmplog
+    magni.py build --cov --laf     LAF-INTEL binary → fuzz/build/fuzz_target_laf
     magni.py build --exec         executor/storage target (coverage + ASan)
     magni.py build --check-only parse + type check (no vet)
 

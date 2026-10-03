@@ -56,11 +56,6 @@ Group :: struct {
 	rows      : [dynamic]Row_Entry,
 }
 
-Update_Op :: struct #all_or_none {
-	rowid     : types.Row_ID,
-	new_values: []types.Value,
-}
-
 Mutated_Table_Info :: struct #all_or_none {
 	name: string,
 	root: u32,

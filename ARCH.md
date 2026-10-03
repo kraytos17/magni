@@ -595,12 +595,7 @@ interface (`layout_iface.odin`), with key semantics in the
 statically-dispatched `Key_Kind` (`.Rowid` / `.Text`).
 
 `page_format_version` is a **database-wide** value stored in the database header
-(`PAGE_FORMAT_VERSION :: 3` since the B4a flip; was 2). New databases are
-created at the current version; the pager defaults to it. Files stamped with
-any other version are rejected at open with `DB_Error.Unsupported_Format`
-(clean error, never a crash) — export with `.dump` under an older binary
-and reimport to migrate. V2-stamped files are rejected the same way:
-no V2 reader remains, so old files migrate via dump/reimport only.
+(`PAGE_FORMAT_VERSION :: 3`). New databases are created at the current version; the pager defaults to it. Files stamped with any other version are rejected at open with `DB_Error.Unsupported_Format`. Export with `.dump` under an older binary and reimport to migrate. V2-stamped files are rejected the same way: no V2 reader remains, so old files migrate via dump/reimport only.
 
 #### 3f-ii. V3 Dense Page Vocabulary — `btree/layout_v3.odin`
 
@@ -638,10 +633,45 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   carry `index_root` + `index_column` (fixed `[6],[7]` wire slots, old rows
   parse); root swaps reuse the `update_schema_root_cow` closure core;
   pending maps stage both key spaces through commit/vacuum/rollback.
-  `CREATE INDEX name ON t (c)` (Phase D3: tokenizer + `Create_Index_Stmt`
+  `CREATE INDEX name ON t (c)` (tokenizer + `Create_Index_Stmt`
   + `exec_create_index` with loop backfill) publishes root+column atomically.
-  V3.0 scope: BINARY collation only,
+  DML fan-out maintains the index on every mutation path — insert,
+  pk/scan update (unchanged-column skips, NULL transitions), pk/scan
+  delete — with differential oracle tests, txn rollback coherence, and
+  autocommit/txn parity. (The dormant Direct DML paths were deleted
+  outright afterward; single-kind COW is the only write surface.)
+  Table-cache map keys are
+  heap-cloned (a temp-borrowed key dangled across per-statement temp frees
+  in-txn, silently serving stale roots). V3.0 scope: BINARY collation only,
   NULL-not-indexed, single-column text, no DROP INDEX.
+- Index vacuum: `VACUUM` rebuilds text indexes into packed pages
+  (`text_tree_vacuum`: ordered collect, greedy byte-chunked leaves and
+  levels, empty index → fresh `LEAF_TEXT` root), hooked into the per-table
+  admin loop beside data vacuum (in-txn staged roots publish first, same
+  as data). Rowids are logical, so this is space reclamation only —
+  correctness never depended on it.
+- Planner routing (Phase E, `executor/index_scan.odin`): single-table
+  SELECT filters over the indexed column route through the text index —
+  equality, canonical `LIKE 'stem%'` (single trailing `%`, no `%`/`_` in
+  the stem — exactly where `like_match` reduces to a byte-prefix test, so
+  candidates and recheck agree by construction), and literal `IN` lists
+  (TEXT members; cross-class/NULL members provably never match a TEXT
+  row). Covering `SELECT rowid` answers from the index alone (synthetic
+  single-INTEGER `rowid` column through the unchanged `finish_select`
+  tail; no user column named `rowid` may exist); wider projections fetch
+  `tree_find` per candidate and recheck the full filter, with sorted
+  candidates so LIMIT-without-ORDER-BY matches the scan path exactly. Flat
+  AND-chains route on the first usable conjunct; OR/NOT/nested groups,
+  negated, column-comparison, NULL, and subquery-IN shapes fall back to
+  the full scan (same result, one code path). Both fetch paths
+  (scalar + vector) route identically; staged in-txn roots ride the cache
+  overlay, so routing sees exactly what the scan would see. `EXPLAIN`
+  renders the decision — `PK SEEK`, `INDEX SCAN ... USING col
+  (eq|prefix|in, covering|fetch)`, `FULL SCAN` — from the same resolvers in
+  the same order, so output can never disagree with execution;
+  non-single-table statements keep the legacy echo. Reads get faster:
+  50k-row on-disk A/B (release, interleaved) shows point-eq ≥20×
+  (startup-floor-bound), prefix-fetch ~7×, 3-member IN ≥20× vs full scan.
 - Headers, pure accessors, validators, builders, and init procs are
   unit-tested in `tests/btree_v3_test.odin` (header layout, roundtrips vs
   independent endian writes, search-vs-oracle, FOR boundary, corruption

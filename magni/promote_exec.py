@@ -18,7 +18,7 @@ from .fuzz import fuzz_out_dir
 from .promote import merge_queues
 from .util import die, log
 
-GEN_EXEC_CORPUS = config.EXEC_CORPUS_DIR / "gen_exec_corpus.py"
+GEN_EXEC_CORPUS = config.GEN_EXEC_CORPUS
 EXEC_PROMOTED = config.EXEC_CORPUS_DIR / "promoted_seeds.py"
 
 

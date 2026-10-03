@@ -4,7 +4,7 @@ The corpus directory is gitignored, so this script is the single source of
 truth for seeds. It is deterministic: it clears fuzz/corpus and rewrites every
 seed. Run from the repo root:
 
-    python3 fuzz/gen_corpus.py
+    python3 fuzz/generators/gen_corpus.py
 
 Seeds are curated by grammar production plus adversarial shapes (malformed,
 unterminated, deeply nested). Deep nesting is bounded on purpose: the parser
@@ -15,11 +15,11 @@ the over-limit seed exercises that guard rather than crashing.
 import os
 import sys
 
-sys.path.insert(0, os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..")))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.normpath(os.path.join(_HERE, "..")))  # fuzz/: seedgen
+CORPUS = os.path.normpath(os.path.join(_HERE, "..", "corpus"))
+sys.path.insert(0, CORPUS)  # corpus dir: promoted_seeds
 import seedgen
-
-CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 
 HAND_SEEDS = [
     ("empty", ""),
@@ -151,6 +151,13 @@ HAND_SEEDS = [
     ("long_referenceST", 'SELECT REFERENCEST FROM t;'),
     ("insert_hex_default", 'CREATE TABLE t (a INT DEFAULT 0xFF);'),
     ("txn_bad_fk", 'CREATE TABLE products (price INT CHECK (price > 0), FOREIGN KEY (cat) REFERENCES c(idI);'),
+    ("create_index", 'CREATE INDEX i_body ON docs (body);'),
+    ("create_index_no_cols", 'CREATE INDEX i_body ON docs;'),
+    ("create_index_multi_col", 'CREATE INDEX i ON t (a, b);'),
+    ("select_rowid", "SELECT rowid FROM docs WHERE body = 'alpha';"),
+    ("select_rowid_prefix", "SELECT rowid FROM docs WHERE body LIKE 'al%';"),
+    ("select_rowid_in", "SELECT rowid FROM docs WHERE body IN ('a', 'b');"),
+    ("explain_index", "EXPLAIN SELECT rowid FROM docs WHERE body = 'x';"),
 ]
 
 from promoted_seeds import PROMOTED_SEEDS

@@ -76,6 +76,21 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 		}
 
 		st.root = updated_root
+		if table.index_root > 0 {
+			idx_tree := btree.init(database.pager, table.index_root)
+			vac_idx, vac_err := btree.text_tree_vacuum(&idx_tree)
+			if vac_err != .None {
+				return .Corrupted
+			}
+
+			updated_idx, idx_ok := schema.update_index_root_cow(&st, table.name, vac_idx)
+			if !idx_ok {
+				return .Corrupted
+			}
+
+			st.root = updated_idx
+			updated_root = updated_idx
+		}
 		new_root = updated_root
 	}
 

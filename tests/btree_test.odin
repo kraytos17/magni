@@ -3,6 +3,7 @@ package tests
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:cell"
@@ -17,7 +18,11 @@ Test_Context :: struct {
 
 setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 	context.logger.lowest_level = .Error
-	filename := fmt.tprintf("test_%s.db", name)
+	// Owned (heap) filename: tests free_all(temp) mid-run, so a temp string
+	// stashed in ctx would dangle by teardown (this left test_text_*.db
+	// behind). teardown_tree deletes it — same contract as
+	// setup_schema_env / setup_executor_env.
+	filename, _ := strings.clone(fmt.tprintf("test_%s.db", name), context.allocator)
 	if os.exists(filename) {
 		os.remove(filename)
 	}
@@ -56,6 +61,7 @@ teardown_tree :: proc(ctx: ^Test_Context) {
 	if os.exists(wal_name) {
 		os.remove(wal_name)
 	}
+	delete(ctx.filename)
 }
 
 make_large_text :: proc(allocator: mem.Allocator, size: int) -> string {

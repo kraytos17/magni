@@ -136,6 +136,25 @@ fetch_single_rows :: proc(
 		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
 			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
 		}
+		if is_covering_rowid_select(stmt, tbl.columns) {
+			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+				return fetch_covering_index(t, &tbl, plan, from_name, allocator)
+			}
+		}
+		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+			rows, f_ok := fetch_index_rows(
+				t,
+				&table_tree,
+				&tbl,
+				plan,
+				&wc,
+				single_range,
+				allocator,
+				cache,
+			)
+			if !f_ok { return nil, nil, nil, false }
+			return rows, tbl.columns, single_range, true
+		}
 	}
 
 	rows, scan_err := scan_table(

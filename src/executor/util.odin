@@ -184,7 +184,7 @@ try_pk_lookup :: proc(
 }
 
 // split_qualifier splits "t.col" into ("t", "col"); has=false when unqualified.
-@(private = "file")
+@(private)
 split_qualifier :: proc(name: string) -> (qual: string, col: string, has: bool) {
 	if i := strings.last_index_byte(name, '.'); i >= 0 {
 		return name[:i], name[i + 1:], true

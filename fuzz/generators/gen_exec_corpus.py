@@ -10,11 +10,11 @@ EXEC_PROMOTED (in promoted_seeds.py) holds fuzzer-grown finds appended by
 import os
 import sys
 
-sys.path.insert(0, os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..")))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.normpath(os.path.join(_HERE, "..")))  # fuzz/: seedgen
+CORPUS = os.path.normpath(os.path.join(_HERE, "..", "corpus_exec"))
+sys.path.insert(0, CORPUS)  # corpus dir: promoted_seeds
 import seedgen
-
-CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 
 EXEC_SEEDS = [
     ("script_ddl", """\
@@ -126,6 +126,37 @@ SELECT 0, COUNT(*) FROM g;
 SELECT MAX(nosuchcol) FROM g;
 SELECT MIN(nosuchcol) FROM g;
 SELECT COUNT(*) FROM g;
+"""),
+    ("script_text_index", """\
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);
+CREATE INDEX i_body ON docs (body);
+INSERT INTO docs VALUES (1, 'alpha', 10), (2, 'bb', 20), (3, 'alpha', 30), (4, '', 40), (5, NULL, 50);
+SELECT rowid FROM docs WHERE body = 'alpha';
+SELECT rowid FROM docs WHERE body LIKE 'al%';
+SELECT rowid FROM docs WHERE body IN ('alpha', 'bb');
+SELECT id, body, v FROM docs WHERE body = 'alpha';
+SELECT id FROM docs WHERE body LIKE 'b%' ORDER BY id DESC LIMIT 2;
+EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';
+EXPLAIN SELECT id FROM docs WHERE body LIKE 'al%';
+UPDATE docs SET v = 99 WHERE body = 'alpha';
+DELETE FROM docs WHERE body = 'bb';
+SELECT rowid FROM docs WHERE body = 'bb';
+"""),
+    ("script_admin", """\
+CREATE TABLE t (id INT PRIMARY KEY, body TEXT);
+CREATE INDEX i_body ON t (body);
+INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, NULL);
+.checkpoint
+SELECT id FROM t WHERE body = 'a';
+DELETE FROM t WHERE id = 2;
+.vacuum
+SELECT rowid FROM t WHERE body = 'a';
+SELECT rowid FROM t WHERE body = 'b';
+.expire
+.expire 0
+.expire abc
+.frobnicate
+SELECT * FROM t;
 """),
 ]
 

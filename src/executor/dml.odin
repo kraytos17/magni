@@ -178,13 +178,8 @@ exec_create_index :: proc(
 	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}
 }
 
-Mutation_Mode :: enum u8 {
-	Direct,
-	COW,
-}
-
 // Violation_Policy decides whether a constraint-violating row fails the
-// statement (Fail) or is skipped with a warning (Skip, Direct scans where
+// statement (Fail) or is skipped with a warning (Skip, scans where
 // siblings still apply).
 Violation_Policy :: enum u8 {
 	Fail,
@@ -343,7 +338,6 @@ exec_insert_impl :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
 	stmt: parser.Insert_Stmt,
-	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 	pending: ^Pending_Roots = nil,
 ) -> (
@@ -351,107 +345,54 @@ exec_insert_impl :: proc(
 	u32,
 	Mutated_Table_Info,
 ) {
-	is_direct := mode == .Direct
 	checks: []Resolved_Check
 	if len(stmt.values) > 0 {
 		rc, rc_ok := resolve_table_checks(table)
 		if !rc_ok { return false, t.root, {} }
 		checks = rc
 	}
-	if is_direct {
-		for row_values in stmt.values {
-			info, ok := prepare_insert_row(
-				table,
-				stmt.columns,
-				row_values,
-				t,
-				table.root_page,
-				checks,
-			)
-			if !ok { return false, t.root, {} }
 
-			err := btree.tree_insert(&info.table_tree, info.row_id, info.values)
-			if err != .None {
-				log.errorf("Error inserting row: %v", err)
-				return false, t.root, {}
-			}
-			if _, ok1 := fanout_insert_row(
-				t,
-				table,
-				table.index_root,
-				info.row_id,
-				info.values,
-				false,
-			); !ok1 {
-				return false, t.root, {}
-			}
-			log.infof("Inserted row %d", info.row_id)
-		}
-		return true, t.root, {}
-	} else {
-		data_root := table.root_page
-		index_root := table.index_root
-		for row_values in stmt.values {
-			info, ok := prepare_insert_row(table, stmt.columns, row_values, t, data_root, checks)
-			if !ok { return false, t.root, {} }
+	data_root := table.root_page
+	index_root := table.index_root
+	for row_values in stmt.values {
+		info, ok := prepare_insert_row(table, stmt.columns, row_values, t, data_root, checks)
+		if !ok { return false, t.root, {} }
 
-			table_tree := btree.init(t.pager, data_root)
-			new_data_root, ins_err := btree.tree_insert_cow(&table_tree, info.row_id, info.values)
-			if ins_err != .None {
-				log.errorf("Error inserting row: %v", ins_err)
-				return false, t.root, {}
-			}
-
-			data_root = new_data_root
-			index_root, ok = fanout_insert_row(
-				t,
-				table,
-				index_root,
-				info.row_id,
-				info.values,
-				true,
-			)
-			if !ok { return false, t.root, {} }
-			log.infof("Inserted row %d", info.row_id)
-		}
-
-		new_schema_root, info, ok := commit_cow_root(t, stmt.table_name, data_root, pending, cache)
-		if !ok {
-			log.error("Error: Failed to update schema root page")
+		table_tree := btree.init(t.pager, data_root)
+		new_data_root, ins_err := btree.tree_insert_cow(&table_tree, info.row_id, info.values)
+		if ins_err != .None {
+			log.errorf("Error inserting row: %v", ins_err)
 			return false, t.root, {}
 		}
-		if table.index_root > 0 {
-			st := btree.init(t.pager, new_schema_root)
-			final_root, _, iok := commit_index_cow_root(
-				&st,
-				stmt.table_name,
-				index_root,
-				pending,
-				cache,
-			)
-			if !iok {
-				log.error("Error: Failed to update index root page")
-				return false, t.root, {}
-			}
-			new_schema_root = final_root
+
+		data_root = new_data_root
+		index_root, ok = fanout_insert_row(t, table, index_root, info.row_id, info.values)
+		if !ok { return false, t.root, {} }
+		log.infof("Inserted row %d", info.row_id)
+	}
+
+	new_schema_root, info, ok := commit_cow_root(t, stmt.table_name, data_root, pending, cache)
+	if !ok {
+		log.error("Error: Failed to update schema root page")
+		return false, t.root, {}
+	}
+	if table.index_root > 0 {
+		st := btree.init(t.pager, new_schema_root)
+		final_root, _, iok := commit_index_cow_root(
+			&st,
+			stmt.table_name,
+			index_root,
+			pending,
+			cache,
+		)
+		if !iok {
+			log.error("Error: Failed to update index root page")
+			return false, t.root, {}
 		}
-		return true, new_schema_root, info
+		new_schema_root = final_root
 	}
+	return true, new_schema_root, info
 }
-
-@(private = "file")
-exec_insert :: proc(t: ^btree.Tree, stmt: parser.Insert_Stmt) -> bool {
-	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
-	if !found {
-		log.errorf("Error: Table not found: %s", stmt.table_name)
-		return false
-	}
-
-	defer schema.table_free(table, context.temp_allocator)
-	ok, _, _ := exec_insert_impl(t, table, stmt, .Direct)
-	return ok
-}
-
 // build_update_map resolves column names to indices and builds the
 // index→value mapping for an UPDATE statement.
 // Returns the map and true on success, or (nil, false) on error (already logged).
@@ -531,7 +472,6 @@ exec_update_impl :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
 	stmt: parser.Update_Stmt,
-	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 	pending: ^Pending_Roots = nil,
 ) -> (
@@ -548,7 +488,6 @@ exec_update_impl :: proc(
 		table_name = stmt.table_name,
 		update_map = update_map,
 		filt = {filter = stmt.where_clause},
-		direct = mode == .Direct,
 	}
 
 	table_tree := btree.init(t.pager, tbl.root_page)
@@ -559,8 +498,8 @@ exec_update_impl :: proc(
 }
 
 // Update_Plan captures the resolved state for an UPDATE: target table,
-// column→value map, optional filter, and write mode. Built once by
-// exec_update_impl, consumed by the pk/scan procs below. `checks` holds the
+// column→value map, and optional filter. Built once by exec_update_impl,
+// consumed by the pk/scan procs below. `checks` holds the
 // statement-resolved CHECK constraints, built lazily by apply_update on the
 // first updated row (so zero-match UPDATEs never resolve them).
 Update_Plan :: struct {
@@ -568,7 +507,6 @@ Update_Plan :: struct {
 	table_name  : string,
 	update_map  : map[int]types.Value,
 	using filt  : Mutation_Filter,
-	direct      : bool,
 	checks      : []Resolved_Check,
 	checks_built: bool,
 }
@@ -739,34 +677,14 @@ update_by_pk :: proc(
 		log.info("Updated 0 rows.")
 		return true, true, t.root, {}
 	}
-	defer cell.destroy(&c, context.temp_allocator)
 
+	defer cell.destroy(&c, context.temp_allocator)
 	new_row, had_err := apply_update(&c, plan.update_map, plan, .Fail)
 	if had_err && new_row == nil {
 		return true, false, t.root, {}
 	}
 	if !had_err && new_row == nil {
 		log.info("Updated 0 rows.")
-		return true, true, t.root, {}
-	}
-	if plan.direct {
-		if u_err := btree.tree_update(table_tree, target_rowid, new_row); u_err != .None {
-			log.error("Error: Failed to update row")
-			return true, false, t.root, {}
-		}
-		if _, ok1 := fanout_update_row(
-			t,
-			plan.tbl,
-			plan.tbl.index_root,
-			target_rowid,
-			c.values,
-			new_row,
-			false,
-		); !ok1 {
-			return true, false, t.root, {}
-		}
-
-		log.info("Updated 1 row.")
 		return true, true, t.root, {}
 	}
 
@@ -783,7 +701,6 @@ update_by_pk :: proc(
 		target_rowid,
 		c.values,
 		new_row,
-		true,
 	)
 	if !iok { return true, false, t.root, {} }
 
@@ -824,65 +741,7 @@ update_by_scan :: proc(
 	defer btree.cursor_destroy(&cursor)
 
 	resolve_mutation_filter(&plan.filt, plan.tbl.columns)
-	if plan.direct {
-		return update_scan_direct(t, plan, table_tree, &cursor)
-	}
 	return update_scan_cow(t, plan, table_tree, &cursor, pending, cache)
-}
-
-// update_scan_direct collects matching ops, then applies them in place.
-@(private = "file")
-update_scan_direct :: proc(
-	t: ^btree.Tree,
-	plan: ^Update_Plan,
-	table_tree: ^btree.Tree,
-	cursor: ^btree.Cursor,
-) -> (
-	bool,
-	u32,
-	Mutated_Table_Info,
-) {
-	ops := make([dynamic]Update_Op, context.temp_allocator)
-	for cursor.is_valid {
-		c, get_err := btree.cursor_get_cell(cursor, context.temp_allocator)
-		if get_err != .None {
-			cell.destroy(&c, context.temp_allocator)
-			btree.cursor_advance(cursor)
-			continue
-		}
-
-		should_update := eval_mutation_filter(&plan.filt, c.values)
-		if should_update {
-			new_row, had_err := apply_update(&c, plan.update_map, plan, .Skip)
-			if !had_err && new_row != nil {
-				append(&ops, Update_Op{c.rowid, new_row})
-			}
-		}
-
-		cell.destroy(&c, context.temp_allocator)
-		btree.cursor_advance(cursor)
-	}
-
-	count := 0
-	for op in ops {
-		if upd_err := btree.tree_update(table_tree, op.rowid, op.new_values); upd_err == .None {
-			count += 1
-			if _, iok := fanout_update_rowid(
-				t,
-				table_tree,
-				plan.tbl,
-				plan.tbl.index_root,
-				op.rowid,
-				op.new_values,
-				false,
-			); !iok {
-				return false, t.root, {}
-			}
-		}
-	}
-
-	log.infof("Updated %d rows.", count)
-	return true, t.root, {}
 }
 
 // update_scan_cow applies COW updates as the cursor advances.
@@ -924,7 +783,6 @@ update_scan_cow :: proc(
 						c.rowid,
 						c.values,
 						new_row,
-						true,
 					)
 					if !iok {
 						cell.destroy(&c, context.temp_allocator)
@@ -970,26 +828,11 @@ update_scan_cow :: proc(
 	log.info("Updated 0 rows.")
 	return true, t.root, {}
 }
-
-@(private = "file")
-exec_update :: proc(t: ^btree.Tree, stmt: parser.Update_Stmt) -> bool {
-	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
-	if !found {
-		log.errorf("Error: Table not found: %s", stmt.table_name)
-		return false
-	}
-
-	defer schema.table_free(table, context.temp_allocator)
-	ok, _, _ := exec_update_impl(t, table, stmt, .Direct)
-	return ok
-}
-
 @(private)
 exec_delete_impl :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
 	stmt: parser.Delete_Stmt,
-	mode: Mutation_Mode,
 	cache: ^schema.Table_Cache = nil,
 	pending: ^Pending_Roots = nil,
 ) -> (
@@ -1001,7 +844,6 @@ exec_delete_impl :: proc(
 		tbl = table,
 		table_name = stmt.table_name,
 		filt = {filter = stmt.where_clause},
-		direct = mode == .Direct,
 	}
 
 	table_tree := btree.init(t.pager, table.root_page)
@@ -1013,13 +855,12 @@ exec_delete_impl :: proc(
 	return apply_deletes(t, &plan, &table_tree, targets[:], pending, cache)
 }
 
-// Delete_Plan captures the resolved state for a DELETE: target table,
-// optional filter, and write mode. Built once by exec_delete_impl.
+// Delete_Plan captures the resolved state for a DELETE: target table
+// and optional filter. Built once by exec_delete_impl.
 Delete_Plan :: struct {
 	tbl       : types.Table,
 	table_name: string,
 	using filt: Mutation_Filter,
-	direct    : bool,
 }
 
 // delete_by_pk handles the PK fast path. Returns handled=false to fall
@@ -1039,25 +880,6 @@ delete_by_pk :: proc(
 ) {
 	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
 	if !pk_ok { return false, false, 0, {} }
-	if plan.direct {
-		if btree.tree_delete(table_tree, target_rowid) == .None {
-			log.info("Deleted 1 row.")
-		} else {
-			log.info("Deleted 0 rows.")
-		}
-		if _, ok1 := fanout_delete_rowid(
-			t,
-			table_tree,
-			plan.tbl,
-			plan.tbl.index_root,
-			target_rowid,
-			false,
-		); !ok1 {
-			return true, false, t.root, {}
-		}
-		return true, true, t.root, {}
-	}
-
 	nroot, del_err := btree.tree_delete_cow(table_tree, target_rowid)
 	if del_err == .None {
 		index_root, iok := fanout_delete_rowid(
@@ -1066,7 +888,6 @@ delete_by_pk :: proc(
 			plan.tbl,
 			plan.tbl.index_root,
 			target_rowid,
-			true,
 		)
 		if !iok { return true, false, t.root, {} }
 
@@ -1102,9 +923,8 @@ collect_delete_targets :: proc(
 	targets := make([dynamic]types.Row_ID, context.temp_allocator)
 	cursor, err := btree.cursor_start(table_tree, context.temp_allocator)
 	if err != .None { return targets }
-	defer btree.cursor_destroy(&cursor)
 
-	// Resolve the filter once, not per row.
+	defer btree.cursor_destroy(&cursor)
 	resolve_mutation_filter(&plan.filt, plan.tbl.columns)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
@@ -1125,7 +945,7 @@ collect_delete_targets :: proc(
 	return targets
 }
 
-// apply_deletes removes the collected targets, direct or COW.
+// apply_deletes removes the collected targets copy-on-write.
 @(private = "file")
 apply_deletes :: proc(
 	t: ^btree.Tree,
@@ -1139,28 +959,6 @@ apply_deletes :: proc(
 	u32,
 	Mutated_Table_Info,
 ) {
-	if plan.direct {
-		count := 0
-		for rowid in targets {
-			if btree.tree_delete(table_tree, rowid) == .None {
-				count += 1
-			}
-			if _, iok := fanout_delete_rowid(
-				t,
-				table_tree,
-				plan.tbl,
-				plan.tbl.index_root,
-				rowid,
-				false,
-			); !iok {
-				return false, t.root, {}
-			}
-		}
-
-		log.infof("Deleted %d rows.", count)
-		return true, t.root, {}
-	}
-
 	current_root := plan.tbl.root_page
 	index_root := plan.tbl.index_root
 	count := 0
@@ -1172,14 +970,7 @@ apply_deletes :: proc(
 			count += 1
 		}
 
-		new_index_root, iok := fanout_delete_rowid(
-			t,
-			table_tree,
-			plan.tbl,
-			index_root,
-			rowid,
-			true,
-		)
+		new_index_root, iok := fanout_delete_rowid(t, table_tree, plan.tbl, index_root, rowid)
 		if !iok { return false, t.root, {} }
 		index_root = new_index_root
 	}
@@ -1212,20 +1003,6 @@ apply_deletes :: proc(
 	log.info("Deleted 0 rows.")
 	return true, t.root, {}
 }
-
-@(private = "file")
-exec_delete :: proc(t: ^btree.Tree, stmt: parser.Delete_Stmt) -> bool {
-	table, found := schema.get_table(t, stmt.table_name, context.temp_allocator)
-	if !found {
-		log.errorf("Error: Table not found: %s", stmt.table_name)
-		return false
-	}
-
-	defer schema.table_free(table, context.temp_allocator)
-	ok, _, _ := exec_delete_impl(t, table, stmt, .Direct)
-	return ok
-}
-
 @(private)
 exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated_Table_Info) {
 	if !schema.table_exists(t, stmt.table_name) {
@@ -1257,7 +1034,7 @@ exec_insert_cow :: proc(
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	return exec_insert_impl(t, table^, stmt, .COW, cache, pending)
+	return exec_insert_impl(t, table^, stmt, cache, pending)
 }
 
 @(private)
@@ -1276,7 +1053,7 @@ exec_update_cow :: proc(
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	return exec_update_impl(t, table^, stmt, .COW, cache, pending)
+	return exec_update_impl(t, table^, stmt, cache, pending)
 }
 
 @(private)
@@ -1295,22 +1072,22 @@ exec_delete_cow :: proc(
 		log.errorf("Error: Table not found: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	return exec_delete_impl(t, table^, stmt, .COW, cache, pending)
+	return exec_delete_impl(t, table^, stmt, cache, pending)
 }
 
 // One entry point per mutation kind, each threading the index root the
-// same way the data root threads beside it (COW) or touching nothing
-// (Direct — in-place writes never change page ids). Tables without an
+// same way the data root threads beside it. Tables without an
 // index return early on `index_root == 0`: one branch, negligible cost
 // for the unindexed hot path. Non-TEXT values (incl. NULL) skip — the
 // type assertion is the whole gate, same as backfill.
 //
 // Old values ride in explicitly (pk sites hold them; scan sites refetch
-// before mutating — never after, since Direct mutates in place). All
-// borrows (old row texts, new values) are consumed synchronously: COW
-// never mutates the pages they borrow, and index writes never touch
-// data pages. Missing index entries on delete tolerate-and-log (mirrors
-// delete_by_pk's "Deleted 0 rows" stance); anything else fails loudly.
+// from the pre-mutation tree — COW never mutates it, so the old row is
+// intact). All borrows (old row texts, new values) are consumed
+// synchronously: COW never mutates the pages they borrow, and index
+// writes never touch data pages. Missing index entries on delete
+// tolerate-and-log (mirrors delete_by_pk's "Deleted 0 rows" stance);
+// anything else fails loudly.
 
 // index_col_text extracts the indexed TEXT value of a row: ("", false)
 // when unindexed, column-missing, non-TEXT, or NULL. Callers treat false
@@ -1336,14 +1113,13 @@ fanout_insert_row :: proc(
 	index_root: u32,
 	rowid: types.Row_ID,
 	values: []types.Value,
-	cow: bool,
 ) -> (
 	u32,
 	bool,
 ) {
 	text, ok := index_col_text(table, values)
 	if !ok { return index_root, true }
-	return fanout_insert_text(t, table, index_root, text, rowid, cow)
+	return fanout_insert_text(t, table, index_root, text, rowid)
 }
 
 // fanout_delete_text removes one entry, tolerating absence (mirrors
@@ -1356,26 +1132,13 @@ fanout_delete_text :: proc(
 	index_root: u32,
 	text: string,
 	rowid: types.Row_ID,
-	cow: bool,
 ) -> (
 	u32,
 	bool,
 ) {
 	idx_tree := btree.init(t.pager, index_root)
-	if cow {
-		new_root, del_err := btree.text_delete_cow(&idx_tree, transmute([]u8)text, rowid)
-		if del_err != .None {
-			if del_err == .Cell_Not_Found {
-				log.infof("Index entry already absent for row %d.", rowid)
-				return index_root, true
-			}
-
-			log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
-			return index_root, false
-		}
-		return new_root, true
-	}
-	if del_err := btree.text_delete(&idx_tree, transmute([]u8)text, rowid); del_err != .None {
+	new_root, del_err := btree.text_delete_cow(&idx_tree, transmute([]u8)text, rowid)
+	if del_err != .None {
 		if del_err == .Cell_Not_Found {
 			log.infof("Index entry already absent for row %d.", rowid)
 			return index_root, true
@@ -1384,7 +1147,7 @@ fanout_delete_text :: proc(
 		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
 		return index_root, false
 	}
-	return index_root, true
+	return new_root, true
 }
 
 // fanout_delete_rowid removes one row's index entry, looked up by rowid.
@@ -1397,7 +1160,6 @@ fanout_delete_rowid :: proc(
 	table: types.Table,
 	index_root: u32,
 	rowid: types.Row_ID,
-	cow: bool,
 ) -> (
 	u32,
 	bool,
@@ -1412,7 +1174,7 @@ fanout_delete_rowid :: proc(
 	defer cell.destroy(&old, context.temp_allocator)
 	text, ok := index_col_text(table, old.values)
 	if !ok { return index_root, true }
-	return fanout_delete_text(t, table, index_root, text, rowid, cow)
+	return fanout_delete_text(t, table, index_root, text, rowid)
 }
 
 // fanout_update_row maintains the index across one UPDATE from explicit
@@ -1427,7 +1189,6 @@ fanout_update_row :: proc(
 	rowid: types.Row_ID,
 	old_values: []types.Value,
 	new_values: []types.Value,
-	cow: bool,
 ) -> (
 	u32,
 	bool,
@@ -1440,12 +1201,12 @@ fanout_update_row :: proc(
 
 	cur := index_root
 	if old_ok {
-		nr, ok := fanout_delete_text(t, table, cur, old_text, rowid, cow)
+		nr, ok := fanout_delete_text(t, table, cur, old_text, rowid)
 		if !ok { return index_root, false }
 		cur = nr
 	}
 	if new_ok {
-		nr, ok := fanout_insert_text(t, table, cur, new_text, rowid, cow)
+		nr, ok := fanout_insert_text(t, table, cur, new_text, rowid)
 		if !ok { return index_root, false }
 		cur = nr
 	}
@@ -1453,8 +1214,7 @@ fanout_update_row :: proc(
 }
 
 // fanout_update_rowid is the scan-path entry: re-fetches the old row
-// (BEFORE the caller mutates — Direct writes in place), then delegates.
-// A vanished old row fails loudly (the update just proved it present).
+// from the pre-mutation tree (COW never mutates it), then delegates.
 @(private = "file")
 fanout_update_rowid :: proc(
 	t: ^btree.Tree,
@@ -1463,7 +1223,6 @@ fanout_update_rowid :: proc(
 	index_root: u32,
 	rowid: types.Row_ID,
 	new_values: []types.Value,
-	cow: bool,
 ) -> (
 	u32,
 	bool,
@@ -1476,7 +1235,7 @@ fanout_update_rowid :: proc(
 	}
 
 	defer cell.destroy(&old, context.temp_allocator)
-	return fanout_update_row(t, table, index_root, rowid, old.values, new_values, cow)
+	return fanout_update_row(t, table, index_root, rowid, old.values, new_values)
 }
 
 // fanout_insert_text inserts one index entry by explicit text (the update
@@ -1489,23 +1248,15 @@ fanout_insert_text :: proc(
 	index_root: u32,
 	text: string,
 	rowid: types.Row_ID,
-	cow: bool,
 ) -> (
 	u32,
 	bool,
 ) {
 	idx_tree := btree.init(t.pager, index_root)
-	if cow {
-		new_root, ins_err := btree.text_insert_cow(&idx_tree, transmute([]u8)text, rowid)
-		if ins_err != .None {
-			log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
-			return index_root, false
-		}
-		return new_root, true
-	}
-	if ins_err := btree.text_insert(&idx_tree, transmute([]u8)text, rowid); ins_err != .None {
+	new_root, ins_err := btree.text_insert_cow(&idx_tree, transmute([]u8)text, rowid)
+	if ins_err != .None {
 		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
 		return index_root, false
 	}
-	return index_root, true
+	return new_root, true
 }

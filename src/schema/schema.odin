@@ -210,7 +210,8 @@ Table_Cache :: struct {
 // clear_table_cache frees every cached table entry; caller must hold cache.mu.
 @(private = "file")
 clear_table_cache :: proc(cache: ^Table_Cache) {
-	for _, tbl in cache.tables {
+	for k, tbl in cache.tables {
+		delete(k, cache.allocator)
 		table_free(tbl^, cache.allocator)
 		free(tbl, cache.allocator)
 	}
@@ -286,7 +287,7 @@ find_table_cached :: proc(
 
 	tbl := new(types.Table, cache.allocator)
 	tbl^ = table
-	cache.tables[table_name] = tbl
+	cache.tables[strings.clone(table_name, cache.allocator)] = tbl
 	return tbl, true
 }
 

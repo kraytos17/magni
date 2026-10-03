@@ -349,6 +349,35 @@ fetch_single_rows_vec :: proc(
 			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
 			return
 		}
+		if is_covering_rowid_select(stmt, tbl.columns) {
+			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+				crows, ccols, cranges, cok := fetch_covering_index(
+					t,
+					&tbl,
+					plan,
+					from_name,
+					allocator,
+				)
+
+				rows, cols, ranges, projected, ok = crows, ccols, cranges, false, cok
+				return
+			}
+		}
+		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+			frows, f_ok := fetch_index_rows(
+				t,
+				&table_tree,
+				&tbl,
+				plan,
+				&wc,
+				single_range,
+				allocator,
+				cache,
+			)
+
+			rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
+			return
+		}
 	}
 
 	vrows, out_cols, vproj, scan_err := scan_table_vec(

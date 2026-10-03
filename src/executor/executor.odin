@@ -1,6 +1,5 @@
 package executor
 
-import "core:strings"
 import "src:btree"
 import "src:parser"
 import "src:schema"
@@ -69,9 +68,9 @@ execute :: proc(
 		return ok, new_root, mutated
 	case parser.Explain_Stmt:
 		if out != nil {
-			sql := strings.trim_space(s.sql)
+			plan_text := explain_plan_text(schema_tree, s, cache)
 			vals := make([]types.Value, 1, context.temp_allocator)
-			vals[0] = types.value_text(sql)
+			vals[0] = types.value_text(plan_text)
 			rows := make([]Row_Entry, 1, context.temp_allocator)
 			rows[0] = Row_Entry {
 				rowid  = 1,

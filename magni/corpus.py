@@ -87,7 +87,7 @@ def parse_afl_metadata(filename: str) -> str:
 def corpus_generate(exec_scripts: bool = False) -> None:
     """Regenerate seeds (parser corpus) or exec scripts (with exec_scripts)."""
     if exec_scripts:
-        gen_exec = config.EXEC_CORPUS_DIR / "gen_exec_corpus.py"
+        gen_exec = config.GEN_EXEC_CORPUS
         run([sys.executable, str(gen_exec)])
         pycache = config.EXEC_CORPUS_DIR / "__pycache__"
         if pycache.exists():

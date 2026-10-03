@@ -565,6 +565,9 @@ test_lb_backspace_cursor :: proc(t: ^testing.T) {
 test_history_path_clone :: proc(t: ^testing.T) {
 	pid := posix.getpid()
 	tmp_path := fmt.tprintf("/tmp/magni_test_hist_clone_%d", pid)
+	// Remove runs AFTER history_destroy (LIFO): destroy saves entries back
+	// to path, so removing first would resurrect the file.
+	defer os.remove(tmp_path)
 
 	h: linedit.History
 	defer linedit.history_destroy(&h)
@@ -576,7 +579,6 @@ test_history_path_clone :: proc(t: ^testing.T) {
 	linedit.history_load(&h, tmp_path)
 	testing.expect_value(t, linedit.history_len(&h), 1)
 	testing.expect_value(t, linedit.history_get(&h, 0), "SELECT X")
-	defer os.remove(tmp_path)
 }
 
 @(test)

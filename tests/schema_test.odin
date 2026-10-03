@@ -469,11 +469,7 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	d := setup_db(t, "index_root")
 	defer teardown_db(d, "index_root")
 
-	testing.expect(
-		t,
-		db.execute(d, "CREATE TABLE docs (id INT, body TEXT);") == .None,
-		"create",
-	)
+	testing.expect(t, db.execute(d, "CREATE TABLE docs (id INT, body TEXT);") == .None, "create")
 
 	st := db.Schema_Tree(d)
 	new_schema_root, ok := schema.update_index_root_cow(&st, "docs", 99)

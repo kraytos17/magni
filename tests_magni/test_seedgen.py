@@ -77,6 +77,22 @@ class TestAppendToPromoted(unittest.TestCase):
             self.assertEqual(ns["EXEC_PROMOTED"],
                              [("promoted_0001", b"SELECT 'a; b';")])
 
+    def test_generator_layout(self):
+        # Generators live in fuzz/generators/ (never among the seeds they
+        # write); corpus dirs hold only seed files + promoted_seeds.py.
+        # Fuzz binaries build into fuzz/build/.
+        from magni import config
+        self.assertTrue(config.GEN_CORPUS.is_file())
+        self.assertTrue(config.GEN_EXEC_CORPUS.is_file())
+        self.assertEqual(config.GEN_CORPUS.parent, config.GENERATORS_DIR)
+        for corpus in (config.CORPUS_DIR, config.EXEC_CORPUS_DIR):
+            pys = sorted(f.name for f in corpus.iterdir()
+                         if f.is_file() and f.suffix == ".py")
+            self.assertEqual(pys, ["promoted_seeds.py"])
+        for target in (config.FUZZ_TARGET, config.FUZZ_TARGET_COV,
+                       config.FUZZ_EXEC_TARGET):
+            self.assertEqual(target.parent, config.FUZZ_BUILD_DIR)
+
 
 if __name__ == "__main__":
     unittest.main()

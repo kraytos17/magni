@@ -1,12 +1,12 @@
 // Phase C1 tests: text leaf layout, builders, search-vs-oracle, and
 // fail-closed corruption. Buffer-level only (no DB): pages are raw PAGE_SIZE
-// buffers, mirroring tests/btree_v3_test.odin. No dispatcher or writer
-// coverage — layout_for_page refusal is pinned until C2 wires it.
+// buffers, mirroring tests/btree_v3_test.odin.
 package tests
 
 import "core:encoding/endian"
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:cell"
@@ -105,7 +105,11 @@ test_text_dispatch_resolves :: proc(t: ^testing.T) {
 	h := btree.get_header(buf, 2)
 	testing.expect(t, h != nil, "header readable")
 	if h == nil { return }
-	n := btree.Node{id = 2, data = buf, header = h}
+	n := btree.Node {
+		id     = 2,
+		data   = buf,
+		header = h,
+	}
 	testing.expect(t, btree.is_leaf(n), "text leaf is a leaf")
 }
 
@@ -118,7 +122,11 @@ test_text_table_ops :: proc(t: ^testing.T) {
 	texts := [][]u8{{'a', 'p', 'p', 'l', 'e'}, {'a', 'p', 'p', 'l', 'e', 't'}}
 	rids := []types.Row_ID{2, 5}
 	page := make([]u8, types.PAGE_SIZE, context.temp_allocator)
-	testing.expect(t, btree.text_build_from_sorted(page, 2, texts, rids) == .None, "build succeeds")
+	testing.expect(
+		t,
+		btree.text_build_from_sorted(page, 2, texts, rids) == .None,
+		"build succeeds",
+	)
 	pid := WT(2)
 	layout, kind, l_err := btree.layout_for_page(page, pid)
 	testing.expect(t, l_err == .None, "text page resolves")
@@ -351,11 +359,7 @@ test_text_exact_prefix_rule :: proc(t: ^testing.T) {
 		[][]u8{{'x', 'c'}, {'x', 'd'}},
 		[]types.Row_ID{1, 2},
 	)
-	testing.expect(
-		t,
-		btree.text_validate_leaf(bad, WT(2)) == .None,
-		"short prefix accepts",
-	)
+	testing.expect(t, btree.text_validate_leaf(bad, WT(2)) == .None, "short prefix accepts")
 
 	good := text_build_raw(t, 2, []u8{'a', 'b'}, [][]u8{{'c'}, {'d'}}, []types.Row_ID{1, 2})
 	testing.expect(t, btree.text_validate_leaf(good, WT(2)) == .None, "exact accepts")
@@ -489,7 +493,11 @@ test_text_interior_header_layout :: proc(t: ^testing.T) {
 	if r_err != .None { return }
 	testing.expect_value(t, kind, btree.Key_Kind.Text)
 	testing.expect(t, layout.vtable != nil, "vtable never nil")
-	n := btree.Node{id = 2, data = buf, header = h}
+	n := btree.Node {
+		id     = 2,
+		data   = buf,
+		header = h,
+	}
 	testing.expect(t, !btree.is_leaf(n), "text interior is interior")
 
 	// Page-1 offset + short buffer.
@@ -530,19 +538,11 @@ test_text_interior_build_roundtrip :: proc(t: ^testing.T) {
 	for i in 0 ..< 3 {
 		sep, s_err := btree.text_interior_sep_at(buf, WT(2), i)
 		testing.expect(t, s_err == .None, "sep reads")
-		testing.expect(
-			t,
-			cell.text_index_compare(sep, keys[i]) == 0,
-			"separator round-trips",
-		)
+		testing.expect(t, cell.text_index_compare(sep, keys[i]) == 0, "separator round-trips")
 	}
 	_, sep_oob := btree.text_interior_sep_at(buf, WT(2), 3)
 	testing.expect(t, sep_oob == .Cell_Not_Found, "sep past end fails")
-	testing.expect(
-		t,
-		btree.text_validate_interior(buf, WT(2)) == .None,
-		"build validates",
-	)
+	testing.expect(t, btree.text_validate_interior(buf, WT(2)) == .None, "build validates")
 
 	// Contract violations fail closed with the page untouched.
 	bad_n := make([]u8, types.PAGE_SIZE, context.temp_allocator)
@@ -900,19 +900,15 @@ test_text_boundary_routing :: proc(t: ^testing.T) {
 		defer pager.unpin_page(ctx.pager, pg.page_num)
 		testing.expect(
 			t,
-			btree.text_build_from_sorted(pg.data, btree.Page_Id(pg.page_num), texts, rids) == .None,
+			btree.text_build_from_sorted(pg.data, btree.Page_Id(pg.page_num), texts, rids) ==
+			.None,
 			"leaf builds",
 		)
 		pager.mark_dirty(ctx.pager, pg.page_num)
 		return pg.page_num
 	}
 
-	left := mk_leaf(
-		t,
-		&ctx,
-		[][]u8{{'a'}, {'l'}, {'m'}},
-		[]types.Row_ID{1, 2, 4},
-	)
+	left := mk_leaf(t, &ctx, [][]u8{{'a'}, {'l'}, {'m'}}, []types.Row_ID{1, 2, 4})
 	right := mk_leaf(t, &ctx, [][]u8{{'m'}, {'z'}}, []types.Row_ID{6, 7})
 	testing.expect(t, left != 0 && right != 0, "leaves allocated")
 	if left == 0 || right == 0 { return }
@@ -1028,7 +1024,13 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	defer pager.unpin_page(ctx.pager, ipg.page_num)
 	testing.expect(
 		t,
-		btree.text_interior_build_from_sorted(ipg.data, btree.Page_Id(ipg.page_num), seps, children) == .None,
+		btree.text_interior_build_from_sorted(
+			ipg.data,
+			btree.Page_Id(ipg.page_num),
+			seps,
+			children,
+		) ==
+		.None,
 		"full interior builds",
 	)
 	pager.mark_dirty(ctx.pager, ipg.page_num)
@@ -1038,7 +1040,11 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	ihdr := btree.get_header(ipg.data, ipg.page_num)
 	testing.expect(t, ihdr != nil, "interior header readable")
 	if ihdr == nil { return }
-	node := btree.Node{id = ipg.page_num, data = ipg.data, header = ihdr}
+	node := btree.Node {
+		id     = ipg.page_num,
+		data   = ipg.data,
+		header = ihdr,
+	}
 
 	// Split halves must be loadable: the overflow path recounts through
 	// them (count_recursive), so they start as empty text leaves.
@@ -1060,7 +1066,14 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 		right_page = rp.page_num,
 		split_key  = nb[:nn],
 	}
-	res, ab_err := btree.text_absorb_child_split(&ctx.tree, &node, &child_result, false, 75, ipg.page_num)
+	res, ab_err := btree.text_absorb_child_split(
+		&ctx.tree,
+		&node,
+		&child_result,
+		false,
+		75,
+		ipg.page_num,
+	)
 	testing.expect(t, ab_err == .None, "absorb succeeds")
 	testing.expect(t, res.did_split, "full interior overflows into split")
 	if !res.did_split { return }
@@ -1113,7 +1126,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 // for C3b chain tests (D wires real index trees through the catalog).
 setup_text_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 	context.logger.lowest_level = .Error
-	filename := fmt.tprintf("test_text_%s.db", name)
+	// Owned filename (see setup_tree): temp strings dangle across the
+	// test's own free_all calls; teardown_tree owns and deletes this.
+	filename, _ := strings.clone(fmt.tprintf("test_text_%s.db", name), context.allocator)
 	if os.exists(filename) {
 		os.remove(filename)
 	}
@@ -1380,4 +1395,149 @@ test_text_delete_dup_texts :: proc(t: ^testing.T) {
 		testing.expect_value(t, found[i], want[i])
 	}
 	free_all(context.temp_allocator)
+}
+
+@(test)
+test_text_insert_direct :: proc(t: ^testing.T) {
+	// Non-COW entry: 100 sequential inserts in place (root id stable),
+	// every key found with its exact rowid. Covers text_insert, the only
+	// non-COW text writer (dml Direct fan-out is dormant, but the entry
+	// itself is live API and must not rot).
+	context.logger.lowest_level = .Error
+	ctx := setup_text_tree(t, "insertdirect")
+	defer teardown_tree(&ctx)
+
+	N := 100
+	for i in 1 ..= N {
+		free_all(context.temp_allocator)
+		key := fmt.tprintf("dkey-%04d", i)
+		testing.expect(
+			t,
+			btree.text_insert(&ctx.tree, transmute([]u8)key, types.Row_ID(i64(i))) == .None,
+			"direct insert succeeds",
+		)
+	}
+	free_all(context.temp_allocator)
+
+	cnt, c_err := btree.tree_count_rows(&ctx.tree)
+	testing.expect(t, c_err == .None, "count succeeds")
+	testing.expect_value(t, cnt, N)
+	for i in 1 ..= N {
+		free_all(context.temp_allocator)
+		key := fmt.tprintf("dkey-%04d", i)
+		found, f_err := btree.text_find_rowids(&ctx.tree, ctx.tree.root, transmute([]u8)key)
+		testing.expect(t, f_err == .None, "find succeeds")
+		testing.expect(t, len(found) == 1, "unique key finds one rowid")
+		if len(found) == 1 {
+			testing.expect_value(t, found[0], types.Row_ID(i64(i)))
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
+test_text_find_prefix_vs_oracle :: proc(t: ^testing.T) {
+	// Prefix scan oracle: 150 padded "alpha%03d" texts (multi-leaf by
+	// volume) plus boundary neighbors. Every prefix query matches an
+	// independent linear filter over the inserted pairs, in (text,rowid)
+	// order — the index's own sort order.
+	context.logger.lowest_level = .Error
+	ctx := setup_text_tree(t, "prefixscan")
+	defer teardown_tree(&ctx)
+
+	inserted_texts := make([dynamic]string, 0, 160, context.allocator)
+	defer {
+		for s in inserted_texts { delete(s, context.allocator) }
+		delete(inserted_texts)
+	}
+	inserted_rids := make([dynamic]i64, 0, 160, context.allocator)
+	defer delete(inserted_rids)
+	next_rid := i64(1)
+	insert_one :: proc(t: ^testing.T, ctx: ^Test_Context, s: string, rid: i64) -> bool {
+		free_all(context.temp_allocator)
+		new_root, ins_err := btree.text_insert_cow(&ctx.tree, transmute([]u8)s, types.Row_ID(rid))
+		if ins_err != .None {
+			testing.expect(t, false, "insert succeeds")
+			return false
+		}
+		ctx.tree.root = new_root
+		return true
+	}
+	for i in 1 ..= 150 {
+		free_all(context.temp_allocator)
+		s := fmt.tprintf("alpha%03d", i)
+		if !insert_one(t, &ctx, s, next_rid) { return }
+		append(&inserted_texts, strings.clone(s, context.allocator))
+		append(&inserted_rids, next_rid)
+		next_rid += 1
+	}
+	extra := []string{"alpha", "alphabet", "alpine", "beta", "b", "", "alph"}
+	for s in extra {
+		if !insert_one(t, &ctx, s, next_rid) { return }
+		append(&inserted_texts, strings.clone(s, context.allocator))
+		append(&inserted_rids, next_rid)
+		next_rid += 1
+	}
+	free_all(context.temp_allocator)
+
+	has_prefix :: proc(s, pre: string) -> bool {
+		if len(s) < len(pre) { return false }
+		return s[:len(pre)] == pre
+	}
+	pres := []string{"alpha", "alph", "alpha1", "alpha150", "b", "beta", "z", "alphabetical"}
+	for pre in pres {
+		free_all(context.temp_allocator)
+		// Independent oracle: filter + insertion-sort by (text,rowid).
+		want_t := make([dynamic]string, 0, 8, context.temp_allocator)
+		want_r := make([dynamic]i64, 0, 8, context.temp_allocator)
+		for i in 0 ..< len(inserted_texts) {
+			if has_prefix(inserted_texts[i], pre) {
+				append(&want_t, inserted_texts[i])
+				append(&want_r, inserted_rids[i])
+			}
+		}
+		for i in 1 ..< len(want_t) {
+			for j := i; j > 0; j -= 1 {
+				if want_t[j] < want_t[j - 1] ||
+				   (want_t[j] == want_t[j - 1] && want_r[j] < want_r[j - 1]) {
+					want_t[j], want_t[j - 1] = want_t[j - 1], want_t[j]
+					want_r[j], want_r[j - 1] = want_r[j - 1], want_r[j]
+				} else {
+					break
+				}
+			}
+		}
+
+		got, g_err := btree.text_find_prefix(&ctx.tree, ctx.tree.root, transmute([]u8)pre)
+		testing.expect(t, g_err == .None, "prefix find succeeds")
+		if g_err != .None { continue }
+		testing.expectf(
+			t,
+			len(got) == len(want_r),
+			"prefix %q: got %d rowids, want %d",
+			pre,
+			len(got),
+			len(want_r),
+		)
+		for i in 0 ..< min(len(got), len(want_r)) {
+			testing.expectf(
+				t,
+				got[i] == types.Row_ID(want_r[i]),
+				"prefix %q [%d]: got %d, want %d",
+				pre,
+				i,
+				i64(got[i]),
+				want_r[i],
+			)
+		}
+	}
+
+	// Empty prefix matches everything only by router contract — the btree
+	// honors it literally (full ordered scan), proving no hidden guard.
+	free_all(context.temp_allocator)
+	all, a_err := btree.text_find_prefix(&ctx.tree, ctx.tree.root, []u8{})
+	testing.expect(t, a_err == .None, "empty prefix succeeds")
+	if a_err == .None {
+		testing.expect_value(t, len(all), len(inserted_texts))
+	}
 }

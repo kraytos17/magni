@@ -3,13 +3,16 @@ package tests
 import "core:container/bit_array"
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "src:pager"
 import "src:types"
 
 create_test_pager_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
 	context.logger.lowest_level = .Error
-	filename := fmt.tprintf("test_pager_%s.db", test_name)
+	// Owned filename (see setup_tree): returned across the test body, where
+	// free_all(temp) would dangle a temp string. destroy owns the delete.
+	filename, _ := strings.clone(fmt.tprintf("test_pager_%s.db", test_name), context.allocator)
 	if os.exists(filename) {
 		os.remove(filename)
 	}
@@ -35,6 +38,7 @@ destroy_test_pager_env :: proc(p: ^pager.Pager, filename: string) {
 	if os.exists(wal_name) {
 		os.remove(wal_name)
 	}
+	delete(filename)
 }
 
 @(test)
@@ -70,8 +74,6 @@ test_pager_allocate_page :: proc(t: ^testing.T) {
 test_pager_write_and_flush :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "write_flush")
-	defer os.remove(file)
-	defer os.remove(fmt.tprintf("%s-wal", file))
 
 	page, _ := pager.allocate_page(p)
 	test_data := "Hello, MagniDB!"
@@ -83,7 +85,7 @@ test_pager_write_and_flush :: proc(t: ^testing.T) {
 	_ = pager.close(p)
 	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "Failed to reopen pager")
-	defer _ = pager.close(p2)
+	defer destroy_test_pager_env(p2, file)
 
 	page_read, read_err := pager.get_page(p2, 1)
 	testing.expect(t, read_err == .None, "Failed to read page 1")
@@ -210,8 +212,6 @@ test_pager_double_unpin :: proc(t: ^testing.T) {
 test_pager_file_len_after_write :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "filelen")
-	defer os.remove(file)
-	defer os.remove(fmt.tprintf("%s-wal", file))
 
 	pager.allocate_page(p)
 	pager.allocate_page(p)
@@ -221,7 +221,7 @@ test_pager_file_len_after_write :: proc(t: ^testing.T) {
 
 	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "Failed to reopen")
-	defer _ = pager.close(p2)
+	defer destroy_test_pager_env(p2, file)
 
 	testing.expect_value(t, p2.file_len, i64(types.PAGE_SIZE * 2))
 	testing.expect_value(t, pager.page_count(p2), 2)
@@ -248,7 +248,8 @@ test_allocate_page_zero_fails :: proc(t: ^testing.T) {
 }
 
 create_test_wal_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
-	filename := fmt.tprintf("test_wal_%s.db", test_name)
+	// Owned filename, same contract as create_test_pager_env.
+	filename, _ := strings.clone(fmt.tprintf("test_wal_%s.db", test_name), context.allocator)
 	wal_filename := fmt.tprintf("%s-wal", filename)
 	if os.exists(filename) { os.remove(filename) }
 	if os.exists(wal_filename) { os.remove(wal_filename) }
@@ -268,6 +269,7 @@ remove_wal_files :: proc(filename: string) {
 destroy_test_wal_env :: proc(p: ^pager.Pager, filename: string) {
 	_ = pager.close(p)
 	remove_wal_files(filename)
+	delete(filename)
 }
 
 @(test)
@@ -308,7 +310,6 @@ test_wal_allocate_and_read_back :: proc(t: ^testing.T) {
 test_wal_uncommitted_discarded_on_close :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "uncommitted")
-	defer remove_wal_files(file)
 
 	pg, err := pager.allocate_page(p)
 	testing.expect(t, err == .None, "WAL: allocate failed")
@@ -331,7 +332,6 @@ test_wal_uncommitted_discarded_on_close :: proc(t: ^testing.T) {
 test_wal_commit_survives_reopen :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "commit_survive")
-	defer remove_wal_files(file)
 
 	pg, _ := pager.allocate_page(p)
 	pg_num := pg.page_num
@@ -454,7 +454,6 @@ test_wal_checkpoint_resets_wal :: proc(t: ^testing.T) {
 test_wal_multi_txn_read_your_writes :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "read_writes")
-	defer remove_wal_files(file)
 
 	pg, _ := pager.allocate_page(p)
 	pg_num := pg.page_num
@@ -495,7 +494,6 @@ test_wal_multi_txn_read_your_writes :: proc(t: ^testing.T) {
 test_wal_begin_commit_rollback_stress :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "txn_stress")
-	defer remove_wal_files(file)
 
 	for i in 0 ..< 50 {
 		pg, _ := pager.allocate_page(p)
@@ -536,7 +534,6 @@ test_wal_begin_commit_rollback_stress :: proc(t: ^testing.T) {
 test_wal_rollback_does_not_leak_pages :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "ro_noleak")
-	defer remove_wal_files(file)
 
 	before_page_count := pager.page_count(p)
 	pg, _ := pager.allocate_page(p)

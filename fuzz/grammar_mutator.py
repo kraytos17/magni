@@ -77,6 +77,7 @@ _DICT_FALLBACK = [
     b"ORDER BY", b"HAVING", b"LIMIT", b"UNION ALL",
     b"AND", b"OR", b"NOT", b"BETWEEN", b"IN", b"LIKE",
     b"IS NULL", b"AS", b"DISTINCT", b"EXPLAIN", b"BEGIN", b"COMMIT",
+    b"INDEX",
     b"*", b",", b";", b"(", b")", b"=", b"<>", b">", b"NULL",
 ]
 

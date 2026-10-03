@@ -52,6 +52,10 @@ begin="BEGIN"
 commit="COMMIT"
 rollback="ROLLBACK"
 explain="EXPLAIN"
+index="INDEX"
+# rowid is not a keyword (plain identifier); present so splicing can build
+# covering SELECT rowid shapes over indexed columns.
+rowid="rowid"
 asof="AS OF"
 snapshot="SNAPSHOT"
 timestamp="TIMESTAMP"

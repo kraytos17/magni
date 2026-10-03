@@ -6,15 +6,22 @@
 //
 // Build (coverage + AddressSanitizer combined):
 //   odin build fuzz_exec -build-mode:llvm-ir -collection:src=src -o:speed ...
-//   afl-clang-fast ...ll -fsanitize=address -o fuzz/fuzz_exec_target
+//   afl-clang-fast ...ll -fsanitize=address -o fuzz/build/fuzz_exec_target
 // Or via magni.py: python3 magni.py build --exec
 // Run:
-//   ./fuzz/fuzz_exec_target fuzz/corpus_exec/script_ddl
+//   ./fuzz/build/fuzz_exec_target fuzz/corpus_exec/script_ddl
+//
+// Dot-command lines (`.vacuum`, `.checkpoint`, `.expire [N]`) route to the
+// same admin handlers the REPL dispatches, so campaigns also cover the
+// maintenance surface (vacuum incl. text-index rebuilds, checkpoints,
+// snapshot expiry). Unknown dot-commands are ignored.
 package main
 
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
+import "src:admin"
 import "src:db"
 import "src:sqltext"
 
@@ -41,6 +48,34 @@ main :: proc() {
 	for stmt in sqltext.split_statements(string(data), context.temp_allocator) {
 		trimmed := strings.trim_space(stmt)
 		if len(trimmed) <= 1 { continue }
+		if strings.has_prefix(trimmed, ".") {
+			exec_admin_cmd(database, trimmed)
+			continue
+		}
 		db.execute(database, trimmed)
+	}
+}
+
+// exec_admin_cmd runs one dot-command line against the admin surface.
+// Results are intentionally ignored: the harness fuzzes for crashes and
+// sanitizer findings, not for command outcomes (same contract as the
+// db.execute path above).
+exec_admin_cmd :: proc(database: ^db.Database, line: string) {
+	space := strings.index_byte(line, ' ')
+	cmd := line if space < 0 else line[:space]
+	args := "" if space < 0 else strings.trim_space(line[space + 1:])
+	switch cmd {
+	case ".vacuum":
+		admin.vacuum(database)
+	case ".checkpoint":
+		admin.checkpoint(database)
+	case ".expire":
+		keep := db.DEFAULT_KEEP
+		if len(args) > 0 {
+			if v, ok := strconv.parse_i64(args); ok && v >= 0 {
+				keep = int(v)
+			}
+		}
+		db.expire_snapshots(database, keep)
 	}
 }
