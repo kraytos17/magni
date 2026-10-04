@@ -111,6 +111,40 @@ main :: proc() {
 		100,
 	)
 
+	// Many-group stress (streaming GROUP BY: no hash table, peak memory is
+	// the largest group): 100000 rows in 100000 singleton groups.
+	db.execute(d, "CREATE TABLE gm (k INT, v INT);")
+	db.execute(d, "BEGIN;")
+	for i in 1 ..= 100000 {
+		db.execute(d, fmt.tprintf("INSERT INTO gm VALUES (%d, %d);", i, i))
+	}
+
+	db.execute(d, "COMMIT;")
+	timed_query(
+		d,
+		"groupmany",
+		"GROUP BY with 100000 groups",
+		"SELECT k, COUNT(*) FROM gm GROUP BY k;",
+		100000,
+	)
+
+	// Same cardinality with shuffled keys: the ordered-input skip cannot
+	// fire, so the streaming sort itself stays covered at scale.
+	db.execute(d, "CREATE TABLE gs (k INT, v INT);")
+	db.execute(d, "BEGIN;")
+	for i in 1 ..= 100000 {
+		db.execute(d, fmt.tprintf("INSERT INTO gs VALUES (%d, %d);", (i * 7919) % 100000, i))
+	}
+
+	db.execute(d, "COMMIT;")
+	timed_query(
+		d,
+		"groupshuffled",
+		"GROUP BY 100000 groups (shuffled keys)",
+		"SELECT k, COUNT(*) FROM gs GROUP BY k;",
+		100000,
+	)
+
 	// IN-list membership (linear scan today: O(rows × list size)).
 	// 500 literals over the 100000-row table.
 	in_list: strings.Builder

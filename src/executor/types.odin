@@ -56,6 +56,12 @@ Group :: struct {
 	rows      : [dynamic]Row_Entry,
 }
 
+// GROUP_STREAM_THRESHOLD routes wide GROUP BY inputs to the streaming
+// builder (sort + boundary runs) instead of the hash builder. Streaming
+// wins once the hash table and full row materialization dominate; below the
+// line hashing avoids the sort. Emission order differs per path.
+GROUP_STREAM_THRESHOLD :: 32768
+
 Mutated_Table_Info :: struct #all_or_none {
 	name: string,
 	root: u32,

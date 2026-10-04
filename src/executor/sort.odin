@@ -5,6 +5,71 @@ import "core:slice"
 import "src:parser"
 import "src:types"
 
+// compare_key_values three-way-compares two rows' group keys in index
+// order (NULLs sort last). The single comparison primitive behind the key
+// sorter, the ordered-input check, and (via ==0) the boundary test, so the
+// three can never disagree on key order.
+@(private)
+compare_key_values :: proc(a, b: []types.Value, indices: []int) -> int {
+	for idx in indices {
+		a_null := types.is_null(a[idx])
+		b_null := types.is_null(b[idx])
+		if a_null != b_null {
+			return 1 if a_null else -1
+		}
+		if a_null {
+			continue
+		}
+		if cmp := compare_values(a[idx], b[idx]); cmp != 0 {
+			return cmp
+		}
+	}
+	return 0
+}
+
+// rows_key_ordered reports whether rows already ascend by key (an O(n) scan
+// with early exit — unsorted input typically exits within a few pairs, so
+// the check is only fully paid when it pays off by skipping the sort).
+@(private)
+rows_key_ordered :: proc(rows: []Row_Entry, indices: []int) -> bool {
+	for i in 1 ..< len(rows) {
+		if compare_key_values(rows[i - 1].values, rows[i].values, indices) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// group_boundary_at returns the end index of the group starting at start
+// (rows [start, end) share one key). Runs the shared equality primitive
+// rather than a re-derivation so boundary semantics cannot drift from the
+// sorter.
+@(private)
+group_boundary_at :: proc(rows: []Row_Entry, start: int, indices: []int) -> int {
+	end := start + 1
+	for end < len(rows) && compare_key_values(rows[start].values, rows[end].values, indices) == 0 {
+		end += 1
+	}
+	return end
+}
+
+// sort_rows_by_key_indices sorts rows ascending by key via
+// compare_key_values. Used by streaming GROUP BY, which needs key order
+// rather than ORDER BY display semantics.
+@(private)
+sort_rows_by_key_indices :: proc(rows: []Row_Entry, key_indices: []int) -> bool {
+	if len(key_indices) == 0 || len(rows) < 2 {
+		return true
+	}
+
+	idxs := key_indices
+	slice.sort_by_with_data(rows, proc(a, b: Row_Entry, data: rawptr) -> bool {
+			keys := (^[]int)(data)
+			return compare_key_values(a.values, b.values, keys^) < 0
+		}, &idxs)
+	return true
+}
+
 // row_fingerprint computes a hash over a row's values. Used for DISTINCT
 // dedup and set-operation membership. Implemented via hash_values (single
 // FNV-1a with per-type tags); collisions fall back to value_compare.

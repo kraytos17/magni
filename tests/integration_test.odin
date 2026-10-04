@@ -426,6 +426,171 @@ test_integration_group_by_having :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_integration_group_by_stream_edges :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "grp_stream")
+	defer teardown_db(d, "grp_stream")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (a INT, b TEXT, v INT);") == .None, "create")
+	// NULL keys, duplicate groups, mixed int/real-adjacent values, multi-col.
+	testing.expect(
+		t,
+		db.execute(
+			d,
+			"INSERT INTO t VALUES (1, 'x', 10), (2, 'y', 20), (1, 'x', 30), (NULL, 'n', 40), (NULL, 'n', 50), (3, 'x', 60);",
+		) ==
+		.None,
+		"bulk load",
+	)
+
+	// NULL group key forms exactly one group (NULL == NULL for grouping).
+	q := db.query(d, "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY a;")
+	testing.expect(t, q.ok, "null-key group query succeeds")
+	// Groups: NULL(2), 1(2), 2(1), 3(1). NULL sorts with the ordering's
+	// placement; assert the multiset of counts, not positions.
+	counts := make([dynamic]i64, context.temp_allocator)
+	for r in q.rows {
+		append(&counts, r[1].(i64))
+	}
+	testing.expect_value(t, len(counts), 4)
+	total: i64 = 0
+	for c in counts {
+		total += c
+	}
+	testing.expect_value(t, total, 6)
+
+	// Multi-column grouping over the same rows.
+	q2 := db.query(d, "SELECT a, b, COUNT(*) FROM t GROUP BY a, b ORDER BY a, b;")
+	testing.expect(t, q2.ok, "multi-col group query succeeds")
+	testing.expect_value(t, len(q2.rows), 4)
+
+	// ORDER BY over grouped output is a no-op in this engine (aggregate path
+	// returns before finish_select sorts) — assert the group SET, not order.
+	q3 := db.query(d, "SELECT a, COUNT(*) FROM t GROUP BY a;")
+	testing.expect(t, q3.ok, "group set query succeeds")
+	testing.expect_value(t, len(q3.rows), 4)
+	found_null, found_1, found_2, found_3 := false, false, false, false
+	for r in q3.rows {
+		if _, is_null := r[0].(types.Null); is_null {
+			found_null = found_null || r[1].(i64) == 2
+			continue
+		}
+		#partial switch v in r[0] {
+		case i64:
+			switch v {
+			case 1:
+				found_1 = found_1 || r[1].(i64) == 2
+			case 2:
+				found_2 = found_2 || r[1].(i64) == 1
+			case 3:
+				found_3 = found_3 || r[1].(i64) == 1
+			}
+		}
+	}
+	testing.expect(t, found_null && found_1 && found_2 && found_3, "all groups with counts")
+
+	// Empty input with GROUP BY yields no groups (hash parity).
+	testing.expect(t, db.execute(d, "CREATE TABLE e (a INT);") == .None, "create empty")
+	q4 := db.query(d, "SELECT a, COUNT(*) FROM e GROUP BY a;")
+	testing.expect(t, q4.ok && len(q4.rows) == 0, "empty grouped input yields no rows")
+}
+
+@(test)
+test_integration_group_by_stream_scale :: proc(t: ^testing.T) {
+	// Above GROUP_STREAM_THRESHOLD: the streaming path (sort + boundary
+	// runs) must agree with hashing exactly. 40000 rows into 500 groups
+	// plus a NULL group (which routes around the int fast path into the
+	// general streamer).
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "grp_scale")
+	defer teardown_db(d, "grp_scale")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (k INT, v INT);") == .None,
+		"create",
+	)
+	sb: strings.Builder
+	strings.builder_init(&sb, context.temp_allocator)
+	strings.write_string(&sb, "INSERT INTO t VALUES ")
+	for i in 1 ..= 40000 {
+		if i > 1 {
+			strings.write_string(&sb, ",")
+		}
+		if i % 1000 == 0 {
+			fmt.sbprintf(&sb, "(NULL,%d)", i)
+		} else {
+			fmt.sbprintf(&sb, "(%d,%d)", i % 500, i)
+		}
+	}
+	strings.write_string(&sb, ";")
+	testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "bulk load")
+
+	q := db.query(d, "SELECT k, COUNT(*) FROM t GROUP BY k;")
+	testing.expect(t, q.ok, "streamed group query succeeds")
+	testing.expect_value(t, len(q.rows), 501)
+
+	total: i64 = 0
+	null_count: i64 = -1
+	for r in q.rows {
+		total += r[1].(i64)
+		if _, is_null := r[0].(types.Null); is_null {
+			null_count = r[1].(i64)
+		}
+	}
+	testing.expect_value(t, total, 40000)
+	testing.expect_value(t, null_count, 40)
+}
+
+@(test)
+test_integration_group_by_stream_ordered :: proc(t: ^testing.T) {
+	// Ascending keys arrive ordered (PK/scan order): the ordered-input skip
+	// streams without sorting. 40000 rows with a NULL tail exercises the
+	// skip plus NULL grouping at scale.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "grp_ord")
+	defer teardown_db(d, "grp_ord")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (k INT, v INT);") == .None,
+		"create",
+	)
+	sb: strings.Builder
+	strings.builder_init(&sb, context.temp_allocator)
+	strings.write_string(&sb, "INSERT INTO t VALUES ")
+	for i in 1 ..= 40000 {
+		if i > 1 {
+			strings.write_string(&sb, ",")
+		}
+		if i > 39960 {
+			fmt.sbprintf(&sb, "(NULL,%d)", i)
+		} else {
+			// Ascending groups of 80: input arrives key-ordered, so the
+			// ordered-input skip fires instead of sorting.
+			fmt.sbprintf(&sb, "(%d,%d)", i / 80, i)
+		}
+	}
+	strings.write_string(&sb, ";")
+	testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "bulk load")
+
+	q := db.query(d, "SELECT k, COUNT(*) FROM t GROUP BY k;")
+	testing.expect(t, q.ok, "ordered stream query succeeds")
+	testing.expect_value(t, len(q.rows), 501)
+
+	total: i64 = 0
+	null_count: i64 = -1
+	for r in q.rows {
+		total += r[1].(i64)
+		if _, is_null := r[0].(types.Null); is_null {
+			null_count = r[1].(i64)
+		}
+	}
+	testing.expect_value(t, total, 40000)
+	testing.expect_value(t, null_count, 40)
+}
+
+@(test)
 test_integration_as_of_timestamp :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "tt_ts")

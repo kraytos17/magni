@@ -2,6 +2,7 @@ package executor
 
 import "core:bytes"
 import "core:log"
+import "core:slice"
 import "core:strings"
 import "src:parser"
 import "src:schema"
@@ -31,6 +32,43 @@ find_existing_group :: proc(
 	return -1, false
 }
 
+// resolve_grouping resolves GROUP BY column indices and validates aggregate
+// arguments (unknown columns are a clean error, never silent NULLs).
+// Shared by the hash and streaming group builders.
+@(private)
+resolve_grouping :: proc(
+	stmt: parser.Select_Stmt,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+) -> (
+	indices: []int,
+	ok: bool,
+) {
+	indices = make([]int, len(stmt.group_by), context.temp_allocator)
+	resolver := build_column_resolver(combined_cols, table_ranges)
+	for col, i in stmt.group_by {
+		idx, col_ok := resolve(resolver, col)
+		if !col_ok {
+			log.errorf("Error: Unknown column in GROUP BY: %s", col)
+			return nil, false
+		}
+		indices[i] = idx
+	}
+	// Unknown aggregate arguments (e.g. SUM(nosuchcol)) are a clean error,
+	// like unknown WHERE/GROUP BY columns — never silent NULLs. COUNT(*)
+	// takes no column and always resolves.
+	for agg in stmt.aggregates {
+		if agg.column == "" {
+			continue
+		}
+		if _, col_ok := resolve(resolver, agg.column); !col_ok {
+			log.errorf("Error: Unknown column in aggregate: %s", agg.column)
+			return nil, false
+		}
+	}
+	return indices, true
+}
+
 // build_groups resolves GROUP BY column indices and partitions rows into
 // groups (a single implicit group when there is no GROUP BY). Shared by the
 // printing and data aggregate evaluators.
@@ -45,29 +83,12 @@ build_groups :: proc(
 	group_by_indices: []int,
 	ok: bool,
 ) {
-	group_by_indices = make([]int, len(stmt.group_by), context.temp_allocator)
-	resolver := build_column_resolver(combined_cols, table_ranges)
-	for col, i in stmt.group_by {
-		idx, col_ok := resolve(resolver, col)
-		if !col_ok {
-			log.errorf("Error: Unknown column in GROUP BY: %s", col)
-			return nil, nil, false
-		}
-		group_by_indices[i] = idx
-	}
-	// Unknown aggregate arguments (e.g. SUM(nosuchcol)) are a clean error,
-	// like unknown WHERE/GROUP BY columns — never silent NULLs. COUNT(*)
-	// takes no column and always resolves.
-	for agg in stmt.aggregates {
-		if agg.column == "" {
-			continue
-		}
-		if _, col_ok := resolve(resolver, agg.column); !col_ok {
-			log.errorf("Error: Unknown column in aggregate: %s", agg.column)
-			return nil, nil, false
-		}
+	gids, g_ok := resolve_grouping(stmt, combined_cols, table_ranges)
+	if !g_ok {
+		return nil, nil, false
 	}
 
+	group_by_indices = gids
 	groups = make([dynamic]Group, context.temp_allocator)
 	group_map := fp_buckets_make(0, context.temp_allocator)
 	defer fp_buckets_destroy(&group_map)
@@ -110,57 +131,56 @@ build_groups :: proc(
 // exec_select_aggregate_data evaluates a SELECT with aggregates/GROUP BY and returns
 // the result rows as data (group key values followed by aggregate values), without
 // printing. `cols` are synthesized from stmt.columns.
+// emit_aggregate_group finalizes one group (compute → HAVING filter →
+// project → append) and appends to result. Shared by the hash and streaming
+// builders so both paths compute identically; rowid is the emission ordinal.
 @(private)
-exec_select_aggregate_data :: proc(
+emit_aggregate_group :: proc(
 	stmt: parser.Select_Stmt,
+	key_values: []types.Value,
 	rows: []Row_Entry,
 	combined_cols: []types.Column,
-	table_ranges: []Table_Col_Range,
-) -> (
-	[]Row_Entry,
-	[]types.Column,
-	bool,
-) {
-	groups, group_by_indices, g_ok := build_groups(stmt, rows, combined_cols, table_ranges)
-	if !g_ok {
-		return nil, nil, false
+	group_key_count: int,
+	rowid: types.Row_ID,
+	result: ^[dynamic]Row_Entry,
+) -> bool {
+	group_rows := make([][]types.Value, len(rows), context.temp_allocator)
+	for row_entry, ri in rows {
+		group_rows[ri] = row_entry.values
 	}
 
-	result := make([dynamic]Row_Entry, context.temp_allocator)
-	for gi in 0 ..< len(groups) {
-		group_rows := make([][]types.Value, len(groups[gi].rows), context.temp_allocator)
-		for row_entry, ri in groups[gi].rows {
-			group_rows[ri] = row_entry.values
-		}
-
-		agg_vals := compute_aggregates(
-			group_rows,
-			stmt.aggregates,
-			combined_cols,
-			context.temp_allocator,
-		)
-		if having_cl, has_having := stmt.having.?; has_having {
-			if !evaluate_where_having(
-				having_cl,
-				groups[gi].key_values,
-				agg_vals,
-				stmt.group_by,
-				stmt.aggregates,
-			) { continue }
-		}
-
-		out, proj_ok := project_group_row(
-			stmt,
-			groups[gi].key_values,
+	agg_vals := compute_aggregates(
+		group_rows,
+		stmt.aggregates,
+		combined_cols,
+		context.temp_allocator,
+	)
+	if having_cl, has_having := stmt.having.?; has_having {
+		if !evaluate_where_having(
+			having_cl,
+			key_values,
 			agg_vals,
-			len(group_by_indices),
-		)
-		if !proj_ok {
-			return nil, nil, false
+			stmt.group_by,
+			stmt.aggregates,
+		) {
+			return true
 		}
-		append(&result, Row_Entry{rowid = types.Row_ID(gi), values = out})
 	}
 
+	out, proj_ok := project_group_row(stmt, key_values, agg_vals, group_key_count)
+	if !proj_ok {
+		return false
+	}
+
+	append(result, Row_Entry{rowid = rowid, values = out})
+	return true
+}
+
+// synthesize_display_cols builds the output column descriptors from the
+// projection list (aliases and literal types honored). Shared by both
+// aggregate builders.
+@(private = "file")
+synthesize_display_cols :: proc(stmt: parser.Select_Stmt) -> []types.Column {
 	cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 	for name, i in stmt.columns {
 		display := name
@@ -181,7 +201,174 @@ exec_select_aggregate_data :: proc(
 			type = col_type,
 		}
 	}
-	return result[:], cols, true
+	return cols
+}
+
+// try_stream_int_groups fast-paths single-integer-key grouping (the common
+// case): keys extracted once — any NULL or non-int key bails to the general
+// path — row indices sorted by key, then boundary runs emitted through the
+// shared tail. Mirrors sort_rows_int_fast. Returns done=false when the
+// general path must run instead.
+@(private = "file")
+try_stream_int_groups :: proc(
+	stmt: parser.Select_Stmt,
+	rows: []Row_Entry,
+	key_idx: int,
+	combined_cols: []types.Column,
+) -> (
+	out_rows: []Row_Entry,
+	out_cols: []types.Column,
+	done: bool,
+	ok: bool,
+) {
+	keys := make([]i64, len(rows), context.temp_allocator)
+	for e, i in rows {
+		v, is_int := e.values[key_idx].(i64)
+		if !is_int {
+			return nil, nil, false, true
+		}
+		keys[i] = v
+	}
+
+	order := make([]int, len(rows), context.temp_allocator)
+	for i in 0 ..< len(rows) {
+		order[i] = i
+	}
+
+	sort_keys := keys
+	slice.sort_by_with_data(order[:], proc(a, b: int, data: rawptr) -> bool {
+			ks := (^[]i64)(data)
+			return ks^[a] < ks^[b]
+		}, &sort_keys)
+
+	result := make([dynamic]Row_Entry, context.temp_allocator)
+	i := 0
+	for i < len(order) {
+		j := i + 1
+		for j < len(order) && keys[order[j]] == keys[order[i]] {
+			j += 1
+		}
+
+		key_vals := []types.Value{types.value_int(keys[order[i]])}
+		gr := make([]Row_Entry, j - i, context.temp_allocator)
+		for k in i ..< j {
+			gr[k - i] = rows[order[k]]
+		}
+		if !emit_aggregate_group(
+			stmt,
+			key_vals,
+			gr,
+			combined_cols,
+			1,
+			types.Row_ID(len(result)),
+			&result,
+		) {
+			return nil, nil, true, false
+		}
+		i = j
+	}
+	return result[:], synthesize_display_cols(stmt), true, true
+}
+
+// exec_stream_groups evaluates GROUP BY by sorting rows into key order and
+// finalizing each boundary run: no hash table, peak memory is the largest
+// group rather than all rows. Emission order is key-sorted (hash emits
+// first-seen; both are SQL-legal without ORDER BY). Empty input yields no
+// groups, same as the hash path.
+@(private)
+exec_stream_groups :: proc(
+	stmt: parser.Select_Stmt,
+	rows: []Row_Entry,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
+	group_by_indices, g_ok := resolve_grouping(stmt, combined_cols, table_ranges)
+	if !g_ok {
+		return nil, nil, false
+	}
+	// Ordered-input skip: rows already ascending (PK scans, prior sorts)
+	// stream directly — the O(n) check exits on the first inversion, so it
+	// is only fully paid when it pays off by skipping the sort.
+	ordered := rows_key_ordered(rows, group_by_indices)
+	if !ordered {
+		if len(group_by_indices) == 1 {
+			if out, cols, done, ok := try_stream_int_groups(
+				stmt,
+				rows,
+				group_by_indices[0],
+				combined_cols,
+			); done {
+				return out, cols, ok
+			}
+		}
+		if !sort_rows_by_key_indices(rows, group_by_indices) {
+			return nil, nil, false
+		}
+	}
+
+	result := make([dynamic]Row_Entry, context.temp_allocator)
+	i := 0
+	for i < len(rows) {
+		j := group_boundary_at(rows, i, group_by_indices)
+
+		key_vals := make([]types.Value, len(group_by_indices), context.temp_allocator)
+		for col_idx, pos in group_by_indices {
+			key_vals[pos] = rows[i].values[col_idx]
+		}
+		if !emit_aggregate_group(
+			stmt,
+			key_vals,
+			rows[i:j],
+			combined_cols,
+			len(group_by_indices),
+			types.Row_ID(len(result)),
+			&result,
+		) {
+			return nil, nil, false
+		}
+		i = j
+	}
+	return result[:], synthesize_display_cols(stmt), true
+}
+
+exec_select_aggregate_data :: proc(
+	stmt: parser.Select_Stmt,
+	rows: []Row_Entry,
+	combined_cols: []types.Column,
+	table_ranges: []Table_Col_Range,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
+	if len(stmt.group_by) > 0 && len(rows) >= GROUP_STREAM_THRESHOLD {
+		return exec_stream_groups(stmt, rows, combined_cols, table_ranges)
+	}
+
+	groups, group_by_indices, g_ok := build_groups(stmt, rows, combined_cols, table_ranges)
+	if !g_ok {
+		return nil, nil, false
+	}
+
+	result := make([dynamic]Row_Entry, context.temp_allocator)
+	for gi in 0 ..< len(groups) {
+		if !emit_aggregate_group(
+			stmt,
+			groups[gi].key_values,
+			groups[gi].rows[:],
+			combined_cols,
+			len(group_by_indices),
+			types.Row_ID(gi),
+			&result,
+		) {
+			return nil, nil, false
+		}
+	}
+	return result[:], synthesize_display_cols(stmt), true
 }
 
 // Group_Proj_Cursor walks the two independent value streams a grouped
