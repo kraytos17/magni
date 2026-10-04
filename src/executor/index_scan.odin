@@ -49,7 +49,7 @@ MAX_INDEX_IN_MEMBERS :: 128
 // full scan (like_match's general path, behavior untouched).
 @(private)
 canonical_like_prefix :: proc(pattern: string) -> (stem: string, ok: bool) {
-	if len(pattern) < 2 || pattern[len(pattern) - 1] != '%' {
+	if len(pattern) < 2 || !strings.has_suffix(pattern, "%") {
 		return "", false
 	}
 
@@ -57,10 +57,8 @@ canonical_like_prefix :: proc(pattern: string) -> (stem: string, ok: bool) {
 	if len(stem) == 0 {
 		return "", false
 	}
-	for i in 0 ..< len(stem) {
-		if stem[i] == '%' || stem[i] == '_' {
-			return "", false
-		}
+	if strings.contains_any(stem, "%_") {
+		return "", false
 	}
 	return stem, true
 }
@@ -361,14 +359,7 @@ index_candidate_rowids :: proc(
 @(private = "file")
 sort_dedup_rowids :: proc(out: ^[dynamic]types.Row_ID) {
 	slice.sort(out[:])
-	w := 0
-	for r in out {
-		if w == 0 || out[w - 1] != r {
-			out[w] = r
-			w += 1
-		}
-	}
-	resize(out, w)
+	resize(out, len(slice.unique(out[:])))
 }
 
 // index_candidate_multi unions (Or) or intersects (And) member candidate
@@ -482,11 +473,8 @@ index_candidate_single :: proc(
 			return nil, false
 		}
 	case .Prefix:
-		found, find_err := btree.text_find_prefix(
-			&idx_tree,
-			plan.root,
-			transmute([]u8)plan.prefix,
-		)
+		found, find_err := btree.text_find_prefix(&idx_tree, plan.root, transmute([]u8)plan.prefix)
+
 		if find_err != .None {
 			log.errorf("Error: Failed to search index for '%s'", table.name)
 			delete(out)
@@ -516,14 +504,7 @@ plan_index_columns :: proc(plan: Index_Plan, allocator := context.allocator) -> 
 
 	seen := make([dynamic]string, 0, len(plan.subs), context.temp_allocator)
 	for sub in plan.subs {
-		dup := false
-		for s in seen {
-			if s == sub.column {
-				dup = true
-				break
-			}
-		}
-		if !dup {
+		if !slice.contains(seen[:], sub.column) {
 			append(&seen, sub.column)
 		}
 	}
@@ -808,15 +789,12 @@ covering_pairs :: proc(
 	}
 
 	slice.sort_by(out[:], proc(a, b: Covering_Pair) -> bool { return a.rid < b.rid })
-	w := 0
-	for i in 0 ..< len(out) {
-		if w == 0 || out[w - 1].rid != out[i].rid {
-			out[w] = out[i]
-			w += 1
-		}
-	}
-
-	resize(&out, w)
+	resize(
+		&out,
+		len(
+			slice.unique_proc(out[:], proc(a, b: Covering_Pair) -> bool { return a.rid == b.rid }),
+		),
+	)
 	return out, true
 }
 
@@ -847,8 +825,6 @@ fetch_covering_col :: proc(
 	rows := make([dynamic]Row_Entry, 0, len(pairs), allocator)
 	for p in pairs {
 		vals := make([]types.Value, 1, allocator)
-		// Cloned per row: plan strings borrow the parser arena and
-		// downstream tails (sort/distinct) reorder freely.
 		vals[0] = types.value_text(strings.clone(p.val, allocator))
 		append(&rows, Row_Entry{rowid = p.rid, values = vals})
 	}

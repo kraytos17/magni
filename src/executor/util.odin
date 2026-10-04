@@ -2,7 +2,9 @@ package executor
 
 import "core:hash"
 import "core:log"
+import "core:math"
 import "core:mem"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "src:parser"
@@ -258,11 +260,7 @@ Fp_Buckets :: struct {
 
 @(private)
 fp_buckets_make :: proc(n: int, allocator: mem.Allocator) -> Fp_Buckets {
-	cap := 16
-	for cap < 2 * (n + 1) {
-		cap *= 2
-	}
-
+	cap := max(16, math.next_power_of_two(2 * (n + 1)))
 	b := Fp_Buckets {
 		mask      = cap - 1,
 		allocator = allocator,
@@ -270,9 +268,7 @@ fp_buckets_make :: proc(n: int, allocator: mem.Allocator) -> Fp_Buckets {
 
 	b.slots = make([]u64, cap, allocator)
 	b.head = make([]int, cap, allocator)
-	for i in 0 ..< cap {
-		b.head[i] = -1
-	}
+	slice.fill(b.head, -1)
 
 	b.rows = make([dynamic]int, 0, n, allocator)
 	b.fps = make([dynamic]u64, 0, n, allocator)
@@ -310,9 +306,7 @@ fp_buckets_grow :: proc(b: ^Fp_Buckets) {
 	cap := 2 * len(old_slots)
 	b.slots = make([]u64, cap, b.allocator)
 	b.head = make([]int, cap, b.allocator)
-	for i in 0 ..< cap {
-		b.head[i] = -1
-	}
+	slice.fill(b.head, -1)
 
 	b.mask = cap - 1
 	clear(&b.rows)

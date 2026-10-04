@@ -96,7 +96,7 @@ text_index_decode :: proc "contextless" (
 		return "", 0, false
 	}
 
-	n := int(src[1]) << 24 | int(src[2]) << 16 | int(src[3]) << 8 | int(src[4])
+	n := int(endian.unchecked_get_u32be(src[1:5]))
 	if intrinsics.unlikely(n < 0 || TEXT_INDEX_PREFIX_LEN + n + TEXT_INDEX_ROWID_LEN != len(src)) {
 		return "", 0, false
 	}
@@ -127,7 +127,7 @@ text_index_split :: #force_inline proc "contextless" (
 		return nil, 0, false
 	}
 
-	n := int(src[1]) << 24 | int(src[2]) << 16 | int(src[3]) << 8 | int(src[4])
+	n := int(endian.unchecked_get_u32be(src[1:5]))
 	if intrinsics.unlikely(n < 0 || TEXT_INDEX_PREFIX_LEN + n + TEXT_INDEX_ROWID_LEN > len(src)) {
 		return nil, 0, false
 	}
@@ -172,13 +172,7 @@ text_index_shared_prefix :: #force_inline proc "contextless" (
 	b: []u8,
 	max_cap: int,
 ) -> int {
-	cap := max_cap
-	if cap > len(a) {
-		cap = len(a)
-	}
-	if cap > len(b) {
-		cap = len(b)
-	}
+	cap := min(max_cap, len(a), len(b))
 	if cap <= 0 {
 		return 0
 	}

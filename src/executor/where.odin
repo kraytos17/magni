@@ -501,10 +501,10 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 
 @(private = "file")
 like_match :: proc(pattern: string, text: string) -> bool {
-	if len(pattern) > 1 && pattern[len(pattern) - 1] == '%' {
-		if strings.index_byte(pattern[:len(pattern) - 1], '_') < 0 {
-			prefix := pattern[:len(pattern) - 1]
-			return len(text) >= len(prefix) && text[:len(prefix)] == prefix
+	if len(pattern) > 1 && strings.has_suffix(pattern, "%") {
+		stem := pattern[:len(pattern) - 1]
+		if strings.index_byte(stem, '_') < 0 {
+			return strings.has_prefix(text, stem)
 		}
 	}
 

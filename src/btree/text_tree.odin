@@ -18,6 +18,7 @@
 //   are missed.
 package btree
 
+import "core:bytes"
 import "core:encoding/endian"
 import "core:mem"
 import "src:cell"
@@ -132,16 +133,10 @@ text_snapshot_with_pending :: proc(
 		}
 	}
 
-	append(&fulls, nil)
-	copy(fulls[lo + 1:], fulls[lo:])
 	full_text := make([]u8, len(text), context.temp_allocator)
-
 	copy(full_text, text)
-	fulls[lo] = full_text
-	append(&rids, rowid)
-
-	copy(rids[lo + 1:], rids[lo:])
-	rids[lo] = rowid
+	inject_at(&fulls, lo, full_text)
+	inject_at(&rids, lo, rowid)
 	return fulls, rids, .None
 }
 
@@ -798,25 +793,44 @@ text_insert_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 // separator (any entry that became a right-first key lives right of a
 // separator equal to itself) — leaf-local scans silently lose those rows.
 // Advance is strictly rightward, so the loop terminates at the last leaf.
-@(require_results)
-text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row_ID, err: Error) {
-	Text_Path_Item :: struct {
-		page_id  : u32,
-		child_idx: int,
-	}
+// Text_Path_Item records one interior level during a text-tree descent so a
+// leaf scan can advance rightward (sibling-or-carry) across leaf boundaries.
+Text_Path_Item :: struct {
+	page_id  : u32,
+	child_idx: int,
+}
 
-	out := make([dynamic]types.Row_ID, 0, 8, context.temp_allocator)
-	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
-	full_of :: proc(prefix, suffix: []u8) -> []u8 {
-		full := make([]u8, len(prefix) + len(suffix), context.temp_allocator)
-		copy(full, prefix)
-		copy(full[len(prefix):], suffix)
-		return full
-	}
+// Text_Scan_Mode selects the leaf-run match rule: exact text equality or
+// prefix containment. A loop-invariant enum, not a callback: no indirect
+// call per entry on this hot path (branch predictor learns the constant).
+Text_Scan_Mode :: enum {
+	Exact,
+	Prefix,
+}
 
-	// Descend once, recording the interior path.
+// text_concat_full joins a leaf page prefix + entry suffix into the full key.
+@(private = "file")
+text_concat_full :: proc(pre, suffix: []u8) -> []u8 {
+	full := make([]u8, len(pre) + len(suffix), context.temp_allocator)
+	copy(full, pre)
+	copy(full[len(pre):], suffix)
+	return full
+}
+
+// text_descend_to_leaf walks from root to the leaf holding key, recording the
+// interior path for later rightward advance. Returns the leaf page id.
+@(private = "file")
+text_descend_to_leaf :: proc(
+	t: ^Tree,
+	root: u32,
+	key: []u8,
+	path: ^[dynamic]Text_Path_Item,
+) -> (
+	leaf_id: u32,
+	err: Error,
+) {
 	curr := root
-	leaf_id: u32 = 0
+	leaf_id = 0
 	{
 		descending := true
 		for descending {
@@ -824,7 +838,7 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 			if is_leaf(node) {
 				if node.header.page_type != .LEAF_TEXT {
 					unpin_node(t, node)
-					return nil, .Invalid_Page_Header
+					return 0, .Invalid_Page_Header
 				}
 
 				leaf_id = curr
@@ -833,19 +847,19 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 			} else {
 				if node.header.page_type != .TEXT_INTERIOR {
 					unpin_node(t, node)
-					return nil, .Invalid_Page_Header
+					return 0, .Invalid_Page_Header
 				}
 
-				tkey, k_err := text_make_key(text, min(types.Row_ID))
+				tkey, k_err := text_make_key(key, min(types.Row_ID))
 				if k_err != .None {
 					unpin_node(t, node)
-					return nil, k_err
+					return 0, k_err
 				}
 
 				child, cidx := text_interior_find_child(node.data, node.id, tkey)
 				if child == 0 {
 					unpin_node(t, node)
-					return nil, .Invalid_Cell_Pointer
+					return 0, .Invalid_Cell_Pointer
 				}
 				// Map the -1 rightmost sentinel to the real index
 				// (cell_count): advance does idx++ and must land past
@@ -857,73 +871,89 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 				}
 
 				unpin_node(t, node)
-				append(&path, Text_Path_Item{page_id = curr, child_idx = rec_idx})
+				append(path, Text_Path_Item{page_id = curr, child_idx = rec_idx})
 				curr = child
 			}
 		}
 	}
+	return leaf_id, .None
+}
 
-	// Advance the path to the next leaf rightward (sibling-or-carry),
-	// drilling down its leftmost leaf. Returns 0 past the last leaf.
-	advance := proc(t: ^Tree, path: ^[dynamic]Text_Path_Item) -> (next: u32, ok: bool) {
-		for len(path^) > 0 {
-			top := &path^[len(path^) - 1]
-			top.child_idx += 1
-			node, l_err := load_node(t, top.page_id)
-			if l_err != .None {
+// text_advance_path moves the recorded path to the next leaf rightward
+// (sibling-or-carry), drilling down its leftmost leaf. Returns 0 past the
+// last leaf.
+@(private = "file")
+text_advance_path :: proc(t: ^Tree, path: ^[dynamic]Text_Path_Item) -> (next: u32, ok: bool) {
+	for len(path^) > 0 {
+		top := &path^[len(path^) - 1]
+		top.child_idx += 1
+		node, l_err := load_node(t, top.page_id)
+		if l_err != .None {
+			return 0, false
+		}
+
+		n := int(node.header.cell_count)
+		if top.child_idx <= n {
+			child, c_err := text_interior_child_at(node.data, Page_Id(node.id), top.child_idx)
+			if c_err != .None {
+				unpin_node(t, node)
 				return 0, false
 			}
 
-			n := int(node.header.cell_count)
-			if top.child_idx <= n {
-				child, c_err := text_interior_child_at(node.data, Page_Id(node.id), top.child_idx)
-				if c_err != .None {
-					unpin_node(t, node)
+			unpin_node(t, node)
+			// Drill down the leftmost spine, recording it.
+			curr := child
+			for {
+				dnode, d_err := load_node(t, curr)
+				if d_err != .None {
+					return 0, false
+				}
+				if is_leaf(dnode) {
+					unpin_node(t, dnode)
+					return curr, true
+				}
+				if dnode.header.page_type != .TEXT_INTERIOR {
+					unpin_node(t, dnode)
 					return 0, false
 				}
 
-				unpin_node(t, node)
-				// Drill down the leftmost spine, recording it.
-				curr := child
-				for {
-					dnode, d_err := load_node(t, curr)
-					if d_err != .None {
-						return 0, false
-					}
-					if is_leaf(dnode) {
-						unpin_node(t, dnode)
-						return curr, true
-					}
-					if dnode.header.page_type != .TEXT_INTERIOR {
-						unpin_node(t, dnode)
-						return 0, false
-					}
-
-					leftmost, dl_err := text_interior_child_at(dnode.data, Page_Id(dnode.id), 0)
-					unpin_node(t, dnode)
-					if dl_err != .None {
-						return 0, false
-					}
-
-					append(path, Text_Path_Item{page_id = curr, child_idx = 0})
-					curr = leftmost
+				leftmost, dl_err := text_interior_child_at(dnode.data, Page_Id(dnode.id), 0)
+				unpin_node(t, dnode)
+				if dl_err != .None {
+					return 0, false
 				}
+
+				append(path, Text_Path_Item{page_id = curr, child_idx = 0})
+				curr = leftmost
 			}
-
-			unpin_node(t, node)
-			pop(path)
 		}
-		return 0, true
-	}
 
-	// Scan leaves left to right: skip below-text, collect text-equal,
-	// stop past it; follow the run across boundaries while the last
-	// examined text is still <= the query.
+		unpin_node(t, node)
+		pop(path)
+	}
+	return 0, true
+}
+
+// text_scan_leaf_run collects matching rowids from leaf_id rightward: skips
+// below-key entries, collects matches, stops past the run; the run follows
+// across boundaries while the last examined entry still orders <= the query.
+@(private = "file")
+text_scan_leaf_run :: proc(
+	t: ^Tree,
+	leaf_id: u32,
+	path: ^[dynamic]Text_Path_Item,
+	key: []u8,
+	mode: Text_Scan_Mode,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	out := make([dynamic]types.Row_ID, 0, 8, context.temp_allocator)
 	first_round := true
-	curr = leaf_id
+	curr := leaf_id
 	for curr != 0 {
 		node := load_node(t, curr) or_return
-		prefix, p_err := text_prefix(node.data, Page_Id(node.id))
+		page_prefix, p_err := text_prefix(node.data, Page_Id(node.id))
 		if p_err != .None {
 			unpin_node(t, node)
 			return nil, p_err
@@ -933,7 +963,7 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 		start := 0
 		if first_round {
 			first_round = false
-			idx, lb_err := text_lower_bound(node.data, Page_Id(node.id), text, min(types.Row_ID))
+			idx, lb_err := text_lower_bound(node.data, Page_Id(node.id), key, min(types.Row_ID))
 			if lb_err != .None {
 				unpin_node(t, node)
 				return nil, lb_err
@@ -950,13 +980,18 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 				return nil, k_err
 			}
 
-			full := full_of(prefix, suf)
-			c := mem.compare(full, text)
-			if c < 0 {
+			full := text_concat_full(page_prefix, suf)
+			raw := mem.compare(full, key)
+			if raw < 0 {
 				i += 1
 				continue
 			}
-			if c > 0 {
+
+			hit := raw == 0
+			if mode == .Prefix && !hit {
+				hit = bytes.has_prefix(full, key)
+			}
+			if !hit {
 				last_le = false
 				break
 			}
@@ -970,13 +1005,23 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 			break
 		}
 
-		next, adv_ok := advance(t, &path)
+		next, adv_ok := text_advance_path(t, path)
 		if !adv_ok {
 			return nil, .Invalid_Cell_Pointer
 		}
 		curr = next
 	}
 	return out[:], .None
+}
+
+@(require_results)
+text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row_ID, err: Error) {
+	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	leaf_id, d_err := text_descend_to_leaf(t, root, text, &path)
+	if d_err != .None {
+		return nil, d_err
+	}
+	return text_scan_leaf_run(t, leaf_id, &path, text, .Exact)
 }
 
 // text_find_prefix collects the rowids of every entry whose text starts with
@@ -998,182 +1043,12 @@ text_find_prefix :: proc(
 	found: []types.Row_ID,
 	err: Error,
 ) {
-	Text_Path_Item :: struct {
-		page_id  : u32,
-		child_idx: int,
-	}
-
-	out := make([dynamic]types.Row_ID, 0, 8, context.temp_allocator)
 	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
-	full_of :: proc(pre, suffix: []u8) -> []u8 {
-		full := make([]u8, len(pre) + len(suffix), context.temp_allocator)
-		copy(full, pre)
-		copy(full[len(pre):], suffix)
-		return full
+	leaf_id, d_err := text_descend_to_leaf(t, root, prefix, &path)
+	if d_err != .None {
+		return nil, d_err
 	}
-
-	// Descend once, recording the interior path.
-	curr := root
-	leaf_id: u32 = 0
-	{
-		descending := true
-		for descending {
-			node := load_node(t, curr) or_return
-			if is_leaf(node) {
-				if node.header.page_type != .LEAF_TEXT {
-					unpin_node(t, node)
-					return nil, .Invalid_Page_Header
-				}
-
-				leaf_id = curr
-				unpin_node(t, node)
-				descending = false
-			} else {
-				if node.header.page_type != .TEXT_INTERIOR {
-					unpin_node(t, node)
-					return nil, .Invalid_Page_Header
-				}
-
-				tkey, k_err := text_make_key(prefix, min(types.Row_ID))
-				if k_err != .None {
-					unpin_node(t, node)
-					return nil, k_err
-				}
-
-				child, cidx := text_interior_find_child(node.data, node.id, tkey)
-				if child == 0 {
-					unpin_node(t, node)
-					return nil, .Invalid_Cell_Pointer
-				}
-				// Map the -1 rightmost sentinel to the real index
-				// (cell_count): advance does idx++ and must land past
-				// the end, not wrap to child 0 (the primary cursor
-				// records cell_count for the same reason).
-				rec_idx := cidx
-				if rec_idx < 0 {
-					rec_idx = get_cell_count(node.data, node.id)
-				}
-
-				unpin_node(t, node)
-				append(&path, Text_Path_Item{page_id = curr, child_idx = rec_idx})
-				curr = child
-			}
-		}
-	}
-
-	// Advance the path to the next leaf rightward (sibling-or-carry),
-	// drilling down its leftmost leaf. Returns 0 past the last leaf.
-	advance := proc(t: ^Tree, path: ^[dynamic]Text_Path_Item) -> (next: u32, ok: bool) {
-		for len(path^) > 0 {
-			top := &path^[len(path^) - 1]
-			top.child_idx += 1
-			node, l_err := load_node(t, top.page_id)
-			if l_err != .None {
-				return 0, false
-			}
-
-			n := int(node.header.cell_count)
-			if top.child_idx <= n {
-				child, c_err := text_interior_child_at(node.data, Page_Id(node.id), top.child_idx)
-				if c_err != .None {
-					unpin_node(t, node)
-					return 0, false
-				}
-
-				unpin_node(t, node)
-				// Drill down the leftmost spine, recording it.
-				curr := child
-				for {
-					dnode, d_err := load_node(t, curr)
-					if d_err != .None {
-						return 0, false
-					}
-					if is_leaf(dnode) {
-						unpin_node(t, dnode)
-						return curr, true
-					}
-					if dnode.header.page_type != .TEXT_INTERIOR {
-						unpin_node(t, dnode)
-						return 0, false
-					}
-
-					leftmost, dl_err := text_interior_child_at(dnode.data, Page_Id(dnode.id), 0)
-					unpin_node(t, dnode)
-					if dl_err != .None {
-						return 0, false
-					}
-
-					append(path, Text_Path_Item{page_id = curr, child_idx = 0})
-					curr = leftmost
-				}
-			}
-
-			unpin_node(t, node)
-			pop(path)
-		}
-		return 0, true
-	}
-
-	// Scan leaves left to right: skip below-prefix, collect prefix-carrying,
-	// stop past the run; follow it across boundaries while the last
-	// examined entry is still <= the query.
-	first_round := true
-	curr = leaf_id
-	for curr != 0 {
-		node := load_node(t, curr) or_return
-		page_prefix, p_err := text_prefix(node.data, Page_Id(node.id))
-		if p_err != .None {
-			unpin_node(t, node)
-			return nil, p_err
-		}
-
-		count := int(node.header.cell_count)
-		start := 0
-		if first_round {
-			first_round = false
-			idx, lb_err := text_lower_bound(node.data, Page_Id(node.id), prefix, min(types.Row_ID))
-			if lb_err != .None {
-				unpin_node(t, node)
-				return nil, lb_err
-			}
-			start = idx
-		}
-
-		last_le := true
-		i := start
-		for i < count {
-			suf, rid, k_err := text_entry_at(node.data, Page_Id(node.id), i)
-			if k_err != .None {
-				unpin_node(t, node)
-				return nil, k_err
-			}
-
-			full := full_of(page_prefix, suf)
-			if mem.compare(full, prefix) < 0 {
-				i += 1
-				continue
-			}
-			if len(full) < len(prefix) || mem.compare(full[:len(prefix)], prefix) != 0 {
-				last_le = false
-				break
-			}
-
-			append(&out, rid)
-			i += 1
-		}
-
-		unpin_node(t, node)
-		if i < count || !last_le {
-			break
-		}
-
-		next, adv_ok := advance(t, &path)
-		if !adv_ok {
-			return nil, .Invalid_Cell_Pointer
-		}
-		curr = next
-	}
-	return out[:], .None
+	return text_scan_leaf_run(t, leaf_id, &path, prefix, .Prefix)
 }
 
 // text_node_delete_leaf_cell removes one exact (text,rowid) entry from a

@@ -6,6 +6,7 @@ import "core:encoding/endian"
 import "core:fmt"
 import "core:log"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:time"
 import "src:pager"
@@ -195,7 +196,7 @@ load :: proc(
 	defer pager.unpin_page(p, snapshot_page)
 	if headers := headers_on_page(page.data); headers != nil {
 		if snapshot_id == 0 {
-			return headers[len(headers) - 1], true
+			return slice.last(headers), true
 		}
 		for i := len(headers) - 1; i >= 0; i -= 1 {
 			if headers[i].snapshot_id == snapshot_id {

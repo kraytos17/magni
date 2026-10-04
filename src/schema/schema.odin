@@ -559,6 +559,58 @@ update_skip_root_cow :: proc(
 	)
 }
 
+// schema_row_for_update fetches + decodes a table's schema row for a COW
+// rewrite (fetch-set-commit, same shape as data/skip roots). The returned
+// cell stays live: the caller must `defer cell.destroy(&c, …)` since defer
+// cannot cross the helper boundary. op names the operation in log lines.
+@(private)
+schema_row_for_update :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	op: string,
+) -> (
+	sr: Schema_Row,
+	c: cell.Cell,
+	ok: bool,
+) {
+	rowid := types.Row_ID(types.hash_string(table_name))
+	found, err := btree.tree_find(t, rowid, context.temp_allocator)
+	if err != .None {
+		log.errorf("[schema] %s: tree_find failed for '%s'", op, table_name)
+		return {}, {}, false
+	}
+
+	decoded, sr_ok := schema_row_from_values(found.values)
+	if !sr_ok {
+		cell.destroy(&found, context.temp_allocator)
+		log.errorf("[schema] %s: decode failed for '%s'", op, table_name)
+		return {}, {}, false
+	}
+	return decoded, found, true
+}
+
+// schema_row_commit encodes + COW-writes a rewritten schema row. Caller sets
+// sr.indexes from its (policy-specific) defs first; op names the operation.
+@(private)
+schema_row_commit :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	rowid: types.Row_ID,
+	sr: Schema_Row,
+	op: string,
+) -> (
+	new_schema_root: u32,
+	ok: bool,
+) {
+	values := schema_row_to_values(sr)
+	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
+	if upd_err != .None {
+		log.errorf("[schema] %s failed for '%s': %v", op, table_name, upd_err)
+		return t.root, false
+	}
+	return upd_root, true
+}
+
 // update_index_def_cow publishes one secondary-index definition
 // (append or replace by name) in ONE schema COW: readers never see a
 // half index. DDL (exec_create_index) is the only writer; per-mutation
@@ -575,19 +627,12 @@ update_index_def_cow :: proc(
 	ok: bool,
 ) {
 	rowid := types.Row_ID(types.hash_string(table_name))
-	c, err := btree.tree_find(t, rowid, context.temp_allocator)
-	if err != .None {
-		log.errorf("[schema] update_index_def_cow: tree_find failed for '%s'", table_name)
-		return t.root, false
-	}
-	defer cell.destroy(&c, context.temp_allocator)
-
-	sr, sr_ok := schema_row_from_values(c.values)
+	sr, c, sr_ok := schema_row_for_update(t, table_name, "update_index_def_cow")
 	if !sr_ok {
-		log.errorf("[schema] update_index_def_cow: decode failed for '%s'", table_name)
 		return t.root, false
 	}
 
+	defer cell.destroy(&c, context.temp_allocator)
 	defs := make([dynamic]types.Index_Def, 0, len(sr.indexes) + 1, context.temp_allocator)
 	replaced := false
 	for def in sr.indexes {
@@ -609,13 +654,7 @@ update_index_def_cow :: proc(
 	}
 
 	sr.indexes = defs[:]
-	values := schema_row_to_values(sr)
-	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
-	if upd_err != .None {
-		log.errorf("[schema] update_index_def_cow failed for '%s': %v", table_name, upd_err)
-		return t.root, false
-	}
-	return upd_root, true
+	return schema_row_commit(t, table_name, rowid, sr, "update_index_def_cow")
 }
 
 // clear_index_def_cow drops a table's secondary-index definition (root +
@@ -702,19 +741,12 @@ update_index_root_cow :: proc(
 	ok: bool,
 ) {
 	rowid := types.Row_ID(types.hash_string(table_name))
-	c, err := btree.tree_find(t, rowid, context.temp_allocator)
-	if err != .None {
-		log.errorf("[schema] update_index_root_cow: tree_find failed for '%s'", table_name)
-		return t.root, false
-	}
-	defer cell.destroy(&c, context.temp_allocator)
-
-	sr, sr_ok := schema_row_from_values(c.values)
+	sr, c, sr_ok := schema_row_for_update(t, table_name, "update_index_root_cow")
 	if !sr_ok {
-		log.errorf("[schema] update_index_root_cow: decode failed for '%s'", table_name)
 		return t.root, false
 	}
 
+	defer cell.destroy(&c, context.temp_allocator)
 	defs := make([dynamic]types.Index_Def, 0, len(sr.indexes), context.temp_allocator)
 	swapped := false
 	for def in sr.indexes {
@@ -734,13 +766,7 @@ update_index_root_cow :: proc(
 	}
 
 	sr.indexes = defs[:]
-	values := schema_row_to_values(sr)
-	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
-	if upd_err != .None {
-		log.errorf("[schema] update_index_root_cow failed for '%s': %v", table_name, upd_err)
-		return t.root, false
-	}
-	return upd_root, true
+	return schema_row_commit(t, table_name, rowid, sr, "update_index_root_cow")
 }
 
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {

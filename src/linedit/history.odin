@@ -1,6 +1,7 @@
 package linedit
 
 import "core:os"
+import "core:slice"
 import "core:strings"
 
 History :: struct {
@@ -10,11 +11,14 @@ History :: struct {
 	path      : string,
 }
 
+// HISTORY_MAX_ENTRIES caps loaded/saved history (file may hold more).
+HISTORY_MAX_ENTRIES :: 1000
+
 history_add :: proc(h: ^History, line: string) {
 	if len(line) == 0 {
 		return
 	}
-	if len(h.entries) > 0 && h.entries[len(h.entries) - 1] == line {
+	if len(h.entries) > 0 && slice.last(h.entries[:]) == line {
 		return
 	}
 	append(&h.entries, strings.clone(line))
@@ -66,7 +70,7 @@ history_load :: proc(h: ^History, path: string) {
 		}
 	}
 
-	skip := max(0, non_empty - 1000)
+	skip := max(0, non_empty - HISTORY_MAX_ENTRIES)
 	skipped := 0
 	for line in lines {
 		if len(line) == 0 {
@@ -89,7 +93,7 @@ history_save :: proc(h: ^History) {
 	defer strings.builder_destroy(&sb)
 
 	n := len(h.entries)
-	start := max(0, n - 1000)
+	start := max(0, n - HISTORY_MAX_ENTRIES)
 	for i in start ..< n {
 		strings.write_string(&sb, h.entries[i])
 		strings.write_byte(&sb, '\n')

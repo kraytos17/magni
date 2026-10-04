@@ -1,5 +1,6 @@
 package executor
 
+import "core:slice"
 import "src:btree"
 import "src:parser"
 import "src:schema"
@@ -284,7 +285,7 @@ exec_compound_data :: proc(
 		}
 		if is_intersect {
 			// Join the current (last) segment via INTERSECT.
-			last := &segments[len(segments) - 1]
+			last := slice.last_ptr(segments[:])
 			apply_set_op(last, op, other_rows)
 		} else {
 			// UNION/EXCEPT: start a new segment and record the joining op.

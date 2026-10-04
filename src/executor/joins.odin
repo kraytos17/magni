@@ -1,6 +1,7 @@
 package executor
 
 import "core:log"
+import "core:slice"
 import "src:btree"
 import "src:parser"
 import "src:schema"
@@ -18,9 +19,7 @@ join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[d
 join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[dynamic]Row_Entry) {
 	null_row := make([]types.Value, len(outer.values) + right_col_count, context.temp_allocator)
 	copy(null_row[:len(outer.values)], outer.values)
-	for k in len(outer.values) ..< len(null_row) {
-		null_row[k] = types.value_null()
-	}
+	slice.fill(null_row[len(outer.values):], types.value_null())
 	append(new_rows, Row_Entry{0, null_row})
 }
 
@@ -31,10 +30,8 @@ join_emit_null_left_row :: proc(
 	new_rows: ^[dynamic]Row_Entry,
 ) {
 	null_row := make([]types.Value, left_col_count + len(right_row.values), context.temp_allocator)
-	for k in 0 ..< left_col_count {
-		null_row[k] = types.value_null()
-	}
 
+	slice.fill(null_row[:left_col_count], types.value_null())
 	copy(null_row[left_col_count:], right_row.values)
 	append(new_rows, Row_Entry{0, null_row})
 }

@@ -12,18 +12,8 @@ unescape_sql_string :: proc(s: string, allocator: mem.Allocator) -> string {
 		return strings.clone(s, allocator)
 	}
 
-	b := strings.builder_make(allocator)
-	i := 0
-	for i < len(s) {
-		if i + 1 < len(s) && s[i] == '\'' && s[i + 1] == '\'' {
-			strings.write_byte(&b, '\'')
-			i += 2
-		} else {
-			strings.write_byte(&b, s[i])
-			i += 1
-		}
-	}
-	return strings.to_string(b)
+	out, _ := strings.replace_all(s, "''", "'", allocator)
+	return out
 }
 
 @(private)
@@ -82,68 +72,62 @@ parse_where_clause :: proc(
 //   or_expr   := and_expr (OR and_expr)*
 //   and_expr  := primary (AND primary)*
 //   primary   := '(' or_expr ')' | condition
+//
+// Both chain tiers share one loop: the operand tier differs (and_expr takes
+// parse_and_expr, and_expr takes parse_primary), so it rides along as a proc
+// value (parser is cold path; one indirection per operand is noise).
 @(private = "file")
-parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
-	left, ok := parse_and_expr(p, allocator)
+parse_operand :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool)
+
+@(private = "file")
+parse_chain :: proc(
+	p: ^Parser,
+	allocator: mem.Allocator,
+	operand: parse_operand,
+	op: Token_Type,
+	kind: Where_Kind,
+) -> (
+	^Where_Node,
+	bool,
+) {
+	left, ok := operand(p, allocator)
 	if !ok {
 		return nil, false
 	}
-	if !match(p, .OR) {
+	if !match(p, op) {
 		return left, true
 	}
 
 	children := make([dynamic]^Where_Node, allocator)
 	append(&children, left)
 	for {
-		right, right_ok := parse_and_expr(p, allocator)
+		right, right_ok := operand(p, allocator)
 		if !right_ok {
 			return nil, false
 		}
 
 		append(&children, right)
-		if !match(p, .OR) {
+		if !match(p, op) {
 			break
 		}
 	}
 
 	node := new(Where_Node, allocator)
 	node^ = Where_Node {
-		kind     = .OR,
+		kind     = kind,
 		children = children,
 	}
 	return node, true
 }
 
 @(private = "file")
+parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
+	return parse_chain(p, allocator, parse_and_expr, .OR, .OR)
+}
+
+@(private = "file")
 parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
-	left, ok := parse_primary(p, allocator)
-	if !ok {
-		return nil, false
-	}
-	if !match(p, .AND) {
-		return left, true
-	}
-
-	children := make([dynamic]^Where_Node, allocator)
-	append(&children, left)
-	for {
-		right, right_ok := parse_primary(p, allocator)
-		if !right_ok {
-			return nil, false
-		}
-
-		append(&children, right)
-		if !match(p, .AND) {
-			break
-		}
-	}
-
-	node := new(Where_Node, allocator)
-	node^ = Where_Node {
-		kind     = .AND,
-		children = children,
-	}
-	return node, true
+	return parse_chain(p, allocator, parse_primary, .AND, .AND)
 }
 
 @(private = "file")

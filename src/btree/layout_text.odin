@@ -166,15 +166,7 @@ text_entry_at :: proc "contextless" (
 		return nil, 0, .Cell_Deserialize_Failed
 	}
 
-	rb :=
-		u64(data[off]) << 56 |
-		u64(data[off + 1]) << 48 |
-		u64(data[off + 2]) << 40 |
-		u64(data[off + 3]) << 32 |
-		u64(data[off + 4]) << 24 |
-		u64(data[off + 5]) << 16 |
-		u64(data[off + 6]) << 8 |
-		u64(data[off + 7])
+	rb := endian.unchecked_get_u64be(data[off:off + 8])
 	return data[off + TEXT_ENTRY_ROWID_LEN:off + elen], rowid_bias_decode(rb), .None
 }
 
@@ -460,8 +452,7 @@ text_interior_child_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -
 	}
 
 	o := coff + i * 4
-	return u32(data[o]) | u32(data[o + 1]) << 8 | u32(data[o + 2]) << 16 | u32(data[o + 3]) << 24,
-		.None
+	return endian.unchecked_get_u32le(data[o:o + 4]), .None
 }
 
 // text_interior_sep_at returns separator i's full codec key (borrowed).

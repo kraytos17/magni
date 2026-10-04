@@ -1,6 +1,7 @@
 package btree
 
 import "core:mem"
+import "core:slice"
 import "src:pager"
 
 // Stats holds B-tree statistics indexed by page id. The arrays must outlive the
@@ -61,9 +62,7 @@ stats_row_count_set :: proc(s: ^Stats, page_id: u32, count: int) {
 	if idx >= len(s.row_counts) {
 		old := len(s.row_counts)
 		resize(&s.row_counts, idx + 1)
-		for i := old; i <= idx; i += 1 {
-			s.row_counts[i] = -1
-		}
+		slice.fill(s.row_counts[old:], -1)
 	}
 	s.row_counts[idx] = count
 }
@@ -88,9 +87,7 @@ stats_range_set :: proc(s: ^Stats, page_id: u32, r: pager.Page_Int_Range) {
 	if idx >= len(s.page_int_ranges) {
 		old := len(s.page_int_ranges)
 		resize(&s.page_int_ranges, idx + 1)
-		for i := old; i <= idx; i += 1 {
-			s.page_int_ranges[i] = nil
-		}
+		slice.fill(s.page_int_ranges[old:], nil)
 	}
 	s.page_int_ranges[idx] = r
 }
