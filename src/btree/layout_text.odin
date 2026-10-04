@@ -58,7 +58,9 @@ Text_Slot :: struct #packed {
 @(require_results)
 init_text_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 	off := get_page_header_offset(page_id)
-	if len(data) < off + TEXT_LEAF_FIXED { return false }
+	if len(data) < off + TEXT_LEAF_FIXED {
+		return false
+	}
 
 	mem.zero_slice(data[off:])
 	header := (^Leaf_Header)(raw_data(data[off:]))
@@ -75,8 +77,12 @@ init_text_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 @(require_results)
 text_entry_area_end :: proc "contextless" (data: []u8, id: Page_Id) -> (int, Error) {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return 0, .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) { return 0, .Invalid_Page_Header }
+	if hdr == nil {
+		return 0, .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+		return 0, .Invalid_Page_Header
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	if intrinsics.unlikely(len(data) < off0 + TEXT_LEAF_FIXED) {
@@ -85,7 +91,9 @@ text_entry_area_end :: proc "contextless" (data: []u8, id: Page_Id) -> (int, Err
 
 	plen := int(u16(data[off0 + 8]) | u16(data[off0 + 9]) << 8)
 	end := off0 + TEXT_LEAF_FIXED + plen + int(hdr.cell_count) * size_of(Text_Slot)
-	if intrinsics.unlikely(end > len(data)) { return 0, .Cell_Deserialize_Failed }
+	if intrinsics.unlikely(end > len(data)) {
+		return 0, .Cell_Deserialize_Failed
+	}
 	return end, .None
 }
 
@@ -93,8 +101,12 @@ text_entry_area_end :: proc "contextless" (data: []u8, id: Page_Id) -> (int, Err
 @(require_results)
 text_prefix :: proc "contextless" (data: []u8, id: Page_Id) -> ([]u8, Error) {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return nil, .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) { return nil, .Invalid_Page_Header }
+	if hdr == nil {
+		return nil, .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+		return nil, .Invalid_Page_Header
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	if intrinsics.unlikely(len(data) < off0 + TEXT_LEAF_FIXED) {
@@ -176,8 +188,12 @@ text_entry_compare :: #force_inline proc "contextless" (
 	ts: []u8,
 	trid: types.Row_ID,
 ) -> int {
-	if r := mem.compare(suf, ts); r != 0 { return r }
-	if rid == trid { return 0 }
+	if r := mem.compare(suf, ts); r != 0 {
+		return r
+	}
+	if rid == trid {
+		return 0
+	}
 	return -1 if rid < trid else 1
 }
 
@@ -196,17 +212,27 @@ text_lower_bound :: proc "contextless" (
 	Error,
 ) {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return 0, .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) { return 0, .Invalid_Page_Header }
+	if hdr == nil {
+		return 0, .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+		return 0, .Invalid_Page_Header
+	}
 
 	count := int(hdr.cell_count)
 	prefix, p_err := text_prefix(data, id)
-	if p_err != .None { return 0, p_err }
-	if count == 0 { return 0, .None }
+	if p_err != .None {
+		return 0, p_err
+	}
+	if count == 0 {
+		return 0, .None
+	}
 
 	m := cell.text_index_shared_prefix(target, prefix, min(len(target), len(prefix)))
 	if m < len(target) && m < len(prefix) {
-		if target[m] < prefix[m] { return 0, .None }
+		if target[m] < prefix[m] {
+			return 0, .None
+		}
 		return count, .None
 	}
 	if len(target) < len(prefix) {
@@ -218,7 +244,9 @@ text_lower_bound :: proc "contextless" (
 	for left < right {
 		mid := left + (right - left) / 2
 		suf, rid, k_err := text_entry_at(data, id, mid)
-		if k_err != .None { return left, k_err }
+		if k_err != .None {
+			return left, k_err
+		}
 		if text_entry_compare(suf, rid, ts, target_rowid) < 0 {
 			left = mid + 1
 		} else {
@@ -244,8 +272,12 @@ text_build_from_sorted :: proc "contextless" (
 	rowids: []types.Row_ID,
 ) -> Error {
 	n := len(texts)
-	if len(rowids) != n { return .Invalid_Bounds }
-	if n > int(max(u16)) { return .Page_Full }
+	if len(rowids) != n {
+		return .Invalid_Bounds
+	}
+	if n > int(max(u16)) {
+		return .Page_Full
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	plen := 0
@@ -260,11 +292,17 @@ text_build_from_sorted :: proc "contextless" (
 		}
 		total += TEXT_ENTRY_ROWID_LEN + (len(texts[i]) - plen)
 	}
-	if total > len(data) { return .Page_Full }
-	if !init_text_leaf_page(data, u32(id)) { return .Invalid_Page_Header }
+	if total > len(data) {
+		return .Page_Full
+	}
+	if !init_text_leaf_page(data, u32(id)) {
+		return .Invalid_Page_Header
+	}
 
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
 
 	hdr.cell_count = u16le(u16(n))
 	data[off0 + 8] = u8(plen)
@@ -308,14 +346,22 @@ text_build_from_sorted :: proc "contextless" (
 @(require_results)
 text_validate_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if hdr.page_type != .LEAF_TEXT { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if hdr.page_type != .LEAF_TEXT {
+		return .Invalid_Page_Header
+	}
 
 	entry_end, e_err := text_entry_area_end(data, id)
-	if e_err != .None { return e_err }
+	if e_err != .None {
+		return e_err
+	}
 
 	cco := int(hdr.cell_content_offset)
-	if cco < entry_end || cco > PAGE_SIZE { return .Cell_Deserialize_Failed }
+	if cco < entry_end || cco > PAGE_SIZE {
+		return .Cell_Deserialize_Failed
+	}
 
 	count := int(hdr.cell_count)
 	prev_suf: []u8 = nil
@@ -323,20 +369,14 @@ text_validate_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	have_prev := false
 	for i in 0 ..< count {
 		suf, rid, k_err := text_entry_at(data, id, i)
-		if k_err != .None { return k_err }
+		if k_err != .None {
+			return k_err
+		}
 		if have_prev && text_entry_compare(prev_suf, prev_rid, suf, rid) >= 0 {
 			return .Cell_Deserialize_Failed
 		}
 		prev_suf, prev_rid, have_prev = suf, rid, true
 	}
-	// No prefix-exactness rule (deliberately): a SHORT shared prefix is a
-	// legal page state, not corruption. Inserts never grow the prefix
-	// (only divergent rebuilds/splits recompute it) and deletes never
-	// shrink it, so insert-/delete-built pages routinely share more than
-	// P. Ordering never depended on exactness — suffix order equals
-	// full-text order under ANY common prefix — so the rule would be a
-	// tripwire that fires on legal pages. Writer exactness stays pinned
-	// where it belongs: the build roundtrip tests assert built prefixes.
 	return .None
 }
 
@@ -359,7 +399,9 @@ text_validate_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 @(require_results)
 init_text_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Leaf_Header) { return false }
+	if len(data) < off + size_of(Leaf_Header) {
+		return false
+	}
 
 	mem.zero_slice(data[off:])
 	header := (^Leaf_Header)(raw_data(data[off:]))
@@ -380,12 +422,18 @@ text_interior_children_off :: #force_inline proc "contextless" (
 	n: int,
 ) -> int {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return -1 }
-	if hdr.page_type != .TEXT_INTERIOR { return -1 }
+	if hdr == nil {
+		return -1
+	}
+	if hdr.page_type != .TEXT_INTERIOR {
+		return -1
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	end := off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
-	if end > len(data) { return -1 }
+	if end > len(data) {
+		return -1
+	}
 	return off0 + size_of(Leaf_Header)
 }
 
@@ -394,16 +442,23 @@ text_interior_children_off :: #force_inline proc "contextless" (
 @(require_results)
 text_interior_child_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u32, Error) {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return 0, .Invalid_Page_Header }
+	if hdr == nil {
+		return 0, .Invalid_Page_Header
+	}
 	if intrinsics.unlikely(hdr.page_type != .TEXT_INTERIOR) {
 		return 0, .Invalid_Page_Header
 	}
 
 	n := int(hdr.cell_count)
-	if intrinsics.unlikely(i < 0 || i > n) { return 0, .Cell_Not_Found }
+	if intrinsics.unlikely(i < 0 || i > n) {
+		return 0, .Cell_Not_Found
+	}
 
 	coff := text_interior_children_off(data, id, n)
-	if coff < 0 { return 0, .Cell_Deserialize_Failed }
+	if coff < 0 {
+		return 0, .Cell_Deserialize_Failed
+	}
+
 	o := coff + i * 4
 	return u32(data[o]) | u32(data[o + 1]) << 8 | u32(data[o + 2]) << 16 | u32(data[o + 3]) << 24,
 		.None
@@ -420,16 +475,22 @@ text_interior_sep_at :: proc "contextless" (
 	err: Error,
 ) {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return nil, .Invalid_Page_Header }
+	if hdr == nil {
+		return nil, .Invalid_Page_Header
+	}
 	if intrinsics.unlikely(hdr.page_type != .TEXT_INTERIOR) {
 		return nil, .Invalid_Page_Header
 	}
 
 	n := int(hdr.cell_count)
-	if intrinsics.unlikely(i < 0 || i >= n) { return nil, .Cell_Not_Found }
+	if intrinsics.unlikely(i < 0 || i >= n) {
+		return nil, .Cell_Not_Found
+	}
 
 	coff := text_interior_children_off(data, id, n)
-	if coff < 0 { return nil, .Cell_Deserialize_Failed }
+	if coff < 0 {
+		return nil, .Cell_Deserialize_Failed
+	}
 
 	slots_start := coff + (n + 1) * 4
 	if intrinsics.unlikely(slots_start + (i + 1) * size_of(Text_Slot) > len(data)) {
@@ -466,20 +527,32 @@ text_interior_find_upper :: #force_inline proc "contextless" (
 	pid := Page_Id(page_id)
 	cell_count := get_cell_count(data, page_id)
 	rightmost, r_err := text_interior_child_at(data, pid, cell_count)
-	if r_err != .None { return 0, -1 }
-	if cell_count == 0 { return rightmost, -1 }
+	if r_err != .None {
+		return 0, -1
+	}
+	if cell_count == 0 {
+		return rightmost, -1
+	}
 
 	idx := 0
 	for idx < cell_count {
 		sep, s_err := text_interior_sep_at(data, pid, idx)
-		if s_err != .None { return 0, -1 }
-		if cell.text_index_compare(sep, target) > 0 { break }
+		if s_err != .None {
+			return 0, -1
+		}
+		if cell.text_index_compare(sep, target) > 0 {
+			break
+		}
 		idx += 1
 	}
-	if idx >= cell_count { return rightmost, -1 }
+	if idx >= cell_count {
+		return rightmost, -1
+	}
 
 	child, c_err := text_interior_child_at(data, pid, idx)
-	if c_err != .None { return rightmost, -1 }
+	if c_err != .None {
+		return rightmost, -1
+	}
 	return child, idx
 }
 
@@ -510,8 +583,12 @@ text_interior_build_from_sorted :: proc "contextless" (
 	children: []u32,
 ) -> Error {
 	n := len(keys)
-	if len(children) != n + 1 { return .Invalid_Bounds }
-	if n > int(max(u16)) { return .Page_Full }
+	if len(children) != n + 1 {
+		return .Invalid_Bounds
+	}
+	if n > int(max(u16)) {
+		return .Page_Full
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	total := off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
@@ -529,7 +606,9 @@ text_interior_build_from_sorted :: proc "contextless" (
 	}
 
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
 
 	hdr.cell_count = u16le(u16(n))
 	coff := off0 + size_of(Leaf_Header)
@@ -565,8 +644,12 @@ text_interior_build_from_sorted :: proc "contextless" (
 @(require_results)
 text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if hdr.page_type != .TEXT_INTERIOR { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if hdr.page_type != .TEXT_INTERIOR {
+		return .Invalid_Page_Header
+	}
 
 	n := int(hdr.cell_count)
 	off0 := get_page_header_offset(u32(id))
@@ -576,7 +659,9 @@ text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error 
 
 	cco := int(hdr.cell_content_offset)
 	entry_end := off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
-	if cco < entry_end || cco > PAGE_SIZE { return .Cell_Deserialize_Failed }
+	if cco < entry_end || cco > PAGE_SIZE {
+		return .Cell_Deserialize_Failed
+	}
 	for i in 0 ..< n + 1 {
 		if _, c_err := text_interior_child_at(data, id, i); c_err != .None {
 			return c_err
@@ -587,7 +672,9 @@ text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error 
 	have_prev := false
 	for i in 0 ..< n {
 		sep, s_err := text_interior_sep_at(data, id, i)
-		if s_err != .None { return s_err }
+		if s_err != .None {
+			return s_err
+		}
 		if have_prev && cell.text_index_compare(prev, sep) >= 0 {
 			return .Cell_Deserialize_Failed
 		}
@@ -610,11 +697,17 @@ text_slot_insert :: proc "contextless" (
 	elen: int,
 ) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+		return .Invalid_Page_Header
+	}
 
 	count := int(hdr.cell_count)
-	if intrinsics.unlikely(idx < 0 || idx > count) { return .Invalid_Bounds }
+	if intrinsics.unlikely(idx < 0 || idx > count) {
+		return .Invalid_Bounds
+	}
 	if intrinsics.unlikely(
 		off < 0 || off > PAGE_SIZE || elen < TEXT_ENTRY_ROWID_LEN || elen > PAGE_SIZE,
 	) {
@@ -623,7 +716,9 @@ text_slot_insert :: proc "contextless" (
 
 	off0 := get_page_header_offset(u32(id))
 	prefix, p_err := text_prefix(data, id)
-	if p_err != .None { return p_err }
+	if p_err != .None {
+		return p_err
+	}
 
 	start := off0 + TEXT_LEAF_FIXED + len(prefix)
 	if intrinsics.unlikely(start + (count + 1) * size_of(Text_Slot) > len(data)) {
@@ -654,16 +749,22 @@ text_interior_child_store :: proc "contextless" (
 	child: u32,
 ) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
 	if intrinsics.unlikely(hdr.page_type != .TEXT_INTERIOR) {
 		return .Invalid_Page_Header
 	}
 
 	n := int(hdr.cell_count)
-	if intrinsics.unlikely(idx < 0 || idx > n) { return .Invalid_Bounds }
+	if intrinsics.unlikely(idx < 0 || idx > n) {
+		return .Invalid_Bounds
+	}
 
 	coff := text_interior_children_off(data, id, n)
-	if coff < 0 { return .Cell_Deserialize_Failed }
+	if coff < 0 {
+		return .Cell_Deserialize_Failed
+	}
 	if !endian.put_u32(data[coff + idx * 4:], .Little, child) {
 		return .Serialization_Failed
 	}
@@ -676,15 +777,23 @@ text_interior_child_store :: proc "contextless" (
 @(require_results)
 text_slot_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+		return .Invalid_Page_Header
+	}
 
 	count := int(hdr.cell_count)
-	if intrinsics.unlikely(idx < 0 || idx >= count) { return .Invalid_Bounds }
+	if intrinsics.unlikely(idx < 0 || idx >= count) {
+		return .Invalid_Bounds
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	prefix, p_err := text_prefix(data, id)
-	if p_err != .None { return p_err }
+	if p_err != .None {
+		return p_err
+	}
 
 	start := off0 + TEXT_LEAF_FIXED + len(prefix)
 	if intrinsics.unlikely(start + count * size_of(Text_Slot) > len(data)) {

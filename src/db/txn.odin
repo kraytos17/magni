@@ -42,12 +42,14 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 		}
 		st.root = new_r
 	}
-	for name, root in db.txn_pending.index_roots {
-		new_r, flush_ok := schema.update_index_root_cow(&st, name, root)
-		if !flush_ok {
-			return .IO_Error
+	for name, stages in db.txn_pending.index_roots {
+		for stg in stages {
+			new_r, flush_ok := schema.update_index_root_cow(&st, name, stg.name, stg.root)
+			if !flush_ok {
+				return .IO_Error
+			}
+			st.root = new_r
 		}
-		st.root = new_r
 	}
 	if len(db.txn_pending.roots) > 0 || len(db.txn_pending.index_roots) > 0 {
 		db.schema_root_page = st.root

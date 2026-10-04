@@ -96,6 +96,30 @@ class TestDdl(MagniCLITestCase):
         p = self.run_stdin("DROP TABLE nonexistent;")
         self.assertIsErr(p)
 
+    def test_drop_index(self):
+        p = self.run_stdin(
+            "CREATE TABLE di_t (id INT PRIMARY KEY, body TEXT); "
+            "CREATE INDEX di_i ON di_t (body); "
+            "INSERT INTO di_t VALUES (1, 'a'); "
+            "DROP INDEX di_i; SELECT id FROM di_t WHERE body = 'a';")
+        self.assertNoErr(p)
+        self.assertHas(p, "1")
+
+    def test_drop_nonexistent_index_fails(self):
+        p = self.run_stdin("DROP INDEX nonexistent;")
+        self.assertIsErr(p)
+
+    def test_second_index_and_qualified_drop(self):
+        p = self.run_stdin(
+            "CREATE TABLE di2 (id INT PRIMARY KEY, a TEXT, b TEXT); "
+            "CREATE INDEX i_a ON di2 (a); CREATE INDEX i_b ON di2 (b); "
+            "INSERT INTO di2 VALUES (1, 'x', 'y'); "
+            "SELECT id FROM di2 WHERE a = 'x' AND b = 'y'; "
+            "DROP INDEX i_b; SELECT id FROM di2 WHERE a = 'x'; "
+            "DROP INDEX i_a ON di2;")
+        self.assertNoErr(p)
+        self.assertHas(p, "1")
+
     def test_duplicate_table_name_rejected(self):
         p = self.run_stdin("CREATE TABLE dup (x INT); CREATE TABLE dup (y INT);")
         self.assertIsErr(p)

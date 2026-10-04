@@ -28,7 +28,9 @@ freeblock_write_size :: proc(data: []u8, off: u16, sz: u16le) {
 // Inserts a cell-sized freeblock into the chain. cell_off/cell_sz are native u16.
 @(private)
 freeblock_insert :: proc(data: []u8, cell_off: u16, cell_sz: u16, first: ^u16le) {
-	if cell_sz < FREEBLOCK_HDR_SIZE { return }
+	if cell_sz < FREEBLOCK_HDR_SIZE {
+		return
+	}
 
 	co := u16le(cell_off)
 	cs := u16le(cell_sz)
@@ -73,7 +75,9 @@ freeblock_insert :: proc(data: []u8, cell_off: u16, cell_sz: u16, first: ^u16le)
 		}
 
 		end_prev := u16(prev) + u16(freeblock_read_size(data, u16(prev)))
-		if u16le(end_prev) > co { return }
+		if u16le(end_prev) > co {
+			return
+		}
 		if u16le(end_prev) == co {
 			// Merge with prev
 			new_sz := freeblock_read_size(data, u16(prev)) + cs
@@ -108,14 +112,20 @@ freeblock_insert :: proc(data: []u8, cell_off: u16, cell_sz: u16, first: ^u16le)
 @(private)
 freeblock_alloc :: proc(data: []u8, first_hdr: u16le, need: u16, first: ^u16le) -> u16 {
 	f := u16(first_hdr)
-	if f == 0 { return 0 }
+	if f == 0 {
+		return 0
+	}
 
 	walk_and_alloc :: proc(data: []u8, prev: u16, curr: u16, need: u16, first: ^u16le) -> u16 {
 		fsz := u16(freeblock_read_size(data, curr))
 		if fsz >= need {
 			if fsz == need {
 				nxt := freeblock_read_next(data, curr)
-				if prev == 0 { first^ = nxt } else { freeblock_write_next(data, prev, nxt) }
+				if prev == 0 {
+					first^ = nxt
+				} else {
+					freeblock_write_next(data, prev, nxt)
+				}
 				return curr
 			}
 
@@ -126,17 +136,27 @@ freeblock_alloc :: proc(data: []u8, first_hdr: u16le, need: u16, first: ^u16le) 
 			}
 
 			nxt := freeblock_read_next(data, curr)
-			if prev == 0 { first^ = nxt } else { freeblock_write_next(data, prev, nxt) }
+			if prev == 0 {
+				first^ = nxt
+			} else {
+				freeblock_write_next(data, prev, nxt)
+			}
 			return curr
 		}
 		return 0
 	}
 
-	if r := walk_and_alloc(data, 0, f, need, first); r != 0 { return r }
+	if r := walk_and_alloc(data, 0, f, need, first); r != 0 {
+		return r
+	}
 	for {
 		nxt_u16 := u16(freeblock_read_next(data, f))
-		if nxt_u16 == 0 { return 0 }
-		if r := walk_and_alloc(data, f, nxt_u16, need, first); r != 0 { return r }
+		if nxt_u16 == 0 {
+			return 0
+		}
+		if r := walk_and_alloc(data, f, nxt_u16, need, first); r != 0 {
+			return r
+		}
 		f = nxt_u16
 	}
 	return 0

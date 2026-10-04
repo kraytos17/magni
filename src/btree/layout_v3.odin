@@ -69,7 +69,9 @@ get_dense_interior_header :: proc "contextless" (
 	page_id: u32,
 ) -> ^Dense_Interior_Header {
 	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Dense_Interior_Header) { return nil }
+	if len(data) < off + size_of(Dense_Interior_Header) {
+		return nil
+	}
 	return (^Dense_Interior_Header)(raw_data(data[off:]))
 }
 
@@ -89,7 +91,9 @@ dense_geometry :: proc "contextless" (
 	err: Error,
 ) {
 	h := get_dense_interior_header(data, u32(id))
-	if h == nil { return 0, 0, 0, false, 0, .Invalid_Page_Header }
+	if h == nil {
+		return 0, 0, 0, false, 0, .Invalid_Page_Header
+	}
 	if intrinsics.unlikely(h.page_type != .INTERIOR_DENSE) {
 		return 0, 0, 0, false, 0, .Invalid_Page_Header
 	}
@@ -126,16 +130,24 @@ dense_geometry :: proc "contextless" (
 @(require_results)
 dense_key_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (types.Row_ID, Error) {
 	keys_off, _, count, use_for, base, g_err := dense_geometry(data, id)
-	if g_err != .None { return 0, g_err }
-	if intrinsics.unlikely(i < 0 || i >= count) { return 0, .Cell_Not_Found }
+	if g_err != .None {
+		return 0, g_err
+	}
+	if intrinsics.unlikely(i < 0 || i >= count) {
+		return 0, .Cell_Not_Found
+	}
 	if use_for {
 		delta, ok := endian.get_u32(data[keys_off + i * DENSE_DELTA_WIDTH:], .Little)
-		if !ok { return 0, .Cell_Deserialize_Failed }
+		if !ok {
+			return 0, .Cell_Deserialize_Failed
+		}
 		return rowid_bias_decode(base + u64(delta)), .None
 	}
 
 	w, ok := endian.get_u64(data[keys_off + i * DENSE_FULL_KEY_WIDTH:], .Little)
-	if !ok { return 0, .Cell_Deserialize_Failed }
+	if !ok {
+		return 0, .Cell_Deserialize_Failed
+	}
 	return rowid_bias_decode(w), .None
 }
 
@@ -144,11 +156,17 @@ dense_key_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (types.R
 @(require_results)
 dense_child_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u32, Error) {
 	_, children_off, count, _, _, g_err := dense_geometry(data, id)
-	if g_err != .None { return 0, g_err }
-	if intrinsics.unlikely(i < 0 || i > count) { return 0, .Cell_Not_Found }
+	if g_err != .None {
+		return 0, g_err
+	}
+	if intrinsics.unlikely(i < 0 || i > count) {
+		return 0, .Cell_Not_Found
+	}
 
 	child, ok := endian.get_u32(data[children_off + i * DENSE_CHILD_WIDTH:], .Little)
-	if !ok { return 0, .Cell_Deserialize_Failed }
+	if !ok {
+		return 0, .Cell_Deserialize_Failed
+	}
 	return child, .None
 }
 
@@ -161,8 +179,6 @@ dense_child_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u32, 
 dense_lower_bound_u64 :: #force_inline proc "contextless" (keys: []u64, target: u64) -> int {
 	pos := 0
 	n := len(keys)
-	// Invariant: pos+n <= len(keys), so mid < len(keys) every iteration.
-	// (Loop-carried, not locally visible — stays bounds-checked.)
 	for n > 0 {
 		half := n >> 1
 		mid := pos + half
@@ -189,7 +205,9 @@ dense_page_lower_bound :: proc "contextless" (
 	Error,
 ) {
 	keys_off, _, count, use_for, base, g_err := dense_geometry(data, id)
-	if g_err != .None { return 0, g_err }
+	if g_err != .None {
+		return 0, g_err
+	}
 
 	target := rowid_bias_encode(key)
 	left, right := 0, count
@@ -198,14 +216,22 @@ dense_page_lower_bound :: proc "contextless" (
 		probe: u64
 		if use_for {
 			delta, ok := endian.get_u32(data[keys_off + mid * DENSE_DELTA_WIDTH:], .Little)
-			if !ok { return left, .Cell_Deserialize_Failed }
+			if !ok {
+				return left, .Cell_Deserialize_Failed
+			}
 			probe = base + u64(delta)
 		} else {
 			w, ok := endian.get_u64(data[keys_off + mid * DENSE_FULL_KEY_WIDTH:], .Little)
-			if !ok { return left, .Cell_Deserialize_Failed }
+			if !ok {
+				return left, .Cell_Deserialize_Failed
+			}
 			probe = w
 		}
-		if probe < target { left = mid + 1 } else { right = mid }
+		if probe < target {
+			left = mid + 1
+		} else {
+			right = mid
+		}
 	}
 	return left, .None
 }
@@ -219,10 +245,14 @@ dense_choose_encoding :: #force_inline proc "contextless" (
 	use_for: bool,
 	base: u64,
 ) {
-	if max_v < min_v { return false, 0 }
+	if max_v < min_v {
+		return false, 0
+	}
 
 	diff := u64(i64(max_v) - i64(min_v))
-	if diff <= u64(max(u32)) { return true, rowid_bias_encode(min_v) }
+	if diff <= u64(max(u32)) {
+		return true, rowid_bias_encode(min_v)
+	}
 	return false, 0
 }
 
@@ -246,8 +276,12 @@ dense_build_from_sorted :: proc "contextless" (
 	children: []u32,
 ) -> Error {
 	n := len(keys)
-	if len(children) != n + 1 { return .Invalid_Bounds }
-	if n > int(max(u16)) { return .Page_Full }
+	if len(children) != n + 1 {
+		return .Invalid_Bounds
+	}
+	if n > int(max(u16)) {
+		return .Page_Full
+	}
 
 	use_for, base := false, u64(0)
 	if n > 0 {
@@ -265,7 +299,9 @@ dense_build_from_sorted :: proc "contextless" (
 	}
 
 	h := get_dense_interior_header(data, u32(id))
-	if h == nil { return .Invalid_Page_Header }
+	if h == nil {
+		return .Invalid_Page_Header
+	}
 
 	h.cell_count = u16le(n)
 	if use_for {
@@ -350,16 +386,26 @@ slot_lower_bound :: proc "contextless" (
 	Error,
 ) {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return 0, .Invalid_Page_Header }
-	if hdr.page_type != .LEAF_SLOTDIR { return 0, .Invalid_Page_Header }
+	if hdr == nil {
+		return 0, .Invalid_Page_Header
+	}
+	if hdr.page_type != .LEAF_SLOTDIR {
+		return 0, .Invalid_Page_Header
+	}
 
 	count := int(hdr.cell_count)
 	left, right := 0, count
 	for left < right {
 		mid := left + (right - left) / 2
 		k, _, k_err := slot_at(data, id, mid)
-		if k_err != .None { return left, k_err }
-		if k < target { left = mid + 1 } else { right = mid }
+		if k_err != .None {
+			return left, k_err
+		}
+		if k < target {
+			left = mid + 1
+		} else {
+			right = mid
+		}
 	}
 	return left, .None
 }
@@ -370,7 +416,9 @@ slot_lower_bound :: proc "contextless" (
 @(require_results)
 init_dense_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Dense_Interior_Header) { return false }
+	if len(data) < off + size_of(Dense_Interior_Header) {
+		return false
+	}
 
 	mem.zero_slice(data[off:])
 	header := (^Dense_Interior_Header)(raw_data(data[off:]))
@@ -391,7 +439,9 @@ init_dense_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> boo
 @(require_results)
 init_slot_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Leaf_Header) { return false }
+	if len(data) < off + size_of(Leaf_Header) {
+		return false
+	}
 
 	mem.zero_slice(data[off:])
 	header := (^Leaf_Header)(raw_data(data[off:]))
@@ -410,10 +460,18 @@ init_slot_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 @(require_results)
 validate_dense_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	h := get_dense_interior_header(data, u32(id))
-	if h == nil { return .Invalid_Page_Header }
-	if h.page_type != .INTERIOR_DENSE { return .Invalid_Page_Header }
-	if u16(h.flags) & ~u16(DENSE_FLAG_FOR) != 0 { return .Unsupported_Format }
-	if h.reserved != 0 { return .Cell_Deserialize_Failed }
+	if h == nil {
+		return .Invalid_Page_Header
+	}
+	if h.page_type != .INTERIOR_DENSE {
+		return .Invalid_Page_Header
+	}
+	if u16(h.flags) & ~u16(DENSE_FLAG_FOR) != 0 {
+		return .Unsupported_Format
+	}
+	if h.reserved != 0 {
+		return .Cell_Deserialize_Failed
+	}
 	if h.first_freeblock != 0 || h.cell_content_offset != u16le(PAGE_SIZE) {
 		return .Cell_Deserialize_Failed
 	}
@@ -429,10 +487,14 @@ validate_dense_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error
 	prev_biased: u64 = 0
 	for i in 0 ..< n {
 		k, k_err := dense_key_at(data, id, i)
-		if k_err != .None { return k_err }
+		if k_err != .None {
+			return k_err
+		}
 
 		biased := rowid_bias_encode(k)
-		if i > 0 && biased < prev_biased { return .Cell_Deserialize_Failed }
+		if i > 0 && biased < prev_biased {
+			return .Cell_Deserialize_Failed
+		}
 		if u16(h.flags) & u16(DENSE_FLAG_FOR) != 0 {
 			if biased < u64(h.base) || biased - u64(h.base) > u64(max(u32)) {
 				return .Cell_Deserialize_Failed
@@ -440,9 +502,13 @@ validate_dense_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error
 		}
 
 		prev_biased = biased
-		if _, c_err := dense_child_at(data, id, i); c_err != .None { return c_err }
+		if _, c_err := dense_child_at(data, id, i); c_err != .None {
+			return c_err
+		}
 	}
-	if _, c_err := dense_child_at(data, id, n); c_err != .None { return c_err }
+	if _, c_err := dense_child_at(data, id, n); c_err != .None {
+		return c_err
+	}
 	return .None
 }
 
@@ -452,8 +518,12 @@ validate_dense_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error
 @(require_results)
 validate_slot_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if hdr.page_type != .LEAF_SLOTDIR { return .Invalid_Page_Header }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if hdr.page_type != .LEAF_SLOTDIR {
+		return .Invalid_Page_Header
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	entry_end := off0 + size_of(Leaf_Header) + int(hdr.cell_count) * size_of(Slot)
@@ -465,8 +535,12 @@ validate_slot_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	count := int(hdr.cell_count)
 	for i in 0 ..< count {
 		k, off, k_err := slot_at(data, id, i)
-		if k_err != .None { return k_err }
-		if i > 0 && k < prev { return .Cell_Deserialize_Failed }
+		if k_err != .None {
+			return k_err
+		}
+		if i > 0 && k < prev {
+			return .Cell_Deserialize_Failed
+		}
 
 		prev = k
 		if int(off) < entry_end || int(off) >= PAGE_SIZE {

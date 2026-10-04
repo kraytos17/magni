@@ -55,13 +55,17 @@ page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> i
 
 get_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Page_Header {
 	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Page_Header) { return nil }
+	if len(data) < off + size_of(Page_Header) {
+		return nil
+	}
 	return (^Page_Header)(raw_data(data[off:]))
 }
 
 get_leaf_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Leaf_Header {
 	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Leaf_Header) { return nil }
+	if len(data) < off + size_of(Leaf_Header) {
+		return nil
+	}
 	return (^Leaf_Header)(raw_data(data[off:]))
 }
 

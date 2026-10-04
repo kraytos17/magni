@@ -133,7 +133,14 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, 
 	case .DELETE:
 		advance(&parser); variant, success = parse_delete(&parser, allocator)
 	case .DROP:
-		advance(&parser); variant, success = parse_drop_table(&parser, allocator)
+		advance(&parser)
+		// DROP TABLE vs DROP INDEX: peek without consuming (match only
+		// advances on success — same discipline as CREATE above).
+		if match(&parser, .INDEX) {
+			variant, success = parse_drop_index(&parser, allocator)
+		} else {
+			variant, success = parse_drop_table(&parser, allocator)
+		}
 	case .BEGIN:
 		advance(&parser); variant = Txn_Stmt {
 			op = .BEGIN,

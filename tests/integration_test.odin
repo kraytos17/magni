@@ -3016,10 +3016,13 @@ test_create_index_empty :: proc(t: ^testing.T) {
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
 	if !found { return }
-	testing.expect(t, tbl.index_root > 0, "index root published")
-	testing.expect_value(t, tbl.index_column, "body")
-
-	idx_tree := btree.init(d.pager, tbl.index_root)
+	def, has := schema.table_index(tbl, "i_body")
+	testing.expect(t, has, "index present")
+	if has {
+		testing.expect(t, def.root > 0, "index root published")
+		testing.expect_value(t, def.column, "body")
+	}
+	idx_tree := btree.init(d.pager, index_root_of(t, tbl, "i_body"))
 	cnt, c_err := btree.tree_count_rows(&idx_tree)
 	testing.expect(t, c_err == .None && cnt == 0, "empty index has no rows")
 }
@@ -3075,8 +3078,9 @@ test_create_index_backfill :: proc(t: ^testing.T) {
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
 	if !found { return }
-	testing.expect(t, tbl.index_root > 0, "index root published")
-	idx_tree := btree.init(d.pager, tbl.index_root)
+	idx_root := index_root_of(t, tbl, "i_body")
+	testing.expect(t, idx_root > 0, "index root published")
+	idx_tree := btree.init(d.pager, idx_root)
 	cnt, c_err := btree.tree_count_rows(&idx_tree)
 	testing.expect(t, c_err == .None, "count succeeds")
 	testing.expect_value(t, cnt, n_indexed)
@@ -3122,9 +3126,9 @@ test_create_index_errors :: proc(t: ^testing.T) {
 	)
 	saved2, quiet2 := suppress_expected_errors()
 	context = quiet2
-	dup := db.execute(d, "CREATE INDEX i_body2 ON docs (body);")
+	dup_name := db.execute(d, "CREATE INDEX i_body ON docs (body);")
 	context = restore_logger(saved2)
-	testing.expect(t, dup != .None, "second index rejected")
+	testing.expect(t, dup_name != .None, "duplicate name on same table rejected")
 }
 
 @(test)
@@ -3159,9 +3163,9 @@ test_create_index_in_txn :: proc(t: ^testing.T) {
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found after commit")
 	if !found { return }
-	testing.expect(t, tbl.index_root > 0, "index survives commit")
+	testing.expect(t, index_root_of(t, tbl, "i_body") > 0, "index survives commit")
 	// Backfilled row present; in-txn row is NOT (fan-out is D4).
-	idx_tree := btree.init(d.pager, tbl.index_root)
+	idx_tree := btree.init(d.pager, index_root_of(t, tbl, "i_body"))
 	hello, _ := btree.text_find_rowids(&idx_tree, idx_tree.root, []u8{'h', 'e', 'l', 'l', 'o'})
 	testing.expect(t, len(hello) == 1 && hello[0] == 1, "backfilled row indexed")
 	// D4 fan-out: post-DDL writes maintain the index in the same txn.
@@ -3206,6 +3210,14 @@ destroy_expect :: proc(expect: ^map[string][dynamic]i64) {
 	delete(expect^)
 }
 
+// index_root_of resolves one named index root, expecting presence.
+index_root_of :: proc(t: ^testing.T, tbl: types.Table, name: string) -> u32 {
+	def, ok := schema.table_index(tbl, name)
+	testing.expect(t, ok, "index present")
+	if !ok { return 0 }
+	return def.root
+}
+
 verify_text_index :: proc(
 	t: ^testing.T,
 	d: ^db.Database,
@@ -3216,8 +3228,11 @@ verify_text_index :: proc(
 	tbl, found := schema.find_table(&st, table_name, context.temp_allocator)
 	testing.expect(t, found, "table found")
 	if !found { return }
-	testing.expect(t, tbl.index_root > 0, "index present")
-	idx_tree := btree.init(d.pager, tbl.index_root)
+	testing.expect(t, len(tbl.indexes) > 0, "index present")
+	if len(tbl.indexes) == 0 { return }
+	idx_root := tbl.indexes[0].root
+	testing.expect(t, idx_root > 0, "index root published")
+	idx_tree := btree.init(d.pager, idx_root)
 	total := 0
 	for _, want in expect { total += len(want) }
 	cnt, c_err := btree.tree_count_rows(&idx_tree)
@@ -3376,7 +3391,7 @@ test_index_update :: proc(t: ^testing.T) {
 	// pk update of a NON-indexed column: oracle identical.
 	st0 := db.Schema_Tree(d)
 	tbl0, _ := schema.find_table(&st0, "docs", context.temp_allocator)
-	root_before := tbl0.index_root
+	root_before := index_root_of(t, tbl0, "i_body")
 	testing.expect(
 		t,
 		db.execute(d, "UPDATE docs SET v = 999 WHERE id = 4;") == .None,
@@ -3384,7 +3399,7 @@ test_index_update :: proc(t: ^testing.T) {
 	)
 	st1 := db.Schema_Tree(d)
 	tbl1, _ := schema.find_table(&st1, "docs", context.temp_allocator)
-	testing.expect(t, tbl1.index_root == root_before, "untouched index keeps its root")
+	testing.expect(t, index_root_of(t, tbl1, "i_body") == root_before, "untouched index keeps its root")
 
 	// NULL -> text and text -> NULL transitions.
 	testing.expect(
@@ -3476,7 +3491,7 @@ test_index_txn_rollback_mixed :: proc(t: ^testing.T) {
 
 	st0 := db.Schema_Tree(d)
 	tbl0, _ := schema.find_table(&st0, "docs", context.temp_allocator)
-	root_before := tbl0.index_root
+	root_before := index_root_of(t, tbl0, "i_body")
 
 	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
 	testing.expect(
@@ -3494,7 +3509,7 @@ test_index_txn_rollback_mixed :: proc(t: ^testing.T) {
 
 	st1 := db.Schema_Tree(d)
 	tbl1, _ := schema.find_table(&st1, "docs", context.temp_allocator)
-	testing.expect(t, tbl1.index_root == root_before, "rollback restores index root")
+	testing.expect(t, index_root_of(t, tbl1, "i_body") == root_before, "rollback restores index root")
 	verify_text_index(t, d, "docs", expect)
 }
 
@@ -3524,7 +3539,7 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 
 	st0 := db.Schema_Tree(d)
 	tbl0, _ := schema.find_table(&st0, "docs", context.temp_allocator)
-	root_before := tbl0.index_root
+	root_before := index_root_of(t, tbl0, "i_body")
 	testing.expect(t, root_before > 0, "index present before vacuum")
 
 	// Delete half the rows (every even id), then vacuum.
@@ -3548,12 +3563,13 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 	tbl1, found1 := schema.find_table(&st1, "docs", context.temp_allocator)
 	testing.expect(t, found1, "table found after vacuum")
 	if !found1 { return }
-	testing.expect(t, tbl1.index_root > 0, "index root present after vacuum")
-	testing.expect(t, tbl1.index_root != root_before, "vacuum rebuilt the index")
+	vac_root := index_root_of(t, tbl1, "i_body")
+	testing.expect(t, vac_root > 0, "index root present after vacuum")
+	testing.expect(t, vac_root != root_before, "vacuum rebuilt the index")
 	verify_text_index(t, d, "docs", expect)
 
 	// Every reachable index page validates (packed output is well-formed).
-	idx_tree := btree.init(d.pager, tbl1.index_root)
+	idx_tree := btree.init(d.pager, vac_root)
 	pages := make(map[u32]bool, context.temp_allocator)
 	defer delete(pages)
 	btree.collect_pages(&idx_tree, idx_tree.root, &pages)
@@ -3610,19 +3626,20 @@ test_index_vacuum_empty :: proc(t: ^testing.T) {
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
 	if !found { return }
-	testing.expect(t, tbl.index_root > 0, "index root present")
-	idx_tree := btree.init(d.pager, tbl.index_root)
+	empty_root := index_root_of(t, tbl, "i_body")
+	testing.expect(t, empty_root > 0, "index root present")
+	idx_tree := btree.init(d.pager, empty_root)
 	cnt, c_err := btree.tree_count_rows(&idx_tree)
 	testing.expect(t, c_err == .None && cnt == 0, "vacuumed empty index counts zero")
-	pg, pg_err := pager.get_page(d.pager, tbl.index_root)
+	pg, pg_err := pager.get_page(d.pager, empty_root)
 	testing.expect(t, pg_err == nil, "root readable")
 	if pg_err != nil { return }
-	defer pager.unpin_page(d.pager, tbl.index_root)
-	h := btree.get_header(pg.data, tbl.index_root)
+	defer pager.unpin_page(d.pager, empty_root)
+	h := btree.get_header(pg.data, empty_root)
 	testing.expect(t, h != nil && h.page_type == .LEAF_TEXT, "empty vacuum root is a text leaf")
 	testing.expect(
 		t,
-		btree.text_validate_leaf(pg.data, btree.Page_Id(tbl.index_root)) == .None,
+		btree.text_validate_leaf(pg.data, btree.Page_Id(empty_root)) == .None,
 		"empty vacuum root validates",
 	)
 }
@@ -4363,6 +4380,23 @@ test_index_explain :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'a' OR body = 'b';"),
+		"INDEX SCAN ON docs USING body (or, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'a' OR body = 'b';"),
+		"INDEX SCAN ON docs USING body (or, covering)",
+	)
+	// OR with an unusable disjunct (other column, negated, nested)
+	// still falls back: the union would be incomplete.
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'a' OR v = 1;"),
+		"FULL SCAN ON docs",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE NOT body = 'a';"),
 		"FULL SCAN ON docs",
 	)
 	testing.expect_value(

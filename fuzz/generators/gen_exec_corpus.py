@@ -142,6 +142,33 @@ UPDATE docs SET v = 99 WHERE body = 'alpha';
 DELETE FROM docs WHERE body = 'bb';
 SELECT rowid FROM docs WHERE body = 'bb';
 """),
+    ("script_drop_index", """\
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);
+CREATE INDEX i_body ON docs (body);
+INSERT INTO docs VALUES (1, 'alpha', 10), (2, 'bb', 20), (3, NULL, 30);
+SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;
+DROP INDEX i_body;
+SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;
+EXPLAIN SELECT id FROM docs WHERE body = 'alpha';
+DROP INDEX i_body;
+DROP INDEX nope;
+CREATE INDEX i_body ON docs (body);
+SELECT id FROM docs WHERE body = 'bb' ORDER BY id;
+"""),
+    ("script_multi_index", """\
+CREATE TABLE docs (id INT PRIMARY KEY, title TEXT, body TEXT);
+CREATE INDEX i_title ON docs (title);
+CREATE INDEX i_body ON docs (body);
+INSERT INTO docs VALUES (1, 't1', 'alpha'), (2, 't2', 'beta'), (3, 't1', 'beta');
+SELECT id FROM docs WHERE title = 't1' AND body = 'beta' ORDER BY id;
+SELECT id FROM docs WHERE title = 't2' OR body = 'alpha' ORDER BY id;
+SELECT body FROM docs WHERE body = 'beta' ORDER BY id;
+EXPLAIN SELECT id FROM docs WHERE title = 't1' AND body = 'beta';
+DROP INDEX i_body;
+SELECT id FROM docs WHERE title = 't1' ORDER BY id;
+DROP INDEX i_title ON docs;
+SELECT id FROM docs WHERE title = 't1' ORDER BY id;
+"""),
     ("script_admin", """\
 CREATE TABLE t (id INT PRIMARY KEY, body TEXT);
 CREATE INDEX i_body ON t (body);

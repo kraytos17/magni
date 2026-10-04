@@ -2196,24 +2196,31 @@ test_pending_index_roots :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	pr := executor.Pending_Roots{}
 	executor.pending_stage(&pr, "t", 10, context.temp_allocator)
-	executor.pending_stage_index(&pr, "t", 20, context.temp_allocator)
-	executor.pending_stage_index(&pr, "u", 30, context.temp_allocator)
+	executor.pending_stage_index(&pr, "t", "i1", 20, context.temp_allocator)
+	executor.pending_stage_index(&pr, "t", "i2", 25, context.temp_allocator)
+	executor.pending_stage_index(&pr, "u", "i1", 30, context.temp_allocator)
 	testing.expect_value(t, pr.roots["t"], u32(10))
-	testing.expect_value(t, pr.index_roots["t"], u32(20))
-	testing.expect_value(t, pr.index_roots["u"], u32(30))
+	testing.expect_value(t, len(pr.index_roots["t"]), 2)
+	testing.expect_value(t, pr.index_roots["t"][0].root, u32(20))
+	testing.expect_value(t, pr.index_roots["t"][1].root, u32(25))
+	testing.expect_value(t, pr.index_roots["u"][0].root, u32(30))
 
-	// Re-stage overwrites in place (same key, no second clone).
-	executor.pending_stage_index(&pr, "t", 21, context.temp_allocator)
-	testing.expect_value(t, pr.index_roots["t"], u32(21))
+	// Re-stage overwrites in place (same table+name, no second clone).
+	executor.pending_stage_index(&pr, "t", "i1", 21, context.temp_allocator)
+	testing.expect_value(t, len(pr.index_roots["t"]), 2)
+	testing.expect_value(t, pr.index_roots["t"][0].root, u32(21))
 	testing.expect_value(t, pr.roots["t"], u32(10))
 
-	// Drop clears both maps for the table.
+	// Named drop forgets one index; table drop clears both maps.
+	executor.pending_drop_index(&pr, "t", "i1")
+	testing.expect_value(t, len(pr.index_roots["t"]), 1)
+	testing.expect_value(t, pr.index_roots["t"][0].name, "i2")
 	executor.pending_drop(&pr, "t")
 	_, in_roots := pr.roots["t"]
 	testing.expect(t, !in_roots, "drop clears data root")
 	_, in_index := pr.index_roots["t"]
-	testing.expect(t, !in_index, "drop clears index root")
-	testing.expect_value(t, pr.index_roots["u"], u32(30))
+	testing.expect(t, !in_index, "drop clears index stages")
+	testing.expect_value(t, pr.index_roots["u"][0].root, u32(30))
 
 	// Clear empties everything (owns clones — no leaks past this).
 	executor.pending_clear(&pr)

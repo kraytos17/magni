@@ -160,6 +160,14 @@ Drop_Stmt :: struct {
 	table_name: string,
 }
 
+// Drop_Index_Stmt is `DROP INDEX name [ON table]` — resolves the owning
+// table by stored index name (unique match, or the ON qualifier when the
+// name repeats across tables).
+Drop_Index_Stmt :: struct {
+	index_name: string,
+	table_name: Maybe(string),
+}
+
 Txn_Op :: enum u8 {
 	BEGIN,
 	COMMIT,
@@ -206,6 +214,7 @@ Statement_Variant :: union {
 	Update_Stmt,
 	Delete_Stmt,
 	Drop_Stmt,
+	Drop_Index_Stmt,
 	Txn_Stmt,
 	Explain_Stmt,
 }

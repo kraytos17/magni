@@ -23,21 +23,23 @@ Schema_Row :: struct {
 	sql         : string,
 	columns_blob: []u8,
 	skip_root   : u32,
-	// Single secondary text index (V3.0). Each field parses with skip-style
-	// independent leniency; "indexed" is a caller-side predicate
-	// (index_root > 0 AND len(index_column) > 0), not a codec invariant.
-	index_root  : u32,
-	index_column: string,
+	// Secondary text indexes: one [root INT][column TEXT][name TEXT]
+	// triple per index from slot [6] (N = 0..). Each field parses with
+	// skip-style independent leniency; "indexed" is a caller-side
+	// predicate (root > 0 AND column non-empty per triple), not a codec
+	// invariant. Legacy widths: 8-wide single unnamed ([6],[7]),
+	// 9-wide single named (+[8]); both parse as one triple.
+	indexes     : []types.Index_Def,
 }
 
 schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator) -> []types.Value {
 	n := 5 // kind + name + root + sql + blob
-	// Index fields live at fixed [6],[7] whenever either is set (root-only
+	// Triples live at fixed [6+3i] whenever any index exists (root-only
 	// swaps persist; the skip slot is emitted explicitly, possibly 0, so
-	// positions never shift). Old 5/6-wide rows keep parsing (below).
-	has_index := r.index_root > 0 || len(r.index_column) > 0
-	if r.skip_root > 0 || has_index { n += 1 }
-	if has_index { n = 8 }
+	// positions never shift). Old 5/6/8/9-wide rows keep parsing (below).
+	k := len(r.indexes)
+	if r.skip_root > 0 || k > 0 { n += 1 }
+	n += 3 * k
 
 	result := make([]types.Value, n, allocator)
 	result[0] = types.value_int(0) // 0 = table
@@ -48,9 +50,10 @@ schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator)
 	if n >= 6 {
 		result[5] = types.value_int(i64(r.skip_root))
 	}
-	if has_index {
-		result[6] = types.value_int(i64(r.index_root))
-		result[7] = types.value_text(r.index_column)
+	for i in 0 ..< k {
+		result[6 + 3 * i] = types.value_int(i64(r.indexes[i].root))
+		result[6 + 3 * i + 1] = types.value_text(r.indexes[i].column)
+		result[6 + 3 * i + 2] = types.value_text(r.indexes[i].name)
 	}
 	return result
 }
@@ -80,11 +83,27 @@ schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 	if len(values) >= 6 {
 		if skip, ok5 := values[5].(i64); ok5 { sr.skip_root = u32(skip) }
 	}
+	// Triples from [6]: complete [root INT][column TEXT][name TEXT]
+	// groups only (trailing partials ignored, skip-style). Legacy
+	// widths: 8-wide single unnamed ([6],[7]), 9-wide single named
+	// (+[8]); both parse as one triple.
 	if len(values) >= 8 {
-		// Independent leniency (skip-style); fixed positions, no ambiguity.
-		// "Indexed" stays caller-side (root > 0 AND column non-empty).
-		if idx, ok6 := values[6].(i64); ok6 { sr.index_root = u32(idx) }
-		if col, ok7 := values[7].(string); ok7 { sr.index_column = col }
+		triples := make([dynamic]types.Index_Def, 0, 2, context.temp_allocator)
+		i := 6
+		for i + 1 < len(values) {
+			iroot, rok := values[i].(i64)
+			col, cok := values[i + 1].(string)
+			if !rok || !cok { break }
+			iname := ""
+			if i + 2 < len(values) {
+				if nm, nok := values[i + 2].(string); nok { iname = nm } else { break }
+			}
+			append(&triples, types.Index_Def{name = iname, column = col, root = u32(iroot)})
+			i += 3
+			// Legacy 8-wide has no name slot: exactly one triple.
+			if len(values) == 8 { break }
+		}
+		sr.indexes = triples[:]
 	}
 	return sr, true
 }
@@ -366,16 +385,37 @@ table_from_values :: proc(
 
 	table.columns = cols
 	table.skip_root = sr.skip_root
-	table.index_root = sr.index_root
-	if len(sr.index_column) > 0 {
-		table.index_column = strings.clone(sr.index_column, allocator)
+	if len(sr.indexes) > 0 {
+		defs := make([]types.Index_Def, len(sr.indexes), allocator)
+		for def, i in sr.indexes {
+			defs[i] = types.Index_Def {
+				root   = def.root,
+				column = strings.clone(def.column, allocator),
+				name   = strings.clone(def.name, allocator),
+			}
+		}
+		table.indexes = defs
 	}
 	return table, true
 }
 
+// table_index returns the named index definition of a resolved table.
+// Linear scan: tables carry few indexes, and this rides catalog
+// resolution (not row loops).
+table_index :: proc(table: types.Table, index_name: string) -> (types.Index_Def, bool) {
+	for def in table.indexes {
+		if def.name == index_name { return def, true }
+	}
+	return {}, false
+}
+
 table_free :: proc(table: types.Table, allocator := context.allocator) {
 	delete(table.name, allocator); delete(table.sql, allocator)
-	if len(table.index_column) > 0 { delete(table.index_column, allocator) }
+	for def in table.indexes {
+		delete(def.column, allocator)
+		delete(def.name, allocator)
+	}
+	delete(table.indexes, allocator)
 	for col in table.columns {
 		delete(col.name, allocator)
 		if def, ok := col.default_value.?; ok { types.value_delete(def, allocator) }
@@ -407,8 +447,6 @@ set_data_root :: proc(sr: ^Schema_Row, root: u32) { sr.root_page = root }
 @(private = "file")
 set_skip_root :: proc(sr: ^Schema_Row, root: u32) { sr.skip_root = root }
 
-@(private = "file")
-set_index_root :: proc(sr: ^Schema_Row, root: u32) { sr.index_root = root }
 
 // update_schema_root_cow is the shared core behind update_root_page_cow and
 // update_skip_root_cow: fetch the schema row, apply the field setter, and
@@ -476,15 +514,17 @@ update_skip_root_cow :: proc(
 	)
 }
 
-// update_index_def_cow publishes a table's secondary-index definition
-// (root + column) in ONE schema COW: readers never see a half index (root
-// without column or vice versa). DDL (exec_create_index) is the only
-// writer; per-mutation root swaps go through update_index_root_cow.
+// update_index_def_cow publishes one secondary-index definition
+// (append or replace by name) in ONE schema COW: readers never see a
+// half index. DDL (exec_create_index) is the only writer; per-mutation
+// root swaps go through update_index_root_cow; exec_drop_index clears
+// via clear_index_def_cow below.
 update_index_def_cow :: proc(
 	t: ^btree.Tree,
 	table_name: string,
 	new_index_root: u32,
 	index_column: string,
+	index_name: string,
 ) -> (
 	new_schema_root: u32,
 	ok: bool,
@@ -503,8 +543,20 @@ update_index_def_cow :: proc(
 		return t.root, false
 	}
 
-	sr.index_root = new_index_root
-	sr.index_column = index_column
+	defs := make([dynamic]types.Index_Def, 0, len(sr.indexes) + 1, context.temp_allocator)
+	replaced := false
+	for def in sr.indexes {
+		if def.name == index_name {
+			append(&defs, types.Index_Def{name = index_name, column = index_column, root = new_index_root})
+			replaced = true
+		} else {
+			append(&defs, def)
+		}
+	}
+	if !replaced {
+		append(&defs, types.Index_Def{name = index_name, column = index_column, root = new_index_root})
+	}
+	sr.indexes = defs[:]
 	values := schema_row_to_values(sr)
 	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
 	if upd_err != .None {
@@ -513,24 +565,119 @@ update_index_def_cow :: proc(
 	}
 	return upd_root, true
 }
-// update_index_root_cow swaps a table's secondary-index root through the
-// shared core (same fetch-set-COW-commit as data/skip roots). Index COLUMN
-// assignment is separate DDL (update_index_def_cow writes both at once).
+
+// clear_index_def_cow drops a table's secondary-index definition (root +
+// column + name, atomically) in ONE schema COW. DDL (exec_drop_index) is
+// the only writer. Index pages are NOT freed here: snapshots may still
+// reference them (same reason DROP TABLE never frees data pages); GC
+// reclaims unreachable pages once snapshots expire.
+clear_index_def_cow :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	index_name: string,
+) -> (
+	new_schema_root: u32,
+	ok: bool,
+) {
+	rowid := types.Row_ID(types.hash_string(table_name))
+	c, err := btree.tree_find(t, rowid, context.temp_allocator)
+	if err != .None {
+		log.errorf("[schema] clear_index_def_cow: tree_find failed for '%s'", table_name)
+		return t.root, false
+	}
+	defer cell.destroy(&c, context.temp_allocator)
+
+	sr, sr_ok := schema_row_from_values(c.values)
+	if !sr_ok {
+		log.errorf("[schema] clear_index_def_cow: decode failed for '%s'", table_name)
+		return t.root, false
+	}
+	defs := make([dynamic]types.Index_Def, 0, len(sr.indexes), context.temp_allocator)
+	dropped := false
+	for def in sr.indexes {
+		if def.name == index_name { dropped = true } else { append(&defs, def) }
+	}
+	if !dropped {
+		log.errorf("[schema] clear_index_def_cow: no index '%s' on '%s'", index_name, table_name)
+		return t.root, false
+	}
+	sr.indexes = defs[:]
+	values := schema_row_to_values(sr)
+	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
+	if upd_err != .None {
+		log.errorf("[schema] clear_index_def_cow failed for '%s': %v", table_name, upd_err)
+		return t.root, false
+	}
+	return upd_root, true
+}
+
+// find_tables_by_index resolves all tables owning secondary index
+// `index_name` (names repeat across tables; unique per table, enforced
+// at CREATE). Returns heap-owned names under allocator (caller frees).
+find_tables_by_index :: proc(
+	t: ^btree.Tree,
+	index_name: string,
+	allocator := context.allocator,
+) -> []string {
+	out := make([dynamic]string, 0, 1, allocator)
+	tables := list_tables(t, context.temp_allocator)
+	for tbl in tables {
+		for def in tbl.indexes {
+			if def.name == index_name {
+				append(&out, strings.clone(tbl.name, allocator))
+				break
+			}
+		}
+	}
+	return out[:]
+}
+// update_index_root_cow swaps one secondary-index root by name
+// (fetch-set-COW-commit, same shape as data/skip roots). Per-mutation
+// fan-out is the only writer; returns false when the triple is absent.
 update_index_root_cow :: proc(
 	t: ^btree.Tree,
 	table_name: string,
+	index_name: string,
 	new_index_root: u32,
 ) -> (
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	return update_schema_root_cow(
-		t,
-		table_name,
-		new_index_root,
-		set_index_root,
-		"update_index_root_cow",
-	)
+	rowid := types.Row_ID(types.hash_string(table_name))
+	c, err := btree.tree_find(t, rowid, context.temp_allocator)
+	if err != .None {
+		log.errorf("[schema] update_index_root_cow: tree_find failed for '%s'", table_name)
+		return t.root, false
+	}
+	defer cell.destroy(&c, context.temp_allocator)
+
+	sr, sr_ok := schema_row_from_values(c.values)
+	if !sr_ok {
+		log.errorf("[schema] update_index_root_cow: decode failed for '%s'", table_name)
+		return t.root, false
+	}
+	defs := make([dynamic]types.Index_Def, 0, len(sr.indexes), context.temp_allocator)
+	swapped := false
+	for def in sr.indexes {
+		if def.name == index_name {
+			append(&defs, types.Index_Def{name = def.name, column = def.column, root = new_index_root})
+			swapped = true
+		} else {
+			append(&defs, def)
+		}
+	}
+	if !swapped {
+		log.errorf("[schema] update_index_root_cow: no index '%s' on '%s'", index_name, table_name)
+		return t.root, false
+	}
+	sr.indexes = defs[:]
+	values := schema_row_to_values(sr)
+	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
+	if upd_err != .None {
+		log.errorf("[schema] update_index_root_cow failed for '%s': %v", table_name, upd_err)
+		return t.root, false
+	}
+	return upd_root, true
 }
 
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {

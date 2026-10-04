@@ -408,44 +408,48 @@ test_schema_row_index_roundtrip :: proc(t: ^testing.T) {
 		root_page    = 42,
 		sql          = "CREATE TABLE docs (body TEXT)",
 		columns_blob = []u8{9, 9, 9},
-		index_root   = 77,
-		index_column = "body",
+		indexes      = []types.Index_Def {
+			{name = "i_body", column = "body", root = 77},
+			{name = "i_v", column = "v", root = 78},
+		},
 	}
 
-	// Index pair adds values [6],[7]: 8 values total.
+	// Two triples add values [6..11]: 12 values total.
 	values := schema.schema_row_to_values(r)
-	testing.expect(t, len(values) == 8, "index pair produces 8 values")
+	testing.expect(t, len(values) == 12, "two triples produce 12 values")
 
 	r2, ok := schema.schema_row_from_values(values)
-	testing.expect(t, ok, "8-value format round-trips")
-	testing.expect_value(t, r2.index_root, u32(77))
-	testing.expect_value(t, r2.index_column, "body")
+	testing.expect(t, ok, "12-value format round-trips")
+	testing.expect_value(t, len(r2.indexes), 2)
+	testing.expect_value(t, r2.indexes[0].root, u32(77))
+	testing.expect_value(t, r2.indexes[0].column, "body")
+	testing.expect_value(t, r2.indexes[0].name, "i_body")
+	testing.expect_value(t, r2.indexes[1].root, u32(78))
+	testing.expect_value(t, r2.indexes[1].column, "v")
+	testing.expect_value(t, r2.indexes[1].name, "i_v")
 	testing.expect_value(t, r2.root_page, u32(42))
 	testing.expect_value(t, r2.skip_root, u32(0))
 
-	// No index: 5 values, zero on decode (old rows keep parsing).
+	// No index: 5 values, empty on decode (old rows keep parsing).
 	r0 := r
-	r0.index_root = 0
-	r0.index_column = ""
+	r0.indexes = nil
 	values5 := schema.schema_row_to_values(r0)
 	testing.expect(t, len(values5) == 5, "no index produces 5 values")
 	r5, ok5 := schema.schema_row_from_values(values5)
 	testing.expect(t, ok5, "5-value format accepted")
-	testing.expect_value(t, r5.index_root, u32(0))
-	testing.expect_value(t, r5.index_column, "")
+	testing.expect_value(t, len(r5.indexes), 0)
 
-	// Root without column still persists (root-only swaps must roundtrip):
-	// 8 wide with an empty column slot; callers predicate on both fields.
+	// Root-only triple still persists: 9 wide; callers predicate per triple.
 	half := r0
-	half.index_root = 9
+	half.indexes = []types.Index_Def{{name = "", column = "", root = 9}}
 	half_values := schema.schema_row_to_values(half)
-	testing.expect(t, len(half_values) == 8, "unpaired root encodes full width")
+	testing.expect(t, len(half_values) == 9, "unpaired root encodes full width")
 	half_back, half_ok := schema.schema_row_from_values(half_values)
 	testing.expect(t, half_ok, "full-width form accepted")
-	testing.expect_value(t, half_back.index_root, u32(9))
-	testing.expect_value(t, half_back.index_column, "")
+	testing.expect_value(t, len(half_back.indexes), 1)
+	testing.expect_value(t, half_back.indexes[0].root, u32(9))
 
-	// 7-value input (root, no column): paired leniency leaves both zero.
+	// 7-value input: paired leniency leaves indexes empty.
 	seven := []types.Value {
 		types.value_int(0),
 		types.value_text("t"),
@@ -456,23 +460,47 @@ test_schema_row_index_roundtrip :: proc(t: ^testing.T) {
 	}
 	seven_back, seven_ok := schema.schema_row_from_values(seven)
 	testing.expect(t, seven_ok, "7-value format accepted")
-	testing.expect_value(t, seven_back.index_root, u32(0))
-	testing.expect_value(t, seven_back.index_column, "")
+	testing.expect_value(t, len(seven_back.indexes), 0)
+
+	// 8-value rows (pre-name format) parse one unnamed triple.
+	eight := []types.Value {
+		types.value_int(0),
+		types.value_text("t"),
+		types.value_int(2),
+		types.value_text(""),
+		types.value_blob({}),
+		types.value_int(0),
+		types.value_int(77),
+		types.value_text("body"),
+	}
+	eight_back, eight_ok := schema.schema_row_from_values(eight)
+	testing.expect(t, eight_ok, "8-value format accepted")
+	testing.expect_value(t, len(eight_back.indexes), 1)
+	testing.expect_value(t, eight_back.indexes[0].root, u32(77))
+	testing.expect_value(t, eight_back.indexes[0].column, "body")
+	testing.expect_value(t, eight_back.indexes[0].name, "")
 }
 
 @(test)
 test_update_index_root_cow :: proc(t: ^testing.T) {
-	// Index roots swap through the shared COW core, independently of data
-	// roots. Built on setup_db (full DB init): bare setup_schema_env trees
-	// reject tree_update_cow (pre-existing harness gap, not D2).
+	// Index roots swap by name, independently of data roots (and of each
+	// other with two triples). Built on setup_db (full DB init): bare
+	// setup_schema_env trees reject tree_update_cow (pre-existing harness
+	// gap, not D2).
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "index_root")
 	defer teardown_db(d, "index_root")
 
-	testing.expect(t, db.execute(d, "CREATE TABLE docs (id INT, body TEXT);") == .None, "create")
+	testing.expect(t, db.execute(d, "CREATE TABLE docs (id INT, body TEXT, v INT);") == .None, "create")
 
 	st := db.Schema_Tree(d)
-	new_schema_root, ok := schema.update_index_root_cow(&st, "docs", 99)
+	def_root, def_ok := schema.update_index_def_cow(&st, "docs", 50, "body", "i_body")
+	testing.expect(t, def_ok, "index def publish succeeds")
+	if !def_ok { return }
+	d.schema_root_page = def_root
+
+	st1 := db.Schema_Tree(d)
+	new_schema_root, ok := schema.update_index_root_cow(&st1, "docs", "i_body", 99)
 	testing.expect(t, ok, "index root update succeeds")
 	if !ok { return }
 	d.schema_root_page = new_schema_root
@@ -481,11 +509,23 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	tbl, found := schema.find_table(&st2, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found after index update")
 	if !found { return }
-	testing.expect_value(t, tbl.index_root, u32(99))
-	testing.expect_value(t, tbl.index_column, "")
+	def, has := schema.table_index(tbl, "i_body")
+	testing.expect(t, has, "index present")
+	if has {
+		testing.expect_value(t, def.root, u32(99))
+		testing.expect_value(t, def.column, "body")
+	}
 	schema.table_free(tbl, context.temp_allocator)
 
-	// Data root swap preserves the index root (independent fields).
+	// Unknown name fails without touching the row.
+	saved, quiet := suppress_expected_errors()
+	context = quiet
+	st1b := db.Schema_Tree(d)
+	_, ok_no := schema.update_index_root_cow(&st1b, "docs", "nope", 100)
+	context = restore_logger(saved)
+	testing.expect(t, !ok_no, "unknown index name rejected")
+
+	// Data root swap preserves the index triple (independent fields).
 	st3 := db.Schema_Tree(d)
 	new_schema_root2, ok2 := schema.update_root_page_cow(&st3, "docs", 7)
 	testing.expect(t, ok2, "data root update succeeds")
@@ -496,6 +536,8 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	testing.expect(t, found2, "table found after data update")
 	if !found2 { return }
 	testing.expect_value(t, tbl2.root_page, u32(7))
-	testing.expect_value(t, tbl2.index_root, u32(99))
+	def2, has2 := schema.table_index(tbl2, "i_body")
+	testing.expect(t, has2, "index survives data swap")
+	if has2 { testing.expect_value(t, def2.root, u32(99)) }
 	schema.table_free(tbl2, context.temp_allocator)
 }

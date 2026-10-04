@@ -49,12 +49,14 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 			}
 			st.root = nr
 		}
-		for name, root in database.txn_pending.index_roots {
-			nr, ok := schema.update_index_root_cow(&st, name, root)
-			if !ok {
-				return .Corrupted
+		for name, stages in database.txn_pending.index_roots {
+			for stg in stages {
+				nr, ok := schema.update_index_root_cow(&st, name, stg.name, stg.root)
+				if !ok {
+					return .Corrupted
+				}
+				st.root = nr
 			}
-			st.root = nr
 		}
 
 		database.schema_root_page = st.root
@@ -76,14 +78,15 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 		}
 
 		st.root = updated_root
-		if table.index_root > 0 {
-			idx_tree := btree.init(database.pager, table.index_root)
+		for def in table.indexes {
+			if def.root == 0 { continue }
+			idx_tree := btree.init(database.pager, def.root)
 			vac_idx, vac_err := btree.text_tree_vacuum(&idx_tree)
 			if vac_err != .None {
 				return .Corrupted
 			}
 
-			updated_idx, idx_ok := schema.update_index_root_cow(&st, table.name, vac_idx)
+			updated_idx, idx_ok := schema.update_index_root_cow(&st, table.name, def.name, vac_idx)
 			if !idx_ok {
 				return .Corrupted
 			}
@@ -252,7 +255,9 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	defer btree.cursor_destroy(&cursor)
 
 	cols := make([]string, len(table.columns), context.temp_allocator)
-	for i in 0 ..< len(table.columns) { cols[i] = table.columns[i].name }
+	for i in 0 ..< len(table.columns) {
+		cols[i] = table.columns[i].name
+	}
 
 	table_rows := make([dynamic][]string, context.temp_allocator)
 	for cursor.is_valid {

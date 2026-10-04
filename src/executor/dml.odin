@@ -103,9 +103,11 @@ exec_create_index :: proc(
 		)
 		return false, t.root, {}
 	}
-	if table.index_root > 0 {
-		log.errorf("Error: Table already has an index: %s", stmt.table_name)
-		return false, t.root, {}
+	for def in table.indexes {
+		if def.name == stmt.index_name {
+			log.errorf("Error: Index already exists on %s: %s", stmt.table_name, stmt.index_name)
+			return false, t.root, {}
+		}
 	}
 
 	root_page, err := pager.allocate_page(t.pager)
@@ -157,16 +159,18 @@ exec_create_index :: proc(
 		btree.cursor_advance(&cursor)
 	}
 
-	new_schema_root, ok := schema.update_index_def_cow(t, table.name, index_root, stmt.column)
+	new_schema_root, ok := schema.update_index_def_cow(
+		t,
+		table.name,
+		index_root,
+		stmt.column,
+		stmt.index_name,
+	)
 	if !ok {
 		log.error("Error: Failed to register index in schema")
 		return false, t.root, {}
 	}
 
-	// NOTE: index_name is informational in V3.0 (single index per table,
-	// no DROP INDEX): it rides the AST for logging/future DDL only, with
-	// no catalog field. stmt.sql likewise has no index home (cf. tables).
-	_ = sql
 	log.infof(
 		"Created index '%s' on %s(%s) at Page %d",
 		stmt.index_name,
@@ -176,6 +180,62 @@ exec_create_index :: proc(
 	)
 
 	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}
+}
+
+// exec_drop_index implements `DROP INDEX name [ON table]` — resolves the
+// owning table by stored index name (qualified, or the unique match),
+// then clears the definition atomically. DDL publishes immediately like
+// exec_create_index (even in-txn, with reoverlay after). Index pages are
+// left for GC: snapshots may still reference them (DROP TABLE precedent
+// — never frees).
+@(private)
+exec_drop_index :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Drop_Index_Stmt,
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
+	table_name := ""
+	if qual, has_qual := stmt.table_name.?; has_qual {
+		table, found := schema.find_table_cached(t, qual, nil)
+		if !found {
+			log.errorf("Error: Table not found: %s", qual)
+			return false, t.root, {}
+		}
+		defer schema.table_free(table^, context.temp_allocator)
+		has_it := false
+		for def in table.indexes {
+			if def.name == stmt.index_name { has_it = true; break }
+		}
+		if !has_it {
+			log.errorf("Error: No such index %s on table %s", stmt.index_name, qual)
+			return false, t.root, {}
+		}
+		table_name = qual
+	} else {
+		owners := schema.find_tables_by_index(t, stmt.index_name, context.temp_allocator)
+		defer delete(owners, context.temp_allocator)
+		if len(owners) == 0 {
+			log.errorf("Error: No such index: %s", stmt.index_name)
+			return false, t.root, {}
+		}
+		if len(owners) > 1 {
+			log.errorf("Error: Ambiguous index name '%s'; use DROP INDEX %s ON <table>", stmt.index_name, stmt.index_name)
+			return false, t.root, {}
+		}
+		table_name = owners[0]
+	}
+
+	new_schema_root, ok := schema.clear_index_def_cow(t, table_name, stmt.index_name)
+	if !ok {
+		log.error("Error: Failed to drop index from schema")
+		return false, t.root, {}
+	}
+
+	log.infof("Dropped index '%s' on table %s", stmt.index_name, table_name)
+	return true, new_schema_root, Mutated_Table_Info{name = table_name, root = 0}
 }
 
 // Violation_Policy decides whether a constraint-violating row fails the
@@ -353,7 +413,7 @@ exec_insert_impl :: proc(
 	}
 
 	data_root := table.root_page
-	index_root := table.index_root
+	idx_roots := fanout_index_state(table, context.temp_allocator)
 	for row_values in stmt.values {
 		info, ok := prepare_insert_row(table, stmt.columns, row_values, t, data_root, checks)
 		if !ok { return false, t.root, {} }
@@ -366,8 +426,18 @@ exec_insert_impl :: proc(
 		}
 
 		data_root = new_data_root
-		index_root, ok = fanout_insert_row(t, table, index_root, info.row_id, info.values)
-		if !ok { return false, t.root, {} }
+		for def, i in table.indexes {
+			if def.root == 0 { continue }
+			idx_roots[i], ok = fanout_insert_row(
+				t,
+				table,
+				def.column,
+				idx_roots[i],
+				info.row_id,
+				info.values,
+			)
+			if !ok { return false, t.root, {} }
+		}
 		log.infof("Inserted row %d", info.row_id)
 	}
 
@@ -376,20 +446,18 @@ exec_insert_impl :: proc(
 		log.error("Error: Failed to update schema root page")
 		return false, t.root, {}
 	}
-	if table.index_root > 0 {
-		st := btree.init(t.pager, new_schema_root)
-		final_root, _, iok := commit_index_cow_root(
-			&st,
-			stmt.table_name,
-			index_root,
-			pending,
-			cache,
-		)
-		if !iok {
-			log.error("Error: Failed to update index root page")
-			return false, t.root, {}
-		}
-		new_schema_root = final_root
+	new_schema_root, ok = commit_all_index_roots(
+		t,
+		stmt.table_name,
+		table,
+		idx_roots[:],
+		new_schema_root,
+		pending,
+		cache,
+	)
+	if !ok {
+		log.error("Error: Failed to update index root page")
+		return false, t.root, {}
 	}
 	return true, new_schema_root, info
 }
@@ -591,6 +659,7 @@ commit_cow_root :: proc(
 commit_index_cow_root :: proc(
 	t: ^btree.Tree,
 	table_name: string,
+	index_name: string,
 	nroot: u32,
 	pending: ^Pending_Roots = nil,
 	cache: ^schema.Table_Cache = nil,
@@ -600,18 +669,66 @@ commit_index_cow_root :: proc(
 	bool,
 ) {
 	if pending != nil {
-		pending_stage_index(pending, table_name, nroot)
+		pending_stage_index(pending, table_name, index_name, nroot)
 		if cache != nil {
 			if tbl, ok := pending_cache_entry(cache, table_name); ok {
-				tbl.index_root = nroot
+				for &def in tbl.indexes {
+					if def.name == index_name { def.root = nroot }
+				}
 			}
 		}
 		return t.root, Mutated_Table_Info{name = table_name, root = nroot}, true
 	}
 
-	new_schema_root, ok := schema.update_index_root_cow(t, table_name, nroot)
+	new_schema_root, ok := schema.update_index_root_cow(t, table_name, index_name, nroot)
 	if !ok { return t.root, {}, false }
 	return new_schema_root, Mutated_Table_Info{name = table_name, root = nroot}, true
+}
+
+// fanout_index_state seeds one working root per table index (temp-owned,
+// parallel to table.indexes). Multi-row statements thread these across
+// rows and commit once — same shape as the single-root threading before.
+@(private = "file")
+fanout_index_state :: proc(
+	table: types.Table,
+	allocator := context.allocator,
+) -> [dynamic]u32 {
+	roots := make([dynamic]u32, 0, len(table.indexes), allocator)
+	for def in table.indexes { append(&roots, def.root) }
+	return roots
+}
+
+// commit_all_index_roots publishes every worked root (root-0 defs skip:
+// never routed, nothing to persist). One schema COW per index; N is tiny.
+@(private = "file")
+commit_all_index_roots :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	table: types.Table,
+	roots: []u32,
+	new_schema_root: u32,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	u32,
+	bool,
+) {
+	cur := new_schema_root
+	for def, i in table.indexes {
+		if def.root == 0 { continue }
+		st := btree.init(t.pager, cur)
+		final_root, _, iok := commit_index_cow_root(
+			&st,
+			table_name,
+			def.name,
+			roots[i],
+			pending,
+			cache,
+		)
+		if !iok { return t.root, false }
+		cur = final_root
+	}
+	return cur, true
 }
 
 // pending_cache_entry finds the cached catalog entry for an overlay update.
@@ -647,9 +764,13 @@ pending_reoverlay :: proc(t: ^btree.Tree, pending: ^Pending_Roots, cache: ^schem
 			tbl.root_page = root
 		}
 	}
-	for name, root in pending.index_roots {
+	for name, stages in pending.index_roots {
 		if tbl, ok := schema.find_table_cached(t, name, cache); ok {
-			tbl.index_root = root
+			for st in stages {
+				for &def in tbl.indexes {
+					if def.name == st.name { def.root = st.root }
+				}
+			}
 		}
 	}
 }
@@ -694,30 +815,35 @@ update_by_pk :: proc(
 		return true, false, t.root, {}
 	}
 
-	index_root, iok := fanout_update_row(
-		t,
-		plan.tbl,
-		plan.tbl.index_root,
-		target_rowid,
-		c.values,
-		new_row,
-	)
-	if !iok { return true, false, t.root, {} }
+	idx_roots := fanout_index_state(plan.tbl, context.temp_allocator)
+	for def, i in plan.tbl.indexes {
+		if def.root == 0 { continue }
+		nr, iok := fanout_update_row(
+			t,
+			plan.tbl,
+			def.column,
+			idx_roots[i],
+			target_rowid,
+			c.values,
+			new_row,
+		)
+		if !iok { return true, false, t.root, {} }
+		idx_roots[i] = nr
+	}
 
 	new_schema_root, committed, ok1 := commit_cow_root(t, plan.table_name, nroot, pending, cache)
 	if !ok1 { return true, false, t.root, {} }
-	if plan.tbl.index_root > 0 {
-		st := btree.init(t.pager, new_schema_root)
-		final_root, _, iok2 := commit_index_cow_root(
-			&st,
-			plan.table_name,
-			index_root,
-			pending,
-			cache,
-		)
-		if !iok2 { return true, false, t.root, {} }
-		new_schema_root = final_root
-	}
+	final_root, ok2 := commit_all_index_roots(
+		t,
+		plan.table_name,
+		plan.tbl,
+		idx_roots[:],
+		new_schema_root,
+		pending,
+		cache,
+	)
+	if !ok2 { return true, false, t.root, {} }
+	new_schema_root = final_root
 
 	log.info("Updated 1 row.")
 	return true, true, new_schema_root, committed
@@ -759,7 +885,7 @@ update_scan_cow :: proc(
 	Mutated_Table_Info,
 ) {
 	current_root := plan.tbl.root_page
-	index_root := plan.tbl.index_root
+	idx_roots := fanout_index_state(plan.tbl, context.temp_allocator)
 	count := 0
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(cursor, context.temp_allocator)
@@ -776,20 +902,24 @@ update_scan_cow :: proc(
 				tree_at := btree.init(t.pager, current_root)
 				nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)
 				if upd_err == .None {
-					new_index_root, iok := fanout_update_row(
-						t,
-						plan.tbl,
-						index_root,
-						c.rowid,
-						c.values,
-						new_row,
-					)
-					if !iok {
-						cell.destroy(&c, context.temp_allocator)
-						return false, t.root, {}
+					for def, i in plan.tbl.indexes {
+						if def.root == 0 { continue }
+						nr, iok := fanout_update_row(
+							t,
+							plan.tbl,
+							def.column,
+							idx_roots[i],
+							c.rowid,
+							c.values,
+							new_row,
+						)
+						if !iok {
+							cell.destroy(&c, context.temp_allocator)
+							return false, t.root, {}
+						}
+						idx_roots[i] = nr
 					}
 
-					index_root = new_index_root
 					current_root = nroot
 					count += 1
 				}
@@ -808,18 +938,17 @@ update_scan_cow :: proc(
 			cache,
 		)
 		if !ok1 { return false, t.root, {} }
-		if plan.tbl.index_root > 0 {
-			st := btree.init(t.pager, new_schema_root)
-			final_root, _, iok := commit_index_cow_root(
-				&st,
-				plan.table_name,
-				index_root,
-				pending,
-				cache,
-			)
-			if !iok { return false, t.root, {} }
-			new_schema_root = final_root
-		}
+		scan_final, iok := commit_all_index_roots(
+			t,
+			plan.table_name,
+			plan.tbl,
+			idx_roots[:],
+			new_schema_root,
+			pending,
+			cache,
+		)
+		if !iok { return false, t.root, {} }
+		new_schema_root = scan_final
 
 		log.infof("Updated %d rows.", count)
 		return true, new_schema_root, info
@@ -882,29 +1011,34 @@ delete_by_pk :: proc(
 	if !pk_ok { return false, false, 0, {} }
 	nroot, del_err := btree.tree_delete_cow(table_tree, target_rowid)
 	if del_err == .None {
-		index_root, iok := fanout_delete_rowid(
-			t,
-			table_tree,
-			plan.tbl,
-			plan.tbl.index_root,
-			target_rowid,
-		)
-		if !iok { return true, false, t.root, {} }
+		idx_roots := fanout_index_state(plan.tbl, context.temp_allocator)
+		for def, i in plan.tbl.indexes {
+			if def.root == 0 { continue }
+			nr, iok := fanout_delete_rowid(
+				t,
+				table_tree,
+				plan.tbl,
+				def.column,
+				idx_roots[i],
+				target_rowid,
+			)
+			if !iok { return true, false, t.root, {} }
+			idx_roots[i] = nr
+		}
 
 		new_schema_root, info1, ok1 := commit_cow_root(t, plan.table_name, nroot, pending, cache)
 		if !ok1 { return true, false, t.root, {} }
-		if plan.tbl.index_root > 0 {
-			st := btree.init(t.pager, new_schema_root)
-			final_root, _, iok2 := commit_index_cow_root(
-				&st,
-				plan.table_name,
-				index_root,
-				pending,
-				cache,
-			)
-			if !iok2 { return true, false, t.root, {} }
-			new_schema_root = final_root
-		}
+		del_final, iok2 := commit_all_index_roots(
+			t,
+			plan.table_name,
+			plan.tbl,
+			idx_roots[:],
+			new_schema_root,
+			pending,
+			cache,
+		)
+		if !iok2 { return true, false, t.root, {} }
+		new_schema_root = del_final
 
 		log.info("Deleted 1 row.")
 		return true, true, new_schema_root, info1
@@ -960,7 +1094,7 @@ apply_deletes :: proc(
 	Mutated_Table_Info,
 ) {
 	current_root := plan.tbl.root_page
-	index_root := plan.tbl.index_root
+	idx_roots := fanout_index_state(plan.tbl, context.temp_allocator)
 	count := 0
 	for rowid in targets {
 		tree_at := btree.init(t.pager, current_root)
@@ -970,9 +1104,12 @@ apply_deletes :: proc(
 			count += 1
 		}
 
-		new_index_root, iok := fanout_delete_rowid(t, table_tree, plan.tbl, index_root, rowid)
-		if !iok { return false, t.root, {} }
-		index_root = new_index_root
+		for def, i in plan.tbl.indexes {
+			if def.root == 0 { continue }
+			nr, iok := fanout_delete_rowid(t, table_tree, plan.tbl, def.column, idx_roots[i], rowid)
+			if !iok { return false, t.root, {} }
+			idx_roots[i] = nr
+		}
 	}
 	if count > 0 {
 		new_schema_root, info, ok := commit_cow_root(
@@ -983,18 +1120,17 @@ apply_deletes :: proc(
 			cache,
 		)
 		if !ok { return false, t.root, {} }
-		if plan.tbl.index_root > 0 {
-			st := btree.init(t.pager, new_schema_root)
-			final_root, _, iok := commit_index_cow_root(
-				&st,
-				plan.table_name,
-				index_root,
-				pending,
-				cache,
-			)
-			if !iok { return false, t.root, {} }
-			new_schema_root = final_root
-		}
+		del_final, iok := commit_all_index_roots(
+			t,
+			plan.table_name,
+			plan.tbl,
+			idx_roots[:],
+			new_schema_root,
+			pending,
+			cache,
+		)
+		if !iok { return false, t.root, {} }
+		new_schema_root = del_final
 
 		log.infof("Deleted %d rows.", count)
 		return true, new_schema_root, info
@@ -1093,10 +1229,10 @@ exec_delete_cow :: proc(
 // when unindexed, column-missing, non-TEXT, or NULL. Callers treat false
 // as skip (insert) — never an error.
 @(private = "file")
-index_col_text :: proc(table: types.Table, values: []types.Value) -> (string, bool) {
-	if table.index_root == 0 || len(table.index_column) == 0 { return "", false }
+index_col_text :: proc(table: types.Table, index_col: string, values: []types.Value) -> (string, bool) {
+	if len(index_col) == 0 { return "", false }
 
-	col_idx, col_ok := schema.find_column_index(table.columns, table.index_column)
+	col_idx, col_ok := schema.find_column_index(table.columns, index_col)
 	if !col_ok || col_idx < 0 || col_idx >= len(values) { return "", false }
 
 	s, is_text := values[col_idx].(string)
@@ -1110,6 +1246,7 @@ index_col_text :: proc(table: types.Table, values: []types.Value) -> (string, bo
 fanout_insert_row :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
+	index_col: string,
 	index_root: u32,
 	rowid: types.Row_ID,
 	values: []types.Value,
@@ -1117,7 +1254,7 @@ fanout_insert_row :: proc(
 	u32,
 	bool,
 ) {
-	text, ok := index_col_text(table, values)
+	text, ok := index_col_text(table, index_col, values)
 	if !ok { return index_root, true }
 	return fanout_insert_text(t, table, index_root, text, rowid)
 }
@@ -1158,13 +1295,13 @@ fanout_delete_rowid :: proc(
 	t: ^btree.Tree,
 	data_tree: ^btree.Tree,
 	table: types.Table,
+	index_col: string,
 	index_root: u32,
 	rowid: types.Row_ID,
 ) -> (
 	u32,
 	bool,
 ) {
-	if table.index_root == 0 || len(table.index_column) == 0 { return index_root, true }
 	old, find_err := btree.tree_find(data_tree, rowid, context.temp_allocator)
 	if find_err != .None {
 		log.infof("Row %d already absent; nothing to de-index.", rowid)
@@ -1172,7 +1309,7 @@ fanout_delete_rowid :: proc(
 	}
 
 	defer cell.destroy(&old, context.temp_allocator)
-	text, ok := index_col_text(table, old.values)
+	text, ok := index_col_text(table, index_col, old.values)
 	if !ok { return index_root, true }
 	return fanout_delete_text(t, table, index_root, text, rowid)
 }
@@ -1185,6 +1322,7 @@ fanout_delete_rowid :: proc(
 fanout_update_row :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
+	index_col: string,
 	index_root: u32,
 	rowid: types.Row_ID,
 	old_values: []types.Value,
@@ -1193,10 +1331,8 @@ fanout_update_row :: proc(
 	u32,
 	bool,
 ) {
-	if table.index_root == 0 || len(table.index_column) == 0 { return index_root, true }
-
-	old_text, old_ok := index_col_text(table, old_values)
-	new_text, new_ok := index_col_text(table, new_values)
+	old_text, old_ok := index_col_text(table, index_col, old_values)
+	new_text, new_ok := index_col_text(table, index_col, new_values)
 	if old_ok == new_ok && (!old_ok || old_text == new_text) { return index_root, true }
 
 	cur := index_root
@@ -1220,6 +1356,7 @@ fanout_update_rowid :: proc(
 	t: ^btree.Tree,
 	data_tree: ^btree.Tree,
 	table: types.Table,
+	index_col: string,
 	index_root: u32,
 	rowid: types.Row_ID,
 	new_values: []types.Value,
@@ -1227,7 +1364,6 @@ fanout_update_rowid :: proc(
 	u32,
 	bool,
 ) {
-	if table.index_root == 0 || len(table.index_column) == 0 { return index_root, true }
 	old, find_err := btree.tree_find(data_tree, rowid, context.temp_allocator)
 	if find_err != .None {
 		log.errorf("Error: Failed to find row %d for re-indexing '%s'", rowid, table.name)
@@ -1235,7 +1371,7 @@ fanout_update_rowid :: proc(
 	}
 
 	defer cell.destroy(&old, context.temp_allocator)
-	return fanout_update_row(t, table, index_root, rowid, old.values, new_values)
+	return fanout_update_row(t, table, index_col, index_root, rowid, old.values, new_values)
 }
 
 // fanout_insert_text inserts one index entry by explicit text (the update

@@ -38,7 +38,9 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 	defer delete(entries)
 
 	cursor, c_err := cursor_start(t, context.temp_allocator)
-	if c_err != .None { return {}, c_err }
+	if c_err != .None {
+		return {}, c_err
+	}
 	defer cursor_destroy(&cursor)
 
 	acc := Skip_Accumulator{}
@@ -46,7 +48,9 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 		item := cursor.path[cursor.depth - 1]
 		page_id := item.page_id
 		node, n_err := load_node(t, page_id)
-		if n_err != .None { return {}, n_err }
+		if n_err != .None {
+			return {}, n_err
+		}
 		if !is_leaf(node) {
 			unpin_node(t, node)
 			cursor_advance(&cursor); continue
@@ -68,11 +72,17 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 	}
 
 	accumulator_flush(&acc, &entries)
-	if len(entries) == 0 { return {}, .None }
+	if len(entries) == 0 {
+		return {}, .None
+	}
 
 	sort.quick_sort_proc(entries[:], proc(a, b: Skip_Entry) -> int {
-		if a.min_int < b.min_int { return -1 }
-		if a.min_int > b.min_int { return 1 }
+		if a.min_int < b.min_int {
+			return -1
+		}
+		if a.min_int > b.min_int {
+			return 1
+		}
 		return 0
 	})
 
@@ -87,9 +97,15 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 			e := entries[i]
 			if i + 1 < n {
 				f := entries[i + 1]
-				if f.max_int > e.max_int { e.max_int = f.max_int }
-				if f.page_min < e.page_min { e.page_min = f.page_min }
-				if f.page_max > e.page_max { e.page_max = f.page_max }
+				if f.max_int > e.max_int {
+					e.max_int = f.max_int
+				}
+				if f.page_min < e.page_min {
+					e.page_min = f.page_min
+				}
+				if f.page_max > e.page_max {
+					e.page_max = f.page_max
+				}
 			}
 
 			entries[out] = e
@@ -117,7 +133,9 @@ accumulator_add :: proc(
 ) {
 	if a.active && a.current.max_int + 1 >= min_val {
 		a.current.page_max = page_id
-		if max_val > a.current.max_int { a.current.max_int = max_val }
+		if max_val > a.current.max_int {
+			a.current.max_int = max_val
+		}
 		return
 	}
 
@@ -132,7 +150,9 @@ accumulator_add :: proc(
 }
 
 accumulator_flush :: proc(a: ^Skip_Accumulator, entries: ^[dynamic]Skip_Entry) {
-	if !a.active { return }
+	if !a.active {
+		return
+	}
 
 	append(entries, a.current)
 	a.active = false
@@ -192,21 +212,31 @@ scan_page_int_range :: proc(
 ) {
 	min_val := max(i64)
 	max_val := min(i64)
-	if col_index == -1 { return min_val, max_val }
+	if col_index == -1 {
+		return min_val, max_val
+	}
 	for i in 0 ..< cell_count {
 		ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, Page_Id(page_id), i)
-		if p_err != .None { continue }
+		if p_err != .None {
+			continue
+		}
 
 		c, _, ok := cell.deserialize(
 			node.data,
 			int(ptr),
 			cell.Config{zero_copy = true, allocator = context.temp_allocator},
 		)
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 		if col_index < len(c.values) {
 			if v, is_int := c.values[col_index].(i64); is_int {
-				if v < min_val { min_val = v }
-				if v > max_val { max_val = v }
+				if v < min_val {
+					min_val = v
+				}
+				if v > max_val {
+					max_val = v
+				}
 			}
 		}
 		cell.destroy(&c, context.temp_allocator)
@@ -219,10 +249,14 @@ scan_page_int_range :: proc(
 @(private = "file")
 write_skip_page :: proc(t: ^Tree, entries: []Skip_Entry, col_index: int) -> (Skip_Index, Error) {
 	page, a_err := pager.allocate_page(t.pager)
-	if a_err != .None { return {}, .Page_Full }
+	if a_err != .None {
+		return {}, .Page_Full
+	}
 
 	n := len(entries)
-	if 12 + n * size_of(Skip_Entry) > PAGE_SIZE { return {}, .Page_Full }
+	if 12 + n * size_of(Skip_Entry) > PAGE_SIZE {
+		return {}, .Page_Full
+	}
 
 	data := page.data[:12 + n * size_of(Skip_Entry)]
 	endian.unchecked_put_u32le(data[0:4], SKIP_FORMAT_MAGIC)
@@ -254,20 +288,30 @@ query_skip_index_range :: proc(
 	ok: bool,
 ) {
 	pg, err := pager.get_page(p, skip_root)
-	if err != .None { return 0, 0, false }
+	if err != .None {
+		return 0, 0, false
+	}
 	defer pager.unpin_page(p, skip_root)
 
 	data := pg.data
-	if len(data) < 12 { return 0, 0, false }
+	if len(data) < 12 {
+		return 0, 0, false
+	}
 
 	magic := endian.unchecked_get_u32le(data[0:4])
-	if magic != SKIP_FORMAT_MAGIC { return 0, 0, false }
+	if magic != SKIP_FORMAT_MAGIC {
+		return 0, 0, false
+	}
 
 	count := int(endian.unchecked_get_u32le(data[4:8]))
-	if int(endian.unchecked_get_u32le(data[8:12])) != col_index { return 0, 0, false }
+	if int(endian.unchecked_get_u32le(data[8:12])) != col_index {
+		return 0, 0, false
+	}
 
 	need := 12 + count * size_of(Skip_Entry)
-	if len(data) < need { return 0, 0, false }
+	if len(data) < need {
+		return 0, 0, false
+	}
 
 	entries := transmute([]Skip_Entry)data[12:need]
 	lo, hi := 0, count - 1
@@ -282,15 +326,23 @@ query_skip_index_range :: proc(
 
 	#partial switch op {
 	case .EQ:
-		if hi < 0 || entries[hi].max_int < val { return 0, 0, false }
+		if hi < 0 || entries[hi].max_int < val {
+			return 0, 0, false
+		}
 		return entries[hi].page_min, entries[hi].page_max, true
 	case .LT:
 		h := hi
-		for h >= 0 && entries[h].min_int >= val { h -= 1 }
-		if h < 0 { return 0, 0, false }
+		for h >= 0 && entries[h].min_int >= val {
+			h -= 1
+		}
+		if h < 0 {
+			return 0, 0, false
+		}
 		return 0, entries[h].page_max, true
 	case .LTE:
-		if hi < 0 { return 0, 0, false }
+		if hi < 0 {
+			return 0, 0, false
+		}
 		return 0, entries[hi].page_max, true
 	case .GT:
 		for i in 0 ..< count {

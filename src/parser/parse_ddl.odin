@@ -249,3 +249,24 @@ parse_drop_table :: proc(
 	table_name := parse_identifier(p, allocator) or_return
 	return Drop_Stmt{table_name = table_name}, true
 }
+
+// parse_drop_index parses `DROP INDEX name [ON table]` — same
+// arena-ownership as parse_drop_table. Existence resolves at execution
+// against stored index names.
+@(private)
+parse_drop_index :: proc(
+	p: ^Parser,
+	allocator := context.allocator,
+) -> (
+	stmt: Statement_Variant,
+	ok: bool,
+) {
+	index_name := parse_identifier(p, allocator) or_return
+	defer if !ok { delete(index_name, allocator) }
+	if match(p, .ON) {
+		table_name := parse_identifier(p, allocator) or_return
+		defer if !ok { delete(table_name, allocator) }
+		return Drop_Index_Stmt{index_name = index_name, table_name = table_name}, true
+	}
+	return Drop_Index_Stmt{index_name = index_name}, true
+}

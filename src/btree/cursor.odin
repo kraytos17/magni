@@ -30,7 +30,9 @@ Cursor :: struct {
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	curr := start_page
 	for {
-		if int(c.depth) >= MAX_TREE_DEPTH { return .Invalid_Page_Header }
+		if int(c.depth) >= MAX_TREE_DEPTH {
+			return .Invalid_Page_Header
+		}
 		c.path[c.depth] = Cursor_Stack_Item {
 			page_id    = curr,
 			cell_index = 0,
@@ -40,10 +42,14 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 		node := load_node(c.tree, curr) or_return
 		defer pager.unpin_page(c.tree.pager, node.id)
 
-		if is_leaf(node) { break }
+		if is_leaf(node) {
+			break
+		}
 
 		child, c_err := node.layout.vtable.child_at(node.data, Page_Id(curr), 0)
-		if c_err != .None { return .Invalid_Cell_Pointer }
+		if c_err != .None {
+			return .Invalid_Cell_Pointer
+		}
 		curr = child
 	}
 	return .None
@@ -77,7 +83,9 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, er
 
 			non_empty := is_leaf(node) && node.header.cell_count > 0
 			pager.unpin_page(t.pager, node.id)
-			if non_empty { break }
+			if non_empty {
+				break
+			}
 			if a_err := cursor_advance(&c); a_err != .None {
 				c.is_valid = false
 				break
@@ -125,12 +133,16 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 
 	curr := c.tree.root
 	for {
-		if int(c.depth) >= MAX_TREE_DEPTH { return .Invalid_Page_Header }
+		if int(c.depth) >= MAX_TREE_DEPTH {
+			return .Invalid_Page_Header
+		}
 
 		node := load_node(c.tree, curr) or_return
 		defer pager.unpin_page(c.tree.pager, node.id)
 		if is_leaf(node) {
-			if curr != page_id { return .Cell_Not_Found }
+			if curr != page_id {
+				return .Cell_Not_Found
+			}
 
 			c.path[c.depth] = Cursor_Stack_Item {
 				page_id    = curr,
@@ -153,12 +165,18 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 
 			c.depth += 1
 			child, c_err := node.layout.vtable.child_at(node.data, nid, idx)
-			if c_err != .None { return .Invalid_Cell_Pointer }
+			if c_err != .None {
+				return .Invalid_Cell_Pointer
+			}
 			curr = child
 		} else {
 			right, r_err := node.layout.vtable.child_at(node.data, nid, cell_count)
-			if r_err != .None { return .Invalid_Cell_Pointer }
-			if right != page_id { return .Cell_Not_Found }
+			if r_err != .None {
+				return .Invalid_Cell_Pointer
+			}
+			if right != page_id {
+				return .Cell_Not_Found
+			}
 
 			c.path[c.depth] = Cursor_Stack_Item {
 				page_id    = curr,
@@ -189,16 +207,22 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	}
 
 	page, err := pager.get_page(c.tree.pager, page_id)
-	if err != nil { return {}, .Page_Read_Failed }
+	if err != nil {
+		return {}, .Page_Read_Failed
+	}
 
 	c.cached_page_id = page_id
 	c.cached_page_data = page.data
 
 	layout, _, l_err := layout_for_page(page.data, Page_Id(page_id))
-	if l_err != .None { return {}, l_err }
+	if l_err != .None {
+		return {}, l_err
+	}
 
 	n, n_err := node_from_bytes(page_id, page.data, layout)
-	if n_err != .None { return {}, n_err }
+	if n_err != .None {
+		return {}, n_err
+	}
 
 	c.cached_layout = layout
 	c.cached_cell_count = u16(n.header.cell_count)
@@ -252,7 +276,9 @@ descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
 					Page_Id(item.page_id),
 					int(item.cell_index),
 				)
-				if c_err != .None { return .Invalid_Cell_Pointer }
+				if c_err != .None {
+					return .Invalid_Cell_Pointer
+				}
 				return drill_down_leftmost(c, child)
 			}
 			c.depth -= 1
@@ -299,7 +325,9 @@ cursor_get_cell_needed :: proc(
 	}
 
 	cell_ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, int(item.cell_index))
-	if p_err != .None { return 0, .Cell_Deserialize_Failed }
+	if p_err != .None {
+		return 0, .Cell_Deserialize_Failed
+	}
 
 	rid, _, ok := cell.deserialize_needed(node.data, int(cell_ptr), needed, out_values)
 	if !ok {
@@ -336,7 +364,9 @@ cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Err
 	}
 
 	cell_ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, int(item.cell_index))
-	if p_err != .None { return {}, .Cell_Deserialize_Failed }
+	if p_err != .None {
+		return {}, .Cell_Deserialize_Failed
+	}
 
 	cell_cfg := cell.Config {
 		allocator = actual_alloc,

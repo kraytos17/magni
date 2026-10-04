@@ -17,7 +17,9 @@ find_interior_cell_for_child :: #force_inline proc(
 	cell_count := get_cell_count(data, page_id)
 	for i in 0 ..< cell_count {
 		child, c_err := layout.vtable.child_at(data, pid, i)
-		if c_err != .None { continue }
+		if c_err != .None {
+			continue
+		}
 		if child == child_page {
 			return i
 		}
@@ -42,7 +44,9 @@ interior_lower_bound :: #force_inline proc(
 	for left < right {
 		mid := left + (right - left) / 2
 		k, k_err := layout.vtable.key_at(data, pid, mid)
-		if k_err != .None { return left, false }
+		if k_err != .None {
+			return left, false
+		}
 		if key >= k {
 			left = mid + 1
 		} else {

@@ -39,6 +39,7 @@ relocate_copied_page1 :: proc(page: ^pager.Page) -> bool {
 	data_sz := types.PAGE_SIZE - SRC_HDR_OFF
 	tmp := make([]u8, data_sz, context.temp_allocator)
 	copy(tmp, page.data[SRC_HDR_OFF:])
+
 	mem.zero_slice(page.data[SRC_HDR_OFF:])
 	copy(page.data[DST_HDR_OFF:], tmp)
 	return true
@@ -53,14 +54,20 @@ tree_insert_cow :: proc(
 	err: Error,
 ) {
 	root_node, load_err := load_node(t, t.root)
-	if load_err != .None { return 0, load_err }
+	if load_err != .None {
+		return 0, load_err
+	}
 	defer unpin_node(t, root_node)
 	if is_leaf(root_node) {
 		new_root, err = copy_on_write(t, t.root)
-		if err != .None { return 0, err }
+		if err != .None {
+			return 0, err
+		}
 
 		cow_node, n_err := load_node(t, new_root)
-		if n_err != .None { return 0, n_err }
+		if n_err != .None {
+			return 0, n_err
+		}
 		defer unpin_node(t, cow_node)
 
 		e := node_insert_leaf_cell(t, &cow_node, rowid, values)
@@ -75,12 +82,16 @@ tree_insert_cow :: proc(
 	}
 
 	result, r_err := insert_recursive(t, t.root, rowid, values, true)
-	if r_err != .None { return 0, r_err }
+	if r_err != .None {
+		return 0, r_err
+	}
 
 	new_root = result.new_page
 	if result.did_split {
 		new_root_page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None { return 0, .Page_Full }
+		if a_err != .None {
+			return 0, .Page_Full
+		}
 
 		// Single-separator dense root: keys=[split_key], children are
 		// the split halves (left = new_page, rightmost = right_page).
@@ -122,12 +133,16 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 		page_id := pid
 		if cow {
 			new_id, c_err := copy_on_write(t, page_id)
-			if c_err != .None { return {}, c_err }
+			if c_err != .None {
+				return {}, c_err
+			}
 			page_id = new_id
 		}
 
 		node, n_err := load_node(t, page_id)
-		if n_err != .None { return {}, n_err }
+		if n_err != .None {
+			return {}, n_err
+		}
 		defer unpin_node(t, node)
 
 		if is_leaf(node) {
@@ -136,7 +151,9 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 
 		child_id, _ := node_find_child(&node, key)
 		child_result, c_err := delete_cow_recursive(t, child_id, key, true)
-		if c_err != .None { return {}, c_err }
+		if c_err != .None {
+			return {}, c_err
+		}
 		if child_result.new_page != child_id {
 			pager.unpin_page(t.pager, child_result.new_page)
 		}
@@ -151,7 +168,9 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 	}
 
 	result, rec_err := delete_cow_recursive(t, t.root, key, true)
-	if rec_err != .None { return 0, rec_err }
+	if rec_err != .None {
+		return 0, rec_err
+	}
 
 	pager.unpin_page(t.pager, result.new_page)
 	return result.new_page, .None
@@ -182,12 +201,16 @@ tree_update_cow :: proc(
 		page_id := pid
 		if cow {
 			new_id, c_err := copy_on_write(t, page_id)
-			if c_err != .None { return {}, c_err }
+			if c_err != .None {
+				return {}, c_err
+			}
 			page_id = new_id
 		}
 
 		node, n_err := load_node(t, page_id)
-		if n_err != .None { return {}, n_err }
+		if n_err != .None {
+			return {}, n_err
+		}
 		defer unpin_node(t, node)
 		if is_leaf(node) {
 			if d_err := delete_from_leaf(t, &node, rowid); d_err != .None {
@@ -201,7 +224,9 @@ tree_update_cow :: proc(
 
 		child_id, _ := node_find_child(&node, rowid)
 		child_result, c_err := update_recursive(t, child_id, rowid, values, true)
-		if c_err != .None { return {}, c_err }
+		if c_err != .None {
+			return {}, c_err
+		}
 		if child_result.new_page != child_id {
 			pager.unpin_page(t.pager, child_result.new_page)
 		}

@@ -10,7 +10,7 @@ numbers.
 |---|---|---|
 | `make vet` / `python3 magni.py vet` | Fast vet (`odin check`, no LLVM) | Every change |
 | `make vet-all` | Full vet via build+test (`-vet -vet-shadowing -warnings-as-errors -strict-style`) | Before commit |
-| `make test` | All Odin tests, vector engine on (500+ tests) | Every change |
+| `make test` | All Odin tests, vector engine on (501 tests) | Every change |
 | `MAGNI_VECTOR=0 make test` | Same suite, scalar path (differential control) | Every behavior change |
 | `make test-cli` / `make test-cli-full` | CLI smoke (6) / full black-box (88) | CLI/executor changes |
 | `make test-py` | `tests_magni/` unit tests (130+) incl. golden help-text surface | Orchestrator/doc changes |

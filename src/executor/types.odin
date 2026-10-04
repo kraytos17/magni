@@ -67,11 +67,18 @@ Mutated_Table_Info :: struct #all_or_none {
 // table. Readers need no changes — the overlay keeps find_table_cached
 // serving pending roots transparently. Autocommit never stages (nil pending
 // ⇒ immediate publish, exactly as before).
+// Index_Stage is one staged secondary-index root. Names are owned by
+// Pending_Roots.alloc (cloned at stage, freed at clear/drop).
+Index_Stage :: struct {
+	name: string, // index name
+	root: u32, // pending index root
+}
+
 Pending_Roots :: struct {
 	roots      : map[string]u32, // table name → pending data root
-	// Single secondary text index per table (V3.0): pending index roots
-	// ride beside data roots through stage/flush/clear/drop/overlay.
-	index_roots: map[string]u32, // table name → pending index root
+	// Secondary text index roots ride beside data roots through
+	// stage/flush/clear/drop/overlay, one stage per index.
+	index_roots: map[string][dynamic]Index_Stage, // table name → staged index roots
 	alloc      : mem.Allocator, // owns key clones + maps; set on first stage
 }
 
@@ -96,25 +103,35 @@ pending_stage :: proc(
 }
 
 // pending_stage_index records a new secondary-index root: same ownership
-// contract as pending_stage, keyed by table name (V3.0: one index/table).
+// contract as pending_stage, keyed by table, matched by index name.
 pending_stage_index :: proc(
 	p: ^Pending_Roots,
 	table_name: string,
+	index_name: string,
 	root: u32,
 	allocator := context.allocator,
 ) {
 	if p.index_roots == nil {
-		p.index_roots = make(map[string]u32, 8, allocator)
+		p.index_roots = make(map[string][dynamic]Index_Stage, 8, allocator)
 		p.alloc = allocator
 	}
 	if table_name in p.index_roots {
-		p.index_roots[table_name] = root
+		stages := &p.index_roots[table_name]
+		for &st in stages {
+			if st.name == index_name {
+				st.root = root
+				return
+			}
+		}
+		append(stages, Index_Stage{name = strings.clone(index_name, p.alloc), root = root})
 		return
 	}
-	p.index_roots[strings.clone(table_name, p.alloc)] = root
+	list := make([dynamic]Index_Stage, 0, 1, p.alloc)
+	append(&list, Index_Stage{name = strings.clone(index_name, p.alloc), root = root})
+	p.index_roots[strings.clone(table_name, p.alloc)] = list
 }
 
-// pending_drop forgets a staged root (DROP TABLE in txn). No-op when absent.
+// pending_drop forgets staged roots (DROP TABLE in txn). No-op when absent.
 pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
 	if p.roots == nil && p.index_roots == nil { return }
 	for k in p.roots {
@@ -124,10 +141,28 @@ pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
 			break
 		}
 	}
-	for k in p.index_roots {
+	for k, &stages in p.index_roots {
 		if k == table_name {
+			for st in stages { delete(st.name, p.alloc) }
+			delete(stages)
 			delete(k, p.alloc)
 			delete_key(&p.index_roots, k)
+			return
+		}
+	}
+}
+
+// pending_drop_index forgets one staged INDEX root (DROP INDEX in txn).
+// The table survives, so staged DATA roots are kept — pending_drop would
+// wrongly discard them along with the definition. No-op when absent.
+pending_drop_index :: proc(p: ^Pending_Roots, table_name: string, index_name: string) {
+	if p.index_roots == nil { return }
+	if table_name not_in p.index_roots { return }
+	stages := &p.index_roots[table_name]
+	for i in 0 ..< len(stages) {
+		if stages[i].name == index_name {
+			delete(stages[i].name, p.alloc)
+			ordered_remove(stages, i)
 			return
 		}
 	}
@@ -143,7 +178,11 @@ pending_clear :: proc(p: ^Pending_Roots) {
 		p.roots = nil
 	}
 	if p.index_roots != nil {
-		for k in p.index_roots { delete(k, p.alloc) }
+		for k, &stages in p.index_roots {
+			for st in stages { delete(st.name, p.alloc) }
+			delete(stages)
+			delete(k, p.alloc)
+		}
 
 		delete(p.index_roots)
 		p.index_roots = nil

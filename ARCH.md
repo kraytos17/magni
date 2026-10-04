@@ -562,11 +562,13 @@ Schema is stored as a B-tree on page 1.
 | [3] | TEXT | Original CREATE TABLE statement |
 | [4] | BLOB | Serialized column definitions |
 | [5] | INT | Skip-index root page (present only when > 0) |
-| [6] | INT | Secondary text index root page (with [7] only) |
-| [7] | TEXT | Indexed column name (with [6] only) |
+| [6+3i] | INT | Index triple `i`: text index root page |
+| [7+3i] | TEXT | Index triple `i`: indexed column name |
+| [8+3i] | TEXT | Index triple `i`: index name |
 
-Rows without an index stay 5/6-wide and keep parsing; index fields sit at
-fixed positions whenever either is set, so positions never shift.
+Rows without an index stay 5/6-wide and keep parsing; pre-name 8-wide
+rows parse as one unnamed triple; triples sit at fixed positions
+whenever any index exists, so positions never shift.
 
 Column blob format:
 ```
@@ -679,12 +681,21 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   `btree/text_tree.odin`; the dispatcher resolves both text page types
   with kind `.Text` (reads via `Key_Kind.Text` dispatch; every
   `Row_ID`-keyed vtable slot refuses).
-- Index catalog: one text index per table — `Schema_Row`/`Table`
-  carry `index_root` + `index_column` (fixed `[6],[7]` wire slots, old rows
-  parse); root swaps reuse the `update_schema_root_cow` closure core;
-  pending maps stage both key spaces through commit/vacuum/rollback.
+- Index catalog: any number of single-column text indexes per table —
+  `Schema_Row`/`Table` carry `indexes: []Index_Def` (fixed `[6+3i]`
+  `[root INT][column TEXT][name TEXT]` triples; 8/9-wide legacy rows
+  parse as one unnamed/named triple). Root swaps reuse the
+  `update_schema_root_cow` closure core; pending maps stage each index
+  root by (table, name) through commit/vacuum/rollback.
   `CREATE INDEX name ON t (c)` (tokenizer + `Create_Index_Stmt`
-  + `exec_create_index` with loop backfill) publishes root+column atomically.
+  + `exec_create_index` with loop backfill) appends the triple
+  atomically (names unique per table, repeatable across tables).
+  `DROP INDEX name [ON t]` (`Drop_Index_Stmt` + `exec_drop_index`
+  via `clear_index_def_cow`) needs a unique match or the qualifier and
+  clears the triple atomically; the staged root dies with it
+  (`pending_drop_index` keeps staged data roots), and GC reclaims the
+  pages (the live-set marks index subtrees from triple slots, so live
+  indexes survive sweeps).
   DML fan-out maintains the index on every mutation path — insert,
   pk/scan update (unchanged-column skips, NULL transitions), pk/scan
   delete — with differential oracle tests, txn rollback coherence, and
@@ -692,8 +703,9 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   outright afterward; single-kind COW is the only write surface.)
   Table-cache map keys are
   heap-cloned (a temp-borrowed key dangled across per-statement temp frees
-  in-txn, silently serving stale roots). V3.0 scope: BINARY collation only,
-  NULL-not-indexed, single-column text, no DROP INDEX.
+  in-txn, silently serving stale roots). Text-index scope: BINARY
+  collation only, NULL-not-indexed, single-column TEXT indexes
+  (`DROP INDEX <name> [ON <table>]`, names unique per table).
 - Index vacuum: `VACUUM` rebuilds text indexes into packed pages
   (`text_tree_vacuum`: ordered collect, greedy byte-chunked leaves and
   levels, empty index → fresh `LEAF_TEXT` root), hooked into the per-table
@@ -1155,11 +1167,14 @@ context.allocator)`).
 ## Limitations
 
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
-- **Secondary text index (V3.0 scope)**: one single-column TEXT index per
-  table (`CREATE INDEX`), BINARY collation, NULL-not-indexed, no
-  `DROP INDEX`. Routes equality, canonical `LIKE 'stem%'`, and literal
-  `IN` (covering `SELECT rowid`, fetch+recheck otherwise); everything else
-  scans. User guide: [docs/indexing.md](docs/indexing.md).
+- **Secondary text indexes**: single-column TEXT indexes
+  (`CREATE INDEX` / `DROP INDEX <name> [ON <table>]`, names unique per
+  table), BINARY collation, NULL-not-indexed. Routes equality, canonical
+  `LIKE 'stem%'`, and literal `IN` (up to 128 members) — plus flat-OR
+  unions and multi-conjunct AND intersections across indexes. Covering
+  `SELECT rowid` and `SELECT <indexed-col>` (Eq/In shapes); fetch+recheck
+  otherwise; everything else scans.
+  User guide: [docs/indexing.md](docs/indexing.md).
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100`, `>=`, `<=`, `=`, `!=` format.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (inline `[dynamic; N]T` scratch buffer).
 - **REPL line editor**: SQL keyword and table/column name completion only (no in-expression or JOIN completion).

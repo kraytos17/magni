@@ -1,6 +1,7 @@
 package snapshot
 
 import "src:btree"
+import "src:cell"
 import "src:pager"
 
 count_committed :: proc(p: ^pager.Pager, start_page: u32) -> int {
@@ -41,6 +42,7 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 			// lost from the live set (freed while still reachable).
 			t := btree.init(p, h.schema_root)
 			btree.collect_pages(&t, h.schema_root, live)
+			mark_index_roots(p, &t, live)
 			if h.manifest_page != 0 {
 				_, roots, load_ok := load_manifest_tables(
 					p,
@@ -55,6 +57,34 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 			}
 		}
 		count += 1; page = h.prev_snapshot
+	}
+}
+
+// mark_index_roots marks secondary-index subtrees live. Index roots ride
+// schema rows as VALUES (slot [6]), not child pointers, so the
+// collect_pages walk above never reaches them; without this the sweep
+// frees live index pages. Post-DROP INDEX the row no longer names the
+// pages, so they recycle naturally — no eager free needed (snapshots may
+// still reference them; DROP TABLE precedent).
+@(private)
+mark_index_roots :: proc(p: ^pager.Pager, t: ^btree.Tree, live: ^map[u32]bool) {
+	c, c_err := btree.cursor_start(t, context.temp_allocator)
+	if c_err != .None { return }
+	defer btree.cursor_destroy(&c)
+	for c.is_valid {
+		row, get_err := btree.cursor_get_cell(&c, context.temp_allocator)
+		if get_err == .None {
+			// Triples from slot [6]: every complete [root INT]
+			// group marks its subtree. Narrower rows (and trailing
+			// partials) carry no index.
+			for i := 6; i < len(row.values); i += 3 {
+				if idx, ok := row.values[i].(i64); ok && idx > 0 {
+					btree.collect_pages(t, u32(idx), live)
+				}
+			}
+			cell.destroy(&row, context.temp_allocator)
+		}
+		btree.cursor_advance(&c)
 	}
 }
 

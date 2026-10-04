@@ -22,8 +22,12 @@ move_src_count :: proc(src: ^Node) -> int {
 // (which range-checks) accepts every slot; content_offset lands at the end.
 @(private)
 move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> bool {
-	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 { return count == 0 }
-	if start_idx + count > move_src_count(src) { return false }
+	if !is_leaf(src^) || !is_leaf(dst^) || count == 0 {
+		return count == 0
+	}
+	if start_idx + count > move_src_count(src) {
+		return false
+	}
 
 	dst_off := int(dst.header.cell_content_offset)
 	dst_cell_count := int(dst.header.cell_count)
@@ -31,17 +35,22 @@ move_leaf_cells :: proc(src: ^Node, dst: ^Node, start_idx: int, count: int) -> b
 	for i in 0 ..< count {
 		idx := start_idx + i
 		src_ptr, p_err := src.layout.vtable.cell_ptr_at(src.data, Page_Id(src.id), idx)
-		if p_err != .None { return false }
+		if p_err != .None {
+			return false
+		}
 
 		src_key, k_err := src.layout.vtable.key_at(src.data, Page_Id(src.id), idx)
-		if k_err != .None { return false }
+		if k_err != .None {
+			return false
+		}
 
 		cell_sz, ok := cell.get_size(src.data, int(src_ptr))
-		if !ok { return false }
+		if !ok {
+			return false
+		}
 
 		dst_off -= cell_sz
 		copy(dst.data[dst_off:dst_off + cell_sz], src.data[int(src_ptr):int(src_ptr) + cell_sz])
-
 		if rp_err := dst.layout.vtable.slot_repoint(
 			dst.data,
 			Page_Id(dst.id),
@@ -80,10 +89,14 @@ pack_left_half :: proc(
 	total_sz := 0
 	for i in 0 ..< total {
 		off, p_err := curr.layout.vtable.cell_ptr_at(curr.data, Page_Id(curr.id), i)
-		if p_err != .None { return false }
+		if p_err != .None {
+			return false
+		}
 
 		sz, ok := cell_size_at(curr.data, int(off))
-		if !ok { return false }
+		if !ok {
+			return false
+		}
 
 		refs[i] = int(off)
 		sizes[i] = sz
@@ -108,7 +121,9 @@ pack_left_half :: proc(
 		// Repack writes slots 0..mid-1 in place; the header still holds the
 		// full count here, so the range check passes by construction.
 		key, k_err := curr.layout.vtable.key_at(curr.data, Page_Id(curr.id), i)
-		if k_err != .None { return false }
+		if k_err != .None {
+			return false
+		}
 		if rp_err := curr.layout.vtable.slot_repoint(
 			curr.data,
 			Page_Id(curr.id),

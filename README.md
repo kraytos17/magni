@@ -40,9 +40,10 @@ CREATE TABLE users (
 -- Drop table
 DROP TABLE users;
 
--- Secondary text index (one single-column TEXT index per table;
--- BINARY collation, NULLs not indexed, no DROP INDEX)
+-- Secondary text indexes (single-column TEXT, several per table;
+-- BINARY collation, NULLs not indexed; DROP INDEX <name> [ON <table>])
 CREATE INDEX i_name ON users (name);
+DROP INDEX i_name;
 
 -- Table with CHECK constraint
 CREATE TABLE products (
@@ -149,8 +150,8 @@ ROLLBACK;
 
 | Area | Capabilities |
 |---|---|
-| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, CREATE INDEX (single-column TEXT), WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE, IS [NOT] NULL), BETWEEN, covering `SELECT rowid`, column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/RIGHT/CROSS, ON and USING), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN (plan output), transactions, hex literals |
-| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-descent UPDATE (lookup, then delete + re-insert in one root-to-leaf pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **V3-only page format** (dense interiors, slotdir leaves, prefix-compressed text index pages; older stamps rejected, migrate via dump/reimport). Secondary text index (one TEXT column per table, BINARY collation, NULL-not-indexed). **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **Space reclamation** via `.vacuum` — rebuilds tables and text indexes into densely packed pages (COW-safe; delete paths do not merge leaves automatically). **Row count tracking** with fast `COUNT(*)` via incremental cache. |
+| **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, CREATE INDEX / DROP INDEX (single-column TEXT, several per table), WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE, IS [NOT] NULL), BETWEEN, covering `SELECT rowid` / `SELECT <indexed-col>`, column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/RIGHT/CROSS, ON and USING), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/FOREIGN KEY constraints, EXPLAIN (plan output), transactions, hex literals |
+| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-descent UPDATE (lookup, then delete + re-insert in one root-to-leaf pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **V3-only page format** (dense interiors, slotdir leaves, prefix-compressed text index pages; older stamps rejected, migrate via dump/reimport). Secondary text indexes (single-column TEXT, several per table, BINARY collation, NULL-not-indexed). **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **Space reclamation** via `.vacuum` — rebuilds tables and text indexes into densely packed pages (COW-safe; delete paths do not merge leaves automatically). **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Commit/abort iterate only the dirtied-page list instead of scanning the whole page cache. Crash recovery replays committed frames; corrupt frames (bad FNV checksum) are skipped. Checkpoint flushes WAL frames back to the main file; auto-checkpoint (`--wal-size-threshold`) reclaims the WAL proactively once it grows past a frame budget. |
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
@@ -325,7 +326,7 @@ src/
 │                          fuzz harness
 └── types/                 Core types: Value, Column, Table, SerialType, Foreign_Key
 tests/
-└── *_test.odin            500+ test functions across all packages (run: `make test`, scalar: `MAGNI_VECTOR=0`)
+└── *_test.odin            501 test functions across all packages (run: `make test`, scalar: `MAGNI_VECTOR=0`)
 tests_magni/
 ├── clirunner.py           Shared black-box CLI harness (subprocess + timeouts)
 ├── test_cli_smoke.py      CLI smoke: binary surface basics (6 tests)
@@ -380,7 +381,7 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 
 ## Limitations
 
-- Secondary text index is single-column TEXT only (BINARY collation, NULLs not indexed, one per table, no `DROP INDEX`); only equality, canonical `LIKE 'stem%'`, and literal `IN` route — everything else scans (see `docs/indexing.md`)
+- Secondary text indexes are single-column TEXT only (BINARY collation, NULLs not indexed, several per table, `DROP INDEX <name> [ON <table>]`); equality, canonical `LIKE 'stem%'`, and literal `IN` (up to 128 members) route, plus flat-OR unions and multi-conjunct AND intersections — everything else scans (see `docs/indexing.md`)
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100, >=, <=, =, !=)
 - Max 10 columns per table

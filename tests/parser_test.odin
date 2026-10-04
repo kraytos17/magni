@@ -215,6 +215,55 @@ test_parse_drop :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_parse_drop_index :: proc(t: ^testing.T) {
+	sql := "DROP INDEX i_body;"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "Parse failed")
+
+	drop, is_drop := stmt.type.(parser.Drop_Index_Stmt)
+	testing.expect(t, is_drop, "Expected Drop_Index_Stmt")
+	testing.expect(t, drop.index_name == "i_body", "Wrong index name")
+
+	// Lowercase folds through the keyword bucket.
+	lower, lok, _ := parser.parse("drop index j;", context.temp_allocator)
+	testing.expect(t, lok, "lowercase parses")
+	_, lok_drop := lower.type.(parser.Drop_Index_Stmt)
+	testing.expect(t, lok_drop, "lowercase is Drop_Index_Stmt")
+
+	// DROP TABLE still parses (INDEX peek must not consume TABLE).
+	dt, dok, _ := parser.parse("DROP TABLE t;", context.temp_allocator)
+	testing.expect(t, dok, "DROP TABLE parses")
+	_, dok_tbl := dt.type.(parser.Drop_Stmt)
+	testing.expect(t, dok_tbl, "still Drop_Stmt")
+
+	// ON qualifier resolves same-name indexes per table.
+	qual, qok, _ := parser.parse("DROP INDEX i ON docs;", context.temp_allocator)
+	testing.expect(t, qok, "qualified parses")
+	qdrop, is_qdrop := qual.type.(parser.Drop_Index_Stmt)
+	testing.expect(t, is_qdrop, "qualified is Drop_Index_Stmt")
+	if is_qdrop {
+		testing.expect(t, qdrop.index_name == "i", "qualified index name")
+		qtbl, has_qtbl := qdrop.table_name.?
+		testing.expect(t, has_qtbl, "qualifier present")
+		if has_qtbl { testing.expect(t, qtbl == "docs", "qualified table") }
+	}
+	unqual, uok, _ := parser.parse("DROP INDEX i;", context.temp_allocator)
+	testing.expect(t, uok, "unqualified parses")
+	_, is_uq := unqual.type.(parser.Drop_Index_Stmt)
+	testing.expect(t, is_uq, "unqualified is Drop_Index_Stmt")
+	if is_uq {
+		_, has_uqt := unqual.type.(parser.Drop_Index_Stmt).table_name.?
+		testing.expect(t, !has_uqt, "no qualifier")
+	}
+
+	// Error cases fail closed.
+	_, bok, _ := parser.parse("DROP INDEX;", context.temp_allocator)
+	testing.expect(t, !bok, "bare DROP INDEX rejected")
+	_, bok2, _ := parser.parse("DROP INDEX i ON;", context.temp_allocator)
+	testing.expect(t, !bok2, "dangling ON rejected")
+}
+
+@(test)
 test_parse_mixed_logic_precedence :: proc(t: ^testing.T) {
 	sql := "SELECT * FROM t WHERE a=1 AND b=2 OR c=3;"
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)

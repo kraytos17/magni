@@ -61,6 +61,16 @@ execute :: proc(
 			pending_reoverlay(schema_tree, pending, cache)
 		}
 		return ok, new_root, mutated
+	case parser.Drop_Index_Stmt:
+		ok, new_root, mutated = exec_drop_index(schema_tree, s)
+		schema_tree.root = new_root
+		if ok && pending != nil {
+			// Only the staged INDEX root dies with the definition;
+			// staged data roots survive (the table is still there).
+			pending_drop_index(pending, mutated.name, s.index_name)
+			pending_reoverlay(schema_tree, pending, cache)
+		}
+		return ok, new_root, mutated
 	case parser.Create_Index_Stmt:
 		ok, new_root, mutated = exec_create_index(schema_tree, s, stmt.sql)
 		schema_tree.root = new_root

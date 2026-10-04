@@ -51,17 +51,26 @@ serialize :: proc(
 	offset += varint.encode(dest[offset:], u64(rowid))
 	offset += varint.encode(dest[offset:], u64(info.serial_types_size))
 
-	serial_types: [types.MAX_COLS]u64
+	// Stack scratch covers every user row (MAX_COLS cap); wider rows
+	// (schema catalog rows past one index) spill to temp. The spill
+	// branch never fires on the DML hot path.
+	serial_stack: [types.MAX_COLS]u64
+	serial_wide: []u64
+	serials := serial_stack[:]
+	if len(values) > types.MAX_COLS {
+		serial_wide = make([]u64, len(values), context.temp_allocator)
+		serials = serial_wide
+	}
 	i := 0
 	for val in values {
 		serial := serial_type_for_value(val)
-		serial_types[i] = serial; i += 1
+		serials[i] = serial; i += 1
 		offset += varint.encode(dest[offset:], serial)
 	}
 
 	i = 0
 	for val in values {
-		serial := serial_types[i]
+		serial := serials[i]
 		i += 1
 		switch v in val {
 		case types.Null:
@@ -119,17 +128,31 @@ deserialize :: proc(
 
 	pos += n3
 	header_start := pos
-	serial_types: [types.MAX_COLS]u64
+	// Stack scratch covers every user row; wider rows (schema catalog
+	// rows past one index) spill the whole header to temp. The header
+	// loop stays bounds-checked (untrusted page bytes); consumption
+	// loops below keep their proven-index annotations.
+	serial_stack: [types.MAX_COLS]u64
+	serial_spill: [dynamic]u64
 	serial_count := 0
 
-	#no_bounds_check for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
+	for pos < header_start + int(header_size) {
 		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st { return {}, 0, false }
 
-		serial_types[serial_count] = st
+		if serial_count < types.MAX_COLS {
+			serial_stack[serial_count] = st
+		} else {
+			if serial_spill == nil {
+				serial_spill = make([dynamic]u64, 0, 16, context.temp_allocator)
+				append(&serial_spill, ..serial_stack[:])
+			}
+			append(&serial_spill, st)
+		}
 		serial_count += 1
 		pos += n4
 	}
+	serials := serial_stack[:] if serial_spill == nil else serial_spill[:]
 
 	result_values := make([]types.Value, serial_count, alloc)
 	success := false
@@ -137,7 +160,7 @@ deserialize :: proc(
 		types.values_delete(result_values, alloc)
 	}
 	#no_bounds_check for st_idx in 0 ..< serial_count {
-		st := serial_types[st_idx]
+		st := serials[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
 		type_code := types.Serial_Type(st)
 		if pos + content_size > len(src) {
@@ -237,21 +260,35 @@ deserialize_needed :: proc(
 
 	pos += n3
 	header_start := pos
-	serial_types: [types.MAX_COLS]u64
+	// Stack scratch covers every user row; wider rows (schema catalog
+	// rows past one index) spill the whole header to temp. The header
+	// loop stays bounds-checked (untrusted page bytes); consumption
+	// loops below keep their proven-index annotations.
+	serial_stack: [types.MAX_COLS]u64
+	serial_spill: [dynamic]u64
 	serial_count := 0
-	#no_bounds_check for pos < header_start + int(header_size) && serial_count < types.MAX_COLS {
+	for pos < header_start + int(header_size) {
 		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st { return 0, 0, false }
 
-		serial_types[serial_count] = st
+		if serial_count < types.MAX_COLS {
+			serial_stack[serial_count] = st
+		} else {
+			if serial_spill == nil {
+				serial_spill = make([dynamic]u64, 0, 16, context.temp_allocator)
+				append(&serial_spill, ..serial_stack[:])
+			}
+			append(&serial_spill, st)
+		}
 		serial_count += 1
 		pos += n4
 	}
+	serials := serial_stack[:] if serial_spill == nil else serial_spill[:]
 	if len(out_values) < serial_count {
 		return 0, 0, false
 	}
 	#no_bounds_check for st_idx in 0 ..< serial_count {
-		st := serial_types[st_idx]
+		st := serials[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
 		type_code := types.Serial_Type(st)
 		if pos + content_size > len(src) {

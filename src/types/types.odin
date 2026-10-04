@@ -209,6 +209,15 @@ hash_string :: proc(s: string) -> u64 {
 	return hash.fnv64a(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
 }
 
+// Index_Def is one secondary text index: covering text->rowid over a
+// single TEXT column. Names are unique per table (may repeat across
+// tables); DROP INDEX <name> needs a unique match or ON <table>.
+Index_Def :: struct {
+	name  : string, // index name (empty = legacy unnamed single)
+	column: string, // indexed column name
+	root  : u32, // root page of the text index (0 = none, never routed)
+}
+
 Table :: struct {
 	name        : string,
 	columns     : []Column,
@@ -216,9 +225,10 @@ Table :: struct {
 	sql         : string,
 	foreign_keys: []Foreign_Key,
 	skip_root   : u32, // root page of the skip index for this table (0 = none)
-	// Single secondary text index (V3.0: one per table): covering text->rowid.
-	index_root  : u32, // root page of the text index (0 = none)
-	index_column: string, // indexed column name (empty = none)
+	// Secondary text indexes: covering text->rowid, one Index_Def per
+	// index (empty = none). Wire format is triples from slot [6]
+	// ([root INT][column TEXT][name TEXT] × N); see schema serde.
+	indexes     : []Index_Def,
 }
 
 Foreign_Key :: struct {

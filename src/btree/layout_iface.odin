@@ -106,14 +106,9 @@ Key_Kind :: enum u8 {
 // encoding, so a second entry would be speculative duplication — split them
 // if an encoding ever divorces order from layout.
 key_compare :: #force_inline proc "contextless" (kind: Key_Kind, a: []u8, b: []u8) -> int {
-	// Assigned, not returned, inside the cases: keeps the switch exhaustive
-	// (adding a Key_Kind is a compile error here) without a trailing
-	// unreachable, which require_results rejects in value-returning procs.
 	res := 0
 	switch kind {
 	case .Rowid:
-		// Core memcmp + shorter-first tiebreak, direct (a one-line
-		// forwarder here would be pure noise).
 		res = mem.compare(a, b)
 	case .Text:
 		res = cell.text_index_compare(a, b)
@@ -192,12 +187,17 @@ rowid_shared_prefix_len :: #force_inline proc "contextless" (
 	max_cap: int,
 ) -> int {
 	cap := max_cap
-	if cap > len(a) { cap = len(a) }
-	if cap > len(b) { cap = len(b) }
-	if cap <= 0 { return 0 }
+	if cap > len(a) {
+		cap = len(a)
+	}
+	if cap > len(b) {
+		cap = len(b)
+	}
+	if cap <= 0 {
+		return 0
+	}
 
 	n := 0
-	// Proven: cap <= both lengths, so every index below is in range.
 	#no_bounds_check for n < cap && a[n] == b[n] { n += 1 }
 	return n
 }
@@ -216,8 +216,12 @@ rowid_encode :: proc "contextless" (
 	bool,
 ) {
 	v, ok := val.(i64)
-	if intrinsics.unlikely(!ok) { return 0, false }
-	if intrinsics.unlikely(len(buf) < ROWID_INDEX_ENCODED_LEN) { return 0, false }
+	if intrinsics.unlikely(!ok) {
+		return 0, false
+	}
+	if intrinsics.unlikely(len(buf) < ROWID_INDEX_ENCODED_LEN) {
+		return 0, false
+	}
 
 	buf[0] = 0x52 // 'R': rowid tag, reserves tag space for composite keys
 	w := rowid_encode_u64(types.Row_ID(v))
@@ -251,8 +255,12 @@ dense_separator_insert :: proc "contextless" (
 	child: u32,
 ) -> Error {
 	keys_off, children_off, count, use_for, base, g_err := dense_geometry(data, id)
-	if g_err != .None { return g_err }
-	if intrinsics.unlikely(idx < 0 || idx > count) { return .Invalid_Bounds }
+	if g_err != .None {
+		return g_err
+	}
+	if intrinsics.unlikely(idx < 0 || idx > count) {
+		return .Invalid_Bounds
+	}
 
 	bk := rowid_bias_encode(key)
 	if use_for && intrinsics.unlikely(bk < base || bk - base > u64(max(u32))) {
@@ -299,7 +307,9 @@ dense_separator_insert :: proc "contextless" (
 	}
 
 	h := get_dense_interior_header(data, u32(id))
-	if h == nil { return .Invalid_Page_Header }
+	if h == nil {
+		return .Invalid_Page_Header
+	}
 
 	h.cell_count += 1
 	return .None
@@ -340,7 +350,9 @@ slot_leaf_key_at :: #force_inline proc "contextless" (
 	Error,
 ) {
 	k, _, k_err := slot_at(data, id, i)
-	if k_err != .None { return 0, k_err }
+	if k_err != .None {
+		return 0, k_err
+	}
 	return k, .None
 }
 
@@ -354,7 +366,9 @@ slot_leaf_cell_ptr_at :: #force_inline proc "contextless" (
 	Error,
 ) {
 	_, off, o_err := slot_at(data, id, i)
-	if o_err != .None { return 0, o_err }
+	if o_err != .None {
+		return 0, o_err
+	}
 	return off, .None
 }
 
@@ -367,9 +381,15 @@ slot_leaf_insert :: proc "contextless" (
 	off: Cell_Off,
 ) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) { return .Invalid_Page_Header }
-	if intrinsics.unlikely(idx < 0 || idx > int(hdr.cell_count)) { return .Invalid_Bounds }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(idx < 0 || idx > int(hdr.cell_count)) {
+		return .Invalid_Bounds
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	hdr_sz := page_header_size(hdr.page_type)
@@ -395,9 +415,15 @@ slot_leaf_insert :: proc "contextless" (
 @(private = "file", require_results)
 slot_leaf_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) { return .Invalid_Page_Header }
-	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) {
+		return .Invalid_Bounds
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	hdr_sz := page_header_size(hdr.page_type)
@@ -423,9 +449,15 @@ slot_leaf_repoint :: proc "contextless" (
 	off: Cell_Off,
 ) -> Error {
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return .Invalid_Page_Header }
-	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) { return .Invalid_Page_Header }
-	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) { return .Invalid_Bounds }
+	if hdr == nil {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(hdr.page_type != .LEAF_SLOTDIR) {
+		return .Invalid_Page_Header
+	}
+	if intrinsics.unlikely(idx < 0 || idx >= int(hdr.cell_count)) {
+		return .Invalid_Bounds
+	}
 
 	off0 := get_page_header_offset(u32(id))
 	hdr_sz := page_header_size(hdr.page_type)
@@ -630,8 +662,6 @@ prefix_leaf_layout :: proc() -> Page_Layout {
 }
 
 prefix_interior_layout :: proc() -> Page_Layout {
-	// C3a: vends the text interior table (TEXT_INTERIOR pages). Separators
-	// are full codec keys via the free functions; child_at is real.
 	return Page_Layout{vtable = &text_interior_table}
 }
 
@@ -644,7 +674,10 @@ prefix_interior_layout :: proc() -> Page_Layout {
 @(require_results)
 layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Error) {
 	hdr := get_header(data, u32(id))
-	if intrinsics.unlikely(hdr == nil) { return {}, {}, .Invalid_Page_Header }
+	if intrinsics.unlikely(hdr == nil) {
+		return {}, {}, .Invalid_Page_Header
+	}
+
 	switch hdr.page_type {
 	case .INTERIOR_DENSE:
 		return dense_u64_interior_layout(), .Rowid, .None
