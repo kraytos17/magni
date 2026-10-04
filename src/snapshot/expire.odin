@@ -49,7 +49,9 @@ expire_and_collect :: proc(
 	// expire_snapshots contract, so per-expire heap churn stays zero.
 	expired_ids = mark_abandoned(p, latest_page, keep_count, context.temp_allocator)
 	max_page := pager.page_count(p)
-	if max_page < GC_MIN_PAGES { return expired_ids }
+	if max_page < GC_MIN_PAGES {
+		return expired_ids
+	}
 
 	live := make(map[u32]bool, context.temp_allocator)
 	defer delete(live)

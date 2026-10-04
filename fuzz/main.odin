@@ -21,9 +21,11 @@ main :: proc() {
 	}
 
 	data, err := os.read_entire_file_from_path(os.args[1], context.allocator)
-	if err != nil { os.exit(1) }
-	defer delete(data)
+	if err != nil {
+		os.exit(1)
+	}
 
+	defer delete(data)
 	// Fuzz target: parse arbitrary bytes as a SQL statement. Success or failure
 	// is irrelevant to AFL++ — reaching new parse paths is what drives coverage.
 	parser.parse(string(data), context.temp_allocator)

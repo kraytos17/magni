@@ -251,8 +251,12 @@ create_test_wal_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, 
 	// Owned filename, same contract as create_test_pager_env.
 	filename, _ := strings.clone(fmt.tprintf("test_wal_%s.db", test_name), context.allocator)
 	wal_filename := fmt.tprintf("%s-wal", filename)
-	if os.exists(filename) { os.remove(filename) }
-	if os.exists(wal_filename) { os.remove(wal_filename) }
+	if os.exists(filename) {
+		os.remove(filename)
+	}
+	if os.exists(wal_filename) {
+		os.remove(wal_filename)
+	}
 
 	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "WAL: Failed to open pager with WAL")
@@ -261,9 +265,13 @@ create_test_wal_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, 
 }
 
 remove_wal_files :: proc(filename: string) {
-	if os.exists(filename) { os.remove(filename) }
+	if os.exists(filename) {
+		os.remove(filename)
+	}
 	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) { os.remove(wal_name) }
+	if os.exists(wal_name) {
+		os.remove(wal_name)
+	}
 }
 
 destroy_test_wal_env :: proc(p: ^pager.Pager, filename: string) {
@@ -343,7 +351,9 @@ test_wal_commit_survives_reopen :: proc(t: ^testing.T) {
 
 	p2, err := pager.open(file)
 	testing.expect(t, err == .None, "WAL: reopen after commit failed")
-	if err != .None { return }
+	if err != .None {
+		return
+	}
 	defer destroy_test_wal_env(p2, file)
 
 	pg2, get_err := pager.get_page(p2, pg_num)
@@ -362,8 +372,12 @@ test_wal_recovery_from_crash :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	file := fmt.tprintf("test_wal_crash.db")
 	wal_file := fmt.tprintf("%s-wal", file)
-	if os.exists(file) { os.remove(file) }
-	if os.exists(wal_file) { os.remove(wal_file) }
+	if os.exists(file) {
+		os.remove(file)
+	}
+	if os.exists(wal_file) {
+		os.remove(wal_file)
+	}
 	defer os.remove(file)
 	defer os.remove(wal_file)
 
@@ -571,7 +585,9 @@ write_u32 :: proc(dst: []u8, v: u32) {
 }
 
 bytes_to_u32 :: proc(b: []u8) -> u32 {
-	if len(b) < 4 { return 0 }
+	if len(b) < 4 {
+		return 0
+	}
 	return u32(b[0]) | u32(b[1]) << 8 | u32(b[2]) << 16 | u32(b[3]) << 24
 }
 
@@ -656,7 +672,9 @@ test_bitmap_grows_on_allocate :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	// Open with a small file to start with a small bitmap
 	filename := "test_bmap_grow.db"
-	if os.exists(filename) { os.remove(filename) }
+	if os.exists(filename) {
+		os.remove(filename)
+	}
 	defer os.remove(filename)
 	wal_name := fmt.tprintf("%s-wal", filename)
 	defer os.remove(wal_name)
@@ -861,7 +879,10 @@ test_free_page_slot_reusable_tracks_dirty :: proc(t: ^testing.T) {
 	testing.expect_value(t, pg3.page_num, pn)
 	found := false
 	for d in p.dirty_pages {
-		if d == pn { found = true; break }
+		if d == pn {
+			found = true
+			break
+		}
 	}
 	testing.expect(t, found, "reused page must be tracked in dirty_pages")
 	pager.unpin_page(p, pn)
@@ -896,7 +917,9 @@ test_pager_bloom_no_false_negative :: proc(t: ^testing.T) {
 	// would surface as page_in_cache == false for a table-present page.
 	for i in 0 ..< len(p.slots) {
 		pn := p.slots[i].page.page_num
-		if pn == 0 { continue }
+		if pn == 0 {
+			continue
+		}
 		testing.expect(
 			t,
 			pager.page_in_cache(p, pn),

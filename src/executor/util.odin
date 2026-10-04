@@ -146,7 +146,9 @@ resolve :: proc(r: Column_Resolver, name: string) -> (int, bool) {
 @(private)
 where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition, bool) {
 	root := clause.root
-	if root == nil || root.kind != .COND { return {}, false }
+	if root == nil || root.kind != .COND {
+		return {}, false
+	}
 	return root.cond, true
 }
 
@@ -161,25 +163,40 @@ try_pk_lookup :: proc(
 	ok: bool,
 ) {
 	cond, has_cond := where_single_condition(clause)
-	if !has_cond { return }
-	if cond.operator != .EQUALS { return }
+	if !has_cond {
+		return
+	}
+	if cond.operator != .EQUALS {
+		return
+	}
 
 	pk_idx, has_pk := schema.get_pk_column(table.columns)
-	if !has_pk { return }
+	if !has_pk {
+		return
+	}
 
 	pk_name := table.columns[pk_idx].name
 	if cond.column != pk_name {
 		qual, col, has_qual := split_qualifier(cond.column)
-		if !has_qual || col != pk_name { return }
+		if !has_qual || col != pk_name {
+			return
+		}
 
 		matches := qual == table_name || (table_alias != "" && qual == table_alias)
-		if !matches { return }
+		if !matches {
+			return
+		}
 	}
 
 	val_untyped, is_val := cond.rhs.(types.Value)
-	if !is_val { return }
+	if !is_val {
+		return
+	}
+
 	val, is_int := val_untyped.(i64)
-	if !is_int { return }
+	if !is_int {
+		return
+	}
 	return types.Row_ID(val), true
 }
 
@@ -194,9 +211,13 @@ split_qualifier :: proc(name: string) -> (qual: string, col: string, has: bool) 
 
 @(private)
 values_equal :: proc(a, b: []types.Value) -> bool {
-	if len(a) != len(b) { return false }
+	if len(a) != len(b) {
+		return false
+	}
 	for v, i in a {
-		if !types.value_compare(v, b[i]) { return false }
+		if !types.value_compare(v, b[i]) {
+			return false
+		}
 	}
 	return true
 }
@@ -207,9 +228,13 @@ values_equal_by_indices :: proc(
 	key: []types.Value,
 	indices: []int,
 ) -> bool {
-	if len(key) != len(indices) { return false }
+	if len(key) != len(indices) {
+		return false
+	}
 	for col_idx, pos in indices {
-		if !types.value_compare(key[pos], values[col_idx]) { return false }
+		if !types.value_compare(key[pos], values[col_idx]) {
+			return false
+		}
 	}
 	return true
 }
@@ -234,15 +259,20 @@ Fp_Buckets :: struct {
 @(private)
 fp_buckets_make :: proc(n: int, allocator: mem.Allocator) -> Fp_Buckets {
 	cap := 16
-	for cap < 2 * (n + 1) { cap *= 2 }
+	for cap < 2 * (n + 1) {
+		cap *= 2
+	}
 
 	b := Fp_Buckets {
 		mask      = cap - 1,
 		allocator = allocator,
 	}
+
 	b.slots = make([]u64, cap, allocator)
 	b.head = make([]int, cap, allocator)
-	for i in 0 ..< cap { b.head[i] = -1 }
+	for i in 0 ..< cap {
+		b.head[i] = -1
+	}
 
 	b.rows = make([dynamic]int, 0, n, allocator)
 	b.fps = make([dynamic]u64, 0, n, allocator)
@@ -280,7 +310,9 @@ fp_buckets_grow :: proc(b: ^Fp_Buckets) {
 	cap := 2 * len(old_slots)
 	b.slots = make([]u64, cap, b.allocator)
 	b.head = make([]int, cap, b.allocator)
-	for i in 0 ..< cap { b.head[i] = -1 }
+	for i in 0 ..< cap {
+		b.head[i] = -1
+	}
 
 	b.mask = cap - 1
 	clear(&b.rows)
@@ -296,7 +328,10 @@ fp_buckets_grow :: proc(b: ^Fp_Buckets) {
 
 @(private)
 fp_buckets_add :: proc(b: ^Fp_Buckets, fp: u64, pos: int) {
-	if len(b.rows) >= (3 * len(b.slots)) / 4 { fp_buckets_grow(b) }
+	if len(b.rows) >= (3 * len(b.slots)) / 4 {
+		fp_buckets_grow(b)
+	}
+
 	s := fp_slot(fp, b.mask)
 	for {
 		if b.head[s] == -1 {
@@ -321,8 +356,12 @@ fp_buckets_add :: proc(b: ^Fp_Buckets, fp: u64, pos: int) {
 fp_buckets_probe :: proc(b: ^Fp_Buckets, fp: u64) -> (int, bool) {
 	s := fp_slot(fp, b.mask)
 	for {
-		if b.head[s] == -1 { return 0, false }
-		if b.slots[s] == fp { return b.head[s], true }
+		if b.head[s] == -1 {
+			return 0, false
+		}
+		if b.slots[s] == fp {
+			return b.head[s], true
+		}
 		s = (s + 1) & b.mask
 	}
 }
@@ -442,19 +481,27 @@ Resolved_Check :: struct {
 resolve_table_checks :: proc(table: types.Table) -> ([]Resolved_Check, bool) {
 	n := 0
 	for col in table.columns {
-		if _, has_chk := col.check_expr.?; has_chk { n += 1 }
+		if _, has_chk := col.check_expr.?; has_chk {
+			n += 1
+		}
 	}
-	if n == 0 { return nil, true }
+	if n == 0 {
+		return nil, true
+	}
 
 	checks := make([]Resolved_Check, n, context.temp_allocator)
 	resolver := build_column_resolver(table.columns, nil)
 	i := 0
 	for col in table.columns {
 		chk, has_chk := col.check_expr.?
-		if !has_chk { continue }
+		if !has_chk {
+			continue
+		}
 
 		parsed, p_ok := parse_check_predicate(chk)
-		if !p_ok { return nil, false }
+		if !p_ok {
+			return nil, false
+		}
 
 		col_idx, col_ok := resolve(resolver, parsed.col_name)
 		if !col_ok {

@@ -77,7 +77,9 @@ test_bloom_measured_false_positive_rate :: proc(t: ^testing.T) {
 	fp := 0
 	trials := 20000
 	for k in u32(100000) ..< u32(100000 + trials) {
-		if bloom.might_contain(&f, k) { fp += 1 }
+		if bloom.might_contain(&f, k) {
+			fp += 1
+		}
 	}
 
 	rate := f64(fp) / f64(trials)

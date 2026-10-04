@@ -106,7 +106,9 @@ match_keyword :: proc(ident: string) -> Token_Type {
 	end :=
 		len(keyword_table) if bi == len(keyword_bucket_offsets) - 1 else keyword_bucket_offsets[bi + 1]
 	for kw in keyword_table[start:end] {
-		if len(kw.word) != len(ident) { continue }
+		if len(kw.word) != len(ident) {
+			continue
+		}
 
 		match := true
 		for i in 0 ..< len(ident) {
@@ -115,7 +117,9 @@ match_keyword :: proc(ident: string) -> Token_Type {
 				break
 			}
 		}
-		if match { return kw.tok }
+		if match {
+			return kw.tok
+		}
 	}
 	return .IDENTIFIER
 }
@@ -153,7 +157,9 @@ Lexer :: struct {
 // lex_line_comment consumes a `--` comment to (not past) the newline.
 @(private = "file")
 lex_line_comment :: proc(l: ^Lexer) {
-	for l.pos < len(l.sql) && l.sql[l.pos] != '\n' { l.pos += 1 }
+	for l.pos < len(l.sql) && l.sql[l.pos] != '\n' {
+		l.pos += 1
+	}
 }
 
 // lex_block_comment consumes a `/* ... */` comment. False on unterminated.
@@ -161,7 +167,9 @@ lex_line_comment :: proc(l: ^Lexer) {
 lex_block_comment :: proc(l: ^Lexer) -> bool {
 	l.pos += 2
 	for l.pos + 1 < len(l.sql) && !(l.sql[l.pos] == '*' && l.sql[l.pos + 1] == '/') {
-		if l.sql[l.pos] == '\n' { l.line += 1 }
+		if l.sql[l.pos] == '\n' {
+			l.line += 1
+		}
 		l.pos += 1
 	}
 	if l.pos + 1 >= len(l.sql) {
@@ -184,10 +192,14 @@ lex_string :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 			}
 			break
 		}
-		if l.sql[l.pos] == '\n' { l.line += 1 }
+		if l.sql[l.pos] == '\n' {
+			l.line += 1
+		}
 		l.pos += 1
 	}
-	if l.pos >= len(l.sql) { return false }
+	if l.pos >= len(l.sql) {
+		return false
+	}
 
 	append(tokens, Token{.STRING, l.sql[start:l.pos], token_line})
 	l.pos += 1
@@ -200,15 +212,23 @@ lex_string :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 lex_blob :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 	start := l.pos + 2; l.pos += 2; token_line := l.line
 	for l.pos < len(l.sql) && l.sql[l.pos] != '\'' {
-		if l.sql[l.pos] == '\n' { l.line += 1 }
+		if l.sql[l.pos] == '\n' {
+			l.line += 1
+		}
 		l.pos += 1
 	}
-	if l.pos >= len(l.sql) { return false }
+	if l.pos >= len(l.sql) {
+		return false
+	}
 
 	hex_len := l.pos - start
-	if hex_len % 2 != 0 { return false }
+	if hex_len % 2 != 0 {
+		return false
+	}
 	for j in start ..< l.pos {
-		if !is_hex_digit(l.sql[j]) { return false }
+		if !is_hex_digit(l.sql[j]) {
+			return false
+		}
 	}
 
 	append(tokens, Token{.BLOB_LITERAL, l.sql[start:l.pos], token_line})
@@ -221,13 +241,17 @@ lex_blob :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 @(private = "file")
 lex_number :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 	start := l.pos
-	if l.sql[l.pos] == '-' { l.pos += 1 }
+	if l.sql[l.pos] == '-' {
+		l.pos += 1
+	}
 	if l.pos + 1 < len(l.sql) && l.sql[l.pos] == '0' && (l.sql[l.pos + 1] | 0x20) == 'x' {
 		l.pos += 2
 		if l.pos >= len(l.sql) || !is_hex_digit(l.sql[l.pos]) {
 			return false
 		}
-		for l.pos < len(l.sql) && is_hex_digit(l.sql[l.pos]) { l.pos += 1 }
+		for l.pos < len(l.sql) && is_hex_digit(l.sql[l.pos]) {
+			l.pos += 1
+		}
 
 		append(tokens, Token{.NUMBER, l.sql[start:l.pos], l.line})
 		return true
@@ -255,7 +279,9 @@ lex_number :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 				break
 			}
 
-			for l.pos < len(l.sql) && is_digit_byte(l.sql[l.pos]) { l.pos += 1 }
+			for l.pos < len(l.sql) && is_digit_byte(l.sql[l.pos]) {
+				l.pos += 1
+			}
 			break
 		} else {
 			break
@@ -271,9 +297,9 @@ lex_number :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 lex_ident :: proc(l: ^Lexer, tokens: ^[dynamic]Token) {
 	start := l.pos
 	for l.pos < len(l.sql) &&
-	    (is_alpha_byte(l.sql[l.pos]) ||
-			    is_digit_byte(l.sql[l.pos]) ||
-			    l.sql[l.pos] == '_') { l.pos += 1 }
+	    (is_alpha_byte(l.sql[l.pos]) || is_digit_byte(l.sql[l.pos]) || l.sql[l.pos] == '_') {
+		l.pos += 1
+	}
 
 	token_type := match_keyword(l.sql[start:l.pos])
 	append(tokens, Token{token_type, l.sql[start:l.pos], l.line})
@@ -334,7 +360,9 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 	for l.pos < len(l.sql) {
 		c := l.sql[l.pos]
 		if is_space_byte(c) {
-			if c == '\n' { l.line += 1 }
+			if c == '\n' {
+				l.line += 1
+			}
 			l.pos += 1
 			continue
 		}
@@ -343,27 +371,42 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 			continue
 		}
 		if c == '/' && l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '*' {
-			if !lex_block_comment(&l) { delete(tokens); return nil, false }
+			if !lex_block_comment(&l) {
+				delete(tokens)
+				return nil, false
+			}
 			continue
 		}
 		if c == '\'' {
-			if !lex_string(&l, &tokens) { delete(tokens); return nil, false }
+			if !lex_string(&l, &tokens) {
+				delete(tokens)
+				return nil, false
+			}
 			continue
 		}
 		if (c == 'X' || c == 'x') && l.pos + 1 < len(l.sql) && l.sql[l.pos + 1] == '\'' {
-			if !lex_blob(&l, &tokens) { delete(tokens); return nil, false }
+			if !lex_blob(&l, &tokens) {
+				delete(tokens)
+				return nil, false
+			}
 			continue
 		}
 		if is_digit_byte(c) ||
 		   (c == '-' && l.pos + 1 < len(l.sql) && is_digit_byte(l.sql[l.pos + 1])) {
-			if !lex_number(&l, &tokens) { delete(tokens); return nil, false }
+			if !lex_number(&l, &tokens) {
+				delete(tokens)
+				return nil, false
+			}
 			continue
 		}
 		if is_alpha_byte(c) || c == '_' {
 			lex_ident(&l, &tokens)
 			continue
 		}
-		if !lex_symbol(&l, &tokens) { delete(tokens); return nil, false }
+		if !lex_symbol(&l, &tokens) {
+			delete(tokens)
+			return nil, false
+		}
 	}
 
 	append(&tokens, Token{.EOF, "", l.line})
@@ -372,12 +415,16 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 
 @(private)
 peek :: proc(p: ^Parser) -> Token {
-	if p.current >= len(p.tokens) { return Token{.EOF, "", 0} }
+	if p.current >= len(p.tokens) {
+		return Token{.EOF, "", 0}
+	}
 	return p.tokens[p.current]
 }
 
 advance :: proc(p: ^Parser) -> Token {
-	if p.current >= len(p.tokens) { return Token{.EOF, "", 0} }
+	if p.current >= len(p.tokens) {
+		return Token{.EOF, "", 0}
+	}
 
 	token := p.tokens[p.current]
 	p.current += 1
@@ -386,14 +433,19 @@ advance :: proc(p: ^Parser) -> Token {
 
 match :: proc(p: ^Parser, types: ..Token_Type) -> bool {
 	for t in types {
-		if peek(p).type == t { advance(p); return true }
+		if peek(p).type == t {
+			advance(p)
+			return true
+		}
 	}
 	return false
 }
 
 expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 	token := peek(p)
-	if token.type != type { return token, false }
+	if token.type != type {
+		return token, false
+	}
 
 	advance(p)
 	return token, true

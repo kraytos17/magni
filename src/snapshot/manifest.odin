@@ -28,12 +28,16 @@ Snapshot_Diff_Entry :: struct {
 }
 
 diff_entries_free :: proc(entries: []Snapshot_Diff_Entry, allocator := context.allocator) {
-	for e in entries { delete(e.table_name, allocator) }
+	for e in entries {
+		delete(e.table_name, allocator)
+	}
 	delete(entries, allocator)
 }
 
 create_manifest :: proc(p: ^pager.Pager, tables: []types.Table) -> u32 {
-	if len(tables) == 0 { return 0 }
+	if len(tables) == 0 {
+		return 0
+	}
 
 	page, err := pager.allocate_page(p)
 	if err != .None {
@@ -43,9 +47,9 @@ create_manifest :: proc(p: ^pager.Pager, tables: []types.Table) -> u32 {
 
 	data := page.data
 	offset := 0
+
 	copy(data[offset:], MANIFEST_MAGIC); offset += len(MANIFEST_MAGIC)
 	count := u32(len(tables))
-
 	mem.copy_non_overlapping(raw_data(data[offset:]), &count, size_of(count))
 	offset += size_of(count)
 	for tbl in tables {
@@ -73,14 +77,20 @@ find_in_manifest :: proc(
 	root_page: u32,
 	ok: bool,
 ) {
-	if manifest_page == 0 { return 0, false }
+	if manifest_page == 0 {
+		return 0, false
+	}
 
 	page, err := pager.get_page(p, manifest_page)
-	if err != .None { return 0, false }
+	if err != .None {
+		return 0, false
+	}
 	defer pager.unpin_page(p, manifest_page)
 
 	data := page.data
-	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC { return 0, false }
+	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
+		return 0, false
+	}
 
 	offset := len(MANIFEST_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += size_of(u32)
@@ -103,14 +113,20 @@ load_manifest :: proc(
 	manifest_page: u32,
 	allocator := context.allocator,
 ) -> []Manifest_Entry {
-	if manifest_page == 0 { return nil }
+	if manifest_page == 0 {
+		return nil
+	}
 
 	page, err := pager.get_page(p, manifest_page)
-	if err != .None { return nil }
+	if err != .None {
+		return nil
+	}
 	defer pager.unpin_page(p, manifest_page)
 
 	data := page.data
-	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC { return nil }
+	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
+		return nil
+	}
 
 	offset := len(MANIFEST_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += size_of(u32)
@@ -132,14 +148,20 @@ load_manifest_tables :: proc(
 	roots: []u32,
 	ok: bool,
 ) {
-	if manifest_page == 0 { return {}, {}, true }
+	if manifest_page == 0 {
+		return {}, {}, true
+	}
 
 	page, err := pager.get_page(p, manifest_page)
-	if err != .None { return {}, {}, false }
+	if err != .None {
+		return {}, {}, false
+	}
 	defer pager.unpin_page(p, manifest_page)
 
 	data := page.data
-	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC { return {}, {}, false }
+	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
+		return {}, {}, false
+	}
 
 	offset := len(MANIFEST_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += size_of(u32)
@@ -163,7 +185,9 @@ diff_manifests :: proc(
 ) {
 	old_names, old_roots, ok_a := load_manifest_tables(p, manifest_a, context.temp_allocator)
 	new_names, new_roots, ok_b := load_manifest_tables(p, manifest_b, context.temp_allocator)
-	if !ok_a || !ok_b { return nil, false }
+	if !ok_a || !ok_b {
+		return nil, false
+	}
 
 	old_map := make(map[string]u32, context.temp_allocator)
 	defer delete(old_map)
@@ -220,12 +244,18 @@ diff_snapshots :: proc(
 	[]Snapshot_Diff_Entry,
 	bool,
 ) {
-	if older_id > newer_id { return diff_snapshots(p, newer_id, older_id, latest_page, allocator) }
+	if older_id > newer_id {
+		return diff_snapshots(p, newer_id, older_id, latest_page, allocator)
+	}
 
 	older_h, older_ok := find_by_id(p, latest_page, older_id)
-	if !older_ok { return nil, false }
+	if !older_ok {
+		return nil, false
+	}
 
 	newer_h, newer_ok := find_by_id(p, latest_page, newer_id)
-	if !newer_ok { return nil, false }
+	if !newer_ok {
+		return nil, false
+	}
 	return diff_manifests(p, older_h.manifest_page, newer_h.manifest_page, allocator)
 }

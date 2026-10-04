@@ -128,14 +128,12 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	search_failed := false
 	search_wrapped := false
 	matched_entry := original
-
 	defer {
 		if ed.prev_search_rows > 0 {
 			fmt.fprintf(os.stdout, "\x1b[%dA", 1)
 		}
 		ed.prev_search_rows = 0
 	}
-
 	for {
 		prompt_prefix := "(reverse-i-search)"
 		if search_failed {
@@ -147,7 +145,9 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 		search_prompt := fmt.tprintf("%s`%s': ", prompt_prefix, strings.to_string(query))
 		render_search_overlay(ed, search_prompt, matched_entry)
 		ev, ok := read_key(ed.term.fd)
-		if !ok { break }
+		if !ok {
+			break
+		}
 
 		#partial switch ev.key {
 		case .Enter:
@@ -306,7 +306,9 @@ sql_keywords :: []string {
 
 run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 	line := lb_to_string(lb, context.temp_allocator)
-	if len(line) == 0 { return }
+	if len(line) == 0 {
+		return
+	}
 
 	candidates := make([dynamic]string, context.temp_allocator)
 	if line[0] == '.' {
@@ -317,7 +319,9 @@ run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 		}
 	} else {
 		word_start := len(line) - 1
-		for word_start >= 0 && line[word_start] != ' ' { word_start -= 1 }
+		for word_start >= 0 && line[word_start] != ' ' {
+			word_start -= 1
+		}
 
 		word_start += 1
 		word := line[word_start:]
@@ -335,6 +339,7 @@ run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 			}
 		}
 	}
+
 	if len(candidates) == 0 {
 		return
 	}
@@ -363,7 +368,9 @@ read_pasted_text :: proc(fd: posix.FD, lb: ^Line_Buffer) {
 	mi := 0
 	for {
 		b, ok := read_byte(fd)
-		if !ok { break }
+		if !ok {
+			break
+		}
 
 		append(&buf, b)
 		if b == end[mi] {

@@ -38,7 +38,9 @@ bench_page :: proc(
 		// included): defeats branch learning, exercises all probe depths.
 		target := types.Row_ID(key_base + i64((i * 7919000) % key_span))
 		idx, l_err := btree.dense_page_lower_bound(page, id, target)
-		if l_err != .None { checksum += 1 }
+		if l_err != .None {
+			checksum += 1
+		}
 		checksum += idx
 	}
 
@@ -51,10 +53,14 @@ main :: proc() {
 	// Full-u64 page: 339 sparse keys (span > u32 forces full encoding;
 	// exactly fills the page: 24+2712+1360 = 4096).
 	fkeys := make([]types.Row_ID, 339, context.temp_allocator)
-	for i in 0 ..< 339 { fkeys[i] = types.Row_ID(i64(i) * 20000000 - 3000000000) }
+	for i in 0 ..< 339 {
+		fkeys[i] = types.Row_ID(i64(i) * 20000000 - 3000000000)
+	}
 
 	fchildren := make([]u32, 340, context.temp_allocator)
-	for i in 0 ..< 340 { fchildren[i] = u32(100 + i) }
+	for i in 0 ..< 340 {
+		fchildren[i] = u32(100 + i)
+	}
 
 	fpage := make([]u8, types.PAGE_SIZE, context.temp_allocator)
 	if err := btree.dense_build_from_sorted(fpage, 2, fkeys, fchildren); err != .None {
@@ -64,10 +70,14 @@ main :: proc() {
 
 	// FOR page: 500 small-range keys (delta encoding, the post-split shape).
 	dkeys := make([]types.Row_ID, 500, context.temp_allocator)
-	for i in 0 ..< 500 { dkeys[i] = types.Row_ID(100000 + i64(i)) }
+	for i in 0 ..< 500 {
+		dkeys[i] = types.Row_ID(100000 + i64(i))
+	}
 
 	dchildren := make([]u32, 501, context.temp_allocator)
-	for i in 0 ..< 501 { dchildren[i] = u32(200 + i) }
+	for i in 0 ..< 501 {
+		dchildren[i] = u32(200 + i)
+	}
 
 	dpage := make([]u8, types.PAGE_SIZE, context.temp_allocator)
 	if err := btree.dense_build_from_sorted(dpage, 3, dkeys, dchildren); err != .None {

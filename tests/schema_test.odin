@@ -496,19 +496,25 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	def_root, def_ok := schema.update_index_def_cow(&st, "docs", 50, "body", "i_body")
 	testing.expect(t, def_ok, "index def publish succeeds")
-	if !def_ok { return }
+	if !def_ok {
+		return
+	}
 	d.schema_root_page = def_root
 
 	st1 := db.Schema_Tree(d)
 	new_schema_root, ok := schema.update_index_root_cow(&st1, "docs", "i_body", 99)
 	testing.expect(t, ok, "index root update succeeds")
-	if !ok { return }
+	if !ok {
+		return
+	}
 	d.schema_root_page = new_schema_root
 
 	st2 := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st2, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found after index update")
-	if !found { return }
+	if !found {
+		return
+	}
 	def, has := schema.table_index(tbl, "i_body")
 	testing.expect(t, has, "index present")
 	if has {
@@ -529,15 +535,21 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	st3 := db.Schema_Tree(d)
 	new_schema_root2, ok2 := schema.update_root_page_cow(&st3, "docs", 7)
 	testing.expect(t, ok2, "data root update succeeds")
-	if !ok2 { return }
+	if !ok2 {
+		return
+	}
 	d.schema_root_page = new_schema_root2
 	st4 := db.Schema_Tree(d)
 	tbl2, found2 := schema.find_table(&st4, "docs", context.temp_allocator)
 	testing.expect(t, found2, "table found after data update")
-	if !found2 { return }
+	if !found2 {
+		return
+	}
 	testing.expect_value(t, tbl2.root_page, u32(7))
 	def2, has2 := schema.table_index(tbl2, "i_body")
 	testing.expect(t, has2, "index survives data swap")
-	if has2 { testing.expect_value(t, def2.root, u32(99)) }
+	if has2 {
+		testing.expect_value(t, def2.root, u32(99))
+	}
 	schema.table_free(tbl2, context.temp_allocator)
 }

@@ -82,7 +82,9 @@ Join_Outer :: struct {
 @(private = "file")
 join_key_i64 :: proc(v: types.Value) -> (u64, bool) {
 	key, ok := v.(i64)
-	if !ok { return 0, false }
+	if !ok {
+		return 0, false
+	}
 	return u64(key), true
 }
 
@@ -90,7 +92,9 @@ join_key_i64 :: proc(v: types.Value) -> (u64, bool) {
 // allocation). Collisions fall back to value_compare at the call site.
 @(private = "file")
 join_key_fingerprint :: proc(v: types.Value) -> (u64, bool) {
-	if types.is_null(v) { return 0, false }
+	if types.is_null(v) {
+		return 0, false
+	}
 	return hash_value(v), true
 }
 
@@ -126,7 +130,9 @@ join_hash_probe :: proc(
 	ht := make(map[u64][dynamic]int, build_cap, context.temp_allocator)
 	for row, ri in build.rows {
 		key, ok := key_of(row.values[build.col])
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 
 		bucket := ht[key]
 		append(&bucket, ri)
@@ -138,12 +144,18 @@ join_hash_probe :: proc(
 	for p_row, pi in probe.rows {
 		pv := p_row.values[probe.col]
 		key, ok := key_of(pv)
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 
 		matches, has := ht[key]
-		if !has { continue }
+		if !has {
+			continue
+		}
 		for bi in matches {
-			if !verify(build.rows[bi].values[build.col], pv) { continue }
+			if !verify(build.rows[bi].values[build.col], pv) {
+				continue
+			}
 
 			matched_build[bi] = true
 			matched_probe[pi] = true
@@ -154,20 +166,26 @@ join_hash_probe :: proc(
 			}
 		}
 	}
-	for _, bucket in ht { delete(bucket) }
+	for _, bucket in ht {
+		delete(bucket)
+	}
 
 	delete(ht)
 	matched_left := matched_build if build_left else matched_probe
 	matched_right := matched_probe if build_left else matched_build
 	if outer.left {
 		for li in 0 ..< len(left.rows) {
-			if li in matched_left { continue }
+			if li in matched_left {
+				continue
+			}
 			join_emit_null_row(left.rows[li], right.width, new_rows)
 		}
 	}
 	if outer.right {
 		for ri in 0 ..< len(right.rows) {
-			if ri in matched_right { continue }
+			if ri in matched_right {
+				continue
+			}
 			join_emit_null_left_row(right.rows[ri], left.width, new_rows)
 		}
 	}
@@ -201,7 +219,9 @@ resolve_from_source :: proc(
 		return true
 	} else if vt, is_vt := stmt.from.(^parser.Select_Stmt); is_vt {
 		inner_rows, inner_cols := exec_subquery(t, vt^, cache)
-		if inner_rows == nil { return false }
+		if inner_rows == nil {
+			return false
+		}
 
 		ctx^ = Table_Context {
 			info = {virtual = Virtual_Table{columns = inner_cols, rows = inner_rows}},
@@ -239,7 +259,9 @@ resolve_join_source :: proc(
 		return true
 	} else if subq, is_subquery := join.source.(^parser.Select_Stmt); is_subquery {
 		inner_rows, inner_cols := exec_subquery(t, subq^, cache)
-		if inner_rows == nil { return false }
+		if inner_rows == nil {
+			return false
+		}
 
 		alias := join.alias if join.alias != "" else ""
 		ctx^ = Table_Context {
@@ -308,17 +330,25 @@ try_hash_join :: proc(
 	left_col_count := jb.ctxs[info_idx - 1].range.start_col + jb.ctxs[info_idx - 1].range.col_count
 	right_col_count := jb.ctxs[info_idx].range.col_count
 	on_cl, has_on := jc.on_clause.?
-	if !has_on { return false }
+	if !has_on {
+		return false
+	}
 
 	cond, has_cond := where_single_condition(on_cl)
-	if !has_cond || cond.operator != .EQUALS { return false }
+	if !has_cond || cond.operator != .EQUALS {
+		return false
+	}
 
 	rhs_str, is_col := cond.rhs.(string)
-	if !is_col { return false }
+	if !is_col {
+		return false
+	}
 
 	left_idx, left_ok := resolve(jb.resolver, cond.column)
 	right_idx, right_ok := resolve(jb.resolver, rhs_str)
-	if !left_ok || !right_ok { return false }
+	if !left_ok || !right_ok {
+		return false
+	}
 
 	right_adjust := jb.ctxs[info_idx].range.start_col
 	lcc := jb.ctxs[info_idx - 1].range.col_count
@@ -405,7 +435,9 @@ nested_loop_join :: proc(
 			matched := false
 			for right_row, ri in right_rows {
 				try_join_match(outer_row, right_row.values, filter, new_rows, &matched)
-				if matched { matched_right[ri] = true }
+				if matched {
+					matched_right[ri] = true
+				}
 			}
 			if is_left && !matched {
 				join_emit_null_row(outer_row, right_col_count, new_rows)
@@ -416,13 +448,18 @@ nested_loop_join :: proc(
 			for l_row in rows {
 				dummy := false
 				try_join_match(l_row, r_row.values, filter, new_rows, &dummy)
-				if dummy { matched_right[r_idx] = true }
+				if dummy {
+					matched_right[r_idx] = true
+				}
 			}
 		}
 	}
+
 	if is_right {
 		for ri in 0 ..< len(right_rows) {
-			if ri in matched_right { continue }
+			if ri in matched_right {
+				continue
+			}
 			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
 		}
 	}
@@ -471,9 +508,13 @@ assemble_combined_cols :: proc(
 	for ti in 0 ..< table_count {
 		tr := table_ctxs[ti].range
 		if vt, is_virtual := table_ctxs[ti].info.virtual.?; is_virtual {
-			for j in 0 ..< tr.col_count { combined_cols[tr.start_col + j] = vt.columns[j] }
+			for j in 0 ..< tr.col_count {
+				combined_cols[tr.start_col + j] = vt.columns[j]
+			}
 		} else {
-			for j in 0 ..< tr.col_count { combined_cols[tr.start_col + j] = table_ctxs[ti].info.table.columns[j] }
+			for j in 0 ..< tr.col_count {
+				combined_cols[tr.start_col + j] = table_ctxs[ti].info.table.columns[j]
+			}
 		}
 	}
 	return combined_cols, total_cols
@@ -502,7 +543,9 @@ scan_first_table :: proc(
 			context.temp_allocator,
 			cache,
 		)
-		if scan_err { return nil, false }
+		if scan_err {
+			return nil, false
+		}
 		return r, true
 	} else if vt, is_virtual := table_ctxs[0].info.virtual.?; is_virtual {
 		return vt.rows, true
@@ -554,7 +597,9 @@ build_join_result :: proc(
 	}
 
 	rows, scan_ok := scan_first_table(t, table_ctxs, join_filters, cache)
-	if !scan_ok { return {} }
+	if !scan_ok {
+		return {}
+	}
 
 	jb := Join_Build {
 		ctxs     = table_ctxs,
@@ -582,7 +627,9 @@ exec_select_join_data :: proc(
 	bool,
 ) {
 	jb := build_join_result(t, stmt, cache)
-	if !jb.ok { return nil, nil, false }
+	if !jb.ok {
+		return nil, nil, false
+	}
 
 	rows, combined_cols, table_ranges := jb.rows, jb.cols, jb.ranges
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
@@ -608,7 +655,9 @@ try_join_match :: proc(
 
 		copy(tmp[:len(outer_row.values)], outer_row.values)
 		copy(tmp[len(outer_row.values):], inner_values)
-		if !evaluate_where_ctx(f, tmp) { return }
+		if !evaluate_where_ctx(f, tmp) {
+			return
+		}
 	}
 
 	matched^ = true

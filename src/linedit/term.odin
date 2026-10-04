@@ -76,6 +76,7 @@ term_enable_raw :: proc(t: ^Term) -> bool {
 	t.is_raw = true
 	install_restore_handler(t)
 	terminal_query_size(t)
+
 	fmt.fprint(os.stdout, "\x1b[?2004h")
 	return true
 }

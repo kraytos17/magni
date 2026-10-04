@@ -31,10 +31,14 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 	page := latest_page
 	for page != 0 && count < keep_count {
 		h, ok := load(p, page)
-		if !ok { break }
+		if !ok {
+			break
+		}
 
 		live[page] = true
-		if h.manifest_page != 0 { live[h.manifest_page] = true }
+		if h.manifest_page != 0 {
+			live[h.manifest_page] = true
+		}
 		if h.schema_root != 0 {
 			// NOTE: do NOT pre-mark roots before collect_pages. It marks
 			// the root itself and uses presence as its visited guard, so
@@ -51,7 +55,9 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 				)
 				if load_ok {
 					for i in 0 ..< len(roots) {
-						if roots[i] != 0 { btree.collect_pages(&t, roots[i], live) }
+						if roots[i] != 0 {
+							btree.collect_pages(&t, roots[i], live)
+						}
 					}
 				}
 			}
@@ -69,7 +75,10 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 @(private)
 mark_index_roots :: proc(p: ^pager.Pager, t: ^btree.Tree, live: ^map[u32]bool) {
 	c, c_err := btree.cursor_start(t, context.temp_allocator)
-	if c_err != .None { return }
+	if c_err != .None {
+		return
+	}
+
 	defer btree.cursor_destroy(&c)
 	for c.is_valid {
 		row, get_err := btree.cursor_get_cell(&c, context.temp_allocator)
@@ -95,12 +104,16 @@ sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
 	if len(bm) > 0 {
 		for i := 0; i < len(bm); i += 1 {
 			word := bm[i]
-			if word == 0 { continue }
+			if word == 0 {
+				continue
+			}
 
 			base := u32(i) * 64
 			for bit := uint(0); bit < 64; bit += 1 {
 				pn := base + u32(bit)
-				if pn > max_page { break }
+				if pn > max_page {
+					break
+				}
 				if pn >= 2 && (word & (u64(1) << bit)) != 0 && pn not_in live^ {
 					pager.free_page(p, pn)
 				}
@@ -108,7 +121,9 @@ sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
 		}
 	} else {
 		for pn := u32(2); pn <= max_page; pn += 1 {
-			if pn not_in live^ { pager.free_page(p, pn) }
+			if pn not_in live^ {
+				pager.free_page(p, pn)
+			}
 		}
 	}
 	// NOTE: no file truncation here by design. Freed pages recycle through

@@ -30,7 +30,9 @@ tree_stats :: proc(t: ^Tree) -> ^Stats {
 @(private)
 attach_stats :: proc(t: ^Tree) {
 	p := t.pager
-	if p.stats != nil { return }
+	if p.stats != nil {
+		return
+	}
 
 	s := new(Stats, p.allocator)
 	s.row_counts = make([dynamic]int, 0, 64, p.allocator)
@@ -43,7 +45,9 @@ attach_stats :: proc(t: ^Tree) {
 // stats_row_count_get returns the cached row count for page_id, if present.
 @(private)
 stats_row_count_get :: proc(s: ^Stats, page_id: u32) -> (int, bool) {
-	if int(page_id) >= len(s.row_counts) { return 0, false }
+	if int(page_id) >= len(s.row_counts) {
+		return 0, false
+	}
 
 	count := s.row_counts[page_id]
 	return count, count >= 0
@@ -57,7 +61,9 @@ stats_row_count_set :: proc(s: ^Stats, page_id: u32, count: int) {
 	if idx >= len(s.row_counts) {
 		old := len(s.row_counts)
 		resize(&s.row_counts, idx + 1)
-		for i := old; i <= idx; i += 1 { s.row_counts[i] = -1 }
+		for i := old; i <= idx; i += 1 {
+			s.row_counts[i] = -1
+		}
 	}
 	s.row_counts[idx] = count
 }
@@ -65,8 +71,12 @@ stats_row_count_set :: proc(s: ^Stats, page_id: u32, count: int) {
 // stats_range_get returns the cached integer range for page_id, if present.
 @(private)
 stats_range_get :: proc(s: ^Stats, page_id: u32) -> (pager.Page_Int_Range, bool) {
-	if int(page_id) >= len(s.page_int_ranges) { return {}, false }
-	if r, ok := s.page_int_ranges[page_id].?; ok { return r, true }
+	if int(page_id) >= len(s.page_int_ranges) {
+		return {}, false
+	}
+	if r, ok := s.page_int_ranges[page_id].?; ok {
+		return r, true
+	}
 	return {}, false
 }
 
@@ -78,7 +88,9 @@ stats_range_set :: proc(s: ^Stats, page_id: u32, r: pager.Page_Int_Range) {
 	if idx >= len(s.page_int_ranges) {
 		old := len(s.page_int_ranges)
 		resize(&s.page_int_ranges, idx + 1)
-		for i := old; i <= idx; i += 1 { s.page_int_ranges[i] = nil }
+		for i := old; i <= idx; i += 1 {
+			s.page_int_ranges[i] = nil
+		}
 	}
 	s.page_int_ranges[idx] = r
 }
@@ -87,18 +99,24 @@ stats_range_set :: proc(s: ^Stats, page_id: u32, r: pager.Page_Int_Range) {
 // never grows the array — eviction/free of a page we never tracked is a no-op).
 @(private)
 stats_row_count_reset :: proc(s: ^Stats, page_id: u32) {
-	if int(page_id) < len(s.row_counts) { s.row_counts[page_id] = -1 }
+	if int(page_id) < len(s.row_counts) {
+		s.row_counts[page_id] = -1
+	}
 }
 
 // stats_range_reset marks a page's cached range as uncached (bounds-guarded).
 @(private)
 stats_range_reset :: proc(s: ^Stats, page_id: u32) {
-	if int(page_id) < len(s.page_int_ranges) { s.page_int_ranges[page_id] = nil }
+	if int(page_id) < len(s.page_int_ranges) {
+		s.page_int_ranges[page_id] = nil
+	}
 }
 
 @(private = "file")
 on_evict_stats :: proc(data: rawptr, page_num: u32) {
-	if data == nil { return }
+	if data == nil {
+		return
+	}
 
 	s := cast(^Stats)data
 	stats_row_count_reset(s, page_num)
@@ -107,7 +125,9 @@ on_evict_stats :: proc(data: rawptr, page_num: u32) {
 
 @(private = "file")
 free_stats_proc :: proc(data: rawptr) {
-	if data == nil { return }
+	if data == nil {
+		return
+	}
 
 	s := cast(^Stats)data
 	delete(s.row_counts)

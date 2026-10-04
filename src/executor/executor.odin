@@ -21,7 +21,9 @@ execute :: proc(
 	case parser.Create_Stmt:
 		ok, new_root, mutated = exec_create(schema_tree, s, stmt.sql)
 		schema_tree.root = new_root
-		if ok && pending != nil { pending_reoverlay(schema_tree, pending, cache) }
+		if ok && pending != nil {
+			pending_reoverlay(schema_tree, pending, cache)
+		}
 		return ok, new_root, mutated
 	case parser.Insert_Stmt:
 		ok, new_root, mutated = exec_insert_cow(schema_tree, s, cache, pending)
@@ -74,7 +76,9 @@ execute :: proc(
 	case parser.Create_Index_Stmt:
 		ok, new_root, mutated = exec_create_index(schema_tree, s, stmt.sql)
 		schema_tree.root = new_root
-		if ok && pending != nil { pending_reoverlay(schema_tree, pending, cache) }
+		if ok && pending != nil {
+			pending_reoverlay(schema_tree, pending, cache)
+		}
 		return ok, new_root, mutated
 	case parser.Explain_Stmt:
 		if out != nil {
@@ -86,12 +90,14 @@ execute :: proc(
 				rowid  = 1,
 				values = vals,
 			}
+
 			out.rows = rows
 			cols := make([]types.Column, 1, context.temp_allocator)
 			cols[0] = types.Column {
 				name = "QUERY PLAN",
 				type = .TEXT,
 			}
+
 			out.cols = cols
 			out.is_select = true
 			out.new_root = schema_tree.root
@@ -106,21 +112,32 @@ execute :: proc(
 // render_result prints a SELECT/Compound result (or EXPLAIN description) as a
 // markdown table.
 render_result :: proc(out: Result) {
-	if !out.is_select { return }
+	if !out.is_select {
+		return
+	}
+
 	cols := out.cols
-	if len(cols) == 0 { return }
+	if len(cols) == 0 {
+		return
+	}
 
 	indices := make([]int, len(cols), context.temp_allocator)
-	for i in 0 ..< len(cols) { indices[i] = i }
+	for i in 0 ..< len(cols) {
+		indices[i] = i
+	}
 
 	header := make([]string, len(cols), context.temp_allocator)
-	for c, i in cols { header[i] = c.name }
+	for c, i in cols {
+		header[i] = c.name
+	}
 
 	table_rows := make([dynamic][]string, context.temp_allocator)
 	for entry in out.rows {
 		// Defensive: a producer bug yielding a short row must never panic
 		// the renderer — skip it instead.
-		if len(entry.values) != len(cols) { continue }
+		if len(entry.values) != len(cols) {
+			continue
+		}
 		append(&table_rows, stringify_row(entry.values, context.temp_allocator))
 	}
 	render_counted(header, table_rows[:])

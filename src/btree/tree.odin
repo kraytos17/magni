@@ -60,7 +60,9 @@ Insert_COW_Result :: struct #all_or_none {
 
 init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree {
 	c := config
-	if c.allocator.procedure == nil { c.allocator = context.allocator }
+	if c.allocator.procedure == nil {
+		c.allocator = context.allocator
+	}
 
 	t := Tree {
 		pager  = p,
@@ -75,10 +77,7 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 // is_leaf is public: the leaf/interior question is asked by every page
 // reader (and pinned by tests for each new page type).
 is_leaf :: #force_inline proc "contextless" (n: Node) -> bool {
-	return(
-		n.header.page_type == .LEAF_SLOTDIR ||
-		n.header.page_type == .LEAF_TEXT \
-	)
+	return n.header.page_type == .LEAF_SLOTDIR || n.header.page_type == .LEAF_TEXT
 }
 
 @(private)
@@ -93,17 +92,23 @@ unpin_node :: #force_inline proc(t: ^Tree, n: Node) { pager.unpin_page(t.pager, 
 @(require_results)
 load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	page, err := pager.get_page(t.pager, page_id)
-	if err != nil { return {}, .Page_Read_Failed }
+	if err != nil {
+		return {}, .Page_Read_Failed
+	}
 
 	layout, _, l_err := layout_for_page(page.data, Page_Id(page_id))
-	if l_err != .None { return {}, l_err }
+	if l_err != .None {
+		return {}, l_err
+	}
 	return node_from_bytes(page_id, page.data, layout)
 }
 
 @(private)
 node_from_bytes :: proc(id: u32, data: []u8, layout: Page_Layout) -> (Node, Error) {
 	common_hdr := get_header(data, id)
-	if common_hdr == nil { return {}, .Invalid_Page_Header }
+	if common_hdr == nil {
+		return {}, .Invalid_Page_Header
+	}
 	return Node{id = id, data = data, header = common_hdr, layout = layout}, .None
 }
 
@@ -123,8 +128,14 @@ leaf_lower_bound :: #force_inline proc(
 	for left < right {
 		mid := left + (right - left) / 2
 		k, k_err := layout.vtable.key_at(data, pid, mid)
-		if k_err != .None { return left, false }
-		if k < target { left = mid + 1 } else { right = mid }
+		if k_err != .None {
+			return left, false
+		}
+		if k < target {
+			left = mid + 1
+		} else {
+			right = mid
+		}
 	}
 	return left, true
 }
@@ -141,20 +152,28 @@ node_insert_leaf_cell :: proc(
 	rowid: types.Row_ID,
 	values: []types.Value,
 ) -> Error {
-	if !is_leaf(n^) { return .Invalid_Page_Header }
+	if !is_leaf(n^) {
+		return .Invalid_Page_Header
+	}
 
 	rl, _, r_err := layout_for_page(n.data, Page_Id(n.id))
-	if r_err != .None { return r_err }
+	if r_err != .None {
+		return r_err
+	}
 
 	n.layout = rl
 	idx, lb_ok := leaf_lower_bound(n.data, n.id, rowid, n.layout)
 	if t.config.check_duplicates {
 		if lb_ok && idx < int(n.header.cell_count) {
 			ptr, p_err := n.layout.vtable.cell_ptr_at(n.data, Page_Id(n.id), idx)
-			if p_err != .None { return .Invalid_Cell_Pointer }
+			if p_err != .None {
+				return .Invalid_Cell_Pointer
+			}
 
 			rid, rid_ok := cell.get_rowid(n.data, int(ptr))
-			if intrinsics.unlikely(rid_ok && rid == rowid) { return .Duplicate_Rowid }
+			if intrinsics.unlikely(rid_ok && rid == rowid) {
+				return .Duplicate_Rowid
+			}
 		}
 	}
 
@@ -167,7 +186,9 @@ node_insert_leaf_cell :: proc(
 	)
 	if free_off != 0 {
 		bytes_written, ok := cell.serialize(n.data[int(free_off):], rowid, values, cinfo)
-		if !ok || bytes_written != cinfo.total_size { return .Serialization_Failed }
+		if !ok || bytes_written != cinfo.total_size {
+			return .Serialization_Failed
+		}
 		if s_err := n.layout.vtable.slot_insert(
 			n.data,
 			Page_Id(n.id),
@@ -187,15 +208,18 @@ node_insert_leaf_cell :: proc(
 	base_offset := get_page_header_offset(n.id)
 	header_size := page_header_size(n.header.page_type)
 	ptr_area_end := base_offset + header_size + int(n.header.cell_count + 1) * size_of(Slot)
-
-	if ptr_area_end >= int(n.header.cell_content_offset) { return .Page_Full }
+	if ptr_area_end >= int(n.header.cell_content_offset) {
+		return .Page_Full
+	}
 	if cinfo.total_size > int(n.header.cell_content_offset) - ptr_area_end {
 		return .Page_Full
 	}
 
 	new_offset := int(n.header.cell_content_offset) - cinfo.total_size
 	bytes_written, ok := cell.serialize(n.data[new_offset:], rowid, values, cinfo)
-	if !ok || bytes_written != cinfo.total_size { return .Serialization_Failed }
+	if !ok || bytes_written != cinfo.total_size {
+		return .Serialization_Failed
+	}
 	if s_err := n.layout.vtable.slot_insert(
 		n.data,
 		Page_Id(n.id),
@@ -217,7 +241,9 @@ node_insert_leaf_cell :: proc(
 node_update_child_ptr :: proc(n: ^Node, key: types.Row_ID, new_sibling: u32) -> bool {
 	pid := Page_Id(n.id)
 	_, children_off, count, _, _, g_err := dense_geometry(n.data, pid)
-	if g_err != .None { return false }
+	if g_err != .None {
+		return false
+	}
 
 	idx, ok := interior_lower_bound(n.data, n.id, key, n.layout)
 	if !ok || idx > count {
@@ -243,7 +269,9 @@ insert_recursive :: proc(
 	new_page_num := page_id
 	if cow {
 		var, cow_err := copy_on_write(t, page_id)
-		if cow_err != .None { return {}, cow_err }
+		if cow_err != .None {
+			return {}, cow_err
+		}
 		new_page_num = var
 	}
 
@@ -272,20 +300,28 @@ insert_into_leaf :: proc(
 	if e == .Page_Full {
 		original_count := int(curr.header.cell_count)
 		split, s_err := split_leaf_node(t, curr)
-		if s_err != .None { return {}, s_err }
+		if s_err != .None {
+			return {}, s_err
+		}
 
 		mid := original_count / 2
 		stats_row_count_set(tree_stats(t), curr.id, mid)
 		stats_row_count_set(tree_stats(t), split.right_page, original_count - mid)
 		target_id := curr.id
-		if rowid >= split.split_key { target_id = split.right_page }
+		if rowid >= split.split_key {
+			target_id = split.right_page
+		}
 
 		target_node, t_err := load_node(t, target_id)
-		if t_err != .None { return {}, t_err }
+		if t_err != .None {
+			return {}, t_err
+		}
 
 		defer unpin_node(t, target_node)
 		retry_err := node_insert_leaf_cell(t, &target_node, rowid, values)
-		if retry_err != .None { return {}, retry_err }
+		if retry_err != .None {
+			return {}, retry_err
+		}
 
 		stats_row_count_set(tree_stats(t), target_id, int(target_node.header.cell_count))
 		return Insert_COW_Result {
@@ -325,7 +361,9 @@ insert_into_interior :: proc(
 	child_id, child_idx := node_find_child(curr, rowid)
 	was_rightmost := child_idx == -1
 	child_result, c_err := insert_recursive(t, child_id, rowid, values, cow)
-	if c_err != .None { return {}, c_err }
+	if c_err != .None {
+		return {}, c_err
+	}
 	if cow && child_result.new_page != child_id {
 		pager.unpin_page(t.pager, child_result.new_page)
 	}
@@ -377,16 +415,22 @@ handle_interior_child_split :: proc(
 	children := make([dynamic]u32, 0, n + 2, context.temp_allocator)
 	for i in 0 ..< n {
 		k, k_err := curr.layout.vtable.key_at(curr.data, pid, i)
-		if k_err != .None { return {}, k_err }
+		if k_err != .None {
+			return {}, k_err
+		}
 
 		append(&keys, k)
 		c, c_err := curr.layout.vtable.child_at(curr.data, pid, i)
-		if c_err != .None { return {}, c_err }
+		if c_err != .None {
+			return {}, c_err
+		}
 		append(&children, c)
 	}
 
 	rc, rc_err := curr.layout.vtable.child_at(curr.data, pid, n)
-	if rc_err != .None { return {}, rc_err }
+	if rc_err != .None {
+		return {}, rc_err
+	}
 
 	append(&children, rc)
 	insert_key := child_result.split_key
@@ -404,16 +448,24 @@ handle_interior_child_split :: proc(
 		keys[idx] = insert_key
 		children[idx] = child_result.new_page
 		nkeys := make([dynamic]types.Row_ID, 0, len(keys) + 1, context.temp_allocator)
-		for k in keys[:idx + 1] { append(&nkeys, k) }
+		for k in keys[:idx + 1] {
+			append(&nkeys, k)
+		}
 
 		append(&nkeys, old_sep)
-		for k in keys[idx + 1:] { append(&nkeys, k) }
+		for k in keys[idx + 1:] {
+			append(&nkeys, k)
+		}
 
 		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
-		for c in children[:idx + 1] { append(&nchildren, c) }
+		for c in children[:idx + 1] {
+			append(&nchildren, c)
+		}
 
 		append(&nchildren, child_result.right_page)
-		for c in children[idx + 1:] { append(&nchildren, c) }
+		for c in children[idx + 1:] {
+			append(&nchildren, c)
+		}
 
 		keys, children = nkeys, nchildren
 		insert_key = old_sep
@@ -446,7 +498,10 @@ handle_interior_child_split :: proc(
 	}
 
 	new_page, a_err := pager.allocate_page(t.pager)
-	if a_err != nil { return {}, .Page_Full }
+	if a_err != nil {
+		return {}, .Page_Full
+	}
+
 	defer pager.unpin_page(t.pager, new_page.page_num)
 	if rb_err := dense_build_from_sorted(
 		new_page.data,
@@ -483,10 +538,14 @@ rowid_exists :: proc(
 ) -> bool {
 	cell_count := get_cell_count(data, page_id)
 	idx, ok := leaf_lower_bound(data, page_id, target_rowid, layout)
-	if !ok || idx >= cell_count { return false }
+	if !ok || idx >= cell_count {
+		return false
+	}
 
 	ptr, p_err := layout.vtable.cell_ptr_at(data, Page_Id(page_id), idx)
-	if p_err != .None { return false }
+	if p_err != .None {
+		return false
+	}
 
 	rowid, ok2 := cell.get_rowid(data, int(ptr))
 	return ok2 && rowid == target_rowid
@@ -511,19 +570,27 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 		}
 
 		result, r_err := insert_recursive(t, t.root, rowid, values, false)
-		if r_err != .None { return r_err }
+		if r_err != .None {
+			return r_err
+		}
 		if result.did_split {
 			if s_err := split_interior_root(
 				t,
 				{did_split = true, right_page = result.right_page, split_key = result.split_key},
-			); s_err != .None { return s_err }
+			); s_err != .None {
+				return s_err
+			}
 		}
-		if _, c_err := count_recursive(t, t.root); c_err != .None { return c_err }
+		if _, c_err := count_recursive(t, t.root); c_err != .None {
+			return c_err
+		}
 		return .None
 	}
 
 	result, i_err := insert_recursive(t, t.root, rowid, values, false)
-	if i_err != .None { return i_err }
+	if i_err != .None {
+		return i_err
+	}
 	if result.did_split {
 		if s_err := split_interior_root(
 			t,
@@ -551,7 +618,9 @@ descend_to_leaf :: proc(
 	curr := t.root if root_override == 0 else root_override
 	for {
 		leaf = load_node(t, curr) or_return
-		if is_leaf(leaf) { return }
+		if is_leaf(leaf) {
+			return
+		}
 		curr = get_child(leaf.data, leaf.id, ctx); unpin_node(t, leaf)
 	}
 }
@@ -569,14 +638,22 @@ node_find_child_data :: #force_inline proc(
 	pid := Page_Id(page_id)
 	cell_count := get_cell_count(data, page_id)
 	rightmost, r_err := layout.vtable.child_at(data, pid, cell_count)
-	if r_err != .None { return 0, -1 }
-	if cell_count == 0 { return rightmost, -1 }
+	if r_err != .None {
+		return 0, -1
+	}
+	if cell_count == 0 {
+		return rightmost, -1
+	}
 
 	idx, ok := interior_lower_bound(data, page_id, key, layout)
-	if !ok || idx >= cell_count { return rightmost, -1 }
+	if !ok || idx >= cell_count {
+		return rightmost, -1
+	}
 
 	child, c_err := layout.vtable.child_at(data, pid, idx)
-	if c_err != .None { return rightmost, -1 }
+	if c_err != .None {
+		return rightmost, -1
+	}
 	return child, idx
 }
 
@@ -585,10 +662,14 @@ descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	pid := Page_Id(page_id)
 	count := get_cell_count(data, page_id)
 	layout, _, l_err := layout_for_page(data, pid)
-	if l_err != .None { return 0 }
+	if l_err != .None {
+		return 0
+	}
 
 	rc, rc_err := layout.vtable.child_at(data, pid, count)
-	if rc_err != .None { return 0 }
+	if rc_err != .None {
+		return 0
+	}
 	return rc
 }
 
@@ -600,7 +681,9 @@ Descend_Key_Ctx :: struct {
 descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	dk := (^Descend_Key_Ctx)(ctx)
 	layout, _, l_err := layout_for_page(data, Page_Id(page_id))
-	if l_err != .None { return 0 }
+	if l_err != .None {
+		return 0
+	}
 
 	child, _ := node_find_child_data(data, page_id, dk.key, layout)
 	return child
@@ -615,17 +698,23 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 	}
 
 	leaf, err := descend_to_leaf(t, descend_by_key, &dk)
-	if err != .None { return {}, err }
+	if err != .None {
+		return {}, err
+	}
 	defer unpin_node(t, leaf)
 
 	lid := Page_Id(leaf.id)
 	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key, leaf.layout)
-	if !ok { return {}, .Invalid_Cell_Pointer }
+	if !ok {
+		return {}, .Invalid_Cell_Pointer
+	}
 
 	cell_count := get_cell_count(leaf.data, leaf.id)
 	if idx < cell_count {
 		ptr, p_err := leaf.layout.vtable.cell_ptr_at(leaf.data, lid, idx)
-		if p_err != .None { return {}, .Invalid_Cell_Pointer }
+		if p_err != .None {
+			return {}, .Invalid_Cell_Pointer
+		}
 
 		rid, ok1 := cell.get_rowid(leaf.data, int(ptr))
 		if ok1 && rid == key {
@@ -634,7 +723,9 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 				int(ptr),
 				cell.Config{allocator = allocator, zero_copy = t.config.zero_copy},
 			)
-			if !des_ok { return {}, .Cell_Deserialize_Failed }
+			if !des_ok {
+				return {}, .Cell_Deserialize_Failed
+			}
 			return c, .None
 		}
 	}
@@ -644,22 +735,37 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
 	leaf := descend_to_leaf(t, descend_by_rightmost, nil) or_return
 	defer unpin_node(t, leaf)
-	if leaf.header.cell_count == 0 { result = 1; return }
+	if leaf.header.cell_count == 0 {
+		result = 1
+		return
+	}
 
 	last_ptr, p_err := leaf.layout.vtable.cell_ptr_at(
 		leaf.data,
 		Page_Id(leaf.id),
 		int(leaf.header.cell_count) - 1,
 	)
-	if p_err != .None { err = .Invalid_Cell_Pointer; return }
+	if p_err != .None {
+		err = .Invalid_Cell_Pointer
+		return
+	}
 
 	last_id, ok := cell.get_rowid(leaf.data, int(last_ptr))
-	if !ok { err = .Invalid_Cell_Pointer; return }
-	result = last_id + 1; return
+	if !ok {
+		err = .Invalid_Cell_Pointer
+		return
+	}
+
+	result = last_id + 1
+	return
 }
 
 tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
-	if c, ok := stats_row_count_get(tree_stats(t), t.root); ok { count = c; return }
+	if c, ok := stats_row_count_get(tree_stats(t), t.root); ok {
+		count = c
+		return
+	}
+
 	count = count_recursive(t, t.root) or_return
 	return
 }
@@ -684,12 +790,18 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	cell_count := get_cell_count(node.data, page_id)
 	for i in 0 ..< cell_count {
 		child_id, c_err := node.layout.vtable.child_at(node.data, nid, i)
-		if c_err != .None { err = .Invalid_Cell_Pointer; return }
+		if c_err != .None {
+			err = .Invalid_Cell_Pointer
+			return
+		}
 		total += count_recursive(t, child_id) or_return
 	}
 
 	rightmost, r_err := node.layout.vtable.child_at(node.data, nid, cell_count)
-	if r_err != .None { err = .Invalid_Cell_Pointer; return }
+	if r_err != .None {
+		err = .Invalid_Cell_Pointer
+		return
+	}
 
 	total += count_recursive(t, rightmost) or_return
 	stats_row_count_set(tree_stats(t), page_id, total)
@@ -708,19 +820,26 @@ update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
 @(private = "file", require_results)
 delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Error) {
 	node, err := load_node(t, page_id)
-	if err != .None { return false, err }
-	defer unpin_node(t, node)
+	if err != .None {
+		return false, err
+	}
 
+	defer unpin_node(t, node)
 	if is_leaf(node) {
 		e := delete_from_leaf(t, &node, key)
-		if e != .None { return false, e }
+		if e != .None {
+			return false, e
+		}
+
 		stats_row_count_set(tree_stats(t), page_id, int(node.header.cell_count))
 		return true, .None
 	}
 
 	child_id, _ := node_find_child(&node, key)
 	deleted, d_err := delete_recursive(t, child_id, key)
-	if d_err != .None { return false, d_err }
+	if d_err != .None {
+		return false, d_err
+	}
 	if deleted {
 		update_row_count(t, page_id, -1)
 	}
@@ -729,10 +848,14 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 
 @(private, require_results)
 delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error {
-	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
+	if !is_leaf(leaf_node^) {
+		return .Invalid_Page_Header
+	}
 
 	rl, _, r_err := layout_for_page(leaf_node.data, Page_Id(leaf_node.id))
-	if r_err != .None { return r_err }
+	if r_err != .None {
+		return r_err
+	}
 
 	leaf_node.layout = rl
 	limit := int(leaf_node.header.cell_count)
@@ -744,14 +867,18 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 			Page_Id(leaf_node.id),
 			idx,
 		)
-		if p_err != .None { return .Invalid_Cell_Pointer }
+		if p_err != .None {
+			return .Invalid_Cell_Pointer
+		}
 
 		rid, ok2 := cell.get_rowid(leaf_node.data, int(ptr))
 		if ok2 && rid == key {
 			delete_idx = idx
 			cell_off = int(ptr)
 			sz, ok3 := cell.get_size(leaf_node.data, cell_off)
-			if ok3 { cell_sz = sz }
+			if ok3 {
+				cell_sz = sz
+			}
 		}
 	}
 	if delete_idx == -1 {
@@ -819,18 +946,24 @@ foreach_recursive :: proc(
 		cell_count := get_cell_count(node.data, page_id)
 		for i in 0 ..< cell_count {
 			ptr, p_err := node.layout.vtable.cell_ptr_at(node.data, nid, i)
-			if p_err != .None { return .Cell_Deserialize_Failed }
+			if p_err != .None {
+				return .Cell_Deserialize_Failed
+			}
 
 			c, _, ok := cell.deserialize(
 				node.data,
 				int(ptr),
 				cell.Config{allocator = t.config.allocator, zero_copy = t.config.zero_copy},
 			)
-			if !ok { return .Cell_Deserialize_Failed }
+			if !ok {
+				return .Cell_Deserialize_Failed
+			}
 
 			continue_iter := cb(&c, ud)
 			cell.destroy(&c, t.config.allocator)
-			if !continue_iter { return .None }
+			if !continue_iter {
+				return .None
+			}
 		}
 		return .None
 	}
@@ -838,19 +971,28 @@ foreach_recursive :: proc(
 	cell_count := get_cell_count(node.data, page_id)
 	for i in 0 ..< cell_count {
 		child, c_err := node.layout.vtable.child_at(node.data, nid, i)
-		if c_err != .None { return .Invalid_Cell_Pointer }
-		if e := foreach_recursive(t, child, cb, ud); e != .None { return e }
+		if c_err != .None {
+			return .Invalid_Cell_Pointer
+		}
+		if e := foreach_recursive(t, child, cb, ud); e != .None {
+			return e
+		}
 	}
 
 	rightmost, r_err := node.layout.vtable.child_at(node.data, nid, cell_count)
-	if r_err != .None { return .Invalid_Cell_Pointer }
+	if r_err != .None {
+		return .Invalid_Cell_Pointer
+	}
 	return foreach_recursive(t, rightmost, cb, ud)
 }
 
 @(cold)
 tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 	node, err := load_node(t, page_id)
-	if err != .None { log.debugf("Error reading page %d", page_id); return }
+	if err != .None {
+		log.debugf("Error reading page %d", page_id)
+		return
+	}
 
 	log.debugf(
 		"Page %d (type=%v, cells=%d, off=%d, frag=%d)",
@@ -894,7 +1036,9 @@ tree_verify :: proc(t: ^Tree) -> bool {
 // tree_verify allocates a map and walks the full tree — do not call on hot paths.
 VERIFY_TREE            :: #config(VERIFY_TREE, false)
 tree_verify_if_enabled :: proc(t: ^Tree) -> bool {
-	if !VERIFY_TREE { return true }
+	if !VERIFY_TREE {
+		return true
+	}
 	return tree_verify(t)
 }
 
@@ -907,7 +1051,9 @@ verify_recursive :: proc(
 	depth: int,
 	visited: ^map[u32]bool,
 ) -> bool {
-	if page_id == 0 { return false }
+	if page_id == 0 {
+		return false
+	}
 	if page_id in visited {
 		log.debugf("Cycle detected: page %d revisited", page_id)
 		return false
@@ -974,7 +1120,9 @@ verify_recursive :: proc(
 			log.debugf("Interior key %d out of bounds [%d, %d]", key, prev_k, max_k)
 			return false
 		}
-		if !verify_recursive(t, child, prev_k, key, depth + 1, visited) { return false }
+		if !verify_recursive(t, child, prev_k, key, depth + 1, visited) {
+			return false
+		}
 		prev_k = key
 	}
 
@@ -987,19 +1135,28 @@ verify_recursive :: proc(
 }
 
 collect_pages :: proc(t: ^Tree, root: u32, pages: ^map[u32]bool) {
-	if root == 0 || root in pages { return }
+	if root == 0 || root in pages {
+		return
+	}
 
 	pages[root] = true
 	node, err := load_node(t, root)
-	if err != .None { return }
+	if err != .None {
+		return
+	}
+
 	defer unpin_node(t, node)
-	if is_leaf(node) { return }
+	if is_leaf(node) {
+		return
+	}
 
 	nid := Page_Id(node.id)
 	cell_count := get_cell_count(node.data, node.id)
 	for i in 0 ..= cell_count {
 		child, c_err := node.layout.vtable.child_at(node.data, nid, i)
-		if c_err != .None { continue }
+		if c_err != .None {
+			continue
+		}
 		collect_pages(t, child, pages)
 	}
 }

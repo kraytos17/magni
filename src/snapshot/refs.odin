@@ -36,7 +36,9 @@ MAIN_REF :: "main"
 
 create_refs_page :: proc(p: ^pager.Pager) -> u32 {
 	page, err := pager.allocate_page(p)
-	if err != .None { return 0 }
+	if err != .None {
+		return 0
+	}
 	defer pager.unpin_page(p, page.page_num)
 
 	data := page.data
@@ -56,11 +58,15 @@ set_ref :: proc(
 	is_protected: bool,
 ) -> bool {
 	page, err := pager.get_page(p, refs_page)
-	if err != .None { return false }
+	if err != .None {
+		return false
+	}
 	defer pager.unpin_page(p, refs_page)
 
 	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC { return false }
+	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
+		return false
+	}
 
 	offset := len(REFS_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += 4
@@ -87,7 +93,9 @@ set_ref :: proc(
 	}
 
 	entry_size := size_of(Ref_Entry) + len(name)
-	if offset + entry_size > len(data) { return false }
+	if offset + entry_size > len(data) {
+		return false
+	}
 
 	mem.copy_non_overlapping(raw_data(data[offset:]), &entry, size_of(Ref_Entry))
 	offset += size_of(Ref_Entry)
@@ -99,14 +107,20 @@ set_ref :: proc(
 }
 
 get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: u64, found: bool) {
-	if refs_page == 0 { return 0, false }
+	if refs_page == 0 {
+		return 0, false
+	}
 
 	page, err := pager.get_page(p, refs_page)
-	if err != .None { return 0, false }
+	if err != .None {
+		return 0, false
+	}
 	defer pager.unpin_page(p, refs_page)
 
 	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC { return 0, false }
+	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
+		return 0, false
+	}
 
 	offset := len(REFS_MAGIC) + 4 + 8
 	count := (^u32)(raw_data(data[len(REFS_MAGIC):]))^
@@ -125,14 +139,20 @@ get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: 
 
 @(private = "file")
 list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocator) -> []Ref_Entry {
-	if refs_page == 0 { return nil }
+	if refs_page == 0 {
+		return nil
+	}
 
 	page, err := pager.get_page(p, refs_page)
-	if err != .None { return nil }
+	if err != .None {
+		return nil
+	}
 	defer pager.unpin_page(p, refs_page)
 
 	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC { return nil }
+	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
+		return nil
+	}
 
 	offset := len(REFS_MAGIC) + 4 + 8
 	count := (^u32)(raw_data(data[len(REFS_MAGIC):]))^
@@ -147,11 +167,15 @@ list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocato
 
 log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
 	page, err := pager.get_page(p, refs_page)
-	if err != .None { return false }
+	if err != .None {
+		return false
+	}
 	defer pager.unpin_page(p, refs_page)
 
 	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC { return false }
+	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
+		return false
+	}
 
 	log_count := (^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^
 	log_next := (^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^
@@ -173,19 +197,28 @@ log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
 
 log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool) {
 	page, err := pager.get_page(p, refs_page)
-	if err != .None { return 0, false }
+	if err != .None {
+		return 0, false
+	}
 	defer pager.unpin_page(p, refs_page)
 
 	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC { return 0, false }
+	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
+		return 0, false
+	}
 
 	log_count := int((^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^)
 	log_next := int((^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^)
-	if log_count == 0 { return 0, false }
+	if log_count == 0 {
+		return 0, false
+	}
 
 	// Most recent entry is at index log_count - 1 in logical order
 	ring_idx := (log_next - 1) % MAX_LOG_ENTRIES
-	if ring_idx < 0 { ring_idx += MAX_LOG_ENTRIES }
+	if ring_idx < 0 {
+		ring_idx += MAX_LOG_ENTRIES
+	}
+
 	off := REFS_LOG_OFFSET + ring_idx * size_of(Ref_Log_Entry)
 	entry := (^Ref_Log_Entry)(raw_data(data[off:]))^
 
@@ -202,25 +235,35 @@ log_read_range :: proc(
 	count: int,
 	allocator := context.allocator,
 ) -> []Ref_Log_Entry {
-	if refs_page == 0 || count <= 0 { return nil }
+	if refs_page == 0 || count <= 0 {
+		return nil
+	}
 	s_idx := max(start_idx, 0)
 
 	page, err := pager.get_page(p, refs_page)
-	if err != .None { return nil }
+	if err != .None {
+		return nil
+	}
 	defer pager.unpin_page(p, refs_page)
 
 	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC { return nil }
+	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
+		return nil
+	}
 
 	log_count := int((^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^)
 	log_next := int((^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^)
-	if s_idx >= log_count { return nil }
+	if s_idx >= log_count {
+		return nil
+	}
 
 	available := min(count, log_count - s_idx)
 	result := make([]Ref_Log_Entry, available, allocator)
 	for i in 0 ..< available {
 		ring_idx := (log_next - log_count + s_idx + i) % MAX_LOG_ENTRIES
-		if ring_idx < 0 { ring_idx += MAX_LOG_ENTRIES }
+		if ring_idx < 0 {
+			ring_idx += MAX_LOG_ENTRIES
+		}
 
 		off := REFS_LOG_OFFSET + ring_idx * size_of(Ref_Log_Entry)
 		result[i] = (^Ref_Log_Entry)(raw_data(data[off:]))^

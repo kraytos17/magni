@@ -43,8 +43,12 @@ text_full_compare :: #force_inline proc "contextless" (
 	b: []u8,
 	br: types.Row_ID,
 ) -> int {
-	if r := mem.compare(a, b); r != 0 { return r }
-	if ar == br { return 0 }
+	if r := mem.compare(a, b); r != 0 {
+		return r
+	}
+	if ar == br {
+		return 0
+	}
 	return -1 if ar < br else 1
 }
 
@@ -57,7 +61,9 @@ text_split_mid :: proc "contextless" (sizes: []int, total: int) -> int {
 	cum := 0
 	for i in 0 ..< n - 1 {
 		cum += sizes[i]
-		if cum * 2 >= total { return i + 1 }
+		if cum * 2 >= total {
+			return i + 1
+		}
 	}
 	return n - 1
 }
@@ -68,7 +74,9 @@ text_split_mid :: proc "contextless" (sizes: []int, total: int) -> int {
 text_make_key :: proc(text: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
 	buf := make([]u8, 5 + len(text) + 8, context.temp_allocator)
 	n, ok := cell.text_index_encode(types.value_text(string(text)), rowid, buf)
-	if !ok { return nil, .Serialization_Failed }
+	if !ok {
+		return nil, .Serialization_Failed
+	}
 	return buf[:n], .None
 }
 
@@ -87,17 +95,23 @@ text_snapshot_with_pending :: proc(
 	err: Error,
 ) {
 	prefix, p_err := text_prefix(data, id)
-	if p_err != .None { return {}, {}, p_err }
+	if p_err != .None {
+		return {}, {}, p_err
+	}
 
 	hdr := get_header(data, u32(id))
-	if hdr == nil { return {}, {}, .Invalid_Page_Header }
+	if hdr == nil {
+		return {}, {}, .Invalid_Page_Header
+	}
 
 	count := int(hdr.cell_count)
 	fulls = make([dynamic][]u8, 0, count + 1, context.temp_allocator)
 	rids = make([dynamic]types.Row_ID, 0, count + 1, context.temp_allocator)
 	for i in 0 ..< count {
 		suf, rid, k_err := text_entry_at(data, id, i)
-		if k_err != .None { return {}, {}, k_err }
+		if k_err != .None {
+			return {}, {}, k_err
+		}
 
 		full := make([]u8, len(prefix) + len(suf), context.temp_allocator)
 		copy(full, prefix)
@@ -138,17 +152,25 @@ text_snapshot_with_pending :: proc(
 // duplicates are caller bugs the validator rejects loudly).
 @(require_results)
 text_node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, text: []u8, rowid: types.Row_ID) -> Error {
-	if !is_leaf(n^) { return .Invalid_Page_Header }
-	if n.header.page_type != .LEAF_TEXT { return .Invalid_Page_Header }
+	if !is_leaf(n^) {
+		return .Invalid_Page_Header
+	}
+	if n.header.page_type != .LEAF_TEXT {
+		return .Invalid_Page_Header
+	}
 
 	prefix, p_err := text_prefix(n.data, Page_Id(n.id))
-	if p_err != .None { return p_err }
+	if p_err != .None {
+		return p_err
+	}
 	// Prefix-divergent key: rebuild the page around the shrunk prefix.
 	// Byte totals are prefix-invariant, so a fitting page still fits —
 	// this never converts .None into .Page_Full, only re-lays-out.
 	if !cell.text_index_has_prefix(text, prefix) {
 		fulls, rids, s_err := text_snapshot_with_pending(n.data, Page_Id(n.id), text, rowid)
-		if s_err != .None { return s_err }
+		if s_err != .None {
+			return s_err
+		}
 		if b_err := text_build_from_sorted(n.data, Page_Id(n.id), fulls[:], rids[:]);
 		   b_err != .None {
 			return b_err
@@ -160,7 +182,9 @@ text_node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, text: []u8, rowid: types.
 	}
 
 	idx, lb_err := text_lower_bound(n.data, Page_Id(n.id), text, rowid)
-	if lb_err != .None { return lb_err }
+	if lb_err != .None {
+		return lb_err
+	}
 
 	elen := 8 + (len(text) - len(prefix))
 	free_off := freeblock_alloc(
@@ -170,7 +194,9 @@ text_node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, text: []u8, rowid: types.
 		&n.header.first_freeblock,
 	)
 	if free_off != 0 {
-		if int(free_off) + elen > len(n.data) { return .Cell_Deserialize_Failed }
+		if int(free_off) + elen > len(n.data) {
+			return .Cell_Deserialize_Failed
+		}
 		if !endian.put_u64(n.data[int(free_off):], .Big, rowid_bias_encode(rowid)) {
 			return .Serialization_Failed
 		}
@@ -188,7 +214,9 @@ text_node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, text: []u8, rowid: types.
 	}
 
 	entry_end, e_err := text_entry_area_end(n.data, Page_Id(n.id))
-	if e_err != .None { return e_err }
+	if e_err != .None {
+		return e_err
+	}
 	if entry_end + size_of(Text_Slot) >= int(n.header.cell_content_offset) {
 		return .Page_Full
 	}
@@ -232,8 +260,12 @@ text_insert_into_leaf :: proc(
 	if e == .Page_Full {
 		fulls, rids, s_err := text_snapshot_with_pending(curr.data, Page_Id(curr.id), text, rowid)
 
-		if s_err != .None { return {}, s_err }
-		if len(fulls) < 2 { return {}, .Page_Full }
+		if s_err != .None {
+			return {}, s_err
+		}
+		if len(fulls) < 2 {
+			return {}, .Page_Full
+		}
 
 		sizes := make([dynamic]int, 0, len(fulls), context.temp_allocator)
 		total := 0
@@ -250,7 +282,10 @@ text_insert_into_leaf :: proc(
 		}
 
 		new_page, a_err := pager.allocate_page(t.pager)
-		if a_err != nil { return {}, .Page_Full }
+		if a_err != nil {
+			return {}, .Page_Full
+		}
+
 		defer pager.unpin_page(t.pager, new_page.page_num)
 		if rb_err := text_build_from_sorted(
 			new_page.data,
@@ -262,7 +297,9 @@ text_insert_into_leaf :: proc(
 		}
 
 		sep, sep_err := text_make_key(fulls[mid], rids[mid])
-		if sep_err != .None { return {}, sep_err }
+		if sep_err != .None {
+			return {}, sep_err
+		}
 
 		stats_row_count_set(tree_stats(t), curr.id, mid)
 		stats_row_count_set(tree_stats(t), new_page.page_num, len(fulls) - mid)
@@ -311,19 +348,25 @@ text_absorb_child_split :: proc(
 	children := make([dynamic]u32, 0, n + 2, context.temp_allocator)
 	for i in 0 ..< n {
 		s, s_err := text_interior_sep_at(curr.data, pid, i)
-		if s_err != .None { return {}, s_err }
+		if s_err != .None {
+			return {}, s_err
+		}
 
 		sc := make([]u8, len(s), context.temp_allocator)
 		copy(sc, s)
 		append(&seps, sc)
 
 		c, c_err := text_interior_child_at(curr.data, pid, i)
-		if c_err != .None { return {}, c_err }
+		if c_err != .None {
+			return {}, c_err
+		}
 		append(&children, c)
 	}
 
 	rc, rc_err := text_interior_child_at(curr.data, pid, n)
-	if rc_err != .None { return {}, rc_err }
+	if rc_err != .None {
+		return {}, rc_err
+	}
 
 	append(&children, rc)
 	split_key := child_result.split_key
@@ -333,22 +376,32 @@ text_absorb_child_split :: proc(
 		append(&children, child_result.right_page)
 	} else {
 		idx := child_idx
-		if idx < 0 || idx >= n { return {}, .Invalid_Page_Header }
+		if idx < 0 || idx >= n {
+			return {}, .Invalid_Page_Header
+		}
 
 		old_sep := seps[idx]
 		seps[idx] = split_key
 		children[idx] = child_result.new_page
 		nseps := make([dynamic][]u8, 0, len(seps) + 1, context.temp_allocator)
-		for s in seps[:idx + 1] { append(&nseps, s) }
+		for s in seps[:idx + 1] {
+			append(&nseps, s)
+		}
 
 		append(&nseps, old_sep)
-		for s in seps[idx + 1:] { append(&nseps, s) }
+		for s in seps[idx + 1:] {
+			append(&nseps, s)
+		}
 
 		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
-		for c in children[:idx + 1] { append(&nchildren, c) }
+		for c in children[:idx + 1] {
+			append(&nchildren, c)
+		}
 
 		append(&nchildren, child_result.right_page)
-		for c in children[idx + 1:] { append(&nchildren, c) }
+		for c in children[idx + 1:] {
+			append(&nchildren, c)
+		}
 
 		seps, children = nseps, nchildren
 		split_key = old_sep
@@ -384,7 +437,10 @@ text_absorb_child_split :: proc(
 	}
 
 	new_page, a_err := pager.allocate_page(t.pager)
-	if a_err != nil { return {}, .Page_Full }
+	if a_err != nil {
+		return {}, .Page_Full
+	}
+
 	defer pager.unpin_page(t.pager, new_page.page_num)
 	if rb_err := text_interior_build_from_sorted(
 		new_page.data,
@@ -483,7 +539,9 @@ text_insert_recursive :: proc(
 	new_page_num := page_id
 	if cow {
 		var, cow_err := copy_on_write(t, page_id)
-		if cow_err != .None { return {}, cow_err }
+		if cow_err != .None {
+			return {}, cow_err
+		}
 		new_page_num = var
 	}
 
@@ -509,11 +567,20 @@ text_split_leaf_root :: proc(
 	err: Error,
 ) {
 	root_node, load_err := load_node(t, root_page)
-	if load_err != .None { return 0, load_err }
+	if load_err != .None {
+		return 0, load_err
+	}
+
 	defer unpin_node(t, root_node)
-	if !is_leaf(root_node) { return 0, .Invalid_Page_Header }
-	if root_node.header.page_type != .LEAF_TEXT { return 0, .Invalid_Page_Header }
-	if int(root_node.header.cell_count) == 0 { return 0, .Page_Full }
+	if !is_leaf(root_node) {
+		return 0, .Invalid_Page_Header
+	}
+	if root_node.header.page_type != .LEAF_TEXT {
+		return 0, .Invalid_Page_Header
+	}
+	if int(root_node.header.cell_count) == 0 {
+		return 0, .Page_Full
+	}
 
 	fulls, rids, s_err := text_snapshot_with_pending(
 		root_node.data,
@@ -521,15 +588,23 @@ text_split_leaf_root :: proc(
 		text,
 		rowid,
 	)
-	if s_err != .None { return 0, s_err }
-	if len(fulls) < 2 { return 0, .Page_Full }
+	if s_err != .None {
+		return 0, s_err
+	}
+	if len(fulls) < 2 {
+		return 0, .Page_Full
+	}
 
 	left_page, l_err := pager.allocate_page(t.pager)
-	if l_err != nil { return 0, .Page_Full }
+	if l_err != nil {
+		return 0, .Page_Full
+	}
 	defer pager.unpin_page(t.pager, left_page.page_num)
 
 	right_page, r_err := pager.allocate_page(t.pager)
-	if r_err != nil { return 0, .Page_Full }
+	if r_err != nil {
+		return 0, .Page_Full
+	}
 	defer pager.unpin_page(t.pager, right_page.page_num)
 
 	sizes := make([dynamic]int, 0, len(fulls), context.temp_allocator)
@@ -559,7 +634,9 @@ text_split_leaf_root :: proc(
 	}
 
 	sep, sep_err := text_make_key(fulls[mid], rids[mid])
-	if sep_err != .None { return 0, sep_err }
+	if sep_err != .None {
+		return 0, sep_err
+	}
 	if rb_err := text_interior_build_from_sorted(
 		root_node.data,
 		Page_Id(root_page),
@@ -571,7 +648,9 @@ text_split_leaf_root :: proc(
 
 	stats_row_count_set(tree_stats(t), left_page.page_num, mid)
 	stats_row_count_set(tree_stats(t), right_page.page_num, len(fulls) - mid)
-	if _, c_err := count_recursive(t, root_page); c_err != .None { return 0, c_err }
+	if _, c_err := count_recursive(t, root_page); c_err != .None {
+		return 0, c_err
+	}
 
 	pager.mark_dirty(t.pager, left_page.page_num)
 	pager.mark_dirty(t.pager, right_page.page_num)
@@ -591,7 +670,9 @@ text_split_interior_root :: proc(
 ) {
 	root_node := load_node(t, t.root) or_return
 	defer unpin_node(t, root_node)
-	if is_leaf(root_node) { return 0, .Invalid_Page_Header }
+	if is_leaf(root_node) {
+		return 0, .Invalid_Page_Header
+	}
 
 	rpid := Page_Id(t.root)
 	total := int(root_node.header.cell_count)
@@ -599,23 +680,32 @@ text_split_interior_root :: proc(
 	children := make([dynamic]u32, 0, total + 1, context.temp_allocator)
 	for i in 0 ..< total {
 		s, s_err := text_interior_sep_at(root_node.data, rpid, i)
-		if s_err != .None { return 0, s_err }
+		if s_err != .None {
+			return 0, s_err
+		}
 
 		sc := make([]u8, len(s), context.temp_allocator)
 		copy(sc, s)
 		append(&seps, sc)
 
 		c, c_err := text_interior_child_at(root_node.data, rpid, i)
-		if c_err != .None { return 0, c_err }
+		if c_err != .None {
+			return 0, c_err
+		}
 		append(&children, c)
 	}
 
 	rc, rc_err := text_interior_child_at(root_node.data, rpid, total)
-	if rc_err != .None { return 0, rc_err }
+	if rc_err != .None {
+		return 0, rc_err
+	}
 
 	append(&children, rc)
 	left_page, a_err := pager.allocate_page(t.pager)
-	if a_err != nil { return 0, .Page_Full }
+	if a_err != nil {
+		return 0, .Page_Full
+	}
+
 	defer pager.unpin_page(t.pager, left_page.page_num)
 	if lb_err := text_interior_build_from_sorted(
 		left_page.data,
@@ -644,19 +734,30 @@ text_split_interior_root :: proc(
 @(require_results)
 text_insert_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root: u32, err: Error) {
 	tkey, k_err := text_make_key(text, rowid)
-	if k_err != .None { return 0, k_err }
+	if k_err != .None {
+		return 0, k_err
+	}
 
 	root_node, load_err := load_node(t, t.root)
-	if load_err != .None { return 0, load_err }
+	if load_err != .None {
+		return 0, load_err
+	}
+
 	defer unpin_node(t, root_node)
 	if is_leaf(root_node) {
-		if root_node.header.page_type != .LEAF_TEXT { return 0, .Invalid_Page_Header }
+		if root_node.header.page_type != .LEAF_TEXT {
+			return 0, .Invalid_Page_Header
+		}
 
 		new_root, err = copy_on_write(t, t.root)
-		if err != .None { return 0, err }
+		if err != .None {
+			return 0, err
+		}
 
 		cow_node, n_err := load_node(t, new_root)
-		if n_err != .None { return 0, n_err }
+		if n_err != .None {
+			return 0, n_err
+		}
 
 		defer unpin_node(t, cow_node)
 		e := text_node_insert_leaf_cell(t, &cow_node, text, rowid)
@@ -671,12 +772,16 @@ text_insert_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 	}
 
 	result, r_err := text_insert_recursive(t, t.root, text, rowid, tkey, true)
-	if r_err != .None { return 0, r_err }
+	if r_err != .None {
+		return 0, r_err
+	}
 
 	new_root = result.new_page
 	if result.did_split {
 		grown, g_err := text_split_interior_root(t, result)
-		if g_err != .None { return 0, g_err }
+		if g_err != .None {
+			return 0, g_err
+		}
 		new_root = grown
 	}
 
@@ -747,7 +852,9 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 				// the end, not wrap to child 0 (the primary cursor
 				// records cell_count for the same reason).
 				rec_idx := cidx
-				if rec_idx < 0 { rec_idx = get_cell_count(node.data, node.id) }
+				if rec_idx < 0 {
+					rec_idx = get_cell_count(node.data, node.id)
+				}
 
 				unpin_node(t, node)
 				append(&path, Text_Path_Item{page_id = curr, child_idx = rec_idx})
@@ -763,7 +870,9 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 			top := &path^[len(path^) - 1]
 			top.child_idx += 1
 			node, l_err := load_node(t, top.page_id)
-			if l_err != .None { return 0, false }
+			if l_err != .None {
+				return 0, false
+			}
 
 			n := int(node.header.cell_count)
 			if top.child_idx <= n {
@@ -778,7 +887,9 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 				curr := child
 				for {
 					dnode, d_err := load_node(t, curr)
-					if d_err != .None { return 0, false }
+					if d_err != .None {
+						return 0, false
+					}
 					if is_leaf(dnode) {
 						unpin_node(t, dnode)
 						return curr, true
@@ -790,7 +901,9 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 
 					leftmost, dl_err := text_interior_child_at(dnode.data, Page_Id(dnode.id), 0)
 					unpin_node(t, dnode)
-					if dl_err != .None { return 0, false }
+					if dl_err != .None {
+						return 0, false
+					}
 
 					append(path, Text_Path_Item{page_id = curr, child_idx = 0})
 					curr = leftmost
@@ -853,10 +966,14 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 		}
 
 		unpin_node(t, node)
-		if i < count || !last_le { break }
+		if i < count || !last_le {
+			break
+		}
 
 		next, adv_ok := advance(t, &path)
-		if !adv_ok { return nil, .Invalid_Cell_Pointer }
+		if !adv_ok {
+			return nil, .Invalid_Cell_Pointer
+		}
 		curr = next
 	}
 	return out[:], .None
@@ -933,7 +1050,9 @@ text_find_prefix :: proc(
 				// the end, not wrap to child 0 (the primary cursor
 				// records cell_count for the same reason).
 				rec_idx := cidx
-				if rec_idx < 0 { rec_idx = get_cell_count(node.data, node.id) }
+				if rec_idx < 0 {
+					rec_idx = get_cell_count(node.data, node.id)
+				}
 
 				unpin_node(t, node)
 				append(&path, Text_Path_Item{page_id = curr, child_idx = rec_idx})
@@ -949,7 +1068,9 @@ text_find_prefix :: proc(
 			top := &path^[len(path^) - 1]
 			top.child_idx += 1
 			node, l_err := load_node(t, top.page_id)
-			if l_err != .None { return 0, false }
+			if l_err != .None {
+				return 0, false
+			}
 
 			n := int(node.header.cell_count)
 			if top.child_idx <= n {
@@ -964,7 +1085,9 @@ text_find_prefix :: proc(
 				curr := child
 				for {
 					dnode, d_err := load_node(t, curr)
-					if d_err != .None { return 0, false }
+					if d_err != .None {
+						return 0, false
+					}
 					if is_leaf(dnode) {
 						unpin_node(t, dnode)
 						return curr, true
@@ -976,7 +1099,9 @@ text_find_prefix :: proc(
 
 					leftmost, dl_err := text_interior_child_at(dnode.data, Page_Id(dnode.id), 0)
 					unpin_node(t, dnode)
-					if dl_err != .None { return 0, false }
+					if dl_err != .None {
+						return 0, false
+					}
 
 					append(path, Text_Path_Item{page_id = curr, child_idx = 0})
 					curr = leftmost
@@ -1038,10 +1163,14 @@ text_find_prefix :: proc(
 		}
 
 		unpin_node(t, node)
-		if i < count || !last_le { break }
+		if i < count || !last_le {
+			break
+		}
 
 		next, adv_ok := advance(t, &path)
-		if !adv_ok { return nil, .Invalid_Cell_Pointer }
+		if !adv_ok {
+			return nil, .Invalid_Cell_Pointer
+		}
 		curr = next
 	}
 	return out[:], .None
@@ -1060,17 +1189,27 @@ text_node_delete_leaf_cell :: proc(
 	text: []u8,
 	rowid: types.Row_ID,
 ) -> Error {
-	if !is_leaf(leaf_node^) { return .Invalid_Page_Header }
-	if leaf_node.header.page_type != .LEAF_TEXT { return .Invalid_Page_Header }
+	if !is_leaf(leaf_node^) {
+		return .Invalid_Page_Header
+	}
+	if leaf_node.header.page_type != .LEAF_TEXT {
+		return .Invalid_Page_Header
+	}
 
 	prefix, p_err := text_prefix(leaf_node.data, Page_Id(leaf_node.id))
-	if p_err != .None { return p_err }
-	if !cell.text_index_has_prefix(text, prefix) { return .Cell_Not_Found }
+	if p_err != .None {
+		return p_err
+	}
+	if !cell.text_index_has_prefix(text, prefix) {
+		return .Cell_Not_Found
+	}
 
 	idx, lb_err := text_lower_bound(leaf_node.data, Page_Id(leaf_node.id), text, rowid)
-	if lb_err != .None { return lb_err }
-	limit := int(leaf_node.header.cell_count)
+	if lb_err != .None {
+		return lb_err
+	}
 
+	limit := int(leaf_node.header.cell_count)
 	// Exact match: lower_bound lands first >= (text,rowid); entry must
 	// equal both parts (same text, other rowid is a neighbor, not a hit).
 	delete_idx := -1
@@ -1078,7 +1217,9 @@ text_node_delete_leaf_cell :: proc(
 	cell_sz := 0
 	if idx < limit {
 		suf, rid, k_err := text_entry_at(leaf_node.data, Page_Id(leaf_node.id), idx)
-		if k_err != .None { return k_err }
+		if k_err != .None {
+			return k_err
+		}
 
 		ts := text[len(prefix):]
 		if rid == rowid && len(suf) == len(ts) && mem.compare(suf, ts) == 0 {
@@ -1091,7 +1232,9 @@ text_node_delete_leaf_cell :: proc(
 			cell_sz = int(slot.len)
 		}
 	}
-	if delete_idx == -1 { return .Cell_Not_Found }
+	if delete_idx == -1 {
+		return .Cell_Not_Found
+	}
 	if delete_idx < limit - 1 {
 		if d_err := text_slot_delete(leaf_node.data, Page_Id(leaf_node.id), delete_idx);
 		   d_err != .None {
@@ -1134,12 +1277,16 @@ text_delete_recursive :: proc(
 	Error,
 ) {
 	node, err := load_node(t, page_id)
-	if err != .None { return false, err }
+	if err != .None {
+		return false, err
+	}
 	defer unpin_node(t, node)
 
 	if is_leaf(node) {
 		e := text_node_delete_leaf_cell(t, &node, text, rowid)
-		if e != .None { return false, e }
+		if e != .None {
+			return false, e
+		}
 
 		stats_row_count_set(tree_stats(t), page_id, int(node.header.cell_count))
 		return true, .None
@@ -1147,7 +1294,9 @@ text_delete_recursive :: proc(
 
 	child_id, _ := text_interior_find_child(node.data, node.id, tkey)
 	deleted, d_err := text_delete_recursive(t, child_id, text, rowid, tkey)
-	if d_err != .None { return false, d_err }
+	if d_err != .None {
+		return false, d_err
+	}
 	if deleted {
 		update_row_count(t, page_id, -1)
 	}
@@ -1159,7 +1308,9 @@ text_delete_recursive :: proc(
 @(require_results)
 text_delete :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 	tkey, k_err := text_make_key(text, rowid)
-	if k_err != .None { return k_err }
+	if k_err != .None {
+		return k_err
+	}
 
 	_, err := text_delete_recursive(t, t.root, text, rowid, tkey)
 	return err
@@ -1177,7 +1328,9 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 	}
 
 	tkey, k_err := text_make_key(text, rowid)
-	if k_err != .None { return 0, k_err }
+	if k_err != .None {
+		return 0, k_err
+	}
 
 	delete_cow_recursive :: proc(
 		t: ^Tree,
@@ -1193,12 +1346,17 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 		page_id := pid
 		if cow {
 			new_id, c_err := copy_on_write(t, page_id)
-			if c_err != .None { return {}, c_err }
+			if c_err != .None {
+				return {}, c_err
+			}
 			page_id = new_id
 		}
 
 		node, n_err := load_node(t, page_id)
-		if n_err != .None { return {}, n_err }
+		if n_err != .None {
+			return {}, n_err
+		}
+
 		defer unpin_node(t, node)
 		if is_leaf(node) {
 			if node.header.page_type != .LEAF_TEXT {
@@ -1214,13 +1372,17 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 
 		child_id, child_idx := text_interior_find_child(node.data, node.id, tkey)
 		child_result, c_err := delete_cow_recursive(t, child_id, text, rowid, tkey, true)
-		if c_err != .None { return {}, c_err }
+		if c_err != .None {
+			return {}, c_err
+		}
 		if child_result.new_page != child_id {
 			pager.unpin_page(t.pager, child_result.new_page)
 		}
 		if child_result.new_page != child_id {
 			store_idx := child_idx
-			if store_idx < 0 { store_idx = get_cell_count(node.data, node.id) }
+			if store_idx < 0 {
+				store_idx = get_cell_count(node.data, node.id)
+			}
 			if s_err := text_interior_child_store(
 				node.data,
 				Page_Id(node.id),
@@ -1237,7 +1399,9 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 	}
 
 	result, rec_err := delete_cow_recursive(t, t.root, text, rowid, tkey, true)
-	if rec_err != .None { return 0, rec_err }
+	if rec_err != .None {
+		return 0, rec_err
+	}
 
 	pager.unpin_page(t.pager, result.new_page)
 	return result.new_page, .None
@@ -1249,12 +1413,17 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 @(require_results)
 text_insert :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 	tkey, k_err := text_make_key(text, rowid)
-	if k_err != .None { return k_err }
+	if k_err != .None {
+		return k_err
+	}
 
 	root_node := load_node(t, t.root) or_return
 	defer unpin_node(t, root_node)
 	if is_leaf(root_node) {
-		if root_node.header.page_type != .LEAF_TEXT { return .Invalid_Page_Header }
+		if root_node.header.page_type != .LEAF_TEXT {
+			return .Invalid_Page_Header
+		}
+
 		e := text_node_insert_leaf_cell(t, &root_node, text, rowid)
 		if e != .Page_Full {
 			if e == .None {
@@ -1267,7 +1436,9 @@ text_insert :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 		}
 
 		result, r_err := text_insert_recursive(t, t.root, text, rowid, tkey, false)
-		if r_err != .None { return r_err }
+		if r_err != .None {
+			return r_err
+		}
 		if result.did_split {
 			if _, s_err := text_split_interior_root(t, result); s_err != .None {
 				return s_err
@@ -1280,7 +1451,9 @@ text_insert :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 	}
 
 	result, i_err := text_insert_recursive(t, t.root, text, rowid, tkey, false)
-	if i_err != .None { return i_err }
+	if i_err != .None {
+		return i_err
+	}
 	if result.did_split {
 		if _, s_err := text_split_interior_root(t, result); s_err != .None {
 			return s_err

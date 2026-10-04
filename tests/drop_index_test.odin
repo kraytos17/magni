@@ -52,12 +52,16 @@ expect_rowids :: proc(t: ^testing.T, got, want: []i64) {
 drop_index_ids :: proc(t: ^testing.T, d: ^db.Database, sql: string) -> []i64 {
 	q := db.query(d, sql)
 	testing.expect(t, q.ok, "covering select succeeds")
-	if !q.ok { return nil }
+	if !q.ok {
+		return nil
+	}
 	out := make([]i64, len(q.rows), context.temp_allocator)
 	for row, i in q.rows {
 		v, is_int := row[0].(i64)
 		testing.expect(t, is_int, "rowid projects as INTEGER")
-		if is_int { out[i] = v }
+		if is_int {
+			out[i] = v
+		}
 	}
 	return out
 }
@@ -173,7 +177,9 @@ test_drop_index_errors :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
-	if found { testing.expect_value(t, len(tbl.indexes), 0) }
+	if found {
+		testing.expect_value(t, len(tbl.indexes), 0)
+	}
 }
 
 @(test)
@@ -274,7 +280,9 @@ test_drop_index_recreate :: proc(t: ^testing.T) {
 	if found {
 		def, has := schema.table_index(tbl, "i")
 		testing.expect(t, has, "index present")
-		if has { testing.expect_value(t, def.column, "title") }
+		if has {
+			testing.expect_value(t, def.column, "title")
+		}
 	}
 	testing.expect_value(
 		t,
@@ -288,7 +296,9 @@ test_drop_index_recreate :: proc(t: ^testing.T) {
 	)
 	got := drop_index_ids(t, d, "SELECT id FROM docs WHERE title = 't1' ORDER BY id;")
 	testing.expect_value(t, len(got), 1)
-	if len(got) == 1 { testing.expect_value(t, got[0], i64(1)) }
+	if len(got) == 1 {
+		testing.expect_value(t, got[0], i64(1))
+	}
 }
 
 @(test)
@@ -339,10 +349,14 @@ test_drop_index_in_txn :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
-	if found { testing.expect_value(t, len(tbl.indexes), 0) }
+	if found {
+		testing.expect_value(t, len(tbl.indexes), 0)
+	}
 	got := drop_index_ids(t, d, "SELECT id FROM docs WHERE body = 'beta' ORDER BY id;")
 	testing.expect_value(t, len(got), 1)
-	if len(got) == 1 { testing.expect_value(t, got[0], i64(2)) }
+	if len(got) == 1 {
+		testing.expect_value(t, got[0], i64(2))
+	}
 	all := db.query(d, "SELECT COUNT(*) FROM docs;")
 	testing.expect(t, all.ok && len(all.rows) == 1, "count succeeds")
 	testing.expect_value(t, all.rows[0][0].(i64), i64(3))
@@ -376,7 +390,9 @@ test_drop_index_vacuum :: proc(t: ^testing.T) {
 
 	got := drop_index_ids(t, d, "SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;")
 	testing.expect_value(t, len(got), 1)
-	if len(got) == 1 { testing.expect_value(t, got[0], i64(1)) }
+	if len(got) == 1 {
+		testing.expect_value(t, got[0], i64(1))
+	}
 }
 
 @(test)
@@ -408,7 +424,9 @@ test_drop_index_reopen :: proc(t: ^testing.T) {
 		st := db.Schema_Tree(d2)
 		tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 		testing.expect(t, found, "table found")
-		if found { testing.expect_value(t, len(tbl.indexes), 0) }
+		if found {
+			testing.expect_value(t, len(tbl.indexes), 0)
+		}
 		got := drop_index_ids(t, d2, "SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;")
 		testing.expect_value(t, len(got), 1)
 	}

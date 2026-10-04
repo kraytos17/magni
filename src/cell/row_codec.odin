@@ -40,7 +40,9 @@ serialize :: proc(
 	bytes_written: int,
 	ok: bool,
 ) {
-	if len(dest) < info.total_size { return 0, false }
+	if len(dest) < info.total_size {
+		return 0, false
+	}
 
 	offset := 0
 	header_bytes :=
@@ -61,6 +63,7 @@ serialize :: proc(
 		serial_wide = make([]u64, len(values), context.temp_allocator)
 		serials = serial_wide
 	}
+
 	i := 0
 	for val in values {
 		serial := serial_type_for_value(val)
@@ -116,15 +119,21 @@ deserialize :: proc(
 
 	pos := offset
 	_, n, ok_payload := varint.decode(src, pos)
-	if !ok_payload { return {}, 0, false }
+	if !ok_payload {
+		return {}, 0, false
+	}
 
 	pos += n
 	rowid_val, n2, ok_rowid := varint.decode(src, pos)
-	if !ok_rowid { return {}, 0, false }
+	if !ok_rowid {
+		return {}, 0, false
+	}
 
 	pos += n2
 	header_size, n3, ok_header := varint.decode(src, pos)
-	if !ok_header { return {}, 0, false }
+	if !ok_header {
+		return {}, 0, false
+	}
 
 	pos += n3
 	header_start := pos
@@ -138,8 +147,9 @@ deserialize :: proc(
 
 	for pos < header_start + int(header_size) {
 		st, n4, ok_st := varint.decode(src, pos)
-		if !ok_st { return {}, 0, false }
-
+		if !ok_st {
+			return {}, 0, false
+		}
 		if serial_count < types.MAX_COLS {
 			serial_stack[serial_count] = st
 		} else {
@@ -149,16 +159,18 @@ deserialize :: proc(
 			}
 			append(&serial_spill, st)
 		}
+
 		serial_count += 1
 		pos += n4
 	}
-	serials := serial_stack[:] if serial_spill == nil else serial_spill[:]
 
+	serials := serial_stack[:] if serial_spill == nil else serial_spill[:]
 	result_values := make([]types.Value, serial_count, alloc)
 	success := false
 	defer if !success && !config.zero_copy {
 		types.values_delete(result_values, alloc)
 	}
+
 	#no_bounds_check for st_idx in 0 ..< serial_count {
 		st := serials[st_idx]
 		content_size, _ := types.serial_type_content_size(st)
@@ -248,15 +260,21 @@ deserialize_needed :: proc(
 
 	pos := offset
 	_, n, ok_payload := varint.decode(src, pos)
-	if !ok_payload { return 0, 0, false }
+	if !ok_payload {
+		return 0, 0, false
+	}
 
 	pos += n
 	rowid_val, n2, ok_rowid := varint.decode(src, pos)
-	if !ok_rowid { return 0, 0, false }
+	if !ok_rowid {
+		return 0, 0, false
+	}
 
 	pos += n2
 	header_size, n3, ok_header := varint.decode(src, pos)
-	if !ok_header { return 0, 0, false }
+	if !ok_header {
+		return 0, 0, false
+	}
 
 	pos += n3
 	header_start := pos
@@ -269,8 +287,9 @@ deserialize_needed :: proc(
 	serial_count := 0
 	for pos < header_start + int(header_size) {
 		st, n4, ok_st := varint.decode(src, pos)
-		if !ok_st { return 0, 0, false }
-
+		if !ok_st {
+			return 0, 0, false
+		}
 		if serial_count < types.MAX_COLS {
 			serial_stack[serial_count] = st
 		} else {
@@ -280,9 +299,11 @@ deserialize_needed :: proc(
 			}
 			append(&serial_spill, st)
 		}
+
 		serial_count += 1
 		pos += n4
 	}
+
 	serials := serial_stack[:] if serial_spill == nil else serial_spill[:]
 	if len(out_values) < serial_count {
 		return 0, 0, false
@@ -332,7 +353,10 @@ deserialize_needed :: proc(
 
 @(private = "file")
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
-	if offset + size > len(data) { return 0, false }
+	if offset + size > len(data) {
+		return 0, false
+	}
+
 	switch size {
 	case 1:
 		return i64(i8(data[offset])), true
@@ -340,7 +364,9 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 		return i64(i16(endian.get_u16(data[offset:], .Little) or_return)), true
 	case 3:
 		v := i64(data[offset]) | (i64(data[offset + 1]) << 8) | (i64(data[offset + 2]) << 16)
-		if v & 0x800000 != 0 { v |= ~i64(0xFFFFFF) }
+		if v & 0x800000 != 0 {
+			v |= ~i64(0xFFFFFF)
+		}
 		return v, true
 	case 4:
 		return i64(i32(endian.get_u32(data[offset:], .Little) or_return)), true
@@ -348,7 +374,9 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 		lo := endian.get_u32(data[offset:], .Little) or_return
 		hi := endian.get_u16(data[offset + 4:], .Little) or_return
 		v := i64(lo) | (i64(hi) << 32)
-		if v & 0x8000_0000_0000 != 0 { v |= ~i64(0xFFFF_FFFF_FFFF) }
+		if v & 0x8000_0000_0000 != 0 {
+			v |= ~i64(0xFFFF_FFFF_FFFF)
+		}
 		return v, true
 	case 8:
 		return i64(endian.get_u64(data[offset:], .Little) or_return), true
@@ -358,10 +386,14 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 
 @(private = "file")
 write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> bool {
-	if offset + size > len(dest) { return false }
+	if offset + size > len(dest) {
+		return false
+	}
+
 	switch size {
 	case 1:
-		dest[offset] = u8(value); return true
+		dest[offset] = u8(value)
+		return true
 	case 2:
 		return endian.put_u16(dest[offset:], .Little, u16(value))
 	case 3:

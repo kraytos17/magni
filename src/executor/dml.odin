@@ -88,8 +88,8 @@ exec_create_index :: proc(
 		log.errorf("Error: Table does not exist: %s", stmt.table_name)
 		return false, t.root, {}
 	}
-	defer schema.table_free(table^, context.temp_allocator)
 
+	defer schema.table_free(table^, context.temp_allocator)
 	col_idx, col_ok := schema.find_column_index(table.columns, stmt.column)
 	if !col_ok {
 		log.errorf("Error: Column does not exist: %s.%s", stmt.table_name, stmt.column)
@@ -178,7 +178,6 @@ exec_create_index :: proc(
 		stmt.column,
 		index_root,
 	)
-
 	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}
 }
 
@@ -204,10 +203,14 @@ exec_drop_index :: proc(
 			log.errorf("Error: Table not found: %s", qual)
 			return false, t.root, {}
 		}
+
 		defer schema.table_free(table^, context.temp_allocator)
 		has_it := false
 		for def in table.indexes {
-			if def.name == stmt.index_name { has_it = true; break }
+			if def.name == stmt.index_name {
+				has_it = true
+				break
+			}
 		}
 		if !has_it {
 			log.errorf("Error: No such index %s on table %s", stmt.index_name, qual)
@@ -263,8 +266,12 @@ check_row :: proc(
 	table: types.Table,
 	checks: []Resolved_Check,
 ) -> Row_Check {
-	if !cell.validate(values, table.columns) { return .Type_Error }
-	if !check_constraints_resolved(values, checks) { return .Check_Error }
+	if !cell.validate(values, table.columns) {
+		return .Type_Error
+	}
+	if !check_constraints_resolved(values, checks) {
+		return .Check_Error
+	}
 	return .Ok
 }
 
@@ -295,7 +302,9 @@ prepare_insert_row :: proc(
 	bool,
 ) {
 	values, v_ok := reorder_insert_values(table, columns, row_values)
-	if !v_ok { return {}, false }
+	if !v_ok {
+		return {}, false
+	}
 	if check := check_row(values, table, checks); check != .Ok {
 		if check == .Type_Error {
 			log.error("Error: Data type validation failed")
@@ -408,7 +417,9 @@ exec_insert_impl :: proc(
 	checks: []Resolved_Check
 	if len(stmt.values) > 0 {
 		rc, rc_ok := resolve_table_checks(table)
-		if !rc_ok { return false, t.root, {} }
+		if !rc_ok {
+			return false, t.root, {}
+		}
 		checks = rc
 	}
 
@@ -416,7 +427,9 @@ exec_insert_impl :: proc(
 	idx_roots := fanout_index_state(table, context.temp_allocator)
 	for row_values in stmt.values {
 		info, ok := prepare_insert_row(table, stmt.columns, row_values, t, data_root, checks)
-		if !ok { return false, t.root, {} }
+		if !ok {
+			return false, t.root, {}
+		}
 
 		table_tree := btree.init(t.pager, data_root)
 		new_data_root, ins_err := btree.tree_insert_cow(&table_tree, info.row_id, info.values)
@@ -427,7 +440,10 @@ exec_insert_impl :: proc(
 
 		data_root = new_data_root
 		for def, i in table.indexes {
-			if def.root == 0 { continue }
+			if def.root == 0 {
+				continue
+			}
+
 			idx_roots[i], ok = fanout_insert_row(
 				t,
 				table,
@@ -436,7 +452,9 @@ exec_insert_impl :: proc(
 				info.row_id,
 				info.values,
 			)
-			if !ok { return false, t.root, {} }
+			if !ok {
+				return false, t.root, {}
+			}
 		}
 		log.infof("Inserted row %d", info.row_id)
 	}
@@ -446,6 +464,7 @@ exec_insert_impl :: proc(
 		log.error("Error: Failed to update schema root page")
 		return false, t.root, {}
 	}
+
 	new_schema_root, ok = commit_all_index_roots(
 		t,
 		stmt.table_name,
@@ -549,7 +568,9 @@ exec_update_impl :: proc(
 ) {
 	tbl := table
 	update_map, ok := build_update_map(&tbl, stmt, context.temp_allocator)
-	if !ok { return false, t.root, {} }
+	if !ok {
+		return false, t.root, {}
+	}
 
 	plan := Update_Plan {
 		tbl = tbl,
@@ -584,7 +605,9 @@ Update_Plan :: struct {
 // evaluate_where). Shared by UPDATE and DELETE.
 @(private = "file")
 eval_mutation_filter :: proc(f: ^Mutation_Filter, values: []types.Value) -> bool {
-	if _, has_wc := f.filter.?; !has_wc { return true }
+	if _, has_wc := f.filter.?; !has_wc {
+		return true
+	}
 	if ctx, ok := f.filter_ctx.?; ok {
 		return evaluate_where_ctx(ctx, values)
 	}
@@ -613,7 +636,9 @@ pk_target_rowid :: proc(
 	bool,
 ) {
 	where_clause, has_where := filter.?
-	if !has_where { return 0, false }
+	if !has_where {
+		return 0, false
+	}
 	return try_pk_lookup(tbl, where_clause, table_name)
 }
 
@@ -647,7 +672,9 @@ commit_cow_root :: proc(
 	}
 
 	new_schema_root, ok := schema.update_root_page_cow(t, table_name, nroot)
-	if !ok { return t.root, {}, false }
+	if !ok {
+		return t.root, {}, false
+	}
 	return new_schema_root, Mutated_Table_Info{name = table_name, root = nroot}, true
 }
 
@@ -673,7 +700,9 @@ commit_index_cow_root :: proc(
 		if cache != nil {
 			if tbl, ok := pending_cache_entry(cache, table_name); ok {
 				for &def in tbl.indexes {
-					if def.name == index_name { def.root = nroot }
+					if def.name == index_name {
+						def.root = nroot
+					}
 				}
 			}
 		}
@@ -681,7 +710,9 @@ commit_index_cow_root :: proc(
 	}
 
 	new_schema_root, ok := schema.update_index_root_cow(t, table_name, index_name, nroot)
-	if !ok { return t.root, {}, false }
+	if !ok {
+		return t.root, {}, false
+	}
 	return new_schema_root, Mutated_Table_Info{name = table_name, root = nroot}, true
 }
 
@@ -694,7 +725,9 @@ fanout_index_state :: proc(
 	allocator := context.allocator,
 ) -> [dynamic]u32 {
 	roots := make([dynamic]u32, 0, len(table.indexes), allocator)
-	for def in table.indexes { append(&roots, def.root) }
+	for def in table.indexes {
+		append(&roots, def.root)
+	}
 	return roots
 }
 
@@ -715,7 +748,10 @@ commit_all_index_roots :: proc(
 ) {
 	cur := new_schema_root
 	for def, i in table.indexes {
-		if def.root == 0 { continue }
+		if def.root == 0 {
+			continue
+		}
+
 		st := btree.init(t.pager, cur)
 		final_root, _, iok := commit_index_cow_root(
 			&st,
@@ -725,7 +761,9 @@ commit_all_index_roots :: proc(
 			pending,
 			cache,
 		)
-		if !iok { return t.root, false }
+		if !iok {
+			return t.root, false
+		}
 		cur = final_root
 	}
 	return cur, true
@@ -745,10 +783,14 @@ pending_cache_entry :: proc(
 ) {
 	sync.rw_mutex_lock(&cache.mu)
 	defer sync.rw_mutex_unlock(&cache.mu)
-	if cache.tables == nil { return nil, false }
+	if cache.tables == nil {
+		return nil, false
+	}
 
 	tbl, ok := cache.tables[table_name]
-	if !ok { return nil, false }
+	if !ok {
+		return nil, false
+	}
 	return tbl, true
 }
 
@@ -758,7 +800,9 @@ pending_cache_entry :: proc(
 // its pending root back. Dropped tables no longer resolve — skipped.
 @(private)
 pending_reoverlay :: proc(t: ^btree.Tree, pending: ^Pending_Roots, cache: ^schema.Table_Cache) {
-	if pending == nil || cache == nil { return }
+	if pending == nil || cache == nil {
+		return
+	}
 	for name, root in pending.roots {
 		if tbl, ok := schema.find_table_cached(t, name, cache); ok {
 			tbl.root_page = root
@@ -768,7 +812,9 @@ pending_reoverlay :: proc(t: ^btree.Tree, pending: ^Pending_Roots, cache: ^schem
 		if tbl, ok := schema.find_table_cached(t, name, cache); ok {
 			for st in stages {
 				for &def in tbl.indexes {
-					if def.name == st.name { def.root = st.root }
+					if def.name == st.name {
+						def.root = st.root
+					}
 				}
 			}
 		}
@@ -791,7 +837,9 @@ update_by_pk :: proc(
 	info: Mutated_Table_Info,
 ) {
 	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
-	if !pk_ok { return false, false, 0, {} }
+	if !pk_ok {
+		return false, false, 0, {}
+	}
 
 	c, find_err := btree.tree_find(table_tree, target_rowid, context.temp_allocator)
 	if find_err != .None {
@@ -817,7 +865,10 @@ update_by_pk :: proc(
 
 	idx_roots := fanout_index_state(plan.tbl, context.temp_allocator)
 	for def, i in plan.tbl.indexes {
-		if def.root == 0 { continue }
+		if def.root == 0 {
+			continue
+		}
+
 		nr, iok := fanout_update_row(
 			t,
 			plan.tbl,
@@ -827,12 +878,18 @@ update_by_pk :: proc(
 			c.values,
 			new_row,
 		)
-		if !iok { return true, false, t.root, {} }
+		if !iok {
+			return true, false, t.root, {}
+		}
 		idx_roots[i] = nr
 	}
 
 	new_schema_root, committed, ok1 := commit_cow_root(t, plan.table_name, nroot, pending, cache)
-	if !ok1 { return true, false, t.root, {} }
+
+	if !ok1 {
+		return true, false, t.root, {}
+	}
+
 	final_root, ok2 := commit_all_index_roots(
 		t,
 		plan.table_name,
@@ -842,9 +899,11 @@ update_by_pk :: proc(
 		pending,
 		cache,
 	)
-	if !ok2 { return true, false, t.root, {} }
-	new_schema_root = final_root
+	if !ok2 {
+		return true, false, t.root, {}
+	}
 
+	new_schema_root = final_root
 	log.info("Updated 1 row.")
 	return true, true, new_schema_root, committed
 }
@@ -863,9 +922,11 @@ update_by_scan :: proc(
 	Mutated_Table_Info,
 ) {
 	cursor, cursor_err := btree.cursor_start(table_tree, context.temp_allocator)
-	if cursor_err != .None { return false, t.root, {} }
-	defer btree.cursor_destroy(&cursor)
+	if cursor_err != .None {
+		return false, t.root, {}
+	}
 
+	defer btree.cursor_destroy(&cursor)
 	resolve_mutation_filter(&plan.filt, plan.tbl.columns)
 	return update_scan_cow(t, plan, table_tree, &cursor, pending, cache)
 }
@@ -903,7 +964,9 @@ update_scan_cow :: proc(
 				nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)
 				if upd_err == .None {
 					for def, i in plan.tbl.indexes {
-						if def.root == 0 { continue }
+						if def.root == 0 {
+							continue
+						}
 						nr, iok := fanout_update_row(
 							t,
 							plan.tbl,
@@ -937,7 +1000,10 @@ update_scan_cow :: proc(
 			pending,
 			cache,
 		)
-		if !ok1 { return false, t.root, {} }
+		if !ok1 {
+			return false, t.root, {}
+		}
+
 		scan_final, iok := commit_all_index_roots(
 			t,
 			plan.table_name,
@@ -947,9 +1013,11 @@ update_scan_cow :: proc(
 			pending,
 			cache,
 		)
-		if !iok { return false, t.root, {} }
-		new_schema_root = scan_final
+		if !iok {
+			return false, t.root, {}
+		}
 
+		new_schema_root = scan_final
 		log.infof("Updated %d rows.", count)
 		return true, new_schema_root, info
 	}
@@ -1008,12 +1076,18 @@ delete_by_pk :: proc(
 	info: Mutated_Table_Info,
 ) {
 	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
-	if !pk_ok { return false, false, 0, {} }
+	if !pk_ok {
+		return false, false, 0, {}
+	}
+
 	nroot, del_err := btree.tree_delete_cow(table_tree, target_rowid)
 	if del_err == .None {
 		idx_roots := fanout_index_state(plan.tbl, context.temp_allocator)
 		for def, i in plan.tbl.indexes {
-			if def.root == 0 { continue }
+			if def.root == 0 {
+				continue
+			}
+
 			nr, iok := fanout_delete_rowid(
 				t,
 				table_tree,
@@ -1022,12 +1096,17 @@ delete_by_pk :: proc(
 				idx_roots[i],
 				target_rowid,
 			)
-			if !iok { return true, false, t.root, {} }
+			if !iok {
+				return true, false, t.root, {}
+			}
 			idx_roots[i] = nr
 		}
 
 		new_schema_root, info1, ok1 := commit_cow_root(t, plan.table_name, nroot, pending, cache)
-		if !ok1 { return true, false, t.root, {} }
+		if !ok1 {
+			return true, false, t.root, {}
+		}
+
 		del_final, iok2 := commit_all_index_roots(
 			t,
 			plan.table_name,
@@ -1037,9 +1116,11 @@ delete_by_pk :: proc(
 			pending,
 			cache,
 		)
-		if !iok2 { return true, false, t.root, {} }
-		new_schema_root = del_final
+		if !iok2 {
+			return true, false, t.root, {}
+		}
 
+		new_schema_root = del_final
 		log.info("Deleted 1 row.")
 		return true, true, new_schema_root, info1
 	}
@@ -1056,7 +1137,9 @@ collect_delete_targets :: proc(
 ) -> [dynamic]types.Row_ID {
 	targets := make([dynamic]types.Row_ID, context.temp_allocator)
 	cursor, err := btree.cursor_start(table_tree, context.temp_allocator)
-	if err != .None { return targets }
+	if err != .None {
+		return targets
+	}
 
 	defer btree.cursor_destroy(&cursor)
 	resolve_mutation_filter(&plan.filt, plan.tbl.columns)
@@ -1105,9 +1188,21 @@ apply_deletes :: proc(
 		}
 
 		for def, i in plan.tbl.indexes {
-			if def.root == 0 { continue }
-			nr, iok := fanout_delete_rowid(t, table_tree, plan.tbl, def.column, idx_roots[i], rowid)
-			if !iok { return false, t.root, {} }
+			if def.root == 0 {
+				continue
+			}
+
+			nr, iok := fanout_delete_rowid(
+				t,
+				table_tree,
+				plan.tbl,
+				def.column,
+				idx_roots[i],
+				rowid,
+			)
+			if !iok {
+				return false, t.root, {}
+			}
 			idx_roots[i] = nr
 		}
 	}
@@ -1119,7 +1214,10 @@ apply_deletes :: proc(
 			pending,
 			cache,
 		)
-		if !ok { return false, t.root, {} }
+		if !ok {
+			return false, t.root, {}
+		}
+
 		del_final, iok := commit_all_index_roots(
 			t,
 			plan.table_name,
@@ -1129,9 +1227,11 @@ apply_deletes :: proc(
 			pending,
 			cache,
 		)
-		if !iok { return false, t.root, {} }
-		new_schema_root = del_final
+		if !iok {
+			return false, t.root, {}
+		}
 
+		new_schema_root = del_final
 		log.infof("Deleted %d rows.", count)
 		return true, new_schema_root, info
 	}
@@ -1229,14 +1329,27 @@ exec_delete_cow :: proc(
 // when unindexed, column-missing, non-TEXT, or NULL. Callers treat false
 // as skip (insert) — never an error.
 @(private = "file")
-index_col_text :: proc(table: types.Table, index_col: string, values: []types.Value) -> (string, bool) {
-	if len(index_col) == 0 { return "", false }
+index_col_text :: proc(
+	table: types.Table,
+	index_col: string,
+	values: []types.Value,
+) -> (
+	string,
+	bool,
+) {
+	if len(index_col) == 0 {
+		return "", false
+	}
 
 	col_idx, col_ok := schema.find_column_index(table.columns, index_col)
-	if !col_ok || col_idx < 0 || col_idx >= len(values) { return "", false }
+	if !col_ok || col_idx < 0 || col_idx >= len(values) {
+		return "", false
+	}
 
 	s, is_text := values[col_idx].(string)
-	if !is_text { return "", false }
+	if !is_text {
+		return "", false
+	}
 	return s, true
 }
 
@@ -1255,7 +1368,9 @@ fanout_insert_row :: proc(
 	bool,
 ) {
 	text, ok := index_col_text(table, index_col, values)
-	if !ok { return index_root, true }
+	if !ok {
+		return index_root, true
+	}
 	return fanout_insert_text(t, table, index_root, text, rowid)
 }
 
@@ -1310,7 +1425,9 @@ fanout_delete_rowid :: proc(
 
 	defer cell.destroy(&old, context.temp_allocator)
 	text, ok := index_col_text(table, index_col, old.values)
-	if !ok { return index_root, true }
+	if !ok {
+		return index_root, true
+	}
 	return fanout_delete_text(t, table, index_root, text, rowid)
 }
 
@@ -1333,17 +1450,23 @@ fanout_update_row :: proc(
 ) {
 	old_text, old_ok := index_col_text(table, index_col, old_values)
 	new_text, new_ok := index_col_text(table, index_col, new_values)
-	if old_ok == new_ok && (!old_ok || old_text == new_text) { return index_root, true }
+	if old_ok == new_ok && (!old_ok || old_text == new_text) {
+		return index_root, true
+	}
 
 	cur := index_root
 	if old_ok {
 		nr, ok := fanout_delete_text(t, table, cur, old_text, rowid)
-		if !ok { return index_root, false }
+		if !ok {
+			return index_root, false
+		}
 		cur = nr
 	}
 	if new_ok {
 		nr, ok := fanout_insert_text(t, table, cur, new_text, rowid)
-		if !ok { return index_root, false }
+		if !ok {
+			return index_root, false
+		}
 		cur = nr
 	}
 	return cur, true

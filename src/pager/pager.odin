@@ -165,7 +165,9 @@ pager_layout_report :: proc() {
 // Call explicitly, or set MAGNI_PAGER_STATS=1 to print at pager.close.
 pager_stats_report :: proc(p: ^Pager) {
 	s := p.stats_counters
-	if s.get_page_calls == 0 { return }
+	if s.get_page_calls == 0 {
+		return
+	}
 
 	hit_pct := f64(s.get_page_hits) * 100.0 / f64(s.get_page_calls)
 	steps_per_evict := f64(0)
@@ -280,7 +282,9 @@ cache_lookup :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot {
 		p.stats_counters.cache_probes += 1
 		if p.cache_table[i].page_num == page_num {
 			p.stats_counters.probe_hist[probe_bucket(chain)] += 1
-			if chain > p.stats_counters.max_probe { p.stats_counters.max_probe = chain }
+			if chain > p.stats_counters.max_probe {
+				p.stats_counters.max_probe = chain
+			}
 			return p.cache_table[i].slot
 		}
 		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
@@ -290,8 +294,12 @@ cache_lookup :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot {
 	p.stats_counters.cache_probes += 1
 	p.stats_counters.bloom_false_pos += 1 // bloom said maybe, table says no
 	p.stats_counters.probe_hist_miss[probe_bucket(chain)] += 1
-	if chain > p.stats_counters.max_probe_miss { p.stats_counters.max_probe_miss = chain }
-	if chain > p.stats_counters.max_probe { p.stats_counters.max_probe = chain }
+	if chain > p.stats_counters.max_probe_miss {
+		p.stats_counters.max_probe_miss = chain
+	}
+	if chain > p.stats_counters.max_probe {
+		p.stats_counters.max_probe = chain
+	}
 	return nil
 }
 
@@ -325,14 +333,18 @@ cache_delete :: proc(p: ^Pager, page_num: u32) {
 	for p.cache_table[i].page_num != 0 && p.cache_table[i].page_num != page_num {
 		i = (i + 1) & (CACHE_TABLE_SIZE - 1)
 	}
-	if p.cache_table[i].page_num == 0 { return } 	// not present: no bloom change
+	if p.cache_table[i].page_num == 0 {
+		return
+	} // not present: no bloom change
 
 	bloom.remove(&p.bloom, page_num)
 	p.cache_table[i] = {}
 	j := i
 	for {
 		j = (j + 1) & (CACHE_TABLE_SIZE - 1)
-		if p.cache_table[j].page_num == 0 { break }
+		if p.cache_table[j].page_num == 0 {
+			break
+		}
 
 		k := cache_bucket(p.cache_table[j].page_num)
 		in_range := k > i && k <= j if i <= j else (k > i || k <= j)
@@ -379,7 +391,9 @@ evict_slot :: proc(p: ^Pager, slot: ^Page_Slot, writeback: bool) -> Error {
 	}
 
 	cache_delete(p, slot.page.page_num)
-	if p.on_evict != nil { p.on_evict(p.stats, slot.page.page_num) }
+	if p.on_evict != nil {
+		p.on_evict(p.stats, slot.page.page_num)
+	}
 
 	slot.page = {}
 	slot.referenced = false
@@ -434,10 +448,14 @@ Evict_Report :: struct {
 evict_aborted :: proc(p: ^Pager, pages: []u32) -> (report: Evict_Report) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	for page_num in pages {
-		if page_num == 0 { continue }
+		if page_num == 0 {
+			continue
+		}
 
 		slot := find_slot(p, page_num)
-		if slot == nil { continue }
+		if slot == nil {
+			continue
+		}
 		if slot.page.pin_count > 0 {
 			report.skipped_pinned += 1
 			continue
@@ -460,7 +478,9 @@ open :: proc(
 	Error,
 ) {
 	p := new(Pager, allocator)
-	if p == nil { return nil, .Out_Of_Memory }
+	if p == nil {
+		return nil, .Out_Of_Memory
+	}
 
 	p.allocator = allocator; p.page_size = types.PAGE_SIZE
 	p.max_cache_pages = clamp(max(max_pages, 1), 1, PAGE_CACHE_SIZE)
@@ -494,7 +514,9 @@ open :: proc(
 	p.file_len = file_size if file_size != 0 else 0
 	page_count := u32(p.file_len / i64(p.page_size))
 	bit_array.init(&p.page_bitmap, int(page_count), 0, p.allocator)
-	for i := 0; i < len(p.page_bitmap.bits); i += 1 { p.page_bitmap.bits[i] = ~u64(0) }
+	for i := 0; i < len(p.page_bitmap.bits); i += 1 {
+		p.page_bitmap.bits[i] = ~u64(0)
+	}
 	if err := wal_open(p, path); err != .None {
 		log.errorf("Pager: WAL open failed: %v", err)
 		os.close(file)
@@ -506,13 +528,17 @@ open :: proc(
 
 // Close the pager: flush WAL, checkpoint to main file, close file, free all resources.
 close :: proc(p: ^Pager) -> Error {
-	if p == nil { return .None }
+	if p == nil {
+		return .None
+	}
 
 	wal_begin_txn(p)
 	wal_commit_txn(p)
 	wal_checkpoint(p)
 	wal_close(p)
-	if p.file != nil { os.close(p.file) }
+	if p.file != nil {
+		os.close(p.file)
+	}
 	if len(os.get_env("MAGNI_PAGER_STATS", context.temp_allocator)) > 0 {
 		pager_stats_report(p)
 	}
@@ -523,7 +549,9 @@ close :: proc(p: ^Pager) -> Error {
 
 	delete(p.free_slots)
 	delete(p.dirty_pages)
-	if p.free_stats != nil { p.free_stats(p.stats) }
+	if p.free_stats != nil {
+		p.free_stats(p.stats)
+	}
 
 	delete(p.slots)
 	free(p, p.allocator)
@@ -532,10 +560,13 @@ close :: proc(p: ^Pager) -> Error {
 
 // Page numbers are 1-indexed; 0 is the sentinel for "no page".
 get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
-	if page_num < 1 { return nil, .Invalid_Page_Num }
+	if page_num < 1 {
+		return nil, .Invalid_Page_Num
+	}
 
 	sync.rw_mutex_lock(&p.mutex)
 	defer sync.rw_mutex_unlock(&p.mutex)
+
 	p.stats_counters.get_page_calls += 1
 	if slot := find_slot(p, page_num); slot != nil {
 		p.stats_counters.get_page_hits += 1
@@ -546,21 +577,31 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 
 	p.stats_counters.get_page_misses += 1
 	max_page := u32(p.file_len / i64(p.page_size))
-	if page_num > max_page { return nil, .Page_Not_Found }
+	if page_num > max_page {
+		return nil, .Page_Not_Found
+	}
 
 	slot := find_empty_slot(p)
-	if slot == nil { return nil, .Cache_Full }
+	if slot == nil {
+		return nil, .Cache_Full
+	}
 
 	ws := &p.wal_state
 	fo: i64
 	has_fo := false
 	{
 		v, txn_ok := ws.txn_index[page_num]
-		if txn_ok { fo = v; has_fo = true }
+		if txn_ok {
+			fo = v
+			has_fo = true
+		}
 	}
 	if !has_fo {
 		v, idx_ok := ws.page_index[page_num]
-		if idx_ok { fo = v; has_fo = true }
+		if idx_ok {
+			fo = v
+			has_fo = true
+		}
 	}
 	if has_fo {
 		_, read_err := os.read_at(ws.file, slot._data_buf[:], fo + types.WAL_FRAME_HEADER_SIZE)
@@ -591,16 +632,22 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 // dirty page zeroed to DATABASE_HEADER_SIZE. Caller must unpin when done.
 allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
-	if p.first_free_page != 0 { return alloc_from_freelist(p) }
+	if p.first_free_page != 0 {
+		return alloc_from_freelist(p)
+	}
 
 	slot := find_empty_slot(p)
-	if slot == nil { return nil, .Cache_Full }
+	if slot == nil {
+		return nil, .Cache_Full
+	}
 
 	new_page_num := u32(p.file_len / i64(p.page_size)) + 1
 	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
 	slot.page.page_num = new_page_num; slot.page.pin_count = 1
+
 	mark_slot_dirty(p, slot)
 	cache_insert(p, new_page_num, slot)
+
 	p.file_len += i64(p.page_size)
 	bit_array.set(&p.page_bitmap, new_page_num, true, p.allocator)
 	return &slot.page, .None
@@ -608,7 +655,9 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 
 get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
-	if page_num < 1 { return nil, .Page_Not_Found }
+	if page_num < 1 {
+		return nil, .Page_Not_Found
+	}
 	if slot := find_slot(p, page_num); slot != nil {
 		slot.page.pin_count += 1
 		return &slot.page, .None
@@ -617,12 +666,16 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	current_max := u32(p.file_len / i64(p.page_size))
 	if page_num == current_max + 1 {
 		slot := find_empty_slot(p)
-		if slot == nil { return nil, .Cache_Full }
+		if slot == nil {
+			return nil, .Cache_Full
+		}
 
 		mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
 		slot.page.page_num = page_num; slot.page.pin_count = 1
+
 		mark_slot_dirty(p, slot)
 		cache_insert(p, page_num, slot)
+
 		p.file_len += i64(p.page_size)
 		bit_array.set(&p.page_bitmap, page_num, true, p.allocator)
 		return &slot.page, .None
@@ -655,9 +708,11 @@ page_in_cache :: proc(p: ^Pager, page_num: u32) -> bool {
 copy_page :: proc(p: ^Pager, src_page_num: u32) -> (dst: ^Page, err: Error) {
 	src: ^Page
 	src, err = get_page(p, src_page_num)
-	if err != .None { return }
-	defer unpin_page(p, src_page_num)
+	if err != .None {
+		return
+	}
 
+	defer unpin_page(p, src_page_num)
 	dst = allocate_page(p) or_return
 	mem.copy_non_overlapping(raw_data(dst.data), raw_data(src.data), types.PAGE_SIZE)
 	dst.dirty = true
@@ -669,7 +724,9 @@ copy_page :: proc(p: ^Pager, src_page_num: u32) -> (dst: ^Page, err: Error) {
 // Caller must hold p.mutex.
 @(private)
 mark_slot_dirty :: proc(p: ^Pager, slot: ^Page_Slot) {
-	if slot == nil || slot.page.page_num == 0 { return }
+	if slot == nil || slot.page.page_num == 0 {
+		return
+	}
 	if !slot.page.dirty {
 		slot.page.dirty = true
 		append(&p.dirty_pages, slot.page.page_num)

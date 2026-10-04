@@ -30,7 +30,9 @@ split_where_for_join :: proc(
 	conjuncts := make([dynamic]^parser.Where_Node, 0, 4, allocator)
 	#partial switch clause.root.kind {
 	case .AND:
-		for child in clause.root.children { append(&conjuncts, child) }
+		for child in clause.root.children {
+			append(&conjuncts, child)
+		}
 	case .COND:
 		append(&conjuncts, clause.root)
 	case:
@@ -46,9 +48,13 @@ split_where_for_join :: proc(
 	for ti in 0 ..< len(table_ranges) {
 		assigned := make([dynamic]^parser.Where_Node, 0, 4, allocator)
 		for c, i in conjuncts {
-			if ti_of[i] == ti { append(&assigned, c) }
+			if ti_of[i] == ti {
+				append(&assigned, c)
+			}
 		}
-		if len(assigned) == 0 { continue }
+		if len(assigned) == 0 {
+			continue
+		}
 		if len(assigned) == 1 {
 			filters[ti] = parser.Where_Clause {
 				root = assigned[0],
@@ -82,7 +88,9 @@ conjunct_table_index :: proc(
 	ti_set := false
 	ok := true
 	conjunct_collect(node, combined_cols, table_ranges, &ti, &ti_set, &ok)
-	if !ok || !ti_set { return -1, false }
+	if !ok || !ti_set {
+		return -1, false
+	}
 	return ti, true
 }
 
@@ -95,12 +103,18 @@ conjunct_collect :: proc(
 	ti_set: ^bool,
 	ok: ^bool,
 ) {
-	if n == nil || !ok^ { return }
+	if n == nil || !ok^ {
+		return
+	}
 	switch n.kind {
 	case .COND:
-		if !col_in_table(n.cond.column, combined_cols, table_ranges, ti, ti_set, ok) { return }
+		if !col_in_table(n.cond.column, combined_cols, table_ranges, ti, ti_set, ok) {
+			return
+		}
 		if rhs_str, is_col := n.cond.rhs.(string); is_col {
-			if !col_in_table(rhs_str, combined_cols, table_ranges, ti, ti_set, ok) { return }
+			if !col_in_table(rhs_str, combined_cols, table_ranges, ti, ti_set, ok) {
+				return
+			}
 		}
 	case .AND, .OR, .NOT:
 		for child in n.children {
@@ -119,13 +133,19 @@ col_in_table :: proc(
 	ok: ^bool,
 ) -> bool {
 	t2, col_ok := column_table_index(name, combined_cols, table_ranges)
-	if !col_ok { ok^ = false; return false }
+	if !col_ok {
+		ok^ = false
+		return false
+	}
 	if !ti_set^ {
 		ti^ = t2
 		ti_set^ = true
 		return true
 	}
-	if ti^ != t2 { ok^ = false; return false }
+	if ti^ != t2 {
+		ok^ = false
+		return false
+	}
 	return true
 }
 
@@ -140,7 +160,9 @@ column_table_index :: proc(
 	int,
 	bool,
 ) {
-	if strings.contains(name, ".") { return -1, false }
+	if strings.contains(name, ".") {
+		return -1, false
+	}
 
 	matches := 0
 	found := -1
@@ -153,7 +175,9 @@ column_table_index :: proc(
 			}
 		}
 	}
-	if matches != 1 { return -1, false }
+	if matches != 1 {
+		return -1, false
+	}
 	return found, true
 }
 
@@ -166,8 +190,12 @@ filter_rows :: proc(
 ) -> []Row_Entry {
 	filtered := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
 	ctx, ctx_ok := init_where_ctx(where_clause, cols, table_ranges, nil, context.temp_allocator).?
-	if !ctx_ok { return filtered[:] }
-	if ctx.root == nil { return rows }
+	if !ctx_ok {
+		return filtered[:]
+	}
+	if ctx.root == nil {
+		return rows
+	}
 	for entry in rows {
 		if evaluate_where_ctx(ctx, entry.values) {
 			append(&filtered, entry)
@@ -191,7 +219,9 @@ init_where_ctx :: proc(
 
 	resolver := build_column_resolver(cols, table_ranges, allocator)
 	root, ok := build_resolved_node(clause.root, resolver, schema_tree, allocator, cache)
-	if !ok { return nil }
+	if !ok {
+		return nil
+	}
 	return Where_Eval_Ctx{root = root, schema_tree = schema_tree}
 }
 
@@ -223,7 +253,9 @@ build_resolved_node :: proc(
 		for child, i in node.children {
 			child_rn, ok := build_resolved_node(child, resolver, schema_tree, allocator, cache)
 			if !ok {
-				for j in 0 ..< i { free_resolved_node(children[j], allocator) }
+				for j in 0 ..< i {
+					free_resolved_node(children[j], allocator)
+				}
 
 				delete(children, allocator)
 				free(rn, allocator)
@@ -238,7 +270,9 @@ build_resolved_node :: proc(
 
 @(private = "file")
 free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
-	if n == nil { return }
+	if n == nil {
+		return
+	}
 	switch n.kind {
 	case .COND:
 		// Only Subquery values are owned (made at resolve time); Values
@@ -249,7 +283,9 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 		}
 		delete(n.cond.in_mem.fps, allocator)
 	case .AND, .OR, .NOT:
-		for child in n.children { free_resolved_node(child, allocator) }
+		for child in n.children {
+			free_resolved_node(child, allocator)
+		}
 		delete(n.children, allocator)
 	}
 	free(n, allocator)
@@ -267,7 +303,9 @@ resolve_condition :: proc(
 	bool,
 ) {
 	idx, found := resolve(resolver, cond.column)
-	if !found { return {}, false }
+	if !found {
+		return {}, false
+	}
 
 	rc := Resolved_Condition {
 		col_idx       = idx,
@@ -280,7 +318,9 @@ resolve_condition :: proc(
 	}
 	if rhs_str, is_col := cond.rhs.(string); is_col {
 		right_idx, rc_found := resolve(resolver, rhs_str)
-		if !rc_found { return {}, false }
+		if !rc_found {
+			return {}, false
+		}
 
 		rc.has_right_col = true
 		rc.right_idx = right_idx
@@ -312,7 +352,9 @@ resolve_condition :: proc(
 
 @(private)
 evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
-	if ctx.root == nil { return true }
+	if ctx.root == nil {
+		return true
+	}
 	return evaluate_node(ctx, ctx.root, row)
 }
 
@@ -323,12 +365,16 @@ evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Va
 		return evaluate_resolved_condition(ctx, node.cond, row)
 	case .AND:
 		for child in node.children {
-			if !evaluate_node(ctx, child, row) { return false }
+			if !evaluate_node(ctx, child, row) {
+				return false
+			}
 		}
 		return true
 	case .OR:
 		for child in node.children {
-			if evaluate_node(ctx, child, row) { return true }
+			if evaluate_node(ctx, child, row) {
+				return true
+			}
 		}
 		return false
 	case .NOT:
@@ -353,22 +399,26 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 		// An empty index (hand-built node) falls back to the linear scan.
 		if fp_index_hit(rc.in_mem.fps, hash_value(v)) {
 			for c in rc.in_mem.values {
-				if !types.is_null(v) && compare_values(v, c) == 0 { return true }
+				if !types.is_null(v) && compare_values(v, c) == 0 {
+					return true
+				}
 			}
 		}
 		return false
 	case .Subquery:
 		for c in rc.in_mem.values {
-			if !types.is_null(v) && compare_values(v, c) == 0 { return true }
+			if !types.is_null(v) && compare_values(v, c) == 0 {
+				return true
+			}
 		}
 		return false
 	}
 	if rc.in_subquery != nil {
 		subq_rows, _ := exec_subquery(schema_tree, rc.in_subquery^)
 		for sr in subq_rows {
-			if !types.is_null(v) &&
-			   len(sr.values) > 0 &&
-			   compare_values(v, sr.values[0]) == 0 { return true }
+			if !types.is_null(v) && len(sr.values) > 0 && compare_values(v, sr.values[0]) == 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -393,7 +443,9 @@ evaluate_resolved_condition :: proc(
 	if rc.has_in {
 		cond_result = membership_test(rc, ctx.schema_tree, left_val)
 	}
-	if rc.negated { cond_result = !cond_result }
+	if rc.negated {
+		cond_result = !cond_result
+	}
 	return cond_result
 }
 
@@ -405,7 +457,9 @@ evaluate_where :: proc(
 	table_ranges: []Table_Col_Range,
 ) -> bool {
 	ctx, ok := init_where_ctx(clause, cols, table_ranges, nil, context.temp_allocator).?
-	if !ok { return false }
+	if !ok {
+		return false
+	}
 	return evaluate_where_ctx(ctx, row)
 }
 
@@ -414,14 +468,18 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 	if op == .LIKE {
 		text, text_ok := val.(string)
 		pattern, pat_ok := target.(string)
-		if !text_ok || !pat_ok { return false }
+		if !text_ok || !pat_ok {
+			return false
+		}
 		return like_match(pattern, text)
 	}
 	// NULL is UNKNOWN in any comparison: = NULL (either operand), != NULL,
 	// ordered comparisons, and IN (...) membership all fail. IS NULL stays
 	// the null test. NULL is two-valued-false in the filter, so NOT over it
 	// must not resurrect NULL rows either.
-	if types.is_null(val) || types.is_null(target) { return false }
+	if types.is_null(val) || types.is_null(target) {
+		return false
+	}
 
 	cmp := compare_values(val, target)
 	#partial switch op {

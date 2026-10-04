@@ -79,7 +79,10 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 
 		st.root = updated_root
 		for def in table.indexes {
-			if def.root == 0 { continue }
+			if def.root == 0 {
+				continue
+			}
+
 			idx_tree := btree.init(database.pager, def.root)
 			vac_idx, vac_err := btree.text_tree_vacuum(&idx_tree)
 			if vac_err != .None {

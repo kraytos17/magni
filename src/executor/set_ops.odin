@@ -25,8 +25,6 @@ exec_select_data :: proc(
 		return exec_subquery_data(t, stmt, cache)
 	}
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
-		// Single-table aggregate/GROUP BY: route through exec_select_single_data
-		// which delegates aggregates to exec_select_aggregate_data.
 		return exec_select_single_data(t, stmt, cache)
 	}
 	if len(stmt.joins) > 0 {
@@ -65,10 +63,15 @@ union_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 		is_dup := false
 		if h, has := fp_buckets_probe(&index, fp); has {
 			for n := h; n != -1; n = index.next[n] {
-				if values_equal(r.values, a^[index.rows[n]].values) { is_dup = true; break }
+				if values_equal(r.values, a^[index.rows[n]].values) {
+					is_dup = true
+					break
+				}
 			}
 		}
-		if is_dup { continue }
+		if is_dup {
+			continue
+		}
 
 		append(a, r)
 		fp_buckets_add(&index, fp, len(a^) - 1)
@@ -116,10 +119,14 @@ intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	for ra in a {
 		fp := row_fingerprint(ra.values)
 		h, has := fp_buckets_probe(&seen_b, fp)
-		if !has { continue }
+		if !has {
+			continue
+		}
 		for n := h; n != -1; n = seen_b.next[n] {
 			bi := seen_b.rows[n]
-			if consumed[bi] { continue }
+			if consumed[bi] {
+				continue
+			}
 			if values_equal(ra.values, b[bi].values) {
 				consumed[bi] = true
 				append(&out, ra)
@@ -145,10 +152,15 @@ except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 		found := false
 		if h, has := fp_buckets_probe(&index, fp); has {
 			for n := h; n != -1; n = index.next[n] {
-				if values_equal(ra.values, b[index.rows[n]].values) { found = true; break }
+				if values_equal(ra.values, b[index.rows[n]].values) {
+					found = true
+					break
+				}
 			}
 		}
-		if !found { append(&out, ra) }
+		if !found {
+			append(&out, ra)
+		}
 	}
 	return dedup_rows(out[:])
 }
@@ -172,7 +184,9 @@ except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 		if h, has := fp_buckets_probe(&seen_b, fp); has {
 			for n := h; n != -1; n = seen_b.next[n] {
 				bi := seen_b.rows[n]
-				if consumed[bi] { continue }
+				if consumed[bi] {
+					continue
+				}
 				if values_equal(ra.values, b[bi].values) {
 					consumed[bi] = true
 					skipped = true
@@ -180,7 +194,9 @@ except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 				}
 			}
 		}
-		if !skipped { append(&out, ra) }
+		if !skipped {
+			append(&out, ra)
+		}
 	}
 	return out[:]
 }
@@ -218,7 +234,9 @@ exec_compound_data :: proc(
 	bool,
 ) {
 	acc_rows, acc_cols, ok := exec_select_data(t, compound.first^, cache)
-	if !ok { return nil, nil, false }
+	if !ok {
+		return nil, nil, false
+	}
 	// Precedence: INTERSECT binds tighter than UNION/EXCEPT; all are
 	// left-associative. Reduce in two phases:
 	//   Phase 1: evaluate each maximal run of consecutive INTERSECT ops into a
@@ -231,7 +249,6 @@ exec_compound_data :: proc(
 	segments := make([dynamic][dynamic]Row_Entry, context.temp_allocator)
 	segment_ops := make([dynamic]parser.Set_Op, context.temp_allocator) // op joining segment[i] to segment[i-1]
 	// Initialize segment 0 from the first SELECT.
-
 	seg0 := make([dynamic]Row_Entry, 0, len(acc_rows), context.temp_allocator)
 	append(&seg0, ..acc_rows)
 	append(&segments, seg0)
@@ -244,7 +261,9 @@ exec_compound_data :: proc(
 			compound.operands[i].select^,
 			cache,
 		)
-		if !other_ok { return nil, nil, false }
+		if !other_ok {
+			return nil, nil, false
+		}
 		// Set operations require equal column counts across operands.
 		if len(other_cols) != len(acc_cols) {
 			return nil, nil, false
@@ -257,6 +276,7 @@ exec_compound_data :: proc(
 			// First operand op is UNION/EXCEPT: start a new segment.
 			append(&segment_ops, op)
 			new_seg := make([dynamic]Row_Entry, 0, len(other_rows), context.temp_allocator)
+
 			append(&new_seg, ..other_rows)
 			append(&segments, new_seg)
 			i += 1
@@ -286,11 +306,15 @@ exec_compound_data :: proc(
 	// Compound-level ORDER BY / LIMIT / OFFSET.
 	if order_clause, has_o := compound.order_by.?; has_o && len(order_clause) > 0 {
 		range0 := []Table_Col_Range{{table_name = "", start_col = 0, col_count = len(acc_cols)}}
-		if !sort_rows(rows, order_clause, acc_cols, range0) { return nil, nil, false }
+		if !sort_rows(rows, order_clause, acc_cols, range0) {
+			return nil, nil, false
+		}
 	}
 	if limit, has_limit := compound.limit.?; has_limit {
 		off := u64(0)
-		if o, has_off := compound.offset.?; has_off { off = o }
+		if o, has_off := compound.offset.?; has_off {
+			off = o
+		}
 
 		start := int(min(off, u64(len(rows))))
 		end := int(min(off + limit, u64(len(rows))))
@@ -303,10 +327,14 @@ exec_compound_data :: proc(
 @(private = "file")
 exec_compound :: proc(t: ^btree.Tree, compound: parser.Compound_Stmt) -> bool {
 	rows, acc_cols, ok := exec_compound_data(t, compound)
-	if !ok { return false }
+	if !ok {
+		return false
+	}
 
 	col_names := make([]string, len(acc_cols), context.temp_allocator)
-	for c, i in acc_cols { col_names[i] = c.name }
+	for c, i in acc_cols {
+		col_names[i] = c.name
+	}
 
 	table_rows := make([][]string, len(rows), context.temp_allocator)
 	for r, ri in rows {

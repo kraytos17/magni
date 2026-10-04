@@ -198,7 +198,9 @@ rowid_shared_prefix_len :: #force_inline proc "contextless" (
 	}
 
 	n := 0
-	#no_bounds_check for n < cap && a[n] == b[n] { n += 1 }
+	#no_bounds_check for n < cap && a[n] == b[n] {
+		n += 1
+	}
 	return n
 }
 

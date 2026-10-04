@@ -19,7 +19,9 @@ find_existing_group :: proc(
 	bool,
 ) {
 	h, ok := fp_buckets_probe(buckets, hash)
-	if !ok { return -1, false }
+	if !ok {
+		return -1, false
+	}
 	for n := h; n != -1; n = buckets.next[n] {
 		gi := buckets.rows[n]
 		if values_equal_by_indices(row_entry.values, groups[gi].key_values, group_by_indices) {
@@ -57,7 +59,9 @@ build_groups :: proc(
 	// like unknown WHERE/GROUP BY columns — never silent NULLs. COUNT(*)
 	// takes no column and always resolves.
 	for agg in stmt.aggregates {
-		if agg.column == "" { continue }
+		if agg.column == "" {
+			continue
+		}
 		if _, col_ok := resolve(resolver, agg.column); !col_ok {
 			log.errorf("Error: Unknown column in aggregate: %s", agg.column)
 			return nil, nil, false
@@ -118,12 +122,16 @@ exec_select_aggregate_data :: proc(
 	bool,
 ) {
 	groups, group_by_indices, g_ok := build_groups(stmt, rows, combined_cols, table_ranges)
-	if !g_ok { return nil, nil, false }
+	if !g_ok {
+		return nil, nil, false
+	}
 
 	result := make([dynamic]Row_Entry, context.temp_allocator)
 	for gi in 0 ..< len(groups) {
 		group_rows := make([][]types.Value, len(groups[gi].rows), context.temp_allocator)
-		for row_entry, ri in groups[gi].rows { group_rows[ri] = row_entry.values }
+		for row_entry, ri in groups[gi].rows {
+			group_rows[ri] = row_entry.values
+		}
 
 		agg_vals := compute_aggregates(
 			group_rows,
@@ -147,14 +155,18 @@ exec_select_aggregate_data :: proc(
 			agg_vals,
 			len(group_by_indices),
 		)
-		if !proj_ok { return nil, nil, false }
+		if !proj_ok {
+			return nil, nil, false
+		}
 		append(&result, Row_Entry{rowid = types.Row_ID(gi), values = out})
 	}
 
 	cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 	for name, i in stmt.columns {
 		display := name
-		if i < len(stmt.aliases) && stmt.aliases[i] != "" { display = stmt.aliases[i] }
+		if i < len(stmt.aliases) && stmt.aliases[i] != "" {
+			display = stmt.aliases[i]
+		}
 
 		col_type := types.Column_Type.INTEGER
 		if len(stmt.col_kinds) == len(stmt.columns) &&
@@ -163,6 +175,7 @@ exec_select_aggregate_data :: proc(
 		   stmt.col_literal_idx[i] < len(stmt.literal_values) {
 			col_type = literal_column_type(stmt.literal_values[stmt.col_literal_idx[i]])
 		}
+
 		cols[i] = types.Column {
 			name = display,
 			type = col_type,
@@ -210,7 +223,9 @@ project_group_row :: proc(
 				out[i] = stmt.literal_values[li]
 				continue
 			case .AGGREGATE:
-				if cur.agg >= len(agg_vals) { return nil, mix_error(stmt.columns[i]) }
+				if cur.agg >= len(agg_vals) {
+					return nil, mix_error(stmt.columns[i])
+				}
 
 				out[i] = agg_vals[cur.agg]
 				cur.agg += 1
@@ -273,33 +288,58 @@ group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
 @(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
 @(private)
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
-	if types.is_null(a) && types.is_null(b) { return 0 }
-	if types.is_null(a) { return -1 }
-	if types.is_null(b) { return 1 }
+	if types.is_null(a) && types.is_null(b) {
+		return 0
+	}
+	if types.is_null(a) {
+		return -1
+	}
+	if types.is_null(b) {
+		return 1
+	}
 
 	ra, rb := value_rank(a), value_rank(b)
-	if ra != rb { return -1 if ra < rb else 1 }
+	if ra != rb {
+		return -1 if ra < rb else 1
+	}
+
 	#partial switch va in a {
 	case i64:
 		#partial switch vb in b {
 		case i64:
-			if va < vb { return -1 }
-			if va > vb { return 1 }
+			if va < vb {
+				return -1
+			}
+			if va > vb {
+				return 1
+			}
 			return 0
 		case f64:
-			if f64(va) < vb { return -1 }
-			if f64(va) > vb { return 1 }
+			if f64(va) < vb {
+				return -1
+			}
+			if f64(va) > vb {
+				return 1
+			}
 			return 0
 		}
 	case f64:
 		#partial switch vb in b {
 		case f64:
-			if va < vb { return -1 }
-			if va > vb { return 1 }
+			if va < vb {
+				return -1
+			}
+			if va > vb {
+				return 1
+			}
 			return 0
 		case i64:
-			if va < f64(vb) { return -1 }
-			if va > f64(vb) { return 1 }
+			if va < f64(vb) {
+				return -1
+			}
+			if va > f64(vb) {
+				return 1
+			}
 			return 0
 		}
 	case string:
@@ -319,10 +359,18 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 // variant without ever equating distinct classes.
 @(private = "file")
 value_rank :: proc(v: types.Value) -> int {
-	if _, ok := v.(i64); ok { return 0 }
-	if _, ok := v.(f64); ok { return 0 }
-	if _, ok := v.(string); ok { return 1 }
-	if _, ok := v.([]u8); ok { return 2 }
+	if _, ok := v.(i64); ok {
+		return 0
+	}
+	if _, ok := v.(f64); ok {
+		return 0
+	}
+	if _, ok := v.(string); ok {
+		return 1
+	}
+	if _, ok := v.([]u8); ok {
+		return 2
+	}
 	return 3
 }
 
@@ -367,10 +415,14 @@ resolve_agg_input :: proc(
 	agg: parser.Aggregate_Expr,
 	columns: []types.Column,
 ) -> Agg_Input {
-	if agg.column == "" { return {rows, -1} }
+	if agg.column == "" {
+		return {rows, -1}
+	}
 
 	idx, found := schema.find_column_index(columns, agg.column)
-	if !found { idx = -1 }
+	if !found {
+		idx = -1
+	}
 	return {rows, idx}
 }
 
@@ -480,7 +532,9 @@ evaluate_where_having :: proc(
 	group_cols: []string,
 	aggregates: []parser.Aggregate_Expr,
 ) -> bool {
-	if clause.root == nil { return true }
+	if clause.root == nil {
+		return true
+	}
 	return evaluate_having_node(clause.root, group_keys, agg_values, group_cols, aggregates)
 }
 
@@ -594,7 +648,9 @@ evaluate_having_condition :: proc(
 		   ok {
 			cond_result = types.is_null(v)
 		}
-		if cond.negated { cond_result = !cond_result }
+		if cond.negated {
+			cond_result = !cond_result
+		}
 		return cond_result
 	}
 
@@ -613,6 +669,8 @@ evaluate_having_condition :: proc(
 			cond_result = compare_condition(v, cond.operator, rhs_val)
 		}
 	}
-	if cond.negated { cond_result = !cond_result }
+	if cond.negated {
+		cond_result = !cond_result
+	}
 	return cond_result
 }

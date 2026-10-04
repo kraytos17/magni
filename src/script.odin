@@ -45,14 +45,22 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 		line_end := len(sql) if j < 0 else i + j
 		line := strings.trim_space(sql[i:line_end])
 		if len(line) > 1 && line[0] == '.' {
-			if !execute_sql_chunk(database, sql[seg:i], stop_on_error) { ok = false }
-			if handle_dot_command(database, line) { return ok }
+			if !execute_sql_chunk(database, sql[seg:i], stop_on_error) {
+				ok = false
+			}
+			if handle_dot_command(database, line) {
+				return ok
+			}
 			seg = len(sql) if j < 0 else line_end + 1
 		}
-		if j < 0 { break }
+		if j < 0 {
+			break
+		}
 		i = line_end + 1
 	}
-	if !execute_sql_chunk(database, sql[seg:], stop_on_error) { ok = false }
+	if !execute_sql_chunk(database, sql[seg:], stop_on_error) {
+		ok = false
+	}
 	return ok
 }
 

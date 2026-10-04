@@ -137,9 +137,12 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 	}
 
 	db.pager = p
-	if cfg.snapshot_batch_threshold >
-	   0 { db.snapshot_batch_threshold = cfg.snapshot_batch_threshold }
-	if cfg.wal_size_threshold > 0 { db.wal_size_threshold = cfg.wal_size_threshold }
+	if cfg.snapshot_batch_threshold > 0 {
+		db.snapshot_batch_threshold = cfg.snapshot_batch_threshold
+	}
+	if cfg.wal_size_threshold > 0 {
+		db.wal_size_threshold = cfg.wal_size_threshold
+	}
 
 	db.is_new = (db.pager.file_len == 0)
 	db.txn_state = .None
@@ -167,8 +170,12 @@ open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 // On any failure the caller closes db and propagates the error.
 @(private = "file")
 load_existing :: proc(db: ^Database) -> DB_Error {
-	if v_err := verify_header(db); v_err != .None { return v_err }
-	if h_err := load_header_fields(db); h_err != .None { return h_err }
+	if v_err := verify_header(db); v_err != .None {
+		return v_err
+	}
+	if h_err := load_header_fields(db); h_err != .None {
+		return h_err
+	}
 	return rebuild_snapshot_index(db)
 }
 
@@ -177,7 +184,9 @@ load_existing :: proc(db: ^Database) -> DB_Error {
 @(private = "file")
 load_header_fields :: proc(db: ^Database) -> DB_Error {
 	page1, h_err := pager.get_page(db.pager, 1)
-	if h_err != .None { return .IO_Error }
+	if h_err != .None {
+		return .IO_Error
+	}
 
 	header := (^Header)(raw_data(page1.data))
 	db.schema_root_page = u32(header.schema_root_page)
@@ -198,7 +207,9 @@ load_header_fields :: proc(db: ^Database) -> DB_Error {
 
 	db.refs_page = u32(header.refs_page)
 	pfv := u32(header.page_format_version)
-	if pfv == 0 { pfv = u32(header.schema_version) }
+	if pfv == 0 {
+		pfv = u32(header.schema_version)
+	}
 	if pfv != u32(types.PAGE_FORMAT_VERSION) {
 		pager.unpin_page(db.pager, 1)
 		return .Unsupported_Format
@@ -218,7 +229,9 @@ rebuild_snapshot_index :: proc(db: ^Database) -> DB_Error {
 	page := db.latest_snapshot
 	for page != 0 {
 		pg, pg_err := pager.get_page(db.pager, page)
-		if pg_err != .None { break }
+		if pg_err != .None {
+			break
+		}
 
 		next_page: u32
 		if headers := snapshot.headers_on_page(pg.data); headers != nil {
@@ -258,7 +271,10 @@ maybe_auto_checkpoint :: proc(db: ^Database) {
 }
 
 close :: proc(db: ^Database) {
-	if db == nil { return }
+	if db == nil {
+		return
+	}
+
 	sync.rw_mutex_lock(&db.mu)
 	// NOTE: explicit unlock before free at the end (not defer): the mutex
 	// lives inside db, so unlocking after free(db) is heap-use-after-free.
@@ -332,9 +348,11 @@ initialize :: proc(db: ^Database) -> DB_Error {
 
 verify_header :: proc(db: ^Database) -> DB_Error {
 	page, err := pager.get_page(db.pager, 1)
-	if err != .None { return .IO_Error }
-	defer pager.unpin_page(db.pager, 1)
+	if err != .None {
+		return .IO_Error
+	}
 
+	defer pager.unpin_page(db.pager, 1)
 	header := (^Header)(raw_data(page.data))
 	if string(header.magic[:len(types.MAGIC_STRING)]) != types.MAGIC_STRING {
 		return .Corrupted
@@ -367,7 +385,9 @@ wal_update_header :: proc(db: ^Database) {
 
 update_header :: proc(db: ^Database) {
 	page1, err := pager.get_page(db.pager, 1)
-	if err != .None { return }
+	if err != .None {
+		return
+	}
 	defer pager.unpin_page(db.pager, 1)
 
 	header := (^Header)(raw_data(page1.data))

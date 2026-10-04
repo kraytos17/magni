@@ -53,7 +53,9 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		maybe_snapshot(db, stmt, ctx)
 	}
 	if exec_ok {
-		if result.is_select { executor.render_result(result) }
+		if result.is_select {
+			executor.render_result(result)
+		}
 		return .None
 	}
 	return .IO_Error
@@ -74,7 +76,10 @@ Exec_Ctx :: struct {
 // statements resolve the new structure.
 @(private = "file")
 stmt_defers_root :: proc(db: ^Database, stmt: parser.Statement) -> bool {
-	if db.txn_state != .Active { return false }
+	if db.txn_state != .Active {
+		return false
+	}
+
 	_, is_ins := stmt.type.(parser.Insert_Stmt)
 	_, is_upd := stmt.type.(parser.Update_Stmt)
 	_, is_del := stmt.type.(parser.Delete_Stmt)
@@ -94,7 +99,9 @@ stmt_is_read :: proc(stmt: parser.Statement) -> bool {
 @(private = "file")
 dispatch_txn :: proc(db: ^Database, stmt: parser.Statement) -> (bool, DB_Error) {
 	txn_stmt, is_txn := stmt.type.(parser.Txn_Stmt)
-	if !is_txn { return false, .None }
+	if !is_txn {
+		return false, .None
+	}
 
 	switch txn_stmt.op {
 	case .BEGIN:
@@ -136,11 +143,15 @@ snapshot_op :: proc(stmt: parser.Statement) -> snapshot.Snapshot_Operation {
 // No-op inside transactions or under AS OF (mirrors the inline guards).
 @(private = "file")
 maybe_snapshot :: proc(db: ^Database, stmt: parser.Statement, ctx: Exec_Ctx) {
-	if db.txn_state != .None || ctx.as_of_override { return }
+	if db.txn_state != .None || ctx.as_of_override {
+		return
+	}
 
 	db.snapshot_batch_count += 1
 	threshold := db.snapshot_batch_threshold
-	if threshold <= 0 { threshold = 1 }
+	if threshold <= 0 {
+		threshold = 1
+	}
 
 	make_snapshot := db.snapshot_batch_count >= threshold
 	if make_snapshot {
@@ -166,7 +177,10 @@ Query_Result :: struct {
 
 query :: proc(db: ^Database, sql: string) -> Query_Result {
 	r := Query_Result{}
-	if err := db_check(db); err != .None { r.err = err; return r }
+	if err := db_check(db); err != .None {
+		r.err = err
+		return r
+	}
 
 	sync.rw_mutex_shared_lock(&db.mu)
 	defer sync.rw_mutex_shared_unlock(&db.mu)
@@ -258,7 +272,9 @@ pack_query_result :: proc(rows: []executor.Row_Entry, cols: []types.Column) -> Q
 	}
 
 	flat_rows := make([][]types.Value, len(rows), context.temp_allocator)
-	for entry, i in rows { flat_rows[i] = entry.values }
+	for entry, i in rows {
+		flat_rows[i] = entry.values
+	}
 	return Query_Result {
 		columns = col_names,
 		col_types = col_types,

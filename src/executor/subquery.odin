@@ -16,7 +16,9 @@ exec_subquery :: proc(
 	[]types.Column,
 ) {
 	tbl_name, name_ok := stmt.from.(string)
-	if !name_ok { return nil, nil }
+	if !name_ok {
+		return nil, nil
+	}
 
 	table, found := schema.find_table_cached(t, tbl_name, cache)
 	if !found {
@@ -26,7 +28,9 @@ exec_subquery :: proc(
 
 	table_tree := btree.init(t.pager, table.root_page)
 	rows, scan_err := scan_table(&table_tree, table, nil, nil, t, context.temp_allocator, cache)
-	if scan_err { return nil, nil }
+	if scan_err {
+		return nil, nil
+	}
 	if where_clause, has_where := stmt.where_clause.?; has_where {
 		rows = filter_rows(
 			rows,
@@ -45,7 +49,9 @@ exec_subquery :: proc(
 		col_indices := make([]int, len(stmt.columns), context.temp_allocator)
 		for req_col, i in stmt.columns {
 			idx, ok := schema.find_column_index(table.columns, req_col)
-			if !ok { return nil, nil }
+			if !ok {
+				return nil, nil
+			}
 			col_indices[i] = idx
 		}
 
@@ -87,7 +93,6 @@ materialize_subquery_rows :: proc(
 ) {
 	rows = make([dynamic]Row_Entry, 0, len(inner_rows), context.temp_allocator)
 	append(&rows, ..inner_rows)
-
 	alias := stmt.from_alias
 	// NOTE: built with explicit make, not a []Table_Col_Range{...} literal:
 	// slice-of-struct literals with runtime fields miscompile on odin
@@ -98,6 +103,7 @@ materialize_subquery_rows :: proc(
 		start_col  = 0,
 		col_count  = len(virtual_cols),
 	}
+
 	sr := make([]Table_Col_Range, 1, context.temp_allocator)
 	sr[0] = tr
 	if where_clause, has_where := stmt.where_clause.?; has_where {
@@ -121,10 +127,14 @@ exec_subquery_data :: proc(
 	bool,
 ) {
 	subq, subq_ok := stmt.from.(^parser.Select_Stmt)
-	if !subq_ok { return nil, nil, false }
+	if !subq_ok {
+		return nil, nil, false
+	}
 
 	inner_rows, virtual_cols := exec_subquery(t, subq^, cache)
-	if inner_rows == nil { return nil, nil, false }
+	if inner_rows == nil {
+		return nil, nil, false
+	}
 
 	rows, single_range := materialize_subquery_rows(inner_rows, virtual_cols, stmt)
 	display_indices, ok := build_display_indices(
@@ -132,8 +142,9 @@ exec_subquery_data :: proc(
 		build_column_resolver(virtual_cols, single_range),
 		len(virtual_cols),
 	)
-
-	if !ok { return nil, nil, false }
+	if !ok {
+		return nil, nil, false
+	}
 	// Sort on the full rows (so ORDER BY names outside the projected
 	// columns resolve), then project — same order as exec_select_join_data.
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
@@ -146,18 +157,26 @@ exec_subquery_data :: proc(
 	proj_rows := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
 	for entry in rows {
 		proj_vals := make([]types.Value, len(display_indices), context.temp_allocator)
-		for idx, i in display_indices { proj_vals[i] = entry.values[idx] }
+		for idx, i in display_indices {
+			proj_vals[i] = entry.values[idx]
+		}
 		append(&proj_rows, Row_Entry{entry.rowid, proj_vals})
 	}
 
 	proj_cols := make([]types.Column, len(display_indices), context.temp_allocator)
-	for idx, i in display_indices { proj_cols[i] = virtual_cols[idx] }
+	for idx, i in display_indices {
+		proj_cols[i] = virtual_cols[idx]
+	}
 
 	out := proj_rows[:]
-	if stmt.is_distinct { out = dedup_rows(out) }
+	if stmt.is_distinct {
+		out = dedup_rows(out)
+	}
 	if limit, has_limit := stmt.limit.?; has_limit {
 		off := u64(0)
-		if o, has_off := stmt.offset.?; has_off { off = o }
+		if o, has_off := stmt.offset.?; has_off {
+			off = o
+		}
 
 		start := int(min(off, u64(len(out))))
 		end := int(min(off + limit, u64(len(out))))

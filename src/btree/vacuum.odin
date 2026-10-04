@@ -30,7 +30,9 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 	}
 	if len(handles) == 0 {
 		page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None { return 0, .Page_Full }
+		if a_err != .None {
+			return 0, .Page_Full
+		}
 		if !init_slot_leaf_page(page.data, page.page_num) {
 			pager.unpin_page(t.pager, page.page_num)
 			return 0, .Invalid_Page_Header
@@ -75,7 +77,9 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 
 			append(&cchildren, level[e].id)
 			page, a_err := pager.allocate_page(t.pager)
-			if a_err != .None { return 0, .Page_Full }
+			if a_err != .None {
+				return 0, .Page_Full
+			}
 			if b_err := dense_build_from_sorted(
 				page.data,
 				Page_Id(page.page_num),
@@ -121,7 +125,9 @@ vacuum_ctx :: struct {
 @(private)
 vacuum_collect_cb :: proc(c: ^cell.Cell, ud: rawptr) -> bool {
 	vc := cast(^vacuum_ctx)ud
-	if vc.failed { return false }
+	if vc.failed {
+		return false
+	}
 	if vc.leaf_empty {
 		if v_err := vacuum_start_leaf(vc); v_err != .None {
 			vc.failed = true
@@ -153,7 +159,9 @@ vacuum_collect_cb :: proc(c: ^cell.Cell, ud: rawptr) -> bool {
 @(private)
 vacuum_start_leaf :: proc(vc: ^vacuum_ctx) -> Error {
 	page, a_err := pager.allocate_page(vc.t.pager)
-	if a_err != .None { return .Page_Full }
+	if a_err != .None {
+		return .Page_Full
+	}
 	if !init_slot_leaf_page(page.data, page.page_num) {
 		pager.unpin_page(vc.t.pager, page.page_num)
 		return .Invalid_Page_Header
@@ -178,7 +186,9 @@ vacuum_start_leaf :: proc(vc: ^vacuum_ctx) -> Error {
 
 @(private)
 vacuum_finish_leaf :: proc(vc: ^vacuum_ctx) -> Error {
-	if vc.leaf_empty { return .None }
+	if vc.leaf_empty {
+		return .None
+	}
 
 	append(vc.handles, Node_Handle{id = vc.leaf.id, max_key = vc.leaf_max})
 	pager.unpin_page(vc.t.pager, vc.leaf.id)
@@ -205,18 +215,27 @@ text_vacuum_collect :: proc(
 	rids: ^[dynamic]types.Row_ID,
 ) -> Error {
 	node, n_err := load_node(t, page_id)
-	if n_err != .None { return n_err }
-	defer unpin_node(t, node)
+	if n_err != .None {
+		return n_err
+	}
 
+	defer unpin_node(t, node)
 	if is_leaf(node) {
-		if node.header.page_type != .LEAF_TEXT { return .Invalid_Page_Header }
+		if node.header.page_type != .LEAF_TEXT {
+			return .Invalid_Page_Header
+		}
+
 		prefix, p_err := text_prefix(node.data, Page_Id(node.id))
-		if p_err != .None { return p_err }
+		if p_err != .None {
+			return p_err
+		}
 
 		count := int(node.header.cell_count)
 		for i in 0 ..< count {
 			suf, rid, k_err := text_entry_at(node.data, Page_Id(node.id), i)
-			if k_err != .None { return k_err }
+			if k_err != .None {
+				return k_err
+			}
 
 			full := make([]u8, len(prefix) + len(suf), context.temp_allocator)
 			copy(full, prefix)
@@ -226,12 +245,16 @@ text_vacuum_collect :: proc(
 		}
 		return .None
 	}
-	if node.header.page_type != .TEXT_INTERIOR { return .Invalid_Page_Header }
+	if node.header.page_type != .TEXT_INTERIOR {
+		return .Invalid_Page_Header
+	}
 
 	n := get_cell_count(node.data, node.id)
 	for i in 0 ..< n + 1 {
 		child, c_err := text_interior_child_at(node.data, Page_Id(node.id), i)
-		if c_err != .None { return c_err }
+		if c_err != .None {
+			return c_err
+		}
 		if r_err := text_vacuum_collect(t, child, texts, rids); r_err != .None {
 			return r_err
 		}
@@ -268,7 +291,9 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 	n := len(texts)
 	if n == 0 {
 		page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None { return 0, .Page_Full }
+		if a_err != .None {
+			return 0, .Page_Full
+		}
 		if !init_text_leaf_page(page.data, page.page_num) {
 			pager.unpin_page(t.pager, page.page_num)
 			return 0, .Invalid_Page_Header
@@ -287,12 +312,16 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 		e := i
 		for e + 1 < n {
 			total, _ := text_leaf_chunk_bytes(texts[:], i, e + 2)
-			if total > PAGE_SIZE { break }
+			if total > PAGE_SIZE {
+				break
+			}
 			e += 1
 		}
 
 		page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None { return 0, .Page_Full }
+		if a_err != .None {
+			return 0, .Page_Full
+		}
 		if b_err := text_build_from_sorted(
 			page.data,
 			Page_Id(page.page_num),
@@ -329,8 +358,12 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 				// Try extending to hi+1: children [lo..hi+1].
 				m := (hi + 2) - lo
 				total := 8 + m * 4 + (m - 1) * 4
-				for k in lo ..< hi + 1 { total += len(level[k].max_key) }
-				if total > PAGE_SIZE { break }
+				for k in lo ..< hi + 1 {
+					total += len(level[k].max_key)
+				}
+				if total > PAGE_SIZE {
+					break
+				}
 				hi += 1
 			}
 
@@ -344,7 +377,9 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 			}
 
 			page, a_err := pager.allocate_page(t.pager)
-			if a_err != .None { return 0, .Page_Full }
+			if a_err != .None {
+				return 0, .Page_Full
+			}
 			if b_err := text_interior_build_from_sorted(
 				page.data,
 				Page_Id(page.page_num),

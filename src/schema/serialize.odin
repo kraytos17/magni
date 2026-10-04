@@ -41,16 +41,23 @@ serialize_columns_to_blob :: proc(
 	blob[offset] = COL_BLOB_MARKER; offset += 1
 	blob[offset] = COL_BLOB_VERSION; offset += 1
 	offset += varint.encode(blob[offset:], u64(len(columns)))
-
 	for col in columns {
 		offset += varint.encode(blob[offset:], u64(len(col.name)))
 		copy(blob[offset:], col.name); offset += len(col.name)
 
 		packed: u8 = u8(col.type)
-		if col.not_null { packed |= 0x08 }
-		if col.pk { packed |= 0x10 }
-		if _, has := col.check_expr.?; has { packed |= 0x20 }
-		if _, has := col.default_value.?; has { packed |= 0x40 }
+		if col.not_null {
+			packed |= 0x08
+		}
+		if col.pk {
+			packed |= 0x10
+		}
+		if _, has := col.check_expr.?; has {
+			packed |= 0x20
+		}
+		if _, has := col.default_value.?; has {
+			packed |= 0x40
+		}
 
 		blob[offset] = packed; offset += 1
 		if def, ok := col.default_value.?; ok {
@@ -65,21 +72,31 @@ serialize_columns_to_blob :: proc(
 }
 
 deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
-	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER { return nil }
-	if blob[1] != COL_BLOB_VERSION { return nil }
+	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER {
+		return nil
+	}
+	if blob[1] != COL_BLOB_VERSION {
+		return nil
+	}
 
 	offset := 2
 	count, _, cnt_ok := varint.decode(blob, offset)
-	if !cnt_ok || count == 0 { return nil }
+	if !cnt_ok || count == 0 {
+		return nil
+	}
 
 	offset += varint.size(count)
 	cols := make([dynamic]types.Column, 0, int(count), allocator)
 	for _ in 0 ..< count {
 		name_len, _, name_ok := varint.decode(blob, offset)
-		if !name_ok || name_len == 0 { return nil }
+		if !name_ok || name_len == 0 {
+			return nil
+		}
 
 		offset += varint.size(name_len)
-		if offset + int(name_len) + 1 > len(blob) { return nil }
+		if offset + int(name_len) + 1 > len(blob) {
+			return nil
+		}
 
 		name_str := string(blob[offset:offset + int(name_len)])
 		offset += int(name_len)
@@ -94,15 +111,21 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 
 		if (packed & 0x40) != 0 {
 			def_val, def_ok := deserialize_value_from_blob(blob, &offset, allocator)
-			if !def_ok { return nil }
+			if !def_ok {
+				return nil
+			}
 			col.default_value = def_val
 		}
 		if (packed & 0x20) != 0 {
 			chk_len, _, chk_ok := varint.decode(blob, offset)
-			if !chk_ok || chk_len == 0 { return nil }
+			if !chk_ok || chk_len == 0 {
+				return nil
+			}
 
 			offset += varint.size(chk_len)
-			if offset + int(chk_len) > len(blob) { return nil }
+			if offset + int(chk_len) > len(blob) {
+				return nil
+			}
 
 			col.check_expr = strings.clone(string(blob[offset:offset + int(chk_len)]), allocator)
 			offset += int(chk_len)
@@ -158,7 +181,9 @@ deserialize_value_from_blob :: proc(
 	types.Value,
 	bool,
 ) {
-	if offset^ >= len(src) { return {}, false }
+	if offset^ >= len(src) {
+		return {}, false
+	}
 
 	type_byte := src[offset^]
 	offset^ += 1
@@ -166,33 +191,45 @@ deserialize_value_from_blob :: proc(
 	case 0:
 		return types.value_null(), true
 	case 1:
-		if offset^ + 8 > len(src) { return {}, false }
+		if offset^ + 8 > len(src) {
+			return {}, false
+		}
 
 		val, _ := endian.get_u64(src[offset^:], .Little)
 		offset^ += 8
 		return types.value_int(i64(val)), true
 	case 2:
-		if offset^ + 8 > len(src) { return {}, false }
+		if offset^ + 8 > len(src) {
+			return {}, false
+		}
 
 		val, _ := endian.get_f64(src[offset^:], .Big)
 		offset^ += 8
 		return types.value_real(val), true
 	case 3:
-		if offset^ + 4 > len(src) { return {}, false }
+		if offset^ + 4 > len(src) {
+			return {}, false
+		}
 
 		len_val, _ := endian.get_u32(src[offset^:], .Little)
 		offset^ += 4
-		if offset^ + int(len_val) > len(src) { return {}, false }
+		if offset^ + int(len_val) > len(src) {
+			return {}, false
+		}
 
 		str_val := string(src[offset^:offset^ + int(len_val)])
 		offset^ += int(len_val)
 		return types.value_text(strings.clone(str_val, allocator)), true
 	case 4:
-		if offset^ + 4 > len(src) { return {}, false }
+		if offset^ + 4 > len(src) {
+			return {}, false
+		}
 
 		len_val, _ := endian.get_u32(src[offset^:], .Little)
 		offset^ += 4
-		if offset^ + int(len_val) > len(src) { return {}, false }
+		if offset^ + int(len_val) > len(src) {
+			return {}, false
+		}
 
 		blob := make([]u8, int(len_val), allocator)
 		copy(blob, src[offset^:offset^ + int(len_val)])

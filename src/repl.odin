@@ -80,7 +80,9 @@ repl :: proc(database: ^db.Database) {
 		}
 		if strings.builder_len(query_buffer) == 0 && strings.has_prefix(trimmed, ".") {
 			linedit.history_add(&ed.history, trimmed)
-			if handle_dot_command(database, trimmed) { break }
+			if handle_dot_command(database, trimmed) {
+				break
+			}
 			continue
 		}
 
@@ -125,9 +127,13 @@ repl_fallback :: proc(database: ^db.Database) {
 		}
 
 		trimmed := strings.trim_space(line)
-		if len(trimmed) == 0 { continue }
+		if len(trimmed) == 0 {
+			continue
+		}
 		if strings.builder_len(query_buffer) == 0 && strings.has_prefix(trimmed, ".") {
-			if handle_dot_command(database, trimmed) { break }
+			if handle_dot_command(database, trimmed) {
+				break
+			}
 			continue
 		}
 
@@ -228,7 +234,10 @@ dot_parts :: proc(args: string) -> []string {
 // dot args (expire keep stays i64: it must SEE negatives to clamp them).
 @(private = "file")
 dot_uint_arg :: proc(parts: []string, idx: int) -> (u64, bool) {
-	if len(parts) <= idx { return 0, false }
+	if len(parts) <= idx {
+		return 0, false
+	}
+
 	v, ok := strconv.parse_u64(parts[idx])
 	return v, ok
 }
@@ -431,7 +440,9 @@ dot_cmd_expire :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 	parts := dot_parts(args)
 	keep := db.DEFAULT_KEEP
 	if len(parts) >= 2 {
-		if v, ok := strconv.parse_i64(parts[1]); ok { keep = int(v) }
+		if v, ok := strconv.parse_i64(parts[1]); ok {
+			keep = int(v)
+		}
 	}
 
 	db.expire_snapshots(database, keep)

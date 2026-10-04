@@ -18,10 +18,14 @@ row_fingerprint :: proc(values: []types.Value) -> u64 {
 // Callers verify index hits exactly: fingerprints can collide.
 @(private)
 build_fp_index :: proc(vals: []types.Value, allocator := context.temp_allocator) -> []u64 {
-	if len(vals) == 0 { return nil }
+	if len(vals) == 0 {
+		return nil
+	}
 
 	fps := make([]u64, len(vals), allocator)
-	for v, i in vals { fps[i] = hash_value(v) }
+	for v, i in vals {
+		fps[i] = hash_value(v)
+	}
 
 	slice.sort(fps)
 	return fps
@@ -31,14 +35,18 @@ build_fp_index :: proc(vals: []types.Value, allocator := context.temp_allocator)
 // (e.g. hand-built nodes) hits everything, falling back to the linear scan.
 @(private)
 fp_index_hit :: proc(fps: []u64, fp: u64) -> bool {
-	if len(fps) == 0 { return true }
+	if len(fps) == 0 {
+		return true
+	}
 
 	_, found := slice.binary_search(fps, fp)
 	return found
 }
 
 dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
-	if len(rows) <= 1 { return rows }
+	if len(rows) <= 1 {
+		return rows
+	}
 
 	seen := fp_buckets_make(len(rows), context.temp_allocator)
 	result := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
@@ -71,9 +79,13 @@ sort_rows :: proc(
 ) -> bool {
 	resolver := build_column_resolver(cols, table_ranges)
 	sort_indices, r_ok := resolve_sort_indices(order_clause, resolver)
-	if !r_ok { return false }
+	if !r_ok {
+		return false
+	}
 	if len(order_clause) == 1 && len(rows) > 1 {
-		if sort_rows_int_fast(rows, order_clause[0], sort_indices[0]) { return true }
+		if sort_rows_int_fast(rows, order_clause[0], sort_indices[0]) {
+			return true
+		}
 	}
 
 	sort_ctx := Sort_Ctx{order_clause, sort_indices}
@@ -92,7 +104,9 @@ sort_rows :: proc(
 
 				cmp := compare_values(a.values[sort_idx], b.values[sort_idx])
 				if cmp != 0 {
-					if ctx.order_clause[i].desc { return cmp > 0 }
+					if ctx.order_clause[i].desc {
+						return cmp > 0
+					}
 					return cmp < 0
 				}
 			}
@@ -137,16 +151,22 @@ sort_rows_int_fast :: proc(
 	keys := make([]i64, len(rows), context.temp_allocator)
 	for row, i in rows {
 		iv, ok := row.values[sort_idx].(i64)
-		if !ok { return false }
+		if !ok {
+			return false
+		}
 		keys[i] = iv
 	}
 
 	desc := order.desc
 	nulls_first := order.nulls_first
-	if !nulls_first { nulls_first = desc }
+	if !nulls_first {
+		nulls_first = desc
+	}
 
 	idx := make([]int, len(rows), context.temp_allocator)
-	for i in 0 ..< len(rows) { idx[i] = i }
+	for i in 0 ..< len(rows) {
+		idx[i] = i
+	}
 
 	slice.sort_by_with_data(idx, proc(a, b: int, data: rawptr) -> bool {
 			k := (^[]i64)(data)
@@ -157,7 +177,9 @@ sort_rows_int_fast :: proc(
 	for pi, i in idx {
 		sorted[i] = rows[pi]
 	}
-	if desc || nulls_first { slice.reverse(sorted) }
+	if desc || nulls_first {
+		slice.reverse(sorted)
+	}
 
 	copy(rows, sorted)
 	return true

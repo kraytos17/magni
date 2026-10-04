@@ -8,7 +8,10 @@ encode :: proc(dest: []u8, value: u64) -> int {
 	v := value
 	i := 0
 	for {
-		if i >= len(dest) { return 0 }
+		if i >= len(dest) {
+			return 0
+		}
+
 		b := u8(v & 0x7F)
 		v >>= 7
 		if v != 0 {
@@ -26,19 +29,33 @@ encode :: proc(dest: []u8, value: u64) -> int {
 // decode reads a LEB128 varint from src starting at offset. Returns the value,
 // the number of bytes consumed, and ok=false on truncated or malformed input.
 decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: int, ok: bool) {
-	if offset >= len(src) { return 0, 0, false }
-	shift: u32; pos := offset
+	if offset >= len(src) {
+		return 0, 0, false
+	}
+
+	shift: u32
+	pos := offset
 	for shift < 64 {
-		if pos >= len(src) { return 0, 0, false }
+		if pos >= len(src) {
+			return 0, 0, false
+		}
 
 		b: u64
-		#no_bounds_check { b = u64(src[pos]) }
-		pos += 1; bytes_read += 1
+		#no_bounds_check {
+			b = u64(src[pos])
+		}
+
+		pos += 1
+		bytes_read += 1
 		value |= (b & 0x7F) << shift
-		if (b & 0x80) == 0 { return value, bytes_read, true }
+		if (b & 0x80) == 0 {
+			return value, bytes_read, true
+		}
 
 		shift += 7
-		if bytes_read >= 9 { return 0, 0, false }
+		if bytes_read >= 9 {
+			return 0, 0, false
+		}
 	}
 	return 0, 0, false
 }

@@ -38,9 +38,11 @@ schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator)
 	// swaps persist; the skip slot is emitted explicitly, possibly 0, so
 	// positions never shift). Old 5/6/8/9-wide rows keep parsing (below).
 	k := len(r.indexes)
-	if r.skip_root > 0 || k > 0 { n += 1 }
-	n += 3 * k
+	if r.skip_root > 0 || k > 0 {
+		n += 1
+	}
 
+	n += 3 * k
 	result := make([]types.Value, n, allocator)
 	result[0] = types.value_int(0) // 0 = table
 	result[1] = types.value_text(r.name)
@@ -59,13 +61,19 @@ schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator)
 }
 
 schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
-	if len(values) < 5 { return {}, false }
+	if len(values) < 5 {
+		return {}, false
+	}
 
 	name, ok1 := values[1].(string)
-	if !ok1 { return {}, false }
+	if !ok1 {
+		return {}, false
+	}
 
 	kind_val, kind_ok := values[0].(i64)
-	if !kind_ok || kind_val != 0 { return {}, false }
+	if !kind_ok || kind_val != 0 {
+		return {}, false
+	}
 
 	sr := Schema_Row {
 		kind = "table",
@@ -75,13 +83,17 @@ schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 	root, ok2 := values[2].(i64)
 	sql, ok3 := values[3].(string)
 	blob, ok4 := values[4].([]u8)
-	if !ok2 || !ok3 || !ok4 { return {}, false }
+	if !ok2 || !ok3 || !ok4 {
+		return {}, false
+	}
 
 	sr.root_page = u32(root)
 	sr.sql = sql
 	sr.columns_blob = blob
 	if len(values) >= 6 {
-		if skip, ok5 := values[5].(i64); ok5 { sr.skip_root = u32(skip) }
+		if skip, ok5 := values[5].(i64); ok5 {
+			sr.skip_root = u32(skip)
+		}
 	}
 	// Triples from [6]: complete [root INT][column TEXT][name TEXT]
 	// groups only (trailing partials ignored, skip-style). Legacy
@@ -93,15 +105,24 @@ schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 		for i + 1 < len(values) {
 			iroot, rok := values[i].(i64)
 			col, cok := values[i + 1].(string)
-			if !rok || !cok { break }
+			if !rok || !cok {
+				break
+			}
+
 			iname := ""
 			if i + 2 < len(values) {
-				if nm, nok := values[i + 2].(string); nok { iname = nm } else { break }
+				if nm, nok := values[i + 2].(string); nok {
+					iname = nm
+				} else {
+					break
+				}
 			}
+
 			append(&triples, types.Index_Def{name = iname, column = col, root = u32(iroot)})
 			i += 3
-			// Legacy 8-wide has no name slot: exactly one triple.
-			if len(values) == 8 { break }
+			if len(values) == 8 {
+				break
+			}
 		}
 		sr.indexes = triples[:]
 	}
@@ -203,11 +224,15 @@ find_table :: proc(
 ) {
 	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
-	if err != .None { return {}, false }
+	if err != .None {
+		return {}, false
+	}
 	defer cell.destroy(&c, context.temp_allocator)
 
 	table, ok := table_from_values(c.values, allocator)
-	if !ok { return {}, false }
+	if !ok {
+		return {}, false
+	}
 	if table.name != table_name {
 		table_free(table, allocator)
 		return {}, false
@@ -272,7 +297,9 @@ find_table_cached :: proc(
 ) {
 	if cache == nil {
 		table, ok := find_table(t, table_name, context.temp_allocator)
-		if !ok { return nil, false }
+		if !ok {
+			return nil, false
+		}
 
 		tbl := new(types.Table, context.temp_allocator)
 		tbl^ = table
@@ -294,11 +321,15 @@ find_table_cached :: proc(
 
 	rowid := types.Row_ID(types.hash_string(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
-	if err != .None { return nil, false }
+	if err != .None {
+		return nil, false
+	}
 	defer cell.destroy(&c, context.temp_allocator)
 
 	table, ok := table_from_values(c.values, cache.allocator)
-	if !ok { return nil, false }
+	if !ok {
+		return nil, false
+	}
 	if table.name != table_name {
 		table_free(table, cache.allocator)
 		return nil, false
@@ -322,12 +353,17 @@ get_table :: proc(
 list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.Table {
 	tables := make([dynamic]types.Table, allocator)
 	cursor, err := btree.cursor_start(t, context.temp_allocator)
-	if err != .None { return nil }
+	if err != .None {
+		return nil
+	}
+
 	defer btree.cursor_destroy(&cursor)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err == .None {
-			if tbl, ok := table_from_values(c.values, allocator); ok { append(&tables, tbl) }
+			if tbl, ok := table_from_values(c.values, allocator); ok {
+				append(&tables, tbl)
+			}
 			cell.destroy(&c, context.temp_allocator)
 		}
 		btree.cursor_advance(&cursor)
@@ -370,7 +406,9 @@ table_from_values :: proc(
 	bool,
 ) {
 	sr, ok := schema_row_from_values(values)
-	if !ok { return {}, false }
+	if !ok {
+		return {}, false
+	}
 
 	table: types.Table
 	table.name = strings.clone(sr.name, allocator)
@@ -404,22 +442,30 @@ table_from_values :: proc(
 // resolution (not row loops).
 table_index :: proc(table: types.Table, index_name: string) -> (types.Index_Def, bool) {
 	for def in table.indexes {
-		if def.name == index_name { return def, true }
+		if def.name == index_name {
+			return def, true
+		}
 	}
 	return {}, false
 }
 
 table_free :: proc(table: types.Table, allocator := context.allocator) {
-	delete(table.name, allocator); delete(table.sql, allocator)
+	delete(table.name, allocator)
+	delete(table.sql, allocator)
 	for def in table.indexes {
 		delete(def.column, allocator)
 		delete(def.name, allocator)
 	}
+
 	delete(table.indexes, allocator)
 	for col in table.columns {
 		delete(col.name, allocator)
-		if def, ok := col.default_value.?; ok { types.value_delete(def, allocator) }
-		if chk, has := col.check_expr.?; has { delete(chk, allocator) }
+		if def, ok := col.default_value.?; ok {
+			types.value_delete(def, allocator)
+		}
+		if chk, has := col.check_expr.?; has {
+			delete(chk, allocator)
+		}
 	}
 	delete(table.columns, allocator)
 }
@@ -446,7 +492,6 @@ set_data_root :: proc(sr: ^Schema_Row, root: u32) { sr.root_page = root }
 
 @(private = "file")
 set_skip_root :: proc(sr: ^Schema_Row, root: u32) { sr.skip_root = root }
-
 
 // update_schema_root_cow is the shared core behind update_root_page_cow and
 // update_skip_root_cow: fetch the schema row, apply the field setter, and
@@ -547,15 +592,22 @@ update_index_def_cow :: proc(
 	replaced := false
 	for def in sr.indexes {
 		if def.name == index_name {
-			append(&defs, types.Index_Def{name = index_name, column = index_column, root = new_index_root})
+			append(
+				&defs,
+				types.Index_Def{name = index_name, column = index_column, root = new_index_root},
+			)
 			replaced = true
 		} else {
 			append(&defs, def)
 		}
 	}
 	if !replaced {
-		append(&defs, types.Index_Def{name = index_name, column = index_column, root = new_index_root})
+		append(
+			&defs,
+			types.Index_Def{name = index_name, column = index_column, root = new_index_root},
+		)
 	}
+
 	sr.indexes = defs[:]
 	values := schema_row_to_values(sr)
 	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
@@ -592,15 +644,21 @@ clear_index_def_cow :: proc(
 		log.errorf("[schema] clear_index_def_cow: decode failed for '%s'", table_name)
 		return t.root, false
 	}
+
 	defs := make([dynamic]types.Index_Def, 0, len(sr.indexes), context.temp_allocator)
 	dropped := false
 	for def in sr.indexes {
-		if def.name == index_name { dropped = true } else { append(&defs, def) }
+		if def.name == index_name {
+			dropped = true
+		} else {
+			append(&defs, def)
+		}
 	}
 	if !dropped {
 		log.errorf("[schema] clear_index_def_cow: no index '%s' on '%s'", index_name, table_name)
 		return t.root, false
 	}
+
 	sr.indexes = defs[:]
 	values := schema_row_to_values(sr)
 	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
@@ -656,11 +714,15 @@ update_index_root_cow :: proc(
 		log.errorf("[schema] update_index_root_cow: decode failed for '%s'", table_name)
 		return t.root, false
 	}
+
 	defs := make([dynamic]types.Index_Def, 0, len(sr.indexes), context.temp_allocator)
 	swapped := false
 	for def in sr.indexes {
 		if def.name == index_name {
-			append(&defs, types.Index_Def{name = def.name, column = def.column, root = new_index_root})
+			append(
+				&defs,
+				types.Index_Def{name = def.name, column = def.column, root = new_index_root},
+			)
 			swapped = true
 		} else {
 			append(&defs, def)
@@ -670,6 +732,7 @@ update_index_root_cow :: proc(
 		log.errorf("[schema] update_index_root_cow: no index '%s' on '%s'", index_name, table_name)
 		return t.root, false
 	}
+
 	sr.indexes = defs[:]
 	values := schema_row_to_values(sr)
 	upd_root, upd_err := btree.tree_update_cow(t, rowid, values)
@@ -681,15 +744,21 @@ update_index_root_cow :: proc(
 }
 
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {
-	if len(columns) == 0 { return false, "Table must have at least one column" }
+	if len(columns) == 0 {
+		return false, "Table must have at least one column"
+	}
 	if len(columns) > types.MAX_COLS {
 		return false, fmt.tprintf("Too many columns (max %d)", types.MAX_COLS)
 	}
 
 	pk_count := 0
 	for col, i in columns {
-		if len(col.name) == 0 { return false, "Column name cannot be empty" }
-		if col.pk { pk_count += 1 }
+		if len(col.name) == 0 {
+			return false, "Column name cannot be empty"
+		}
+		if col.pk {
+			pk_count += 1
+		}
 		for j in i + 1 ..< len(columns) {
 			if columns[i].name == columns[j].name {
 				return false, fmt.tprintf("Duplicate column name: %s", columns[i].name)
@@ -727,8 +796,12 @@ debug_print_entry :: proc(table: types.Table) {
 	fmt.println("Columns:")
 	for col, i in table.columns {
 		flags := make([dynamic]string, context.temp_allocator)
-		if col.pk { append(&flags, "PK") }
-		if col.not_null { append(&flags, "NN") }
+		if col.pk {
+			append(&flags, "PK")
+		}
+		if col.not_null {
+			append(&flags, "NN")
+		}
 
 		flags_str := strings.join(flags[:], ", ", context.temp_allocator)
 		type_str: string
@@ -758,7 +831,9 @@ debug_print_all :: proc(t: ^btree.Tree) {
 		return
 	}
 	for table, i in tables {
-		if i > 0 { fmt.println("-----------------------") }
+		if i > 0 {
+			fmt.println("-----------------------")
+		}
 		debug_print_entry(table)
 	}
 	fmt.println("=======================")

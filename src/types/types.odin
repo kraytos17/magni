@@ -98,11 +98,15 @@ value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.All
 	#partial switch val in v {
 	case string:
 		str_copy, err := strings.clone(val, allocator)
-		if err != nil { return {}, err }
+		if err != nil {
+			return {}, err
+		}
 		return value_text(str_copy), nil
 	case []u8:
 		blob_copy, err := slice.clone(val, allocator)
-		if err != nil { return {}, err }
+		if err != nil {
+			return {}, err
+		}
 		return value_blob(blob_copy), nil
 	case:
 		return val, nil

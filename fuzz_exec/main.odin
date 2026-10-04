@@ -33,21 +33,27 @@ main :: proc() {
 
 	context.logger.lowest_level = .Error
 	data, err := os.read_entire_file_from_path(os.args[1], context.allocator)
-	if err != nil { os.exit(1) }
-	defer delete(data)
+	if err != nil {
+		os.exit(1)
+	}
 
+	defer delete(data)
 	db_path := fmt.tprintf("/tmp/opencode/magni_exec_%d.db", os.get_pid())
 	wal_path := fmt.tprintf("%s-wal", db_path)
 	defer os.remove(string(db_path))
 	defer os.remove(string(wal_path))
 
 	database, open_err := db.open(string(db_path))
-	if open_err != .None { return }
-	defer db.close(database)
+	if open_err != .None {
+		return
+	}
 
+	defer db.close(database)
 	for stmt in sqltext.split_statements(string(data), context.temp_allocator) {
 		trimmed := strings.trim_space(stmt)
-		if len(trimmed) <= 1 { continue }
+		if len(trimmed) <= 1 {
+			continue
+		}
 		if strings.has_prefix(trimmed, ".") {
 			exec_admin_cmd(database, trimmed)
 			continue

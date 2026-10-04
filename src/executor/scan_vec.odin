@@ -53,16 +53,23 @@ collect_needed_cols :: proc(
 	total_cols: int,
 	allocator := context.temp_allocator,
 ) -> []bool {
-	if total_cols <= 0 { return nil }
+	if total_cols <= 0 {
+		return nil
+	}
+
 	needed := make([]bool, total_cols, allocator)
 	if root != nil {
 		collect_node_cols(root, needed)
 	}
 	for idx in proj_indices {
-		if idx >= 0 && idx < total_cols { needed[idx] = true }
+		if idx >= 0 && idx < total_cols {
+			needed[idx] = true
+		}
 	}
 	for idx in sort_indices {
-		if idx >= 0 && idx < total_cols { needed[idx] = true }
+		if idx >= 0 && idx < total_cols {
+			needed[idx] = true
+		}
 	}
 	return needed
 }
@@ -73,7 +80,10 @@ collect_needed_cols :: proc(
 // col_idx: their candidate values are constants, not row references.
 @(private = "file")
 collect_node_cols :: proc(node: ^Resolved_Node, needed: []bool) {
-	if node == nil { return }
+	if node == nil {
+		return
+	}
+
 	switch node.kind {
 	case .COND:
 		if node.cond.col_idx >= 0 && node.cond.col_idx < len(needed) {
@@ -197,16 +207,20 @@ scan_table_vec :: proc(
 
 	r := make([dynamic]Row_Entry, allocator)
 	cursor, c_err := btree.cursor_start(tree, allocator)
-	if c_err != .None { return nil, nil, false, true }
+	if c_err != .None {
+		return nil, nil, false, true
+	}
 	if plan.skip_start > 0 {
 		if seek_err := btree.cursor_seek_to_page(&cursor, plan.skip_start); seek_err != .None {
 			btree.cursor_destroy(&cursor)
 			cursor, c_err = btree.cursor_start(tree, allocator)
-			if c_err != .None { return nil, nil, false, true }
+			if c_err != .None {
+				return nil, nil, false, true
+			}
 		}
 	}
-	defer btree.cursor_destroy(&cursor)
 
+	defer btree.cursor_destroy(&cursor)
 	// Fused projection: valid only without ORDER BY. finish_select sorts
 	// full rows before projecting (so out-of-projection sort keys
 	// resolve); projecting first would silently drop them. With ORDER BY
@@ -230,7 +244,9 @@ scan_table_vec :: proc(
 	for cursor.is_valid {
 		if plan.skip_end > 0 {
 			cp := cursor.path[cursor.depth - 1].page_id
-			if cp > plan.skip_end { break }
+			if cp > plan.skip_end {
+				break
+			}
 		}
 		// Full-width clear: deserialize_needed writes only 0..<serial_count,
 		// so without this a short row could inherit a previous row's tail
@@ -297,7 +313,9 @@ scan_table_vec :: proc(
 		}
 
 		append(&r, Row_Entry{rowid, vals})
-		if limit, has_limit := plan.max_rows.?; has_limit && u64(len(r)) >= limit { break }
+		if limit, has_limit := plan.max_rows.?; has_limit && u64(len(r)) >= limit {
+			break
+		}
 		btree.cursor_advance(&cursor)
 	}
 	return r[:], proj_cols, fused, false
@@ -346,6 +364,7 @@ fetch_single_rows_vec :: proc(
 				single_range,
 				allocator,
 			)
+
 			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
 			return
 		}
@@ -406,7 +425,9 @@ fetch_single_rows_vec :: proc(
 		cache,
 		single_range,
 	)
-	if scan_err { return nil, nil, nil, false, false }
+	if scan_err {
+		return nil, nil, nil, false, false
+	}
 	if vproj {
 		// Rows are at projected width: redescribe the range so any
 		// downstream resolver sees a consistent (cols, ranges) pair.

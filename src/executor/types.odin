@@ -123,9 +123,11 @@ pending_stage_index :: proc(
 				return
 			}
 		}
+
 		append(stages, Index_Stage{name = strings.clone(index_name, p.alloc), root = root})
 		return
 	}
+
 	list := make([dynamic]Index_Stage, 0, 1, p.alloc)
 	append(&list, Index_Stage{name = strings.clone(index_name, p.alloc), root = root})
 	p.index_roots[strings.clone(table_name, p.alloc)] = list
@@ -133,7 +135,9 @@ pending_stage_index :: proc(
 
 // pending_drop forgets staged roots (DROP TABLE in txn). No-op when absent.
 pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
-	if p.roots == nil && p.index_roots == nil { return }
+	if p.roots == nil && p.index_roots == nil {
+		return
+	}
 	for k in p.roots {
 		if k == table_name {
 			delete(k, p.alloc)
@@ -143,7 +147,10 @@ pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
 	}
 	for k, &stages in p.index_roots {
 		if k == table_name {
-			for st in stages { delete(st.name, p.alloc) }
+			for st in stages {
+				delete(st.name, p.alloc)
+			}
+
 			delete(stages)
 			delete(k, p.alloc)
 			delete_key(&p.index_roots, k)
@@ -156,8 +163,13 @@ pending_drop :: proc(p: ^Pending_Roots, table_name: string) {
 // The table survives, so staged DATA roots are kept — pending_drop would
 // wrongly discard them along with the definition. No-op when absent.
 pending_drop_index :: proc(p: ^Pending_Roots, table_name: string, index_name: string) {
-	if p.index_roots == nil { return }
-	if table_name not_in p.index_roots { return }
+	if p.index_roots == nil {
+		return
+	}
+	if table_name not_in p.index_roots {
+		return
+	}
+
 	stages := &p.index_roots[table_name]
 	for i in 0 ..< len(stages) {
 		if stages[i].name == index_name {
@@ -172,14 +184,19 @@ pending_drop_index :: proc(p: ^Pending_Roots, table_name: string, index_name: st
 // ROLLBACK (discard).
 pending_clear :: proc(p: ^Pending_Roots) {
 	if p.roots != nil {
-		for k in p.roots { delete(k, p.alloc) }
+		for k in p.roots {
+			delete(k, p.alloc)
+		}
 
 		delete(p.roots)
 		p.roots = nil
 	}
 	if p.index_roots != nil {
 		for k, &stages in p.index_roots {
-			for st in stages { delete(st.name, p.alloc) }
+			for st in stages {
+				delete(st.name, p.alloc)
+			}
+
 			delete(stages)
 			delete(k, p.alloc)
 		}

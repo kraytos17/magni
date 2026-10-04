@@ -21,7 +21,9 @@ v3_build_dense :: proc(
 ) -> []u8 {
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
 	testing.expect(t, btree.init_dense_interior_page(buf, page_id), "init dense page")
-	if len(keys) == 0 { return buf }
+	if len(keys) == 0 {
+		return buf
+	}
 
 	_, base := btree.dense_choose_encoding(keys[0], keys[len(keys) - 1])
 	_ = base
@@ -159,7 +161,10 @@ test_v3_dense_roundtrip :: proc(t: ^testing.T) {
 		// Oracle: first index with key >= target.
 		want_idx := len(for_keys)
 		for k, i in for_keys {
-			if k >= target { want_idx = i; break }
+			if k >= target {
+				want_idx = i
+				break
+			}
 		}
 		testing.expect(t, idx == want_idx, "FOR page search matches oracle")
 	}
@@ -190,7 +195,9 @@ test_v3_dense_lower_bound_oracle :: proc(t: ^testing.T) {
 	// Pure branchless search vs linear scan over patterned biased keys.
 	linear_oracle :: proc(keys: []u64, target: u64) -> int {
 		for k, i in keys {
-			if k >= target { return i }
+			if k >= target {
+				return i
+			}
 		}
 		return len(keys)
 	}
@@ -209,7 +216,9 @@ test_v3_dense_lower_bound_oracle :: proc(t: ^testing.T) {
 	)
 
 	big := make([]u64, 1000, context.temp_allocator)
-	for i in 0 ..< 1000 { big[i] = u64(i * 7919) }
+	for i in 0 ..< 1000 {
+		big[i] = u64(i * 7919)
+	}
 	append(&patterns, big)
 
 	targets := []u64{0, 1, 5, 9, 10, 15, 100, 1000, 7919 * 500, max(u64) - 1, max(u64)}
@@ -226,7 +235,9 @@ test_v3_dense_lower_bound_oracle :: proc(t: ^testing.T) {
 				got,
 				want,
 			)
-			if got != want { return }
+			if got != want {
+				return
+			}
 		}
 	}
 }
@@ -253,7 +264,9 @@ test_v3_for_rule :: proc(t: ^testing.T) {
 	for v, i in sweep {
 		w := btree.rowid_bias_encode(v)
 		testing.expect_value(t, btree.rowid_bias_decode(w), v)
-		if i > 0 { testing.expect(t, prev_enc < w, "biased order matches numeric") }
+		if i > 0 {
+			testing.expect(t, prev_enc < w, "biased order matches numeric")
+		}
 		prev_enc = w
 	}
 
@@ -264,7 +277,9 @@ test_v3_for_rule :: proc(t: ^testing.T) {
 		testing.expect(t, ok && n == 9, "codec encodes")
 		// Payload bytes [1:9] equal the bias word big-endian.
 		wire: u64 = 0
-		for b in kb[1:9] { wire = wire << 8 | u64(b) }
+		for b in kb[1:9] {
+			wire = wire << 8 | u64(b)
+		}
 		testing.expect_value(t, wire, btree.rowid_bias_encode(v))
 	}
 }
@@ -481,10 +496,14 @@ test_v3_dense_build_shapes :: proc(t: ^testing.T) {
 	// Overflow: sparse keys defeat FOR (span > u32 ⇒ full u64), and 500
 	// full keys need 24+4000+2004 > 4096.
 	many_keys := make([]types.Row_ID, 500, context.temp_allocator)
-	for i in 0 ..< 500 { many_keys[i] = types.Row_ID(i * 10000000) }
+	for i in 0 ..< 500 {
+		many_keys[i] = types.Row_ID(i * 10000000)
+	}
 
 	many_children := make([]u32, 501, context.temp_allocator)
-	for i in 0 ..< 501 { many_children[i] = u32(1000 + i) }
+	for i in 0 ..< 501 {
+		many_children[i] = u32(1000 + i)
+	}
 
 	full_page := make([]u8, types.PAGE_SIZE, context.temp_allocator)
 	testing.expect(
@@ -496,10 +515,14 @@ test_v3_dense_build_shapes :: proc(t: ^testing.T) {
 	// Full-capacity build succeeds: 339 sparse (full-u64) keys need
 	// exactly 24+2712+1360 = 4096 — the exact-fit boundary.
 	cap_keys := make([]types.Row_ID, 339, context.temp_allocator)
-	for i in 0 ..< 339 { cap_keys[i] = types.Row_ID(i * 20000000) }
+	for i in 0 ..< 339 {
+		cap_keys[i] = types.Row_ID(i * 20000000)
+	}
 
 	cap_children := make([]u32, 340, context.temp_allocator)
-	for i in 0 ..< 340 { cap_children[i] = u32(5000 + i) }
+	for i in 0 ..< 340 {
+		cap_children[i] = u32(5000 + i)
+	}
 
 	cap_page := make([]u8, types.PAGE_SIZE, context.temp_allocator)
 	testing.expect(
@@ -753,7 +776,9 @@ test_v3_split_produces_slotdir :: proc(t: ^testing.T) {
 	for page_id in pages {
 		pg, pg_err := pager.get_page(ctx.pager, page_id)
 		testing.expect(t, pg_err == nil, "page readable")
-		if pg_err != nil { continue }
+		if pg_err != nil {
+			continue
+		}
 		h := btree.get_header(pg.data, page_id)
 		testing.expect(t, h != nil, "header readable")
 		if h == nil {

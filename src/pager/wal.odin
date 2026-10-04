@@ -55,7 +55,9 @@ wal_scan_committed_upto :: proc(ws: ^Wal_State, file_size: i64, check_salt: bool
 	for scan + types.WAL_FRAME_SIZE <= file_size {
 		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
 		_, read_err := os.read_at(ws.file, fh_buf[:], scan)
-		if read_err != nil { break }
+		if read_err != nil {
+			break
+		}
 
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
 		if check_salt && (u32(fh.salt1) != ws.salt1 || u32(fh.salt2) != ws.salt2) {
@@ -108,11 +110,15 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 
 	ws.file = wal_file
 	file_size, size_err := os.file_size(wal_file)
-	if size_err != nil { return .IO_Error }
+	if size_err != nil {
+		return .IO_Error
+	}
 	if file_size >= types.WAL_HEADER_SIZE {
 		buf: [types.WAL_HEADER_SIZE]u8
 		_, read_err := os.read_at(wal_file, buf[:], 0)
-		if read_err != nil { return .IO_Error }
+		if read_err != nil {
+			return .IO_Error
+		}
 		if string(buf[:8]) == types.WAL_MAGIC {
 			h := (^WAL_Header)(raw_data(buf[:]))
 			ws.salt1 = u32(h.salt1)
@@ -140,7 +146,9 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	header.salt1 = u32le(ws.salt1)
 	header.salt2 = u32le(ws.salt2)
 	_, write_err := os.write_at(wal_file, buf[:], 0)
-	if write_err != nil { return .IO_Error }
+	if write_err != nil {
+		return .IO_Error
+	}
 
 	ws.header_written = true
 	ws.write_offset = i64(types.WAL_HEADER_SIZE)
@@ -166,9 +174,13 @@ wal_begin_txn :: proc(p: ^Pager) {
 
 wal_commit_txn :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
-	if !ws.txn_active { return .None }
+	if !ws.txn_active {
+		return .None
+	}
 	for page_num in p.dirty_pages {
-		if page_num == 0 { continue }
+		if page_num == 0 {
+			continue
+		}
 		if slot := find_slot(p, page_num); slot != nil && slot.page.dirty {
 			wal_append_frame(p, slot.page.page_num, slot.page.data, false, 0) or_return
 			slot.page.dirty = false
@@ -198,7 +210,9 @@ wal_abort_txn :: proc(p: ^Pager) -> Evict_Report {
 			committed_upto := wal_scan_committed_upto(ws, file_size, false)
 			drop := make([dynamic]u32, context.temp_allocator)
 			for page_num, fo in ws.page_index {
-				if fo >= committed_upto { append(&drop, page_num) }
+				if fo >= committed_upto {
+					append(&drop, page_num)
+				}
 			}
 			for page_num in drop {
 				delete_key(&ws.page_index, page_num)
@@ -232,7 +246,9 @@ wal_append_frame :: proc(
 	db_size_after: u32,
 ) -> Error {
 	ws := &p.wal_state
-	if ws.file == nil { return .IO_Error }
+	if ws.file == nil {
+		return .IO_Error
+	}
 
 	db_after: u32 = 0
 	if is_commit {
@@ -261,10 +277,14 @@ wal_append_frame :: proc(
 	file_size := ws.write_offset
 	hdr_bytes := transmute([types.WAL_FRAME_HEADER_SIZE]u8)fh
 	_, hdr_err := os.write_at(ws.file, hdr_bytes[:], file_size)
-	if hdr_err != nil { return .IO_Error }
+	if hdr_err != nil {
+		return .IO_Error
+	}
 
 	_, data_err := os.write_at(ws.file, page_data, file_size + types.WAL_FRAME_HEADER_SIZE)
-	if data_err != nil { return .IO_Error }
+	if data_err != nil {
+		return .IO_Error
+	}
 
 	ws.frame_count += 1
 	ws.write_offset += types.WAL_FRAME_SIZE
@@ -278,10 +298,14 @@ wal_append_frame :: proc(
 
 wal_checkpoint :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
-	if ws.file == nil { return .None }
+	if ws.file == nil {
+		return .None
+	}
 
 	file_size, size_err := os.file_size(ws.file)
-	if size_err != nil { return .IO_Error }
+	if size_err != nil {
+		return .IO_Error
+	}
 
 	offset := i64(types.WAL_HEADER_SIZE)
 	frame_count := 0
@@ -292,7 +316,9 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 	for offset + types.WAL_FRAME_SIZE <= committed_upto {
 		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
 		_, read_err := os.read_at(ws.file, fh_buf[:], offset)
-		if read_err != nil { break }
+		if read_err != nil {
+			break
+		}
 
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
 		page_num := u32(fh.page_num)
@@ -304,16 +330,22 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 
 		page_data: [types.PAGE_SIZE]u8
 		_, data_err := os.read_at(ws.file, page_data[:], offset + types.WAL_FRAME_HEADER_SIZE)
-		if data_err != nil { break }
+		if data_err != nil {
+			break
+		}
 
 		db_offset := i64(page_num - 1) * i64(types.PAGE_SIZE)
 		_, write_err := os.write_at(p.file, page_data[:], db_offset)
-		if write_err != nil { return .IO_Error }
+		if write_err != nil {
+			return .IO_Error
+		}
 
 		offset += types.WAL_FRAME_SIZE
 		frame_count += 1
 	}
-	if err := os.sync(p.file); err != nil { return .IO_Error }
+	if err := os.sync(p.file); err != nil {
+		return .IO_Error
+	}
 
 	clear(&ws.page_index)
 	ws.frame_count = 0
@@ -332,7 +364,9 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 	header.salt1 = u32le(ws.salt1)
 	header.salt2 = u32le(ws.salt2)
 	_, write_err := os.write_at(ws.file, buf[:], 0)
-	if write_err != nil { return .IO_Error }
+	if write_err != nil {
+		return .IO_Error
+	}
 
 	os.truncate(ws.file, types.WAL_HEADER_SIZE)
 	os.sync(ws.file)
@@ -349,15 +383,25 @@ Page_Offset :: struct {
 
 wal_recover :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
-	if ws.file == nil { return .None }
+	if ws.file == nil {
+		return .None
+	}
 
 	file_size, size_err := os.file_size(ws.file)
-	if size_err != nil { return .IO_Error }
-	if file_size <= types.WAL_HEADER_SIZE { return .None }
+	if size_err != nil {
+		return .IO_Error
+	}
+	if file_size <= types.WAL_HEADER_SIZE {
+		return .None
+	}
 
 	valid_frames, scan_err := collect_valid_frames(ws, file_size)
-	if scan_err != .None { return scan_err }
-	if len(valid_frames) == 0 { return .None }
+	if scan_err != .None {
+		return scan_err
+	}
+	if len(valid_frames) == 0 {
+		return .None
+	}
 
 	replay_frames(p, valid_frames[:])
 	log.infof("WAL: recovery complete, %d frames replayed", len(valid_frames))
@@ -372,18 +416,24 @@ wal_recover :: proc(p: ^Pager) -> Error {
 collect_valid_frames :: proc(ws: ^Wal_State, file_size: i64) -> ([dynamic]Page_Offset, Error) {
 	valid_frames := make([dynamic]Page_Offset, context.temp_allocator)
 	committed_upto := wal_scan_committed_upto(ws, file_size, true)
-	if committed_upto <= i64(types.WAL_HEADER_SIZE) { return valid_frames, .None }
+	if committed_upto <= i64(types.WAL_HEADER_SIZE) {
+		return valid_frames, .None
+	}
 
 	offset := i64(types.WAL_HEADER_SIZE)
 	for offset < committed_upto {
 		fh_buf: [types.WAL_FRAME_HEADER_SIZE]u8
-		if _, r_err := os.read_at(ws.file, fh_buf[:], offset); r_err != nil { break }
+		if _, r_err := os.read_at(ws.file, fh_buf[:], offset); r_err != nil {
+			break
+		}
 
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
 		if u32(fh.checksum1) != 0 || u32(fh.checksum2) != 0 {
 			page_buf: [types.PAGE_SIZE]u8
 			_, data_err := os.read_at(ws.file, page_buf[:], offset + types.WAL_FRAME_HEADER_SIZE)
-			if data_err != nil { break }
+			if data_err != nil {
+				break
+			}
 
 			cs1 := fh.checksum1
 			cs2 := fh.checksum2
@@ -407,11 +457,15 @@ collect_valid_frames :: proc(ws: ^Wal_State, file_size: i64) -> ([dynamic]Page_O
 replay_frames :: proc(p: ^Pager, valid_frames: []Page_Offset) {
 	ws := &p.wal_state
 	for fo in valid_frames {
-		if fo.page_num == WAL_COMMIT_PAGE { continue }
+		if fo.page_num == WAL_COMMIT_PAGE {
+			continue
+		}
 
 		page_data: [types.PAGE_SIZE]u8
 		_, data_err := os.read_at(ws.file, page_data[:], fo.offset + types.WAL_FRAME_HEADER_SIZE)
-		if data_err != nil { continue }
+		if data_err != nil {
+			continue
+		}
 
 		db_offset := i64(fo.page_num - 1) * i64(types.PAGE_SIZE)
 		os.write_at(p.file, page_data[:], db_offset)
@@ -420,9 +474,13 @@ replay_frames :: proc(p: ^Pager, valid_frames: []Page_Offset) {
 	os.sync(p.file)
 	max_page_num: u32
 	for fo in valid_frames {
-		if fo.page_num > max_page_num { max_page_num = fo.page_num }
+		if fo.page_num > max_page_num {
+			max_page_num = fo.page_num
+		}
 	}
 
 	new_len := i64(max_page_num) * i64(types.PAGE_SIZE)
-	if new_len > p.file_len { p.file_len = new_len }
+	if new_len > p.file_len {
+		p.file_len = new_len
+	}
 }

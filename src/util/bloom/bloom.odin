@@ -59,7 +59,9 @@ might_contain :: proc(f: ^Filter, key: u32) -> bool {
 	h1, h2 := probe_seeds(key)
 	for i in 0 ..< HASHES {
 		pos := (h1 + u32(i) * h2) & (COUNTERS - 1)
-		if counter_get(f, pos) == 0 { return false }
+		if counter_get(f, pos) == 0 {
+			return false
+		}
 	}
 	return true
 }
@@ -90,7 +92,9 @@ counter_inc :: #force_inline proc(f: ^Filter, pos: u32) {
 	#no_bounds_check {
 		b := f.counters[idx]
 		nib := b & 0x0F if lo else b >> 4
-		if nib >= MAX_COUNT { return }
+		if nib >= MAX_COUNT {
+			return
+		}
 
 		nib += 1
 		f.counters[idx] = (b & 0xF0) | nib if lo else (b & 0x0F) | (nib << 4)
@@ -104,7 +108,9 @@ counter_dec :: #force_inline proc(f: ^Filter, pos: u32) {
 	#no_bounds_check {
 		b := f.counters[idx]
 		nib := b & 0x0F if lo else b >> 4
-		if nib == 0 { return }
+		if nib == 0 {
+			return
+		}
 
 		nib -= 1
 		f.counters[idx] = (b & 0xF0) | nib if lo else (b & 0x0F) | (nib << 4)

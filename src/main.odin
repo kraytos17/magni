@@ -75,7 +75,9 @@ main :: proc() {
 	}
 
 	db.close(database)
-	if !ok { os.exit(1) }
+	if !ok {
+		os.exit(1)
+	}
 }
 
 @(private = "file")

@@ -87,14 +87,18 @@ census_proc :: proc(
 		old_size,
 		loc,
 	)
-	if err != .None { return res, err }
+	if err != .None {
+		return res, err
+	}
 
 	switch mode {
 	case .Alloc, .Alloc_Non_Zeroed:
 		c.allocs += 1
 		c.bytes += u64(size)
 		c.live += i64(size)
-		if c.live > c.peak { c.peak = c.live }
+		if c.live > c.peak {
+			c.peak = c.live
+		}
 
 		b := hist_bucket(size)
 		c.hist[b] += 1
@@ -107,7 +111,9 @@ census_proc :: proc(
 		}
 
 		c.live += delta
-		if c.live > c.peak { c.peak = c.live }
+		if c.live > c.peak {
+			c.peak = c.live
+		}
 	case .Free:
 		c.frees += 1
 		c.freed += u64(old_size)
@@ -147,8 +153,12 @@ snap :: proc(c: ^Census) -> Snap {
 }
 
 bytes_str :: proc(buf: []byte, b: u64) -> string {
-	if b >= (1 << 20) { return fmt.bprintf(buf, "%.2fMB", f64(b) / f64(1 << 20)) }
-	if b >= (1 << 10) { return fmt.bprintf(buf, "%.1fKB", f64(b) / f64(1 << 10)) }
+	if b >= (1 << 20) {
+		return fmt.bprintf(buf, "%.2fMB", f64(b) / f64(1 << 20))
+	}
+	if b >= (1 << 10) {
+		return fmt.bprintf(buf, "%.1fKB", f64(b) / f64(1 << 10))
+	}
 	return fmt.bprintf(buf, "%dB", b)
 }
 
@@ -169,7 +179,9 @@ measure :: proc(
 	q := db.query(d, sql)
 	h1 := snap(heap)
 	t1 := snap(temp)
-	if !q.ok { fail(fmt.tprintf("query failed: %s", label)) }
+	if !q.ok {
+		fail(fmt.tprintf("query failed: %s", label))
+	}
 
 	rows := len(q.rows)
 	if expect >= 0 && rows != expect {
@@ -201,7 +213,9 @@ measure :: proc(
 		fmt.printf("    temp hist:")
 		for i in 0 ..< 7 {
 			cnt := t1.hist[i] - t0.hist[i]
-			if cnt > 0 { fmt.printf(" %s:%d", HIST_LABELS[i], cnt) }
+			if cnt > 0 {
+				fmt.printf(" %s:%d", HIST_LABELS[i], cnt)
+			}
 		}
 		fmt.println()
 	}
@@ -221,12 +235,13 @@ measure_lookups :: proc(d: ^db.Database, heap, temp: ^Census, n: int) {
 	t0 := snap(temp)
 	for s in stmts {
 		q := db.query(d, s)
-		if !q.ok { fail("pk lookup failed") }
+		if !q.ok {
+			fail("pk lookup failed")
+		}
 	}
 
 	h1 := snap(heap)
 	t1 := snap(temp)
-
 	ha := h1.allocs - h0.allocs
 	hb := h1.bytes - h0.bytes
 	ta := t1.allocs - t0.allocs
@@ -275,11 +290,17 @@ main :: proc() {
 		size_of(types.Column),
 	)
 
-	if os.exists(DB_NAME) { os.remove(DB_NAME) }
-	if os.exists(DB_NAME + "-wal") { os.remove(DB_NAME + "-wal") }
+	if os.exists(DB_NAME) {
+		os.remove(DB_NAME)
+	}
+	if os.exists(DB_NAME + "-wal") {
+		os.remove(DB_NAME + "-wal")
+	}
 
 	d, err := db.open(DB_NAME)
-	if err != .None { fail("open") }
+	if err != .None {
+		fail("open")
+	}
 
 	// Build the same dataset as tests/perf (plus a TEXT table for clone cost).
 	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);")
@@ -329,7 +350,9 @@ main :: proc() {
 
 	strings.write_string(&in_list, "SELECT id FROM t WHERE id IN (")
 	for i in 1 ..= 500 {
-		if i > 1 { strings.write_string(&in_list, ",") }
+		if i > 1 {
+			strings.write_string(&in_list, ",")
+		}
 		fmt.sbprint(&in_list, i)
 	}
 

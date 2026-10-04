@@ -786,14 +786,20 @@ test_integration_wal_auto_checkpoint :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_int_walauto.db")
 	wal_path := fmt.tprintf("%s-wal", filename)
-	if os.exists(filename) { os.remove(filename) }
-	if os.exists(wal_path) { os.remove(wal_path) }
+	if os.exists(filename) {
+		os.remove(filename)
+	}
+	if os.exists(wal_path) {
+		os.remove(wal_path)
+	}
 	defer os.remove(filename)
 	defer os.remove(wal_path)
 
 	d, open_err := db.open(filename, db.Open_Config{wal_size_threshold = 2})
 	testing.expect(t, open_err == .None, "open with wal_size_threshold")
-	if open_err != .None { return }
+	if open_err != .None {
+		return
+	}
 
 	db.execute(d, "CREATE TABLE t (id INT);")
 	for i in 1 ..= 20 {
@@ -824,16 +830,22 @@ test_integration_wal_auto_checkpoint :: proc(t: ^testing.T) {
 test_integration_snapshot_batch_config :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	filename := fmt.tprintf("test_int_snapcfg.db")
-	if os.exists(filename) { os.remove(filename) }
+	if os.exists(filename) {
+		os.remove(filename)
+	}
 
 	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) { os.remove(wal_name) }
+	if os.exists(wal_name) {
+		os.remove(wal_name)
+	}
 	defer os.remove(filename)
 	defer os.remove(wal_name)
 
 	d, open_err := db.open(filename, db.Open_Config{snapshot_batch_threshold = 3})
 	testing.expect(t, open_err == .None, "open with snapshot_batch_threshold")
-	if open_err != .None { return }
+	if open_err != .None {
+		return
+	}
 	defer db.close(d)
 
 	testing.expect_value(t, d.snapshot_batch_threshold, 3)
@@ -911,7 +923,9 @@ test_integration_skip_index_range :: proc(t: ^testing.T) {
 		strings.builder_init(&sb, context.temp_allocator)
 		strings.write_string(&sb, "INSERT INTO t VALUES ")
 		for i in 0 ..< 100 {
-			if i > 0 { strings.write_string(&sb, ",") }
+			if i > 0 {
+				strings.write_string(&sb, ",")
+			}
 			id := chunk * 100 + i + 1
 			score := id if id <= 1500 else 100000 + (id - 1500)
 			fmt.sbprintf(&sb, "(%d,%d)", id, score)
@@ -930,7 +944,9 @@ test_integration_skip_index_range :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	testing.expect(t, len(tables) >= 1, "table listed")
-	if len(tables) == 0 { return }
+	if len(tables) == 0 {
+		return
+	}
 	tree := btree.init(d.pager, tables[0].root_page)
 	skip_idx, build_err := btree.build_skip_index(&tree, 1)
 	testing.expect(t, build_err == .None, "build skip index on score")
@@ -1000,7 +1016,9 @@ test_integration_skip_index_overflow :: proc(t: ^testing.T) {
 		strings.builder_init(&sb, context.temp_allocator)
 		strings.write_string(&sb, "INSERT INTO t VALUES ")
 		for i in 0 ..< CHUNK {
-			if i > 0 { strings.write_string(&sb, ",") }
+			if i > 0 {
+				strings.write_string(&sb, ",")
+			}
 			id := chunk * CHUNK + i + 1
 			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
 		}
@@ -1013,14 +1031,18 @@ test_integration_skip_index_overflow :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	testing.expect(t, len(tables) >= 1, "table listed")
-	if len(tables) == 0 { return }
+	if len(tables) == 0 {
+		return
+	}
 	tree := btree.init(d.pager, tables[0].root_page)
 
 	// More zone entries than one page holds: the build must merge them, not
 	// overflow. (ROWS>0 with step-2 scores guarantees ~20 entries/chunk.)
 	skip_idx, build_err := btree.build_skip_index(&tree, 1)
 	testing.expect(t, build_err == .None, "large skip index builds within one page")
-	if build_err != .None { return }
+	if build_err != .None {
+		return
+	}
 	if new_root, up_ok := schema.update_skip_root_cow(&st, "t", skip_idx.root); up_ok {
 		d.schema_root_page = new_root
 	} else {
@@ -1064,11 +1086,16 @@ verify_dense_rows :: proc(t: ^testing.T, tree: ^btree.Tree, n: int) -> bool {
 		if ok {
 			seen[rid] = true
 			ok = len(cell_val.values) == 1
-			if v, v_ok := cell_val.values[0].(i64); v_ok && v == i64(rid) {  } else { ok = false }
+			if v, v_ok := cell_val.values[0].(i64); v_ok && v == i64(rid) {
+			} else {
+				ok = false
+			}
 		}
 		testing.expect(t, ok, "rowid in range, unique, value matches")
 		cell.destroy(&cell_val, context.temp_allocator)
-		if !ok { return false }
+		if !ok {
+			return false
+		}
 		total += 1
 		btree.cursor_advance(&c)
 	}
@@ -1734,7 +1761,9 @@ test_integration_delete_multipage :: proc(t: ^testing.T) {
 		strings.builder_init(&sb, context.temp_allocator)
 		strings.write_string(&sb, "INSERT INTO t VALUES ")
 		for i in 0 ..< 100 {
-			if i > 0 { strings.write_string(&sb, ",") }
+			if i > 0 {
+				strings.write_string(&sb, ",")
+			}
 			id := chunk * 100 + i + 1
 			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
 		}
@@ -1747,7 +1776,9 @@ test_integration_delete_multipage :: proc(t: ^testing.T) {
 	ids: strings.Builder
 	strings.builder_init(&ids, context.temp_allocator)
 	for id in 1 ..= 700 {
-		if id > 1 { strings.write_string(&ids, ",") }
+		if id > 1 {
+			strings.write_string(&ids, ",")
+		}
 		fmt.sbprintf(&ids, "%d", id)
 	}
 	ok :=
@@ -1784,7 +1815,9 @@ test_integration_vacuum :: proc(t: ^testing.T) {
 		strings.builder_init(&sb, context.temp_allocator)
 		strings.write_string(&sb, "INSERT INTO t VALUES ")
 		for i in 0 ..< 100 {
-			if i > 0 { strings.write_string(&sb, ",") }
+			if i > 0 {
+				strings.write_string(&sb, ",")
+			}
 			id := chunk * 100 + i + 1
 			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
 		}
@@ -1796,7 +1829,9 @@ test_integration_vacuum :: proc(t: ^testing.T) {
 	ids: strings.Builder
 	strings.builder_init(&ids, context.temp_allocator)
 	for id in 1 ..= 1800 {
-		if id > 1 { strings.write_string(&ids, ",") }
+		if id > 1 {
+			strings.write_string(&ids, ",")
+		}
 		fmt.sbprintf(&ids, "%d", id)
 	}
 	testing.expect(
@@ -1886,7 +1921,9 @@ test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
 		strings.builder_init(&sb, context.temp_allocator)
 		strings.write_string(&sb, "INSERT INTO t VALUES ")
 		for i in 0 ..< 100 {
-			if i > 0 { strings.write_string(&sb, ",") }
+			if i > 0 {
+				strings.write_string(&sb, ",")
+			}
 			id := chunk * 100 + i + 1
 			fmt.sbprintf(&sb, "(%d,%d)", id, id * 3)
 		}
@@ -1965,7 +2002,9 @@ test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
 		strings.builder_init(&sb, context.temp_allocator)
 		strings.write_string(&sb, "INSERT INTO t VALUES ")
 		for i in 0 ..< 100 {
-			if i > 0 { strings.write_string(&sb, ",") }
+			if i > 0 {
+				strings.write_string(&sb, ",")
+			}
 			id := chunk * 100 + i + 1
 			fmt.sbprintf(&sb, "(%d,%d)", id, id * 2)
 		}
@@ -1976,7 +2015,9 @@ test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
 	ids: strings.Builder
 	strings.builder_init(&ids, context.temp_allocator)
 	for id in 1 ..= 800 {
-		if id > 1 { strings.write_string(&ids, ",") }
+		if id > 1 {
+			strings.write_string(&ids, ",")
+		}
 		fmt.sbprintf(&ids, "%d", id)
 	}
 	testing.expect(
@@ -2506,15 +2547,21 @@ test_pk_seek_aggregates :: proc(t: ^testing.T) {
 	cnt := db.query(d, "SELECT COUNT(*) FROM t WHERE id = 2;")
 	testing.expect(t, cnt.ok, "seek count must succeed")
 	testing.expect_value(t, len(cnt.rows), 1)
-	if len(cnt.rows) == 1 { testing.expect_value(t, cnt.rows[0][0].(i64), 1) }
+	if len(cnt.rows) == 1 {
+		testing.expect_value(t, cnt.rows[0][0].(i64), 1)
+	}
 
 	sum := db.query(d, "SELECT SUM(v) FROM t WHERE id = 3;")
 	testing.expect(t, sum.ok, "seek sum must succeed")
-	if len(sum.rows) == 1 { testing.expect_value(t, sum.rows[0][0].(f64), 30) }
+	if len(sum.rows) == 1 {
+		testing.expect_value(t, sum.rows[0][0].(f64), 30)
+	}
 
 	cntmiss := db.query(d, "SELECT COUNT(*) FROM t WHERE id = 99;")
 	testing.expect(t, cntmiss.ok, "seek count miss must succeed")
-	if len(cntmiss.rows) == 1 { testing.expect_value(t, cntmiss.rows[0][0].(i64), 0) }
+	if len(cntmiss.rows) == 1 {
+		testing.expect_value(t, cntmiss.rows[0][0].(i64), 0)
+	}
 }
 
 @(test)
@@ -2533,12 +2580,16 @@ test_pk_seek_as_of :: proc(t: ^testing.T) {
 
 	cur := db.query(d, "SELECT v FROM t WHERE id = 1;")
 	testing.expect(t, cur.ok, "current seek must succeed")
-	if len(cur.rows) == 1 { testing.expect_value(t, cur.rows[0][0].(i64), 99) }
+	if len(cur.rows) == 1 {
+		testing.expect_value(t, cur.rows[0][0].(i64), 99)
+	}
 
 	old := db.query(d, fmt.tprintf("SELECT v FROM t AS OF SNAPSHOT %d WHERE id = 1;", snap_id))
 	testing.expect(t, old.ok, "as-of seek must succeed")
 	testing.expect_value(t, len(old.rows), 1)
-	if len(old.rows) == 1 { testing.expect_value(t, old.rows[0][0].(i64), 10) }
+	if len(old.rows) == 1 {
+		testing.expect_value(t, old.rows[0][0].(i64), 10)
+	}
 }
 
 @(test)
@@ -2560,7 +2611,9 @@ test_pk_seek_no_pk_and_mutations :: proc(t: ^testing.T) {
 	db.execute(d, "UPDATE t SET v = 200 WHERE id = 2;")
 	upd := db.query(d, "SELECT v FROM t WHERE id = 2;")
 	testing.expect(t, upd.ok, "post-update seek must succeed")
-	if len(upd.rows) == 1 { testing.expect_value(t, upd.rows[0][0].(i64), 200) }
+	if len(upd.rows) == 1 {
+		testing.expect_value(t, upd.rows[0][0].(i64), 200)
+	}
 
 	db.execute(d, "DELETE FROM t WHERE id = 1;")
 	del := db.query(d, "SELECT v FROM t WHERE id = 1;")
@@ -2582,12 +2635,16 @@ test_txn_deferred_read_own_writes :: proc(t: ^testing.T) {
 	q := db.query(d, "SELECT v FROM t WHERE id = 2;")
 	testing.expect(t, q.ok, "in-txn read must succeed")
 	testing.expect_value(t, len(q.rows), 1)
-	if len(q.rows) == 1 { testing.expect_value(t, q.rows[0][0].(i64), 20) }
+	if len(q.rows) == 1 {
+		testing.expect_value(t, q.rows[0][0].(i64), 20)
+	}
 	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit failed")
 
 	after := db.query(d, "SELECT COUNT(*) FROM t;")
 	testing.expect(t, after.ok, "post-commit read must succeed")
-	if len(after.rows) == 1 { testing.expect_value(t, after.rows[0][0].(i64), 2) }
+	if len(after.rows) == 1 {
+		testing.expect_value(t, after.rows[0][0].(i64), 2)
+	}
 }
 
 @(test)
@@ -2633,9 +2690,13 @@ test_txn_deferred_two_tables :: proc(t: ^testing.T) {
 
 	qa := db.query(d, "SELECT COUNT(*) FROM a;")
 	qb := db.query(d, "SELECT v FROM b WHERE id = 1;")
-	if len(qa.rows) == 1 { testing.expect_value(t, qa.rows[0][0].(i64), 2) }
+	if len(qa.rows) == 1 {
+		testing.expect_value(t, qa.rows[0][0].(i64), 2)
+	}
 	testing.expect_value(t, len(qb.rows), 1)
-	if len(qb.rows) == 1 { testing.expect_value(t, qb.rows[0][0].(i64), 200) }
+	if len(qb.rows) == 1 {
+		testing.expect_value(t, qb.rows[0][0].(i64), 200)
+	}
 }
 
 @(test)
@@ -2663,7 +2724,9 @@ test_txn_deferred_rollback_coherent :: proc(t: ^testing.T) {
 	db.execute(d, "INSERT INTO t VALUES (3, 30);")
 	testing.expect(t, db.execute(d, "COMMIT;") == .None, "second commit failed")
 	q2 := db.query(d, "SELECT COUNT(*) FROM t;")
-	if len(q2.rows) == 1 { testing.expect_value(t, q2.rows[0][0].(i64), 2) }
+	if len(q2.rows) == 1 {
+		testing.expect_value(t, q2.rows[0][0].(i64), 2)
+	}
 }
 
 @(test)
@@ -2685,9 +2748,13 @@ test_txn_deferred_ddl_mix :: proc(t: ^testing.T) {
 
 	qt := db.query(d, "SELECT COUNT(*) FROM t;")
 	qu := db.query(d, "SELECT v FROM u WHERE id = 1;")
-	if len(qt.rows) == 1 { testing.expect_value(t, qt.rows[0][0].(i64), 3) }
+	if len(qt.rows) == 1 {
+		testing.expect_value(t, qt.rows[0][0].(i64), 3)
+	}
 	testing.expect_value(t, len(qu.rows), 1)
-	if len(qu.rows) == 1 { testing.expect_value(t, qu.rows[0][0].(i64), 100) }
+	if len(qu.rows) == 1 {
+		testing.expect_value(t, qu.rows[0][0].(i64), 100)
+	}
 }
 
 @(test)
@@ -2747,7 +2814,9 @@ test_txn_deferred_as_of_sees_committed :: proc(t: ^testing.T) {
 	old := db.query(d, fmt.tprintf("SELECT v FROM t AS OF SNAPSHOT %d WHERE id = 1;", snap_id))
 	testing.expect(t, old.ok, "as-of in txn must succeed")
 	testing.expect_value(t, len(old.rows), 1)
-	if len(old.rows) == 1 { testing.expect_value(t, old.rows[0][0].(i64), 10) }
+	if len(old.rows) == 1 {
+		testing.expect_value(t, old.rows[0][0].(i64), 10)
+	}
 	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback failed")
 }
 
@@ -2887,7 +2956,9 @@ test_mutation_pk_seek_qualified :: proc(t: ^testing.T) {
 	q := db.query(d, "SELECT v FROM t WHERE id = 2;")
 	testing.expect(t, q.ok, "post-update read must succeed")
 	testing.expect_value(t, len(q.rows), 1)
-	if len(q.rows) == 1 { testing.expect_value(t, q.rows[0][0].(i64), 77) }
+	if len(q.rows) == 1 {
+		testing.expect_value(t, q.rows[0][0].(i64), 77)
+	}
 
 	db.execute(d, "DELETE FROM t WHERE t.id = 1;")
 	gone := db.query(d, "SELECT v FROM t WHERE id = 1;")
@@ -2922,7 +2993,9 @@ test_vector_scan_differential :: proc(t: ^testing.T) {
 	strings.builder_init(&sb, context.temp_allocator)
 	strings.write_string(&sb, "INSERT INTO t VALUES ")
 	for i in 1 ..= 200 {
-		if i > 1 { strings.write_string(&sb, ",") }
+		if i > 1 {
+			strings.write_string(&sb, ",")
+		}
 		if i % 10 == 0 {
 			fmt.sbprintf(&sb, "(%d,NULL,NULL,NULL)", i)
 		} else if i % 3 == 0 {
@@ -2964,17 +3037,31 @@ test_vector_scan_differential :: proc(t: ^testing.T) {
 	}
 
 	vec_rows_equal :: proc(a, b: db.Query_Result) -> bool {
-		if a.ok != b.ok { return false }
-		if !a.ok { return true }
-		if len(a.rows) != len(b.rows) { return false }
-		if len(a.columns) != len(b.columns) { return false }
+		if a.ok != b.ok {
+			return false
+		}
+		if !a.ok {
+			return true
+		}
+		if len(a.rows) != len(b.rows) {
+			return false
+		}
+		if len(a.columns) != len(b.columns) {
+			return false
+		}
 		for c, i in a.columns {
-			if c != b.columns[i] || a.col_types[i] != b.col_types[i] { return false }
+			if c != b.columns[i] || a.col_types[i] != b.col_types[i] {
+				return false
+			}
 		}
 		for r, i in a.rows {
-			if len(r) != len(b.rows[i]) { return false }
+			if len(r) != len(b.rows[i]) {
+				return false
+			}
 			for v, j in r {
-				if !types.value_compare(v, b.rows[i][j]) { return false }
+				if !types.value_compare(v, b.rows[i][j]) {
+					return false
+				}
 			}
 		}
 		return true
@@ -3015,7 +3102,9 @@ test_create_index_empty :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
-	if !found { return }
+	if !found {
+		return
+	}
 	def, has := schema.table_index(tbl, "i_body")
 	testing.expect(t, has, "index present")
 	if has {
@@ -3045,7 +3134,9 @@ test_create_index_backfill :: proc(t: ^testing.T) {
 	// Heap-owned oracle (outlives per-iteration temp frees below).
 	expect := make(map[string][dynamic]i64, context.allocator)
 	defer {
-		for _, v in expect { delete(v) }
+		for _, v in expect {
+			delete(v)
+		}
 		delete(expect)
 	}
 	n_indexed := 0
@@ -3061,7 +3152,9 @@ test_create_index_backfill :: proc(t: ^testing.T) {
 			testing.expect(t, db.execute(d, nil_sql) == .None, "null insert succeeds")
 		}
 		lst, lst_ok := expect[body]
-		if !lst_ok { lst = make([dynamic]i64, context.allocator) }
+		if !lst_ok {
+			lst = make([dynamic]i64, context.allocator)
+		}
 		append(&lst, i64(i))
 		expect[body] = lst
 		n_indexed += 1
@@ -3077,7 +3170,9 @@ test_create_index_backfill :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
-	if !found { return }
+	if !found {
+		return
+	}
 	idx_root := index_root_of(t, tbl, "i_body")
 	testing.expect(t, idx_root > 0, "index root published")
 	idx_tree := btree.init(d.pager, idx_root)
@@ -3162,7 +3257,9 @@ test_create_index_in_txn :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found after commit")
-	if !found { return }
+	if !found {
+		return
+	}
 	testing.expect(t, index_root_of(t, tbl, "i_body") > 0, "index survives commit")
 	// Backfilled row present; in-txn row is NOT (fan-out is D4).
 	idx_tree := btree.init(d.pager, index_root_of(t, tbl, "i_body"))
@@ -3178,7 +3275,9 @@ test_create_index_in_txn :: proc(t: ^testing.T) {
 // every text's exact rowid set — the whole index, no sampling.
 index_oracle_add :: proc(expect: ^map[string][dynamic]i64, text: string, rowid: i64) {
 	lst, ok := expect[text]
-	if !ok { lst = make([dynamic]i64, context.allocator) }
+	if !ok {
+		lst = make([dynamic]i64, context.allocator)
+	}
 	append(&lst, rowid)
 	for j := len(lst) - 1; j > 0; j -= 1 {
 		if lst[j] < lst[j - 1] {
@@ -3192,10 +3291,14 @@ index_oracle_add :: proc(expect: ^map[string][dynamic]i64, text: string, rowid: 
 
 index_oracle_del :: proc(expect: ^map[string][dynamic]i64, text: string, rowid: i64) {
 	lst, ok := expect[text]
-	if !ok { return }
+	if !ok {
+		return
+	}
 	keep := make([dynamic]i64, 0, len(lst), context.allocator)
 	for r in lst {
-		if r != rowid { append(&keep, r) }
+		if r != rowid {
+			append(&keep, r)
+		}
 	}
 	delete(lst)
 	if len(keep) == 0 {
@@ -3206,7 +3309,9 @@ index_oracle_del :: proc(expect: ^map[string][dynamic]i64, text: string, rowid: 
 }
 
 destroy_expect :: proc(expect: ^map[string][dynamic]i64) {
-	for _, v in expect^ { delete(v) }
+	for _, v in expect^ {
+		delete(v)
+	}
 	delete(expect^)
 }
 
@@ -3214,7 +3319,9 @@ destroy_expect :: proc(expect: ^map[string][dynamic]i64) {
 index_root_of :: proc(t: ^testing.T, tbl: types.Table, name: string) -> u32 {
 	def, ok := schema.table_index(tbl, name)
 	testing.expect(t, ok, "index present")
-	if !ok { return 0 }
+	if !ok {
+		return 0
+	}
 	return def.root
 }
 
@@ -3227,14 +3334,20 @@ verify_text_index :: proc(
 	st := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st, table_name, context.temp_allocator)
 	testing.expect(t, found, "table found")
-	if !found { return }
+	if !found {
+		return
+	}
 	testing.expect(t, len(tbl.indexes) > 0, "index present")
-	if len(tbl.indexes) == 0 { return }
+	if len(tbl.indexes) == 0 {
+		return
+	}
 	idx_root := tbl.indexes[0].root
 	testing.expect(t, idx_root > 0, "index root published")
 	idx_tree := btree.init(d.pager, idx_root)
 	total := 0
-	for _, want in expect { total += len(want) }
+	for _, want in expect {
+		total += len(want)
+	}
 	cnt, c_err := btree.tree_count_rows(&idx_tree)
 	testing.expect(t, c_err == .None, "count succeeds")
 	testing.expect_value(t, cnt, total)
@@ -3544,7 +3657,9 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 
 	// Delete half the rows (every even id), then vacuum.
 	for i in 2 ..= 60 {
-		if i % 2 != 0 { continue }
+		if i % 2 != 0 {
+			continue
+		}
 		free_all(context.temp_allocator)
 		sql := fmt.tprintf("DELETE FROM docs WHERE id = %d;", i)
 		testing.expect(t, db.execute(d, sql) == .None, "delete succeeds")
@@ -3562,7 +3677,9 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 	st1 := db.Schema_Tree(d)
 	tbl1, found1 := schema.find_table(&st1, "docs", context.temp_allocator)
 	testing.expect(t, found1, "table found after vacuum")
-	if !found1 { return }
+	if !found1 {
+		return
+	}
 	vac_root := index_root_of(t, tbl1, "i_body")
 	testing.expect(t, vac_root > 0, "index root present after vacuum")
 	testing.expect(t, vac_root != root_before, "vacuum rebuilt the index")
@@ -3576,7 +3693,9 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 	testing.expect(t, len(pages) >= 1, "index reachable after vacuum")
 	for page_id in pages {
 		pg, pg_err := pager.get_page(d.pager, page_id)
-		if pg_err != nil { continue }
+		if pg_err != nil {
+			continue
+		}
 		h := btree.get_header(pg.data, page_id)
 		if h == nil {
 			pager.unpin_page(d.pager, page_id)
@@ -3625,7 +3744,9 @@ test_index_vacuum_empty :: proc(t: ^testing.T) {
 	st := db.Schema_Tree(d)
 	tbl, found := schema.find_table(&st, "docs", context.temp_allocator)
 	testing.expect(t, found, "table found")
-	if !found { return }
+	if !found {
+		return
+	}
 	empty_root := index_root_of(t, tbl, "i_body")
 	testing.expect(t, empty_root > 0, "index root present")
 	idx_tree := btree.init(d.pager, empty_root)
@@ -3633,7 +3754,9 @@ test_index_vacuum_empty :: proc(t: ^testing.T) {
 	testing.expect(t, c_err == .None && cnt == 0, "vacuumed empty index counts zero")
 	pg, pg_err := pager.get_page(d.pager, empty_root)
 	testing.expect(t, pg_err == nil, "root readable")
-	if pg_err != nil { return }
+	if pg_err != nil {
+		return
+	}
 	defer pager.unpin_page(d.pager, empty_root)
 	h := btree.get_header(pg.data, empty_root)
 	testing.expect(t, h != nil && h.page_type == .LEAF_TEXT, "empty vacuum root is a text leaf")
@@ -3724,12 +3847,16 @@ test_index_select_eq_covering :: proc(t: ^testing.T) {
 	check_covering :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []i64) {
 		q := db.query(d, sql)
 		testing.expect(t, q.ok, "covering select succeeds")
-		if !q.ok { return }
+		if !q.ok {
+			return
+		}
 		testing.expect_value(t, len(q.rows), len(want))
 		for i in 0 ..< min(len(q.rows), len(want)) {
 			v, is_int := q.rows[i][0].(i64)
 			testing.expect(t, is_int, "rowid projects as INTEGER")
-			if is_int { testing.expect_value(t, v, want[i]) }
+			if is_int {
+				testing.expect_value(t, v, want[i])
+			}
 		}
 	}
 
@@ -3856,10 +3983,14 @@ test_index_select_eq_fallback :: proc(t: ^testing.T) {
 	// NULL and cross-type literals fall through (never match, never route).
 	nul := db.query(d, "SELECT id FROM docs WHERE body = NULL;")
 	testing.expect(t, nul.ok, "null rhs succeeds")
-	if nul.ok { testing.expect_value(t, len(nul.rows), 0) }
+	if nul.ok {
+		testing.expect_value(t, len(nul.rows), 0)
+	}
 	cross := db.query(d, "SELECT id FROM docs WHERE body = 1;")
 	testing.expect(t, cross.ok, "int rhs succeeds")
-	if cross.ok { testing.expect_value(t, len(cross.rows), 0) }
+	if cross.ok {
+		testing.expect_value(t, len(cross.rows), 0)
+	}
 }
 
 @(test)
@@ -3882,7 +4013,9 @@ test_index_select_rowid_guard :: proc(t: ^testing.T) {
 		if len(q.rows) == 1 {
 			s, is_text := q.rows[0][0].(string)
 			testing.expect(t, is_text, "user column value is TEXT")
-			if is_text { testing.expect_value(t, s, "a") }
+			if is_text {
+				testing.expect_value(t, s, "a")
+			}
 		}
 	}
 
@@ -3937,17 +4070,23 @@ test_index_select_covering_in_txn :: proc(t: ^testing.T) {
 		if len(staged.rows) == 1 {
 			v, is_int := staged.rows[0][0].(i64)
 			testing.expect(t, is_int, "rowid projects as INTEGER")
-			if is_int { testing.expect_value(t, v, 101) }
+			if is_int {
+				testing.expect_value(t, v, 101)
+			}
 		}
 	}
 	// Pre-existing rows stay visible through the same path.
 	old := db.query(d, "SELECT rowid FROM docs WHERE body = 'aaa';")
 	testing.expect(t, old.ok, "old rows visible in txn")
-	if old.ok { testing.expect_value(t, len(old.rows), 2) }
+	if old.ok {
+		testing.expect_value(t, len(old.rows), 2)
+	}
 	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback")
 	gone := db.query(d, "SELECT rowid FROM docs WHERE body = 'txn';")
 	testing.expect(t, gone.ok, "post-rollback select succeeds")
-	if gone.ok { testing.expect_value(t, len(gone.rows), 0) }
+	if gone.ok {
+		testing.expect_value(t, len(gone.rows), 0)
+	}
 }
 
 @(test)
@@ -3999,13 +4138,17 @@ test_index_select_prefix_covering :: proc(t: ^testing.T) {
 		sql := fmt.tprintf("SELECT rowid FROM docs WHERE body LIKE '%s%%';", stem)
 		q := db.query(d, sql)
 		testing.expect(t, q.ok, "covering prefix succeeds")
-		if !q.ok { continue }
+		if !q.ok {
+			continue
+		}
 		want := union_for_stem(expect, stem)
 		testing.expect_value(t, len(q.rows), len(want))
 		for i in 0 ..< min(len(q.rows), len(want)) {
 			v, is_int := q.rows[i][0].(i64)
 			testing.expect(t, is_int, "rowid projects as INTEGER")
-			if is_int { testing.expect_value(t, v, want[i]) }
+			if is_int {
+				testing.expect_value(t, v, want[i])
+			}
 		}
 	}
 	free_all(context.temp_allocator)
@@ -4028,7 +4171,9 @@ test_index_select_prefix_covering :: proc(t: ^testing.T) {
 	// LIKE '%' matches every non-NULL body (60 rows, NULLs excluded).
 	star := db.query(d, "SELECT id FROM docs WHERE body LIKE '%';")
 	testing.expect(t, star.ok, "bare-% succeeds")
-	if star.ok { testing.expect_value(t, len(star.rows), 60) }
+	if star.ok {
+		testing.expect_value(t, len(star.rows), 60)
+	}
 }
 
 @(test)
@@ -4074,7 +4219,9 @@ test_index_select_fetch :: proc(t: ^testing.T) {
 		// alpha ids with v = id*10 > 100 → id > 10 among alpha rows.
 		narrow := 0
 		for r in expect["alpha"] {
-			if r > 10 { narrow += 1 }
+			if r > 10 {
+				narrow += 1
+			}
 		}
 		testing.expect_value(t, len(andq.rows), narrow)
 	}
@@ -4104,20 +4251,34 @@ test_index_select_fetch :: proc(t: ^testing.T) {
 twin_values_equal :: proc(a, b: types.Value) -> bool {
 	// Output comparison (not filter semantics): NULL equals NULL here —
 	// both sides read the same stored cell.
-	if types.is_null(a) && types.is_null(b) { return true }
-	if types.is_null(a) || types.is_null(b) { return false }
+	if types.is_null(a) && types.is_null(b) {
+		return true
+	}
+	if types.is_null(a) || types.is_null(b) {
+		return false
+	}
 	#partial switch va in a {
 	case i64:
-		if vb, ok := b.(i64); ok { return va == vb }
+		if vb, ok := b.(i64); ok {
+			return va == vb
+		}
 	case f64:
-		if vb, ok := b.(f64); ok { return va == vb }
+		if vb, ok := b.(f64); ok {
+			return va == vb
+		}
 	case string:
-		if vb, ok := b.(string); ok { return va == vb }
+		if vb, ok := b.(string); ok {
+			return va == vb
+		}
 	case []u8:
 		if vb, ok := b.([]u8); ok {
-			if len(va) != len(vb) { return false }
+			if len(va) != len(vb) {
+				return false
+			}
 			for i in 0 ..< len(va) {
-				if va[i] != vb[i] { return false }
+				if va[i] != vb[i] {
+					return false
+				}
 			}
 			return true
 		}
@@ -4185,7 +4346,9 @@ test_index_select_fetch_matches_scan :: proc(t: ^testing.T) {
 		a := db.query(d, q)
 		b := db.query(d, twin)
 		testing.expect(t, a.ok && b.ok, "twin queries succeed")
-		if !a.ok || !b.ok { continue }
+		if !a.ok || !b.ok {
+			continue
+		}
 		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
 		for i in 0 ..< min(len(a.rows), len(b.rows)) {
 			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
@@ -4303,7 +4466,9 @@ test_index_select_fetch_in_txn :: proc(t: ^testing.T) {
 	testing.expect(t, db.execute(d, "ROLLBACK;") == .None, "rollback")
 	gone := db.query(d, "SELECT id FROM docs WHERE body LIKE 'txn%';")
 	testing.expect(t, gone.ok, "post-rollback fetch succeeds")
-	if gone.ok { testing.expect_value(t, len(gone.rows), 0) }
+	if gone.ok {
+		testing.expect_value(t, len(gone.rows), 0)
+	}
 }
 
 @(test)

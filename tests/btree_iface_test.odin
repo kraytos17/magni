@@ -16,20 +16,26 @@ test_iface_dispatcher_parity :: proc(t: ^testing.T) {
 		vals := []types.Value{types.value_int(i64(i * 10))}
 		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
 		testing.expect(t, err == .None, "seed insert succeeds")
-		if err != .None { return }
+		if err != .None {
+			return
+		}
 	}
 
 	pg, pg_err := pager.get_page(ctx.pager, 1)
 	testing.expect(t, pg_err == nil, "get page 1")
-	if pg_err != nil { return }
+	if pg_err != nil {
+		return
+	}
 	defer pager.unpin_page(ctx.pager, 1)
 
 	layout, kind, l_err := btree.layout_for_page(pg.data, btree.Page_Id(1))
 	testing.expect(t, l_err == .None, "dispatcher resolves leaf page")
-	if l_err != .None { return }
+	if l_err != .None {
+		return
+	}
+
 	testing.expect(t, layout.vtable != nil, "vtable never nil")
 	testing.expect_value(t, kind, btree.Key_Kind.Rowid)
-
 	count := layout.vtable.cell_count(pg.data, btree.Page_Id(1))
 	testing.expect_value(t, count, 5)
 
@@ -42,7 +48,6 @@ test_iface_dispatcher_parity :: proc(t: ^testing.T) {
 	// Out-of-range is loud, not a zero key.
 	_, oob_err := layout.vtable.key_at(pg.data, btree.Page_Id(1), count)
 	testing.expect(t, oob_err == .Cell_Not_Found, "key_at past end fails closed")
-
 	// lower_bound matches binary-search semantics: exact hits and gaps.
 	for target in 1 ..= 6 {
 		idx, lb_err := layout.vtable.lower_bound_rowid(
@@ -50,6 +55,7 @@ test_iface_dispatcher_parity :: proc(t: ^testing.T) {
 			btree.Page_Id(1),
 			types.Row_ID(target),
 		)
+
 		testing.expect(t, lb_err == .None, "lower_bound succeeds")
 		want := target - 1 if target <= 5 else 5
 		testing.expect_value(t, idx, want)

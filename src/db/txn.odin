@@ -64,7 +64,9 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 	}
 
 	manifest_page := snapshot.create_manifest(db.pager, tables[:])
-	defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
+	defer if manifest_page != 0 {
+		pager.unpin_page(db.pager, manifest_page)
+	}
 
 	snap_page, snap_ok := snapshot.create(
 		db.pager,
@@ -111,7 +113,9 @@ rollback_impl :: proc(db: ^Database) -> DB_Error {
 	}
 	if db.latest_snapshot != 0 {
 		snap_h, snap_ok := snapshot.load(db.pager, db.latest_snapshot)
-		if snap_ok { db.schema_root_page = snap_h.schema_root }
+		if snap_ok {
+			db.schema_root_page = snap_h.schema_root
+		}
 	}
 
 	// Staged roots die with the txn; the cache never saw a root bump (roots

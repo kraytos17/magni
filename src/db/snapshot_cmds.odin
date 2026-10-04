@@ -21,8 +21,12 @@ Reclaim_Decision :: enum u8 {
 
 @(private = "file")
 reclaim_decision :: proc(db: ^Database) -> Reclaim_Decision {
-	if db.latest_snapshot == 0 { return .Empty_No_Snapshots }
-	if db.txn_state == .Active { return .Blocked_Active_Txn }
+	if db.latest_snapshot == 0 {
+		return .Empty_No_Snapshots
+	}
+	if db.txn_state == .Active {
+		return .Blocked_Active_Txn
+	}
 	return .Proceed
 }
 
@@ -42,7 +46,9 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 		return .Snapshot_Failed
 	}
 	defer {
-		for e in entries { delete(e.table_name) }
+		for e in entries {
+			delete(e.table_name)
+		}
 		delete(entries)
 	}
 	if len(entries) == 0 {
@@ -174,7 +180,9 @@ capture_snapshot :: proc(db: ^Database, op: snapshot.Snapshot_Operation) {
 	}
 
 	manifest_page := snapshot.create_manifest(db.pager, tables[:])
-	defer if manifest_page != 0 { pager.unpin_page(db.pager, manifest_page) }
+	defer if manifest_page != 0 {
+		pager.unpin_page(db.pager, manifest_page)
+	}
 
 	db.txn_snapshot_id += 1
 	snap_id := db.txn_snapshot_id

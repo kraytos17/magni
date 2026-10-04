@@ -9,7 +9,9 @@ import "src:types"
 // where_leaf_conditions flattens a top-level AND chain of comparisons into leaf
 // conditions (for asserting on parsed WHERE/HAVING/ON trees in tests).
 where_leaf_conditions :: proc(clause: parser.Where_Clause) -> []parser.Condition {
-	if clause.root == nil { return nil }
+	if clause.root == nil {
+		return nil
+	}
 	if clause.root.kind == .COND {
 		conds := make([dynamic]parser.Condition, context.temp_allocator)
 		append(&conds, clause.root.cond)
@@ -245,7 +247,9 @@ test_parse_drop_index :: proc(t: ^testing.T) {
 		testing.expect(t, qdrop.index_name == "i", "qualified index name")
 		qtbl, has_qtbl := qdrop.table_name.?
 		testing.expect(t, has_qtbl, "qualifier present")
-		if has_qtbl { testing.expect(t, qtbl == "docs", "qualified table") }
+		if has_qtbl {
+			testing.expect(t, qtbl == "docs", "qualified table")
+		}
 	}
 	unqual, uok, _ := parser.parse("DROP INDEX i;", context.temp_allocator)
 	testing.expect(t, uok, "unqualified parses")
@@ -1538,7 +1542,9 @@ test_is_null_parse_shape :: proc(t: ^testing.T) {
 	sel := stmt.type.(parser.Select_Stmt)
 	clause, has_where := sel.where_clause.?
 	testing.expect(t, has_where, "expected WHERE clause")
-	if !has_where { return }
+	if !has_where {
+		return
+	}
 
 	testing.expect(t, clause.root.kind == .COND, "expected COND node")
 	testing.expect(t, clause.root.cond.operator == .IS, "expected IS operator")
@@ -1592,7 +1598,9 @@ test_keyword_bucket_offsets :: proc(t: ^testing.T) {
 	for kw in keywords {
 		tokens, ok := parser.tokenize(kw[0], context.temp_allocator)
 		testing.expect(t, ok, "keyword must tokenize")
-		if !ok || len(tokens) == 0 { continue }
+		if !ok || len(tokens) == 0 {
+			continue
+		}
 
 		testing.expect(
 			t,

@@ -541,7 +541,9 @@ test_tree_collect_pages :: proc(t: ^testing.T) {
 	testing.expect(t, len(pages) >= 1, "at least one page collected")
 	found_root := false
 	for p in pages {
-		if p == ctx.tree.root { found_root = true }
+		if p == ctx.tree.root {
+			found_root = true
+		}
 	}
 	testing.expect(t, found_root, "root page in collected pages")
 }
@@ -575,14 +577,20 @@ test_page_accessor_move :: proc(t: ^testing.T) {
 	p, err := pager.open("test_accessor_move.db", 8)
 	defer pager.close(p)
 	os.remove("test_accessor_move.db"); os.remove("test_accessor_move.db-wal")
-	if err != nil { testing.fail_now(t, "open failed") }
+	if err != nil {
+		testing.fail_now(t, "open failed")
+	}
 
 	src_pg, a_err := pager.allocate_page(p)
-	if a_err != nil { testing.fail_now(t, "alloc failed") }
+	if a_err != nil {
+		testing.fail_now(t, "alloc failed")
+	}
 	defer pager.unpin_page(p, src_pg.page_num)
 
 	dst_pg, a2_err := pager.allocate_page(p)
-	if a2_err != nil { testing.fail_now(t, "alloc dst failed") }
+	if a2_err != nil {
+		testing.fail_now(t, "alloc dst failed")
+	}
 	defer pager.unpin_page(p, dst_pg.page_num)
 
 	// Slotdir pages post-flip (move_cells_to is stride-generic; the 10-byte

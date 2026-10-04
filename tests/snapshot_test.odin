@@ -400,7 +400,9 @@ test_snapshot_packed_overflow :: proc(t: ^testing.T) {
 	for i in 1 ..= n {
 		page, ok := snapshot.create(p, u64(i), last_page, u32(i * 100))
 		testing.expect(t, ok, fmt.tprintf("create snap %d", i))
-		if i == 1 { first_page = page }
+		if i == 1 {
+			first_page = page
+		}
 		last_page = page
 	}
 

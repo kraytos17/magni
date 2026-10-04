@@ -119,7 +119,9 @@ render_search_overlay :: proc(ed: ^Editor, search_prompt: string, matched: strin
 	}
 
 	cols := t.width
-	if cols <= 0 { cols = 80 }
+	if cols <= 0 {
+		cols = 80
+	}
 
 	rows := ed.prev_search_rows if ed.prev_search_rows > 0 else ed.prev_render_rows
 	if rows > 1 {

@@ -35,7 +35,9 @@ TEXT_INDEX_MIN_LEN    :: TEXT_INDEX_PREFIX_LEN + TEXT_INDEX_ROWID_LEN
 // any non-TEXT value (not indexed — caller skips). Pure observer.
 text_index_encoded_len :: #force_inline proc "contextless" (val: types.Value) -> int {
 	s, ok := val.(string)
-	if !ok { return 0 }
+	if !ok {
+		return 0
+	}
 	return TEXT_INDEX_PREFIX_LEN + len(s) + TEXT_INDEX_ROWID_LEN
 }
 
@@ -53,10 +55,14 @@ text_index_encode :: proc "contextless" (
 	bool,
 ) {
 	s, ok := val.(string)
-	if !ok { return 0, false }
+	if !ok {
+		return 0, false
+	}
 
 	need := TEXT_INDEX_PREFIX_LEN + len(s) + TEXT_INDEX_ROWID_LEN
-	if intrinsics.unlikely(len(buf) < need) { return 0, false }
+	if intrinsics.unlikely(len(buf) < need) {
+		return 0, false
+	}
 
 	buf[0] = TEXT_INDEX_TAG
 	n := len(s)
@@ -83,8 +89,12 @@ text_index_decode :: proc "contextless" (
 	rowid: types.Row_ID,
 	ok: bool,
 ) {
-	if intrinsics.unlikely(len(src) < TEXT_INDEX_MIN_LEN) { return "", 0, false }
-	if intrinsics.unlikely(src[0] != TEXT_INDEX_TAG) { return "", 0, false }
+	if intrinsics.unlikely(len(src) < TEXT_INDEX_MIN_LEN) {
+		return "", 0, false
+	}
+	if intrinsics.unlikely(src[0] != TEXT_INDEX_TAG) {
+		return "", 0, false
+	}
 
 	n := int(src[1]) << 24 | int(src[2]) << 16 | int(src[3]) << 8 | int(src[4])
 	if intrinsics.unlikely(n < 0 || TEXT_INDEX_PREFIX_LEN + n + TEXT_INDEX_ROWID_LEN != len(src)) {
@@ -110,8 +120,12 @@ text_index_split :: #force_inline proc "contextless" (
 	rowid_enc: u64,
 	ok: bool,
 ) {
-	if intrinsics.unlikely(len(src) < TEXT_INDEX_MIN_LEN) { return nil, 0, false }
-	if intrinsics.unlikely(src[0] != TEXT_INDEX_TAG) { return nil, 0, false }
+	if intrinsics.unlikely(len(src) < TEXT_INDEX_MIN_LEN) {
+		return nil, 0, false
+	}
+	if intrinsics.unlikely(src[0] != TEXT_INDEX_TAG) {
+		return nil, 0, false
+	}
 
 	n := int(src[1]) << 24 | int(src[2]) << 16 | int(src[3]) << 8 | int(src[4])
 	if intrinsics.unlikely(n < 0 || TEXT_INDEX_PREFIX_LEN + n + TEXT_INDEX_ROWID_LEN > len(src)) {
@@ -139,8 +153,12 @@ text_index_compare :: #force_inline proc "contextless" (a: []u8, b: []u8) -> int
 		}
 		return 1 if oka else -1
 	}
-	if r := mem.compare(ta, tb); r != 0 { return r }
-	if wa != wb { return -1 if wa < wb else 1 }
+	if r := mem.compare(ta, tb); r != 0 {
+		return r
+	}
+	if wa != wb {
+		return -1 if wa < wb else 1
+	}
 	return 0
 }
 
@@ -155,9 +173,15 @@ text_index_shared_prefix :: #force_inline proc "contextless" (
 	max_cap: int,
 ) -> int {
 	cap := max_cap
-	if cap > len(a) { cap = len(a) }
-	if cap > len(b) { cap = len(b) }
-	if cap <= 0 { return 0 }
+	if cap > len(a) {
+		cap = len(a)
+	}
+	if cap > len(b) {
+		cap = len(b)
+	}
+	if cap <= 0 {
+		return 0
+	}
 
 	n := 0
 	#no_bounds_check {
@@ -180,10 +204,14 @@ text_index_shared_prefix :: #force_inline proc "contextless" (
 				u64(b[n + 5]) << 16 |
 				u64(b[n + 6]) << 8 |
 				u64(b[n + 7])
-			if av != bv { break }
+			if av != bv {
+				break
+			}
 			n += 8
 		}
-		for n < cap && a[n] == b[n] { n += 1 }
+		for n < cap && a[n] == b[n] {
+			n += 1
+		}
 	}
 	return n
 }
@@ -192,6 +220,8 @@ text_index_shared_prefix :: #force_inline proc "contextless" (
 // Feeds LIKE 'abc%' prefix-range planning: leading-wildcard
 // patterns never reach here (caller checks first char).
 text_index_has_prefix :: #force_inline proc "contextless" (text: []u8, prefix: []u8) -> bool {
-	if len(prefix) > len(text) { return false }
+	if len(prefix) > len(text) {
+		return false
+	}
 	return mem.compare(text[:len(prefix)], prefix) == 0
 }

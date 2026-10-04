@@ -27,7 +27,9 @@ copy_on_write :: proc(t: ^Tree, page_id: u32) -> (u32, Error) {
 @(private = "file")
 relocate_copied_page1 :: proc(page: ^pager.Page) -> bool {
 	hdr := get_header(page.data, 1)
-	if hdr == nil { return false }
+	if hdr == nil {
+		return false
+	}
 
 	SRC_HDR_OFF :: types.DATABASE_HEADER_SIZE
 	DST_HDR_OFF :: 0
@@ -241,7 +243,9 @@ tree_update_cow :: proc(
 	}
 
 	result, rec_err := update_recursive(t, t.root, rowid, values, true)
-	if rec_err != .None { return 0, rec_err }
+	if rec_err != .None {
+		return 0, rec_err
+	}
 
 	pager.unpin_page(t.pager, result.new_page)
 	return result.new_page, .None

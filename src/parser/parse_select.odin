@@ -8,7 +8,9 @@ import "src:types"
 @(private)
 parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: string, ok: bool) {
 	tok := peek(p)
-	if tok.type != .IDENTIFIER && !is_keyword_token(tok.type) { return {}, false }
+	if tok.type != .IDENTIFIER && !is_keyword_token(tok.type) {
+		return {}, false
+	}
 
 	advance(p)
 	return strings.clone(tok.lexeme, allocator), true
@@ -37,13 +39,16 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 	if is_subquery_start(p) {
 		advance(p); advance(p)
 		inner_variant, sel_ok := parse_select(p, allocator)
-		if !sel_ok { return {} }
+		if !sel_ok {
+			return {}
+		}
 
 		inner_sel, _ := inner_variant.(Select_Stmt)
 		subq := new(Select_Stmt, allocator)
 		subq^ = inner_sel
 		if !match(p, .RPAREN) {
-			free(subq, allocator); return {}
+			free(subq, allocator)
+			return {}
 		}
 
 		has_as := match(p, .AS)
@@ -63,16 +68,24 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 	}
 
 	tbl, tbl_ok := parse_identifier(p, allocator)
-	if !tbl_ok { return {} }
+	if !tbl_ok {
+		return {}
+	}
 	if match(p, .AS) {
-		if peek(p).type == .OF { p.current -= 1 } else {
+		if peek(p).type == .OF {
+			p.current -= 1
+		} else {
 			al2, al2_ok := parse_identifier(p, allocator)
-			if !al2_ok { return {} }
+			if !al2_ok {
+				return {}
+			}
 			return {source = tbl, alias = al2, success = true}
 		}
 	} else if is_alias(p) {
 		al3, al3_ok := parse_identifier(p, allocator)
-		if !al3_ok { return {} }
+		if !al3_ok {
+			return {}
+		}
 		return {source = tbl, alias = al3, success = true}
 	}
 	return {source = tbl, alias = "", success = true}
@@ -104,11 +117,15 @@ parse_single_join :: proc(
 	ok: bool,
 ) {
 	js := parse_join_source(p, allocator)
-	if !js.success { return {}, false }
+	if !js.success {
+		return {}, false
+	}
 
 	right_alias := js.alias
 	if right_alias == "" {
-		if tbl, is_tbl := js.source.(string); is_tbl { right_alias = tbl }
+		if tbl, is_tbl := js.source.(string); is_tbl {
+			right_alias = tbl
+		}
 	}
 
 	parse_using := proc(
@@ -120,18 +137,28 @@ parse_single_join :: proc(
 		cl: Where_Clause,
 		ok: bool,
 	) {
-		if !match(p, .LPAREN) { return {}, false }
+		if !match(p, .LPAREN) {
+			return {}, false
+		}
 
 		cols := make([dynamic]string, alloc)
 		for {
 			col, col_ok := parse_identifier(p, alloc)
-			if !col_ok { return {}, false }
+			if !col_ok {
+				return {}, false
+			}
 
 			append(&cols, col)
-			if match(p, .RPAREN) { break }
-			if !match(p, .COMMA) { return {}, false }
+			if match(p, .RPAREN) {
+				break
+			}
+			if !match(p, .COMMA) {
+				return {}, false
+			}
 		}
-		if len(cols) == 0 { return {}, false }
+		if len(cols) == 0 {
+			return {}, false
+		}
 
 		root: ^Where_Node = nil
 		for i in 0 ..< len(cols) {
@@ -143,6 +170,7 @@ parse_single_join :: proc(
 				operator = .EQUALS,
 				rhs      = right_col,
 			}
+
 			node := new(Where_Node, alloc)
 			node^ = Where_Node {
 				kind = .COND,
@@ -163,7 +191,9 @@ parse_single_join :: proc(
 				root = wrapper
 			}
 		}
-		for c in cols { delete(c, alloc) }
+		for c in cols {
+			delete(c, alloc)
+		}
 
 		delete(cols)
 		return Where_Clause{root = root}, true
@@ -173,19 +203,27 @@ parse_single_join :: proc(
 	if on_required {
 		if match(p, .ON) {
 			on_cl, ok = parse_where_clause(p, allocator)
-			if !ok { return {}, false }
+			if !ok {
+				return {}, false
+			}
 		} else if match(p, .USING) {
 			on_cl, ok = parse_using(p, left_alias, right_alias, allocator)
-			if !ok { return {}, false }
+			if !ok {
+				return {}, false
+			}
 		} else {
 			return {}, false
 		}
 	} else if match(p, .ON) {
 		on_cl, ok = parse_where_clause(p, allocator)
-		if !ok { return {}, false }
+		if !ok {
+			return {}, false
+		}
 	} else if match(p, .USING) {
 		on_cl, ok = parse_using(p, left_alias, right_alias, allocator)
-		if !ok { return {}, false }
+		if !ok {
+			return {}, false
+		}
 	}
 
 	return Join_Clause {
@@ -203,19 +241,27 @@ parse_select_columns :: proc(
 	b: ^Select_Builder,
 	allocator := context.allocator,
 ) -> bool {
-	if match(p, .ASTERISK) { return true }
+	if match(p, .ASTERISK) {
+		return true
+	}
 	for {
 		tok := peek(p)
 		if tok.type == .IDENTIFIER &&
 		   p.current + 1 < len(p.tokens) &&
 		   p.tokens[p.current + 1].type == .LPAREN {
-			if !parse_column_or_aggregate(p, b, tok, allocator) { return false }
+			if !parse_column_or_aggregate(p, b, tok, allocator) {
+				return false
+			}
 		} else {
-			if !parse_column_or_literal(p, b, tok, allocator) { return false }
+			if !parse_column_or_literal(p, b, tok, allocator) {
+				return false
+			}
 		}
 
 		consume_column_alias(p, &b.aliases, allocator)
-		if !match(p, .COMMA) { break }
+		if !match(p, .COMMA) {
+			break
+		}
 	}
 	return true
 }
@@ -248,7 +294,9 @@ parse_column_or_aggregate :: proc(
 	agg_func, agg_ok := resolve_aggregate_name(tok.lexeme)
 	if !agg_ok {
 		col, cok := parse_identifier(p, allocator)
-		if !cok { return false }
+		if !cok {
+			return false
+		}
 
 		builder_emit_column(b, col, .COLUMN, -1)
 		return true
@@ -259,10 +307,14 @@ parse_column_or_aggregate :: proc(
 	arg_col: string
 	if !is_star {
 		var, acok := parse_qualified_identifier(p, allocator)
-		if !acok { return false }
+		if !acok {
+			return false
+		}
 		arg_col = var
 	}
-	if !match(p, .RPAREN) { return false }
+	if !match(p, .RPAREN) {
+		return false
+	}
 
 	arg_display := "*" if is_star else arg_col
 	display := strings.concatenate({tok.lexeme, "(", arg_display, ")"}, allocator)
@@ -289,7 +341,9 @@ parse_column_or_literal :: proc(
 	#partial switch tok.type {
 	case .NUMBER, .STRING, .BLOB_LITERAL, .NULL:
 		val, vok := parse_value(p, allocator)
-		if !vok { return false }
+		if !vok {
+			return false
+		}
 
 		append(&b.literal_values, val)
 		builder_emit_column(
@@ -300,7 +354,9 @@ parse_column_or_literal :: proc(
 		)
 	case:
 		col, cok := parse_qualified_identifier(p, allocator)
-		if !cok { return false }
+		if !cok {
+			return false
+		}
 		builder_emit_column(b, col, .COLUMN, -1)
 	}
 	return true
@@ -309,11 +365,17 @@ parse_column_or_literal :: proc(
 // eq_fold compares ASCII case-insensitively without allocation.
 @(private = "file")
 eq_fold :: proc(s: string, target: string) -> bool {
-	if len(s) != len(target) { return false }
+	if len(s) != len(target) {
+		return false
+	}
 	for i in 0 ..< len(s) {
 		c := s[i]
-		if c >= 'A' && c <= 'Z' { c += 32 }
-		if c != target[i] { return false }
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c != target[i] {
+			return false
+		}
 	}
 	return true
 }
@@ -325,12 +387,22 @@ eq_fold :: proc(s: string, target: string) -> bool {
 resolve_aggregate_name :: proc(name: string) -> (Aggregate_Func, bool) {
 	switch len(name) {
 	case 3:
-		if eq_fold(name, "min") { return .MIN, true }
-		if eq_fold(name, "max") { return .MAX, true }
-		if eq_fold(name, "avg") { return .AVG, true }
-		if eq_fold(name, "sum") { return .SUM, true }
+		if eq_fold(name, "min") {
+			return .MIN, true
+		}
+		if eq_fold(name, "max") {
+			return .MAX, true
+		}
+		if eq_fold(name, "avg") {
+			return .AVG, true
+		}
+		if eq_fold(name, "sum") {
+			return .SUM, true
+		}
 	case 5:
-		if eq_fold(name, "count") { return .COUNT, true }
+		if eq_fold(name, "count") {
+			return .COUNT, true
+		}
 	}
 	return .COUNT, false
 }
@@ -347,11 +419,16 @@ collect_having_aggregates :: proc(
 	out: ^[dynamic]Aggregate_Expr,
 	allocator: mem.Allocator,
 ) {
-	if node == nil { return }
+	if node == nil {
+		return
+	}
+
 	switch node.kind {
 	case .COND:
 		agg_func, is_agg := resolve_aggregate_name(node.cond.column)
-		if !is_agg { return }
+		if !is_agg {
+			return
+		}
 		for agg in out {
 			if agg.func == agg_func && agg.column == node.cond.agg_column {
 				return
@@ -405,10 +482,14 @@ parse_join_clauses :: proc(
 	}
 	for {
 		jt, explicit, matched := match_join_keyword(p)
-		if !matched { break }
+		if !matched {
+			break
+		}
 
 		jc, jc_ok := parse_single_join(p, allocator, jt, explicit, state.left)
-		if !jc_ok { break }
+		if !jc_ok {
+			break
+		}
 
 		state.left = jc.alias if jc.alias != "" else state.left
 		append(&joins, jc)
@@ -434,18 +515,26 @@ match_join_keyword :: proc(p: ^Parser) -> (jt: Join_Type, explicit: bool, matche
 	case match(p, .JOIN):
 		return .INNER, false, true
 	case match(p, .INNER):
-		if !match(p, .JOIN) { return .INNER, false, false }
+		if !match(p, .JOIN) {
+			return .INNER, false, false
+		}
 		return .INNER, true, true
 	case match(p, .CROSS):
-		if !match(p, .JOIN) { return .CROSS, false, false }
+		if !match(p, .JOIN) {
+			return .CROSS, false, false
+		}
 		return .CROSS, false, true
 	case match(p, .LEFT):
 		match(p, .OUTER)
-		if !match(p, .JOIN) { return .LEFT, false, false }
+		if !match(p, .JOIN) {
+			return .LEFT, false, false
+		}
 		return .LEFT, true, true
 	case match(p, .RIGHT):
 		match(p, .OUTER)
-		if !match(p, .JOIN) { return .RIGHT, false, false }
+		if !match(p, .JOIN) {
+			return .RIGHT, false, false
+		}
 		return .RIGHT, true, true
 	}
 	return .INNER, false, false
@@ -492,7 +581,9 @@ builder_abandon :: proc(b: ^Select_Builder, allocator := context.allocator) {
 	types.values_delete(b.literal_values[:], allocator)
 	delete(b.col_kinds)
 	delete(b.col_literal_idx)
-	for agg in b.aggregates { delete(agg.column, allocator) }
+	for agg in b.aggregates {
+		delete(agg.column, allocator)
+	}
 	delete(b.aggregates)
 }
 
@@ -513,15 +604,21 @@ parse_from_clause :: proc(
 	ok: bool,
 ) {
 	fc.source = No_From{}
-	if !match(p, .FROM) { return fc, true }
+	if !match(p, .FROM) {
+		return fc, true
+	}
 
 	js := parse_join_source(p, allocator)
-	if !js.success { return {}, false }
+	if !js.success {
+		return {}, false
+	}
 
 	fc.source, fc.alias = js.source, js.alias
 	left_name := fc.alias
 	if left_name == "" {
-		if tbl, is_tbl := js.source.(string); is_tbl { left_name = tbl }
+		if tbl, is_tbl := js.source.(string); is_tbl {
+			left_name = tbl
+		}
 	}
 
 	fc.joins = parse_join_clauses(p, left_name, allocator)
@@ -570,7 +667,9 @@ parse_group_by :: proc(
 			}
 
 			append(&group_by, col)
-			if !match(p, .COMMA) { break }
+			if !match(p, .COMMA) {
+				break
+			}
 		}
 	}
 	return group_by, true
@@ -587,12 +686,16 @@ parse_select :: proc(
 	p.nest_depth += 1
 	defer p.nest_depth -= 1
 	if p.nest_depth > MAX_PARSE_NESTING {
-		if p.err_msg == "" { p.err_msg = "Query nesting too deep" }
+		if p.err_msg == "" {
+			p.err_msg = "Query nesting too deep"
+		}
 		return {}, false
 	}
 
 	b := builder_new(allocator)
-	defer if !ok { builder_abandon(&b, allocator) }
+	defer if !ok {
+		builder_abandon(&b, allocator)
+	}
 
 	is_distinct := match(p, .DISTINCT)
 	if !parse_select_columns(p, &b, allocator) {
@@ -602,21 +705,31 @@ parse_select :: proc(
 	// FROM is optional. A SELECT without FROM evaluates its columns as literals
 	// (e.g. `SELECT 1, 'a'`) producing a single row.
 	fc, fc_ok := parse_from_clause(p, allocator)
-	if !fc_ok { return nil, false }
-	defer if !ok { delete(fc.joins) }
+	if !fc_ok {
+		return nil, false
+	}
+	defer if !ok {
+		delete(fc.joins)
+	}
 
 	as_of := parse_as_of(p) or_return
 	where_clause: Maybe(Where_Clause)
-	if match(p, .WHERE) { where_clause = parse_where_clause(p, allocator) or_return }
+	if match(p, .WHERE) {
+		where_clause = parse_where_clause(p, allocator) or_return
+	}
 
 	group_by, gb_ok := parse_group_by(p, allocator)
-	if !gb_ok { return nil, false }
-	defer if !ok { delete(group_by) }
+	if !gb_ok {
+		return nil, false
+	}
+	defer if !ok {
+		delete(group_by)
+	}
 
 	having_cl: Maybe(Where_Clause)
-	if match(p, .HAVING) { having_cl = parse_where_clause(p, allocator) or_return }
-	// Register aggregates referenced only by HAVING (e.g. `HAVING COUNT(*) >= 2`
-	// with no aggregate in the SELECT list) so the executor computes them.
+	if match(p, .HAVING) {
+		having_cl = parse_where_clause(p, allocator) or_return
+	}
 	if hc, has_h := having_cl.?; has_h {
 		collect_having_aggregates(hc.root, &b.aggregates, allocator)
 	}
@@ -663,22 +776,37 @@ parse_order_limit :: proc(
 	ok: bool,
 ) {
 	if match(p, .ORDER) {
-		if !match(p, .BY) { return {}, {}, {}, false }
+		if !match(p, .BY) {
+			return {}, {}, {}, false
+		}
+
 		order_cols := make([dynamic]Order_By_Column, allocator)
-		defer if !ok { delete(order_cols) }
+		defer if !ok {
+			delete(order_cols)
+		}
 		for {
 			col := parse_qualified_identifier(p, allocator) or_return
 			desc := false; nulls_first := false
-			if match(p, .ASC) {  } else if match(p, .DESC) { desc = true }
+			if match(p, .ASC) {
+			} else if match(p, .DESC) {
+				desc = true
+			}
+
 			if match(p, .NULLS) {
-				if match(p, .FIRST) { nulls_first = true } else { match(p, .LAST) }
+				if match(p, .FIRST) {
+					nulls_first = true
+				} else {
+					match(p, .LAST)
+				}
 			}
 
 			append(
 				&order_cols,
 				Order_By_Column{column = col, desc = desc, nulls_first = nulls_first},
 			)
-			if !match(p, .COMMA) { break }
+			if !match(p, .COMMA) {
+				break
+			}
 		}
 		order_by = order_cols[:]
 	}
@@ -734,10 +862,14 @@ parse_compound_operand :: proc(
 	operand: Set_Operand,
 	ok: bool,
 ) {
-	if !match(p, .SELECT) { return {}, false }
+	if !match(p, .SELECT) {
+		return {}, false
+	}
 
 	sel_variant, sel_ok := parse_select(p, allocator, false)
-	if !sel_ok { return {}, false }
+	if !sel_ok {
+		return {}, false
+	}
 
 	sel, _ := sel_variant.(Select_Stmt)
 	sel_ptr := new(Select_Stmt, allocator)
@@ -754,11 +886,15 @@ parse_compound_select :: proc(
 	ok: bool,
 ) {
 	first_variant, first_ok := parse_select(p, allocator)
-	if !first_ok { return nil, false }
+	if !first_ok {
+		return nil, false
+	}
 
 	first_sel, _ := first_variant.(Select_Stmt)
 	op, has_op := parse_set_op(p)
-	if !has_op { return first_variant, true }
+	if !has_op {
+		return first_variant, true
+	}
 
 	first_ptr := new(Select_Stmt, allocator)
 	first_ptr^ = first_sel
@@ -772,7 +908,9 @@ parse_compound_select :: proc(
 
 		append(&operands, operand)
 		next_op, has_next := parse_set_op(p)
-		if !has_next { break }
+		if !has_next {
+			break
+		}
 		op = next_op
 	}
 

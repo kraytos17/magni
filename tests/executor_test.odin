@@ -822,7 +822,9 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 		executor.execute(&tree, make_insert_stmt("t", i64(i), fmt.tprintf("n-%d", i), f64(i)))
 	}
 	for i in 1 ..= 50 {
-		if i % 2 == 0 { continue }
+		if i % 2 == 0 {
+			continue
+		}
 		cond := parser.Condition {
 			column   = "id",
 			operator = .EQUALS,
@@ -848,7 +850,9 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 	for rid, _ in check_ids {
 		c, err := btree.tree_find(&table_tree, rid, context.temp_allocator)
 		testing.expect(t, err == .None, fmt.tprintf("Row %d should exist", rid))
-		if err == .None { cell.destroy(&c, context.temp_allocator) }
+		if err == .None {
+			cell.destroy(&c, context.temp_allocator)
+		}
 	}
 }
 
@@ -1673,7 +1677,9 @@ test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
 		testing.expect(t, parse_ok, "aggregate over unknown column should parse")
 		sel, is_sel := stmt.type.(parser.Select_Stmt)
 		testing.expect(t, is_sel, "expected Select_Stmt")
-		if !is_sel { continue }
+		if !is_sel {
+			continue
+		}
 
 		saved, ctx := suppress_expected_errors()
 		context = ctx
@@ -1707,7 +1713,9 @@ ids_of_query :: proc(t: ^testing.T, tree: ^btree.Tree, sql: string) -> ([]i64, b
 	testing.expect(t, pok, "query must parse")
 	sel, is_sel := stmt.type.(parser.Select_Stmt)
 	testing.expect(t, is_sel, "expected Select_Stmt")
-	if !is_sel { return nil, false }
+	if !is_sel {
+		return nil, false
+	}
 
 	rows, _, ok := executor.exec_query(tree, sel)
 	testing.expect(t, ok, "query must succeed")
@@ -1715,7 +1723,9 @@ ids_of_query :: proc(t: ^testing.T, tree: ^btree.Tree, sql: string) -> ([]i64, b
 	for r, i in rows {
 		v, is_int := r.values[0].(i64)
 		testing.expect(t, is_int, "expected int id")
-		if !is_int { return nil, false }
+		if !is_int {
+			return nil, false
+		}
 		ids[i] = v
 	}
 	return ids, ok
@@ -1738,7 +1748,9 @@ test_exec_is_null_filtering :: proc(t: ^testing.T) {
 	for sql in inserts {
 		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
 		testing.expect(t, pok, "setup INSERT must parse")
-		if !pok { continue }
+		if !pok {
+			continue
+		}
 
 		sok, _, _ := executor.execute(&tree, stmt)
 		testing.expect(t, sok, "setup INSERT must execute")
@@ -1747,7 +1759,9 @@ test_exec_is_null_filtering :: proc(t: ^testing.T) {
 	ids, ok := ids_of_query(t, &tree, "SELECT id FROM t WHERE name IS NULL;")
 	if ok {
 		testing.expect_value(t, len(ids), 1)
-		if len(ids) == 1 { testing.expect_value(t, ids[0], 2) }
+		if len(ids) == 1 {
+			testing.expect_value(t, ids[0], 2)
+		}
 	}
 
 	ids, ok = ids_of_query(t, &tree, "SELECT id FROM t WHERE name IS NOT NULL;")
@@ -1762,7 +1776,9 @@ test_exec_is_null_filtering :: proc(t: ^testing.T) {
 	ids, ok = ids_of_query(t, &tree, "SELECT id FROM t WHERE score > 1.0 AND name IS NOT NULL;")
 	if ok {
 		testing.expect_value(t, len(ids), 1)
-		if len(ids) == 1 { testing.expect_value(t, ids[0], 3) }
+		if len(ids) == 1 {
+			testing.expect_value(t, ids[0], 3)
+		}
 	}
 
 	ids, ok = ids_of_query(t, &tree, "SELECT id FROM t WHERE name IS NULL OR id = 1;")
@@ -1798,7 +1814,9 @@ test_exec_is_null_keyword_column :: proc(t: ^testing.T) {
 	for sql in setup_k {
 		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
 		testing.expect(t, pok, "setup SQL must parse")
-		if !pok { continue }
+		if !pok {
+			continue
+		}
 
 		sok, _, _ := executor.execute(&tree, stmt)
 		testing.expect(t, sok, "setup SQL must execute")
@@ -1806,12 +1824,16 @@ test_exec_is_null_keyword_column :: proc(t: ^testing.T) {
 
 	stmt, pok, _ := parser.parse("SELECT is FROM k WHERE is IS NULL;", context.temp_allocator)
 	testing.expect(t, pok, "column named `is` with IS NULL must parse")
-	if !pok { return }
+	if !pok {
+		return
+	}
 
 	sel := stmt.type.(parser.Select_Stmt)
 	rows, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "must succeed")
-	if ok { testing.expect_value(t, len(rows), 1) }
+	if ok {
+		testing.expect_value(t, len(rows), 1)
+	}
 }
 
 // LIMIT must not truncate the scan feeding aggregates: SUM/COUNT run over
@@ -1831,7 +1853,9 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 	for sql in setup_agg_limit {
 		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
 		testing.expect(t, pok, "setup INSERT must parse")
-		if !pok { continue }
+		if !pok {
+			continue
+		}
 		sok, _, _ := executor.execute(&tree, stmt)
 		testing.expect(t, sok, "setup INSERT must execute")
 	}
@@ -1887,7 +1911,9 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 	for sql in setup_having {
 		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
 		testing.expect(t, pok, "setup INSERT must parse")
-		if !pok { continue }
+		if !pok {
+			continue
+		}
 		sok, _, _ := executor.execute(&tree, stmt)
 		testing.expect(t, sok, "setup INSERT must execute")
 	}
@@ -1900,7 +1926,9 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 	sel := stmt.type.(parser.Select_Stmt)
 	rows, _, ok := executor.exec_query(&tree, sel)
 	testing.expect(t, ok, "HAVING IS NULL should succeed")
-	if ok { testing.expect_value(t, len(rows), 1) }
+	if ok {
+		testing.expect_value(t, len(rows), 1)
+	}
 
 	stmt2, pok2, _ := parser.parse(
 		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING name IS NOT NULL;",
@@ -1910,7 +1938,9 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 	sel2 := stmt2.type.(parser.Select_Stmt)
 	rows2, _, ok2 := executor.exec_query(&tree, sel2)
 	testing.expect(t, ok2, "HAVING IS NOT NULL should succeed")
-	if ok2 { testing.expect_value(t, len(rows2), 2) }
+	if ok2 {
+		testing.expect_value(t, len(rows2), 2)
+	}
 
 	stmt3, pok3, _ := parser.parse(
 		"SELECT name, COUNT(*) FROM t GROUP BY name HAVING COUNT(*) IS NOT NULL;",
@@ -1920,7 +1950,9 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 	sel3 := stmt3.type.(parser.Select_Stmt)
 	rows3, _, ok3 := executor.exec_query(&tree, sel3)
 	testing.expect(t, ok3, "HAVING agg IS NOT NULL should succeed")
-	if ok3 { testing.expect_value(t, len(rows3), 3) }
+	if ok3 {
+		testing.expect_value(t, len(rows3), 3)
+	}
 }
 
 // Join-hash index OOB: grammar-mutator inputs crashed join_hash_i64/string via
@@ -2067,7 +2099,9 @@ test_exec_update_check_enforcement :: proc(t: ^testing.T) {
 	for sql in setup_chk {
 		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
 		testing.expect(t, pok, "setup SQL must parse")
-		if !pok { continue }
+		if !pok {
+			continue
+		}
 		sok, _, _ := executor.execute(&tree, stmt)
 		testing.expect(t, sok, "setup SQL must execute")
 	}

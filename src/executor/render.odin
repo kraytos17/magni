@@ -38,11 +38,17 @@ render_table :: proc(cols: []string, rows: [][]string) {
 	width_proc := table.ascii_width_proc
 	width_check: {
 		for c in cols {
-			if !is_ascii(c) { width_proc = table.unicode_width_proc; break width_check }
+			if !is_ascii(c) {
+				width_proc = table.unicode_width_proc
+				break width_check
+			}
 		}
 		for r in rows {
 			for c in r {
-				if !is_ascii(c) { width_proc = table.unicode_width_proc; break width_check }
+				if !is_ascii(c) {
+					width_proc = table.unicode_width_proc
+					break width_check
+				}
 			}
 		}
 	}
@@ -54,7 +60,9 @@ render_table :: proc(cols: []string, rows: [][]string) {
 @(private = "file")
 is_ascii :: proc(s: string) -> bool {
 	for i in 0 ..< len(s) {
-		if s[i] >= 0x80 { return false }
+		if s[i] >= 0x80 {
+			return false
+		}
 	}
 	return true
 }

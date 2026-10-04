@@ -11,7 +11,9 @@ parse_create_table :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !expect_match(p, .TABLE, "Expected TABLE after CREATE") { return nil, false }
+	if !expect_match(p, .TABLE, "Expected TABLE after CREATE") {
+		return nil, false
+	}
 
 	table_name := parse_identifier(p, allocator) or_return
 	if !expect_match(p, .LPAREN, "CREATE TABLE requires at least one column definition") {
@@ -22,7 +24,9 @@ parse_create_table :: proc(
 	fks := make([dynamic]Foreign_Key, allocator)
 	columns := make([dynamic]types.Column, allocator)
 	defer if !ok {
-		for col in columns { delete(col.name, allocator) }
+		for col in columns {
+			delete(col.name, allocator)
+		}
 
 		delete(table_name, allocator)
 		delete(columns)
@@ -36,17 +40,22 @@ parse_create_table :: proc(
 	for {
 		if match(p, .FOREIGN) {
 			fk, fk_ok := parse_foreign_key_clause(p, allocator)
-			if !fk_ok { return nil, false }
+			if !fk_ok {
+				return nil, false
+			}
 			append(&fks, fk)
 		} else {
 			col, col_ok := parse_column_def(p, &fks, allocator)
-			if !col_ok { return nil, false }
+			if !col_ok {
+				return nil, false
+			}
 			append(&columns, col)
 		}
-		if match(
-			p,
-			.RPAREN,
-		) { break } else if !expect_match(p, .COMMA, "Expected , or ) after column definition") { return nil, false }
+		if match(p, .RPAREN) {
+			break
+		} else if !expect_match(p, .COMMA, "Expected , or ) after column definition") {
+			return nil, false
+		}
 	}
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }
@@ -64,17 +73,28 @@ parse_create_index :: proc(
 	ok: bool,
 ) {
 	index_name := parse_identifier(p, allocator) or_return
-	defer if !ok { delete(index_name, allocator) }
-	if !expect_match(p, .ON, "Expected ON after index name") { return nil, false }
+	defer if !ok {
+		delete(index_name, allocator)
+	}
+	if !expect_match(p, .ON, "Expected ON after index name") {
+		return nil, false
+	}
 
 	table_name := parse_identifier(p, allocator) or_return
-	defer if !ok { delete(table_name, allocator) }
-	if !expect_match(p, .LPAREN, "Expected ( after table name") { return nil, false }
+	defer if !ok {
+		delete(table_name, allocator)
+	}
+	if !expect_match(p, .LPAREN, "Expected ( after table name") {
+		return nil, false
+	}
 
 	column := parse_identifier(p, allocator) or_return
-	defer if !ok { delete(column, allocator) }
-	if !expect_match(p, .RPAREN, "Expected ) after column name") { return nil, false }
-
+	defer if !ok {
+		delete(column, allocator)
+	}
+	if !expect_match(p, .RPAREN, "Expected ) after column name") {
+		return nil, false
+	}
 	return Create_Index_Stmt{index_name = index_name, table_name = table_name, column = column},
 		true
 }
@@ -89,18 +109,30 @@ parse_foreign_key_clause :: proc(
 	fk: Foreign_Key,
 	ok: bool,
 ) {
-	if !expect_match(p, .KEY, "Expected KEY after FOREIGN") { return }
-	if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") { return }
+	if !expect_match(p, .KEY, "Expected KEY after FOREIGN") {
+		return
+	}
+	if !expect_match(p, .LPAREN, "Expected ( after FOREIGN KEY") {
+		return
+	}
 
 	fk_col := parse_identifier(p, allocator) or_return
-	if !expect_match(p, .RPAREN, "Expected ) after foreign key column") { return }
-	if !expect_match(p, .REFERENCES, "Expected REFERENCES after FOREIGN KEY") { return }
+	if !expect_match(p, .RPAREN, "Expected ) after foreign key column") {
+		return
+	}
+	if !expect_match(p, .REFERENCES, "Expected REFERENCES after FOREIGN KEY") {
+		return
+	}
 
 	fk_table := parse_identifier(p, allocator) or_return
-	if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") { return }
+	if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") {
+		return
+	}
 
 	fk_ref_col := parse_identifier(p, allocator) or_return
-	if !expect_match(p, .RPAREN, "Expected ) after referenced column") { return }
+	if !expect_match(p, .RPAREN, "Expected ) after referenced column") {
+		return
+	}
 	return Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col}, true
 }
 
@@ -119,11 +151,17 @@ parse_column_modifier :: proc(
 	ok: bool,
 ) {
 	if match(p, .PRIMARY) {
-		if !expect_match(p, .KEY, "Expected KEY after PRIMARY") { return true, false }
+		if !expect_match(p, .KEY, "Expected KEY after PRIMARY") {
+			return true, false
+		}
+
 		col.pk = true
 		return true, true
 	} else if match(p, .NOT) {
-		if !expect_match(p, .NULL, "Expected NULL after NOT") { return true, false }
+		if !expect_match(p, .NULL, "Expected NULL after NOT") {
+			return true, false
+		}
+
 		col.not_null = true
 		return true, true
 	} else if match(p, .DEFAULT) {
@@ -137,13 +175,17 @@ parse_column_modifier :: proc(
 		return true, true
 	} else if match(p, .CHECK) {
 		expr, expr_ok := collect_check_source(p, allocator)
-		if !expr_ok { return true, false }
+		if !expr_ok {
+			return true, false
+		}
 
 		col.check_expr = expr
 		return true, true
 	} else if match(p, .REFERENCES) {
 		ref_table, rt_ok := parse_identifier(p, allocator)
-		if !rt_ok { return true, false }
+		if !rt_ok {
+			return true, false
+		}
 		if !expect_match(p, .LPAREN, "Expected ( after REFERENCES table") {
 			delete(ref_table, allocator)
 			return true, false
@@ -202,8 +244,12 @@ parse_column_def :: proc(
 
 	for {
 		handled, mok := parse_column_modifier(p, &col, fks, allocator)
-		if !mok { return {}, false }
-		if !handled { break }
+		if !mok {
+			return {}, false
+		}
+		if !handled {
+			break
+		}
 	}
 	return col, true
 }
@@ -218,7 +264,9 @@ collect_check_source :: proc(
 	expr: string,
 	ok: bool,
 ) {
-	if !expect_match(p, .LPAREN, "Expected ( after CHECK") { return }
+	if !expect_match(p, .LPAREN, "Expected ( after CHECK") {
+		return
+	}
 
 	b := strings.builder_make(allocator)
 	depth := 1
@@ -229,9 +277,18 @@ collect_check_source :: proc(
 			err(p, "Expected ) in CHECK constraint")
 			return "", false
 		}
-		if tok.type == .LPAREN { depth += 1 }
-		if tok.type == .RPAREN { depth -= 1; if depth == 0 { break } }
-		if strings.builder_len(b) > 0 { strings.write_byte(&b, ' ') }
+		if tok.type == .LPAREN {
+			depth += 1
+		}
+		if tok.type == .RPAREN {
+			depth -= 1
+			if depth == 0 {
+				break
+			}
+		}
+		if strings.builder_len(b) > 0 {
+			strings.write_byte(&b, ' ')
+		}
 		strings.write_string(&b, tok.lexeme)
 	}
 	return strings.to_string(b), true
@@ -245,7 +302,10 @@ parse_drop_table :: proc(
 	stmt: Statement_Variant,
 	ok: bool,
 ) {
-	if !expect_match(p, .TABLE, "Expected TABLE after DROP") { return nil, false }
+	if !expect_match(p, .TABLE, "Expected TABLE after DROP") {
+		return nil, false
+	}
+
 	table_name := parse_identifier(p, allocator) or_return
 	return Drop_Stmt{table_name = table_name}, true
 }
@@ -262,10 +322,14 @@ parse_drop_index :: proc(
 	ok: bool,
 ) {
 	index_name := parse_identifier(p, allocator) or_return
-	defer if !ok { delete(index_name, allocator) }
+	defer if !ok {
+		delete(index_name, allocator)
+	}
 	if match(p, .ON) {
 		table_name := parse_identifier(p, allocator) or_return
-		defer if !ok { delete(table_name, allocator) }
+		defer if !ok {
+			delete(table_name, allocator)
+		}
 		return Drop_Index_Stmt{index_name = index_name, table_name = table_name}, true
 	}
 	return Drop_Index_Stmt{index_name = index_name}, true

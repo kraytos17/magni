@@ -49,12 +49,18 @@ MAX_INDEX_IN_MEMBERS :: 128
 // full scan (like_match's general path, behavior untouched).
 @(private)
 canonical_like_prefix :: proc(pattern: string) -> (stem: string, ok: bool) {
-	if len(pattern) < 2 || pattern[len(pattern) - 1] != '%' { return "", false }
+	if len(pattern) < 2 || pattern[len(pattern) - 1] != '%' {
+		return "", false
+	}
 
 	stem = pattern[:len(pattern) - 1]
-	if len(stem) == 0 { return "", false }
+	if len(stem) == 0 {
+		return "", false
+	}
 	for i in 0 ..< len(stem) {
-		if stem[i] == '%' || stem[i] == '_' { return "", false }
+		if stem[i] == '%' || stem[i] == '_' {
+			return "", false
+		}
 	}
 	return stem, true
 }
@@ -69,10 +75,14 @@ index_cond_column_ok :: proc(
 	tbl_name: string,
 	tbl_alias: string,
 ) -> bool {
-	if column == index_column { return true }
+	if column == index_column {
+		return true
+	}
 
 	qual, col, has_qual := split_qualifier(column)
-	if !has_qual || col != index_column { return false }
+	if !has_qual || col != index_column {
+		return false
+	}
 	return qual == tbl_name || (tbl_alias != "" && qual == tbl_alias)
 }
 
@@ -95,34 +105,57 @@ index_use_of_cond :: proc(
 	plan: Index_Plan,
 	ok: bool,
 ) {
-	if index_root == 0 || len(index_column) == 0 { return {}, false }
-	if cond.negated { return {}, false }
-	if !index_cond_column_ok(index_column, cond.column, tbl_name, tbl_alias) { return {}, false }
+	if index_root == 0 || len(index_column) == 0 {
+		return {}, false
+	}
+	if cond.negated {
+		return {}, false
+	}
+	if !index_cond_column_ok(index_column, cond.column, tbl_name, tbl_alias) {
+		return {}, false
+	}
 	if cond.operator == .EQUALS {
 		val, is_val := cond.rhs.(types.Value)
-		if !is_val { return {}, false }
+		if !is_val {
+			return {}, false
+		}
 		if s, is_text := val.(string); is_text {
-			return Index_Plan{use = .Eq, root = index_root, column = index_column, eq_text = s}, true
+			return Index_Plan{use = .Eq, root = index_root, column = index_column, eq_text = s},
+				true
 		}
 		return {}, false
 	}
 	if cond.operator == .LIKE {
 		val, is_val := cond.rhs.(types.Value)
-		if !is_val { return {}, false }
+		if !is_val {
+			return {}, false
+		}
 
 		pat, is_text := val.(string)
-		if !is_text { return {}, false }
+		if !is_text {
+			return {}, false
+		}
 		if stem, stem_ok := canonical_like_prefix(pat); stem_ok {
-			return Index_Plan{use = .Prefix, root = index_root, column = index_column, prefix = stem}, true
+			return Index_Plan {
+					use = .Prefix,
+					root = index_root,
+					column = index_column,
+					prefix = stem,
+				},
+				true
 		}
 		return {}, false
 	}
 	if cond.operator == .IN {
-		if cond.in_subquery != nil || cond.in_values == nil { return {}, false }
+		if cond.in_subquery != nil || cond.in_values == nil {
+			return {}, false
+		}
 
 		texts := make([dynamic]string, 0, len(cond.in_values), context.temp_allocator)
 		for v in cond.in_values {
-			if s, is_text := v.(string); is_text { append(&texts, s) }
+			if s, is_text := v.(string); is_text {
+				append(&texts, s)
+			}
 		}
 		if len(texts) == 0 {
 			return {}, false
@@ -130,7 +163,13 @@ index_use_of_cond :: proc(
 		if len(texts) > MAX_INDEX_IN_MEMBERS {
 			return {}, false
 		}
-		return Index_Plan{use = .In, root = index_root, column = index_column, in_texts = texts[:]}, true
+		return Index_Plan {
+				use = .In,
+				root = index_root,
+				column = index_column,
+				in_texts = texts[:],
+			},
+			true
 	}
 	return {}, false
 }
@@ -151,12 +190,17 @@ resolve_index_covering :: proc(
 	ok: bool,
 ) {
 	root := wc.root
-	if root == nil { return {}, false }
+	if root == nil {
+		return {}, false
+	}
 	if root.kind == .COND {
 		cond, has_cond := where_single_condition(wc)
-		if !has_cond { return {}, false }
+		if !has_cond {
+			return {}, false
+		}
 		for def in table.indexes {
-			if cand, usable := index_use_of_cond(def.root, def.column, cond, tbl_name, tbl_alias); usable {
+			if cand, usable := index_use_of_cond(def.root, def.column, cond, tbl_name, tbl_alias);
+			   usable {
 				return cand, true
 			}
 		}
@@ -184,21 +228,33 @@ resolve_index_or :: proc(
 	plan: Index_Plan,
 	ok: bool,
 ) {
-	if len(children) < 2 { return {}, false }
+	if len(children) < 2 {
+		return {}, false
+	}
 
 	subs := make([dynamic]Index_Plan, 0, len(children), context.temp_allocator)
 	for child in children {
-		if child.kind != .COND { return {}, false }
+		if child.kind != .COND {
+			return {}, false
+		}
 
 		resolved := false
 		for def in table.indexes {
-			if sub, usable := index_use_of_cond(def.root, def.column, child.cond, tbl_name, tbl_alias); usable {
+			if sub, usable := index_use_of_cond(
+				def.root,
+				def.column,
+				child.cond,
+				tbl_name,
+				tbl_alias,
+			); usable {
 				append(&subs, sub)
 				resolved = true
 				break
 			}
 		}
-		if !resolved { return {}, false }
+		if !resolved {
+			return {}, false
+		}
 	}
 	return Index_Plan{use = .Or, column = subs[0].column, subs = subs[:]}, true
 }
@@ -222,10 +278,18 @@ resolve_index_fetch :: proc(
 	ok: bool,
 ) {
 	root := wc.root
-	if root == nil { return {}, false }
+	if root == nil {
+		return {}, false
+	}
 	if root.kind == .COND {
 		for def in table.indexes {
-			if cand, usable := index_use_of_cond(def.root, def.column, root.cond, tbl_name, tbl_alias); usable {
+			if cand, usable := index_use_of_cond(
+				def.root,
+				def.column,
+				root.cond,
+				tbl_name,
+				tbl_alias,
+			); usable {
 				return cand, true
 			}
 		}
@@ -234,20 +298,34 @@ resolve_index_fetch :: proc(
 	if root.kind == .OR {
 		return resolve_index_or(table, root.children, tbl_name, tbl_alias)
 	}
-	if root.kind != .AND { return {}, false }
+	if root.kind != .AND {
+		return {}, false
+	}
 
 	subs := make([dynamic]Index_Plan, 0, len(root.children), context.temp_allocator)
 	for child in root.children {
-		if child.kind != .COND { return {}, false }
+		if child.kind != .COND {
+			return {}, false
+		}
 		for def in table.indexes {
-			if cand, usable := index_use_of_cond(def.root, def.column, child.cond, tbl_name, tbl_alias); usable {
+			if cand, usable := index_use_of_cond(
+				def.root,
+				def.column,
+				child.cond,
+				tbl_name,
+				tbl_alias,
+			); usable {
 				append(&subs, cand)
 				break
 			}
 		}
 	}
-	if len(subs) == 0 { return {}, false }
-	if len(subs) == 1 { return subs[0], true }
+	if len(subs) == 0 {
+		return {}, false
+	}
+	if len(subs) == 1 {
+		return subs[0], true
+	}
 	return Index_Plan{use = .And, column = subs[0].column, subs = subs[:]}, true
 }
 
@@ -271,7 +349,9 @@ index_candidate_rowids :: proc(
 	}
 
 	out, ok := index_candidate_single(t, table, plan, allocator)
-	if !ok { return nil, false }
+	if !ok {
+		return nil, false
+	}
 
 	sort_dedup_rowids(&out)
 	return out, true
@@ -305,7 +385,9 @@ index_candidate_multi :: proc(
 	[dynamic]types.Row_ID,
 	bool,
 ) {
-	if len(plan.subs) == 0 { return nil, false }
+	if len(plan.subs) == 0 {
+		return nil, false
+	}
 	if plan.use == .Or {
 		out := make([dynamic]types.Row_ID, 0, 8, allocator)
 		for sub in plan.subs {
@@ -426,16 +508,24 @@ index_candidate_single :: proc(
 }
 
 // plan_index_columns renders the USING column list: the single column,
- // or distinct sub columns joined for Or/And (temp-owned).
+// or distinct sub columns joined for Or/And (temp-owned).
 plan_index_columns :: proc(plan: Index_Plan, allocator := context.allocator) -> string {
-	if plan.use != .Or && plan.use != .And { return plan.column }
+	if plan.use != .Or && plan.use != .And {
+		return plan.column
+	}
+
 	seen := make([dynamic]string, 0, len(plan.subs), context.temp_allocator)
 	for sub in plan.subs {
 		dup := false
 		for s in seen {
-			if s == sub.column { dup = true; break }
+			if s == sub.column {
+				dup = true
+				break
+			}
 		}
-		if !dup { append(&seen, sub.column) }
+		if !dup {
+			append(&seen, sub.column)
+		}
 	}
 	return strings.join(seen[:], ", ", allocator)
 }
@@ -472,17 +562,27 @@ explain_plan_text :: proc(
 ) -> string {
 	echo := strings.trim_space(stmt.sql)
 	inner, parse_ok, _ := parser.parse(stmt.sql, context.temp_allocator)
-	if !parse_ok { return echo }
+	if !parse_ok {
+		return echo
+	}
 
 	sel, is_sel := inner.type.(parser.Select_Stmt)
-	if !is_sel { return echo }
-	if plan := plan_select(sel); !plan.single_table { return echo }
+	if !is_sel {
+		return echo
+	}
+	if plan := plan_select(sel); !plan.single_table {
+		return echo
+	}
 
 	tbl_name, name_ok := sel.from.(string)
-	if !name_ok { return echo }
+	if !name_ok {
+		return echo
+	}
 
 	table, found := schema.find_table_cached(schema_tree, tbl_name, cache)
-	if !found { return echo }
+	if !found {
+		return echo
+	}
 	if wc, has_wc := sel.where_clause.?; has_wc {
 		if _, seek_ok := try_pk_lookup(table^, wc, tbl_name, sel.from_alias); seek_ok {
 			return fmt.tprintf("PK SEEK ON %s", tbl_name)
@@ -528,13 +628,17 @@ explain_plan_text :: proc(
 // not hijack it).
 @(private)
 is_covering_rowid_select :: proc(stmt: parser.Select_Stmt, cols: []types.Column) -> bool {
-	if len(stmt.columns) != 1 || stmt.columns[0] != "rowid" { return false }
+	if len(stmt.columns) != 1 || stmt.columns[0] != "rowid" {
+		return false
+	}
 	if len(stmt.aggregates) != 0 || len(stmt.group_by) != 0 || stmt.having != nil {
 		return false
 	}
 
 	_, has_user_rowid := schema.find_column_index(cols, "rowid")
-	if has_user_rowid { return false }
+	if has_user_rowid {
+		return false
+	}
 	return true
 }
 
@@ -556,9 +660,11 @@ fetch_covering_index :: proc(
 	bool,
 ) {
 	cands, ok := index_candidate_rowids(t, table, plan, allocator)
-	if !ok { return nil, nil, nil, false }
-	defer delete(cands)
+	if !ok {
+		return nil, nil, nil, false
+	}
 
+	defer delete(cands)
 	rows := make([dynamic]Row_Entry, 0, len(cands), allocator)
 	for rid in cands {
 		vals := make([]types.Value, 1, allocator)
@@ -587,12 +693,16 @@ fetch_covering_index :: proc(
 // fetch path with its full-filter recheck.
 @(private)
 is_covering_col_select :: proc(stmt: parser.Select_Stmt, table: types.Table) -> bool {
-	if len(stmt.columns) != 1 { return false }
+	if len(stmt.columns) != 1 {
+		return false
+	}
 	if len(stmt.aggregates) != 0 || len(stmt.group_by) != 0 || stmt.having != nil {
 		return false
 	}
 	for def in table.indexes {
-		if def.root != 0 && stmt.columns[0] == def.column { return true }
+		if def.root != 0 && stmt.columns[0] == def.column {
+			return true
+		}
 	}
 	return false
 }
@@ -609,7 +719,9 @@ covering_known_values :: proc(plan: Index_Plan) -> bool {
 		return true
 	case .Or:
 		for sub in plan.subs {
-			if sub.use != .Eq && sub.use != .In { return false }
+			if sub.use != .Eq && sub.use != .In {
+				return false
+			}
 		}
 		return len(plan.subs) > 0
 	}
@@ -647,12 +759,13 @@ covering_pairs :: proc(
 	) -> bool {
 		idx_tree := btree.init(t.pager, root)
 		found, find_err := btree.text_find_rowids(&idx_tree, root, transmute([]u8)text)
-
 		if find_err != .None {
 			log.errorf("Error: Failed to search index for '%s'", table.name)
 			return false
 		}
-		for rid in found { append(out, Covering_Pair{rid = rid, val = text}) }
+		for rid in found {
+			append(out, Covering_Pair{rid = rid, val = text})
+		}
 		return true
 	}
 
@@ -726,9 +839,11 @@ fetch_covering_col :: proc(
 	bool,
 ) {
 	pairs, ok := covering_pairs(t, table, plan, allocator)
-	if !ok { return nil, nil, nil, false }
-	defer delete(pairs)
+	if !ok {
+		return nil, nil, nil, false
+	}
 
+	defer delete(pairs)
 	rows := make([dynamic]Row_Entry, 0, len(pairs), allocator)
 	for p in pairs {
 		vals := make([]types.Value, 1, allocator)
@@ -776,9 +891,11 @@ fetch_index_rows :: proc(
 	bool,
 ) {
 	cands, ok := index_candidate_rowids(t, table, plan, allocator)
-	if !ok { return nil, false }
-	defer delete(cands)
+	if !ok {
+		return nil, false
+	}
 
+	defer delete(cands)
 	ctx, ctx_ok := init_where_ctx(wc, table.columns, single_range, t, allocator, cache).?
 	if !ctx_ok {
 		log.error("Error: Could not resolve WHERE clause")
@@ -788,7 +905,9 @@ fetch_index_rows :: proc(
 	r := make([dynamic]Row_Entry, 0, len(cands), allocator)
 	for rid in cands {
 		c, find_err := btree.tree_find(table_tree, rid, allocator)
-		if find_err == .Cell_Not_Found { continue }
+		if find_err == .Cell_Not_Found {
+			continue
+		}
 		if find_err != .None {
 			log.errorf("Error: Failed to fetch indexed row %d", i64(rid))
 			return nil, false

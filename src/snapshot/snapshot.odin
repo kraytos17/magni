@@ -51,7 +51,9 @@ Snapshot_State :: enum u8 {
 // UNKNOWN (display) and can never equal .COMMITTED (decisions).
 @(private)
 snapshot_operation_from_u8 :: proc(v: u8) -> Snapshot_Operation {
-	if v < u8(len(Snapshot_Operation)) { return Snapshot_Operation(v) }
+	if v < u8(len(Snapshot_Operation)) {
+		return Snapshot_Operation(v)
+	}
 	return .UNKNOWN
 }
 
@@ -60,7 +62,9 @@ snapshot_operation_from_u8 :: proc(v: u8) -> Snapshot_Operation {
 // skipped by every committed-only decision path by construction.
 @(private)
 snapshot_state_from_u8 :: proc(v: u8) -> Snapshot_State {
-	if v < u8(len(Snapshot_State)) { return Snapshot_State(v) }
+	if v < u8(len(Snapshot_State)) {
+		return Snapshot_State(v)
+	}
 	return .PENDING
 }
 
@@ -126,12 +130,11 @@ create :: proc(
 	if prev_snapshot != 0 {
 		pg, pg_err := pager.get_page(p, prev_snapshot)
 		if pg_err == .None {
-			// Room check composes on the shared dispatch: a full page
-			// (len == MAX) falls through to a fresh page below.
 			if hdrs := headers_on_page(pg.data); hdrs != nil && len(hdrs) < MAX_HEADERS_PER_PAGE {
 				h := (^Snapshot_Header)(
 					raw_data(pg.data[HEADER_PREFIX_SIZE + len(hdrs) * size_of(Snapshot_Header):]),
 				)
+
 				copy(h.magic[:], SNAPSHOT_MAGIC)
 				h.snapshot_id = snapshot_id
 				h.timestamp =
@@ -141,7 +144,6 @@ create :: proc(
 				h.manifest_page = manifest_page
 				h.state = u8(Snapshot_State.COMMITTED)
 				h.operation = u8(operation)
-				// prev_snapshot inherits from the first header on this page
 				h.prev_snapshot = hdrs[0].prev_snapshot
 				endian.unchecked_put_u32le(pg.data[:4], u32(len(hdrs) + 1))
 				pager.mark_dirty(p, prev_snapshot)
@@ -186,7 +188,10 @@ load :: proc(
 	bool,
 ) {
 	page, err := pager.get_page(p, snapshot_page)
-	if err != .None { return {}, false }
+	if err != .None {
+		return {}, false
+	}
+
 	defer pager.unpin_page(p, snapshot_page)
 	if headers := headers_on_page(page.data); headers != nil {
 		if snapshot_id == 0 {
@@ -204,9 +209,11 @@ load :: proc(
 
 set_tag :: proc(p: ^pager.Pager, snapshot_page: u32, tag: string) {
 	page, err := pager.get_page(p, snapshot_page)
-	if err != .None { return }
-	defer pager.unpin_page(p, snapshot_page)
+	if err != .None {
+		return
+	}
 
+	defer pager.unpin_page(p, snapshot_page)
 	// The tag slot sits past the packed-header region in both layouts, so no
 	// format dispatch is needed — only a bounds guard.
 	if len(page.data) >= TAG_OFFSET + TAG_SIZE {
@@ -220,12 +227,17 @@ set_tag :: proc(p: ^pager.Pager, snapshot_page: u32, tag: string) {
 
 get_tag :: proc(p: ^pager.Pager, snapshot_page: u32) -> string {
 	page, err := pager.get_page(p, snapshot_page)
-	if err != .None { return "" }
+	if err != .None {
+		return ""
+	}
+
 	defer pager.unpin_page(p, snapshot_page)
 	if len(page.data) >= TAG_OFFSET + TAG_SIZE {
 		data := page.data[TAG_OFFSET:TAG_OFFSET + TAG_SIZE]
 		length := 0
-		for length < TAG_SIZE && data[length] != 0 { length += 1 }
+		for length < TAG_SIZE && data[length] != 0 {
+			length += 1
+		}
 		return string(data[:length])
 	}
 	return ""
@@ -241,7 +253,9 @@ walk_chain :: proc(
 	page := start_page
 	for page != 0 {
 		pg, err := pager.get_page(p, page)
-		if err != .None { break }
+		if err != .None {
+			break
+		}
 
 		next_page: u32
 		if headers := headers_on_page(pg.data); headers != nil {
@@ -348,7 +362,9 @@ debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 		return true
 	})
 
-	if d.count == 0 { log.debug("  (empty)") }
+	if d.count == 0 {
+		log.debug("  (empty)")
+	}
 	log.debug("======================")
 }
 
@@ -406,7 +422,10 @@ set_header_state :: proc(
 	state: Snapshot_State,
 ) -> bool {
 	pg, err := pager.get_page(p, page)
-	if err != .None { return false }
+	if err != .None {
+		return false
+	}
+
 	defer pager.unpin_page(p, page)
 	if headers := headers_on_page(pg.data); headers != nil {
 		for i in 0 ..< len(headers) {

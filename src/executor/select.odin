@@ -66,6 +66,7 @@ exec_select_literals :: proc(
 		rowid  = 1,
 		values = stmt.literal_values,
 	}
+
 	cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
 	for name, i in stmt.columns {
 		cols[i] = types.Column {
@@ -125,7 +126,6 @@ fetch_single_rows :: proc(
 	// LIMIT pushdown is only valid for plain row-returning scans; see
 	// limit_pushable for the rule (shared with the vector fetch path).
 	pushable := limit_pushable(stmt, has_order)
-
 	max_rows := stmt.limit if pushable else nil
 	from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
 	single_range := []Table_Col_Range {
@@ -158,7 +158,9 @@ fetch_single_rows :: proc(
 				allocator,
 				cache,
 			)
-			if !f_ok { return nil, nil, nil, false }
+			if !f_ok {
+				return nil, nil, nil, false
+			}
 			return rows, tbl.columns, single_range, true
 		}
 	}
@@ -173,7 +175,9 @@ fetch_single_rows :: proc(
 		cache,
 		single_range,
 	)
-	if scan_err { return nil, nil, nil, false }
+	if scan_err {
+		return nil, nil, nil, false
+	}
 	return rows, tbl.columns, single_range, true
 }
 
@@ -216,7 +220,9 @@ exec_select_single_data :: proc(
 	bool,
 ) {
 	tbl_name, name_ok := stmt.from.(string)
-	if !name_ok { return nil, nil, false }
+	if !name_ok {
+		return nil, nil, false
+	}
 
 	table, found := schema.find_table_cached(t, tbl_name, cache)
 	if !found {
@@ -259,8 +265,12 @@ exec_select_single_data :: proc(
 		}
 
 		name := "COUNT(*)"
-		if len(stmt.columns) > 0 { name = stmt.columns[0] }
-		if len(stmt.aliases) > 0 && stmt.aliases[0] != "" { name = stmt.aliases[0] }
+		if len(stmt.columns) > 0 {
+			name = stmt.columns[0]
+		}
+		if len(stmt.aliases) > 0 && stmt.aliases[0] != "" {
+			name = stmt.aliases[0]
+		}
 
 		cols_mat := make([]types.Column, 1, context.temp_allocator)
 		cols_mat[0] = types.Column {
@@ -290,7 +300,9 @@ exec_select_single_data :: proc(
 			context.temp_allocator,
 			cache,
 		)
-		if !v_ok { return nil, nil, false }
+		if !v_ok {
+			return nil, nil, false
+		}
 		if vproj {
 			return finish_projected(stmt, vrows, vcols)
 		}
@@ -305,7 +317,9 @@ exec_select_single_data :: proc(
 		context.temp_allocator,
 		cache,
 	)
-	if !f_ok { return nil, nil, false }
+	if !f_ok {
+		return nil, nil, false
+	}
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows, cols, single_range)
 	}
@@ -335,7 +349,9 @@ finish_select :: proc(
 	}
 	if len(stmt.columns) == 0 {
 		out := rows
-		if stmt.is_distinct { out = dedup_rows(out) }
+		if stmt.is_distinct {
+			out = dedup_rows(out)
+		}
 
 		out = apply_limit_offset(stmt, out)
 		return out, cols, true
@@ -346,12 +362,16 @@ finish_select :: proc(
 		build_column_resolver(cols, ranges),
 		len(cols),
 	)
-	if !i_ok { return nil, nil, false }
+	if !i_ok {
+		return nil, nil, false
+	}
 
 	proj := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
 	for entry in rows {
 		vals := make([]types.Value, len(indices), context.temp_allocator)
-		for idx, i in indices { vals[i] = entry.values[idx] }
+		for idx, i in indices {
+			vals[i] = entry.values[idx]
+		}
 		append(&proj, Row_Entry{entry.rowid, vals})
 	}
 
@@ -364,7 +384,9 @@ finish_select :: proc(
 	}
 
 	out := proj[:]
-	if stmt.is_distinct { out = dedup_rows(out) }
+	if stmt.is_distinct {
+		out = dedup_rows(out)
+	}
 
 	out = apply_limit_offset(stmt, out)
 	return out, proj_cols, true
@@ -387,7 +409,9 @@ finish_projected :: proc(
 	bool,
 ) {
 	out := rows
-	if stmt.is_distinct { out = dedup_rows(out) }
+	if stmt.is_distinct {
+		out = dedup_rows(out)
+	}
 
 	out = apply_limit_offset(stmt, out)
 	return out, proj_cols, true
@@ -398,10 +422,14 @@ finish_projected :: proc(
 @(private)
 apply_limit_offset :: proc(stmt: parser.Select_Stmt, out: []Row_Entry) -> []Row_Entry {
 	limit, has_limit := stmt.limit.?
-	if !has_limit { return out }
+	if !has_limit {
+		return out
+	}
 
 	off := u64(0)
-	if o, has_off := stmt.offset.?; has_off { off = o }
+	if o, has_off := stmt.offset.?; has_off {
+		off = o
+	}
 
 	start := int(min(off, u64(len(out))))
 	end := int(min(off + limit, u64(len(out))))
@@ -477,20 +505,26 @@ scan_table :: proc(
 
 	r := make([dynamic]Row_Entry, allocator)
 	cursor, c_err := btree.cursor_start(tree, allocator)
-	if c_err != .None { return nil, true }
+	if c_err != .None {
+		return nil, true
+	}
 	if plan.skip_start > 0 {
 		if seek_err := btree.cursor_seek_to_page(&cursor, plan.skip_start); seek_err != .None {
 			btree.cursor_destroy(&cursor)
 			cursor, c_err = btree.cursor_start(tree, allocator)
-			if c_err != .None { return nil, true }
+			if c_err != .None {
+				return nil, true
+			}
 		}
 	}
-	defer btree.cursor_destroy(&cursor)
 
+	defer btree.cursor_destroy(&cursor)
 	for cursor.is_valid {
 		if plan.skip_end > 0 {
 			cp := cursor.path[cursor.depth - 1].page_id
-			if cp > plan.skip_end { break }
+			if cp > plan.skip_end {
+				break
+			}
 		}
 
 		c, get_err := btree.cursor_get_cell(&cursor, allocator)
@@ -510,7 +544,9 @@ scan_table :: proc(
 		append(&r, Row_Entry{c.rowid, c.values})
 		c.values = nil
 		cell.destroy(&c, allocator)
-		if limit, has_limit := plan.max_rows.?; has_limit && u64(len(r)) >= limit { break }
+		if limit, has_limit := plan.max_rows.?; has_limit && u64(len(r)) >= limit {
+			break
+		}
 		btree.cursor_advance(&cursor)
 	}
 
@@ -563,14 +599,21 @@ build_scan_plan :: proc(
 	}
 
 	ok = true
-	if _, has_f := plan.filter.?; !has_f { return plan, true }
-
-	if table.skip_root == 0 { return plan, true }
+	if _, has_f := plan.filter.?; !has_f {
+		return plan, true
+	}
+	if table.skip_root == 0 {
+		return plan, true
+	}
 	for rc in skip_chain_conditions(plan.filter.?.root) {
-		if rc.has_right_col || rc.has_in { continue }
+		if rc.has_right_col || rc.has_in {
+			continue
+		}
 		if val, is_int := rc.rhs.(i64); is_int {
 			op, op_ok := skip_op_from_token(rc.operator)
-			if !op_ok { continue }
+			if !op_ok {
+				continue
+			}
 
 			start, end, found := btree.query_skip_index_range(
 				tree.pager,
@@ -580,8 +623,12 @@ build_scan_plan :: proc(
 				val,
 			)
 			if found {
-				if start > plan.skip_start { plan.skip_start = start }
-				if end > 0 && (plan.skip_end == 0 || end < plan.skip_end) { plan.skip_end = end }
+				if start > plan.skip_start {
+					plan.skip_start = start
+				}
+				if end > 0 && (plan.skip_end == 0 || end < plan.skip_end) {
+					plan.skip_end = end
+				}
 			}
 		}
 	}
@@ -600,7 +647,10 @@ skip_chain_conditions :: proc(root: ^Resolved_Node) -> []Resolved_Condition {
 
 @(private = "file")
 collect_skip_chain :: proc(node: ^Resolved_Node, out: ^[dynamic]Resolved_Condition) {
-	if node == nil { return }
+	if node == nil {
+		return
+	}
+
 	switch node.kind {
 	case .COND:
 		append(out, node.cond)

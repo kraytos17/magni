@@ -53,7 +53,9 @@ routing_twin :: proc(t: ^testing.T, d: ^db.Database, queries: []string) {
 		a := db.query(d, q)
 		b := db.query(d, twin)
 		testing.expect(t, a.ok && b.ok, "twin queries succeed")
-		if !a.ok || !b.ok { continue }
+		if !a.ok || !b.ok {
+			continue
+		}
 		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
 		for i in 0 ..< min(len(a.rows), len(b.rows)) {
 			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
@@ -165,7 +167,9 @@ test_index_in_cap :: proc(t: ^testing.T) {
 		strings.builder_init(&b, context.temp_allocator)
 		strings.write_string(&b, "SELECT id FROM docs WHERE body IN (")
 		for i in 1 ..= n {
-			if i > 1 { strings.write_string(&b, ", ") }
+			if i > 1 {
+				strings.write_string(&b, ", ")
+			}
 			fmt.sbprintf(&b, "'m%d'", i)
 		}
 		strings.write_string(&b, ") ORDER BY id;")
@@ -281,7 +285,9 @@ test_multi_index :: proc(t: ^testing.T) {
 	got := db.query(d, "SELECT id FROM docs WHERE title = 't1' AND body = 'beta' ORDER BY id;")
 	testing.expect(t, got.ok, "cross-index AND succeeds")
 	testing.expect_value(t, len(got.rows), 1)
-	if len(got.rows) == 1 { testing.expect_value(t, got.rows[0][0].(i64), i64(3)) }
+	if len(got.rows) == 1 {
+		testing.expect_value(t, got.rows[0][0].(i64), i64(3))
+	}
 	// OR across the two indexes unions.
 	orq := db.query(d, "SELECT id FROM docs WHERE title = 't2' OR body = 'alpha' ORDER BY id;")
 	testing.expect(t, orq.ok, "cross-index OR succeeds")

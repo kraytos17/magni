@@ -29,7 +29,9 @@ text_build_raw :: proc(
 	testing.expect(t, btree.init_text_leaf_page(buf, page_id), "init text leaf")
 	hdr := btree.get_leaf_header(buf, page_id)
 	testing.expect(t, hdr != nil, "text header readable")
-	if hdr == nil { return buf }
+	if hdr == nil {
+		return buf
+	}
 
 	base := btree.get_page_header_offset(page_id)
 	hdr.cell_count = u16le(u16(len(suffixes)))
@@ -95,7 +97,9 @@ test_text_dispatch_resolves :: proc(t: ^testing.T) {
 	testing.expect(t, btree.init_text_leaf_page(buf, 2), "init text leaf")
 	layout, kind, r_err := btree.layout_for_page(buf, WT(2))
 	testing.expect(t, r_err == .None, "text page resolves")
-	if r_err != .None { return }
+	if r_err != .None {
+		return
+	}
 	testing.expect(t, layout.vtable != nil, "vtable never nil")
 	testing.expect_value(t, kind, btree.Key_Kind.Text)
 	testing.expect_value(t, layout.vtable.cell_count(buf, WT(2)), btree.get_cell_count(buf, 2))
@@ -104,7 +108,9 @@ test_text_dispatch_resolves :: proc(t: ^testing.T) {
 	// is_leaf still tells the truth about the live variant.
 	h := btree.get_header(buf, 2)
 	testing.expect(t, h != nil, "header readable")
-	if h == nil { return }
+	if h == nil {
+		return
+	}
 	n := btree.Node {
 		id     = 2,
 		data   = buf,
@@ -130,7 +136,9 @@ test_text_table_ops :: proc(t: ^testing.T) {
 	pid := WT(2)
 	layout, kind, l_err := btree.layout_for_page(page, pid)
 	testing.expect(t, l_err == .None, "text page resolves")
-	if l_err != .None { return }
+	if l_err != .None {
+		return
+	}
 	testing.expect_value(t, kind, btree.Key_Kind.Text)
 
 	testing.expect_value(t, layout.vtable.cell_count(page, pid), 2)
@@ -274,7 +282,9 @@ test_text_search_vs_oracle :: proc(t: ^testing.T) {
 	crid := []i64{7, 1, 4, 2, 3, 5, -5}
 	N := len(ctext)
 	keys := make([][]u8, N, context.temp_allocator)
-	for i in 0 ..< N { keys[i] = enc(ctext[i], crid[i]) }
+	for i in 0 ..< N {
+		keys[i] = enc(ctext[i], crid[i])
+	}
 	for i in 0 ..< N - 1 {
 		testing.expect(
 			t,
@@ -443,7 +453,9 @@ test_text_corruption_loud :: proc(t: ^testing.T) {
 
 	// Builder overflow: page untouched, still validates as empty.
 	big_text := make([]u8, types.PAGE_SIZE, context.temp_allocator)
-	for i in 0 ..< len(big_text) { big_text[i] = 'x' }
+	for i in 0 ..< len(big_text) {
+		big_text[i] = 'x'
+	}
 	big := [][]u8{big_text}
 	big_rids := []types.Row_ID{1}
 	obuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
@@ -490,7 +502,9 @@ test_text_interior_header_layout :: proc(t: ^testing.T) {
 	// Dispatcher resolves with kind .Text; interiors are not leaves.
 	layout, kind, r_err := btree.layout_for_page(buf, WT(2))
 	testing.expect(t, r_err == .None, "interior resolves")
-	if r_err != .None { return }
+	if r_err != .None {
+		return
+	}
 	testing.expect_value(t, kind, btree.Key_Kind.Text)
 	testing.expect(t, layout.vtable != nil, "vtable never nil")
 	n := btree.Node {
@@ -667,7 +681,9 @@ test_text_interior_table_ops :: proc(t: ^testing.T) {
 	pid := WT(2)
 	layout, kind, l_err := btree.layout_for_page(page, pid)
 	testing.expect(t, l_err == .None, "interior resolves")
-	if l_err != .None { return }
+	if l_err != .None {
+		return
+	}
 	testing.expect_value(t, kind, btree.Key_Kind.Text)
 
 	testing.expect_value(t, layout.vtable.cell_count(page, pid), 2)
@@ -734,7 +750,9 @@ test_text_interior_corruption_loud :: proc(t: ^testing.T) {
 	// Inflated count runs past the buffer.
 	hdr := btree.get_leaf_header(buf, 2)
 	testing.expect(t, hdr != nil, "header readable")
-	if hdr == nil { return }
+	if hdr == nil {
+		return
+	}
 	hdr.cell_count = u16le(5000)
 	testing.expect(
 		t,
@@ -781,7 +799,9 @@ test_text_insert_e2e :: proc(t: ^testing.T) {
 			types.Row_ID(i64(i)),
 		)
 		testing.expect(t, ins_err == .None, "insert succeeds")
-		if ins_err != .None { return }
+		if ins_err != .None {
+			return
+		}
 		ctx.tree.root = new_root
 	}
 	free_all(context.temp_allocator)
@@ -795,7 +815,9 @@ test_text_insert_e2e :: proc(t: ^testing.T) {
 		key := fmt.tprintf("key-%04d", i)
 		found, f_err := btree.text_find_rowids(&ctx.tree, ctx.tree.root, transmute([]u8)key)
 		testing.expect(t, f_err == .None, "find succeeds")
-		if f_err != .None { continue }
+		if f_err != .None {
+			continue
+		}
 		testing.expect(t, len(found) == 1, "unique key finds one rowid")
 		if len(found) == 1 {
 			testing.expect_value(t, found[0], types.Row_ID(i64(i)))
@@ -842,7 +864,9 @@ test_text_split_census :: proc(t: ^testing.T) {
 	for page_id in pages {
 		pg, pg_err := pager.get_page(ctx.pager, page_id)
 		testing.expect(t, pg_err == nil, "page readable")
-		if pg_err != nil { continue }
+		if pg_err != nil {
+			continue
+		}
 		h := btree.get_header(pg.data, page_id)
 		testing.expect(t, h != nil, "header readable")
 		if h == nil {
@@ -896,7 +920,9 @@ test_text_boundary_routing :: proc(t: ^testing.T) {
 	) -> u32 {
 		pg, a_err := pager.allocate_page(ctx.pager)
 		testing.expect(t, a_err == nil, "alloc leaf")
-		if a_err != nil { return 0 }
+		if a_err != nil {
+			return 0
+		}
 		defer pager.unpin_page(ctx.pager, pg.page_num)
 		testing.expect(
 			t,
@@ -911,12 +937,16 @@ test_text_boundary_routing :: proc(t: ^testing.T) {
 	left := mk_leaf(t, &ctx, [][]u8{{'a'}, {'l'}, {'m'}}, []types.Row_ID{1, 2, 4})
 	right := mk_leaf(t, &ctx, [][]u8{{'m'}, {'z'}}, []types.Row_ID{6, 7})
 	testing.expect(t, left != 0 && right != 0, "leaves allocated")
-	if left == 0 || right == 0 { return }
+	if left == 0 || right == 0 {
+		return
+	}
 
 	// Separator is right's first key: ("m",6).
 	ipg, a_err := pager.allocate_page(ctx.pager)
 	testing.expect(t, a_err == nil, "alloc interior")
-	if a_err != nil { return }
+	if a_err != nil {
+		return
+	}
 	defer pager.unpin_page(ctx.pager, ipg.page_num)
 	testing.expect(
 		t,
@@ -969,7 +999,9 @@ test_text_dup_texts :: proc(t: ^testing.T) {
 			types.Row_ID(rids[i]),
 		)
 		testing.expect(t, ins_err == .None, "insert succeeds")
-		if ins_err != .None { return }
+		if ins_err != .None {
+			return
+		}
 		ctx.tree.root = new_root
 	}
 	free_all(context.temp_allocator)
@@ -1012,7 +1044,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	for i in 0 ..< N + 1 {
 		pg, a_err := pager.allocate_page(ctx.pager)
 		testing.expect(t, a_err == nil, "alloc child")
-		if a_err != nil { return }
+		if a_err != nil {
+			return
+		}
 		defer pager.unpin_page(ctx.pager, pg.page_num)
 		testing.expect(t, btree.init_text_leaf_page(pg.data, pg.page_num), "init child")
 		pager.mark_dirty(ctx.pager, pg.page_num)
@@ -1020,7 +1054,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	}
 	ipg, a_err := pager.allocate_page(ctx.pager)
 	testing.expect(t, a_err == nil, "alloc interior")
-	if a_err != nil { return }
+	if a_err != nil {
+		return
+	}
 	defer pager.unpin_page(ctx.pager, ipg.page_num)
 	testing.expect(
 		t,
@@ -1039,7 +1075,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	// No load/unpin dance: the page is already pinned by allocate.
 	ihdr := btree.get_header(ipg.data, ipg.page_num)
 	testing.expect(t, ihdr != nil, "interior header readable")
-	if ihdr == nil { return }
+	if ihdr == nil {
+		return
+	}
 	node := btree.Node {
 		id     = ipg.page_num,
 		data   = ipg.data,
@@ -1050,12 +1088,16 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	// them (count_recursive), so they start as empty text leaves.
 	lp, lp_err := pager.allocate_page(ctx.pager)
 	testing.expect(t, lp_err == nil, "alloc left half page")
-	if lp_err != nil { return }
+	if lp_err != nil {
+		return
+	}
 	defer pager.unpin_page(ctx.pager, lp.page_num)
 	testing.expect(t, btree.init_text_leaf_page(lp.data, lp.page_num), "init left")
 	rp, rp_err := pager.allocate_page(ctx.pager)
 	testing.expect(t, rp_err == nil, "alloc right half page")
-	if rp_err != nil { return }
+	if rp_err != nil {
+		return
+	}
 	defer pager.unpin_page(ctx.pager, rp.page_num)
 	testing.expect(t, btree.init_text_leaf_page(rp.data, rp.page_num), "init right")
 	nb := make([]u8, 32, context.temp_allocator)
@@ -1076,7 +1118,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, ab_err == .None, "absorb succeeds")
 	testing.expect(t, res.did_split, "full interior overflows into split")
-	if !res.did_split { return }
+	if !res.did_split {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_validate_interior(node.data, btree.Page_Id(node.id)) == .None,
@@ -1084,7 +1128,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	)
 	rpg, rpg_err := pager.get_page(ctx.pager, res.right_page)
 	testing.expect(t, rpg_err == nil, "load right half")
-	if rpg_err != nil { return }
+	if rpg_err != nil {
+		return
+	}
 	defer pager.unpin_page(ctx.pager, res.right_page)
 	testing.expect(
 		t,
@@ -1095,7 +1141,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	// All 301 separators present in order across the halves.
 	rhdr := btree.get_header(rpg.data, res.right_page)
 	testing.expect(t, rhdr != nil, "right header readable")
-	if rhdr == nil { return }
+	if rhdr == nil {
+		return
+	}
 	// Absorbed N+1 across the halves, minus the promoted separator (it
 	// lives in the parent result, like every B-tree split).
 	total := int(node.header.cell_count) + int(rhdr.cell_count)
@@ -1106,7 +1154,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 		for i in 0 ..< n {
 			s, s_err := btree.text_interior_sep_at(data, btree.Page_Id(id), i)
 			testing.expect(t, s_err == .None, "sep reads")
-			if s_err != .None { continue }
+			if s_err != .None {
+				continue
+			}
 			if prev^ != nil {
 				testing.expect(
 					t,
@@ -1180,10 +1230,14 @@ test_text_dup_across_leaves :: proc(t: ^testing.T) {
 
 	ar, ar_err := btree.text_insert_cow(&ctx.tree, []u8{'a'}, types.Row_ID(1000))
 	testing.expect(t, ar_err == .None, "insert a succeeds")
-	if ar_err == .None { ctx.tree.root = ar }
+	if ar_err == .None {
+		ctx.tree.root = ar
+	}
 	zr, zr_err := btree.text_insert_cow(&ctx.tree, []u8{'z'}, types.Row_ID(1001))
 	testing.expect(t, zr_err == .None, "insert z succeeds")
-	if zr_err == .None { ctx.tree.root = zr }
+	if zr_err == .None {
+		ctx.tree.root = zr
+	}
 	free_all(context.temp_allocator)
 
 	cnt, c_err := btree.tree_count_rows(&ctx.tree)
@@ -1228,7 +1282,9 @@ test_text_delete_basic :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 
 	for i in 2 ..= N {
-		if i % 2 != 0 { continue }
+		if i % 2 != 0 {
+			continue
+		}
 		free_all(context.temp_allocator)
 		key := fmt.tprintf("del-%03d", i)
 		testing.expect(
@@ -1263,7 +1319,9 @@ test_text_delete_basic :: proc(t: ^testing.T) {
 	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
 	for page_id in pages {
 		pg, pg_err := pager.get_page(ctx.pager, page_id)
-		if pg_err != nil { continue }
+		if pg_err != nil {
+			continue
+		}
 		h := btree.get_header(pg.data, page_id)
 		if h == nil {
 			pager.unpin_page(ctx.pager, page_id)
@@ -1350,7 +1408,9 @@ test_text_delete_cow :: proc(t: ^testing.T) {
 
 	new_root, del_err := btree.text_delete_cow(&ctx.tree, []u8{'c', '-', '5'}, 5)
 	testing.expect(t, del_err == .None, "cow delete succeeds")
-	if del_err != .None { return }
+	if del_err != .None {
+		return
+	}
 
 	gone, _ := btree.text_find_rowids(&ctx.tree, new_root, []u8{'c', '-', '5'})
 	testing.expect(t, len(gone) == 0, "new root misses deleted row")
@@ -1447,7 +1507,9 @@ test_text_find_prefix_vs_oracle :: proc(t: ^testing.T) {
 
 	inserted_texts := make([dynamic]string, 0, 160, context.allocator)
 	defer {
-		for s in inserted_texts { delete(s, context.allocator) }
+		for s in inserted_texts {
+			delete(s, context.allocator)
+		}
 		delete(inserted_texts)
 	}
 	inserted_rids := make([dynamic]i64, 0, 160, context.allocator)
@@ -1466,14 +1528,18 @@ test_text_find_prefix_vs_oracle :: proc(t: ^testing.T) {
 	for i in 1 ..= 150 {
 		free_all(context.temp_allocator)
 		s := fmt.tprintf("alpha%03d", i)
-		if !insert_one(t, &ctx, s, next_rid) { return }
+		if !insert_one(t, &ctx, s, next_rid) {
+			return
+		}
 		append(&inserted_texts, strings.clone(s, context.allocator))
 		append(&inserted_rids, next_rid)
 		next_rid += 1
 	}
 	extra := []string{"alpha", "alphabet", "alpine", "beta", "b", "", "alph"}
 	for s in extra {
-		if !insert_one(t, &ctx, s, next_rid) { return }
+		if !insert_one(t, &ctx, s, next_rid) {
+			return
+		}
 		append(&inserted_texts, strings.clone(s, context.allocator))
 		append(&inserted_rids, next_rid)
 		next_rid += 1
@@ -1481,7 +1547,9 @@ test_text_find_prefix_vs_oracle :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 
 	has_prefix :: proc(s, pre: string) -> bool {
-		if len(s) < len(pre) { return false }
+		if len(s) < len(pre) {
+			return false
+		}
 		return s[:len(pre)] == pre
 	}
 	pres := []string{"alpha", "alph", "alpha1", "alpha150", "b", "beta", "z", "alphabetical"}
@@ -1510,7 +1578,9 @@ test_text_find_prefix_vs_oracle :: proc(t: ^testing.T) {
 
 		got, g_err := btree.text_find_prefix(&ctx.tree, ctx.tree.root, transmute([]u8)pre)
 		testing.expect(t, g_err == .None, "prefix find succeeds")
-		if g_err != .None { continue }
+		if g_err != .None {
+			continue
+		}
 		testing.expectf(
 			t,
 			len(got) == len(want_r),
