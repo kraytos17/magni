@@ -1,9 +1,9 @@
-// Package varint provides LEB128-style variable-length integer encoding.
-// It operates purely on []u8 <-> u64
+// Package varint — unsigned LEB128 variable-length integers over byte
+// slices. No allocations; callers own dest/src. decode fails closed.
 package varint
 
-// encode writes value as a LEB128 varint into dest, returning the number of
-// bytes written (0 if dest is too small).
+// encode writes value as a LEB128 varint into dest. Returns bytes written,
+// or 0 when dest is too small.
 encode :: proc(dest: []u8, value: u64) -> int {
 	v := value
 	i := 0
@@ -26,8 +26,9 @@ encode :: proc(dest: []u8, value: u64) -> int {
 	return i
 }
 
-// decode reads a LEB128 varint from src starting at offset. Returns the value,
-// the number of bytes consumed, and ok=false on truncated or malformed input.
+// decode reads a LEB128 varint from src at offset. Returns the value, bytes
+// consumed, and ok=false on truncated input or an overlong encoding (more
+// than 9 bytes). Reads never pass the returned count.
 decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: int, ok: bool) {
 	if offset >= len(src) {
 		return 0, 0, false
@@ -60,7 +61,7 @@ decode :: proc(src: []u8, offset: int = 0) -> (value: u64, bytes_read: int, ok: 
 	return 0, 0, false
 }
 
-// size returns the number of bytes encode will write for value.
+// size returns the LEB128 byte width for v: 1–9 bytes.
 size :: proc(v: u64) -> int {
 	switch {
 	case v < (1 << 7):

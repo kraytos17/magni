@@ -1,3 +1,11 @@
+// Row-major cell codec (package cell).
+//
+// Wire format per cell:
+//   [total_payload:varint][rowid:varint][serial types: one varint per col]
+//   [payload: values in column order]
+// Integers are little-endian and sign-extended from their serial width;
+// FLOAT64 is big-endian; TEXT/BLOB are raw bytes. Varints are unsigned
+// LEB128. Decoding fails closed on truncated or malformed input.
 package cell
 
 import "core:encoding/endian"
@@ -6,12 +14,16 @@ import "core:strings"
 import "src:types"
 import "src:util/varint"
 
+// Serialization_Info is the precomputed size layout of one serialized cell:
+// serial-header bytes, value-payload bytes, and the grand total.
 Serialization_Info :: struct {
 	serial_types_size: int,
 	payload_size     : int,
 	total_size       : int,
 }
 
+// compute_info measures the encoded size of (rowid, values) without writing;
+// serialize requires a matching info.
 compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serialization_Info {
 	info: Serialization_Info
 	for val in values {
@@ -29,8 +41,9 @@ compute_info :: proc(rowid: types.Row_ID, values: []types.Value) -> Serializatio
 	return info
 }
 
-// Serialize a row into the binary cell format at dest. Info must come from compute_info.
-// Returns bytes written and ok=false if dest is too small.
+// serialize writes one cell at dest. info must come from compute_info for
+// the same (rowid, values). Returns bytes written, or ok=false when dest is
+// smaller than info.total_size.
 @(require_results)
 serialize :: proc(
 	dest: []u8,
@@ -100,8 +113,7 @@ serialize :: proc(
 
 // decode_row_prefix reads the payload-size, rowid, and header-size varints
 // at offset, returning the rowid, header size, and the position of the
-// serial-type header. ok=false on short/truncated input (varint.decode
-// fails closed; same call order as the inline code it replaces).
+// serial-type header. ok=false on short or truncated input.
 @(private = "file")
 decode_row_prefix :: proc(
 	src: []u8,
@@ -202,7 +214,10 @@ decode_row_values :: proc(
 	return next_pos, true
 }
 
-// Returns the Cell + bytes consumed. ok=false on invalid input.
+// deserialize parses one cell at offset. When config.zero_copy is set,
+// TEXT/BLOB values borrow from src and owns_data is false; otherwise
+// payloads are cloned into config.allocator. Returns the cell, bytes
+// consumed, and ok=false on invalid input.
 @(require_results)
 deserialize :: proc(
 	src: []u8,
@@ -284,23 +299,20 @@ deserialize :: proc(
 }
 
 // deserialize_needed decodes one row-major cell but materializes only the
-// columns flagged in `needed` (index = serial position). Unneeded columns are
-// still walked (payload skipped via content size) so bytes_consumed matches
-// deserialize exactly, but no value is produced for them: the slot is set to
-// Null and no allocation or clone happens.
+// columns flagged in `needed` (index = serial position). Unneeded columns
+// are still walked (payload skipped by content size) so bytes_consumed
+// matches deserialize exactly; their slots become Null with no allocation
+// or clone.
 //
-// TEXT/BLOB values for needed columns are ALWAYS borrowed from `src`:
-// the caller must clone survivors before the page is unpinned/evicted. The
-// cursor pins only the current page (load_cached_page unpins on page move;
-// eviction reuses the slot buffer), so borrowed strings are valid only
-// while the cursor stays on the page. Non-survivor rows cost zero
-// allocations by construction: ints/reals/Null are by value, text/blob are
-// borrows, and `out_values` is caller storage (stack or reused batch buffer).
+// TEXT/BLOB values are ALWAYS borrowed from src: the caller must clone
+// survivors before the page is unpinned or evicted (borrows stay valid only
+// while the cursor holds the page). Non-survivor rows cost zero allocations:
+// ints/reals/Null are by value, text/blob are borrows, and out_values is
+// caller storage (stack or a reused batch buffer).
 //
-// `out_values` must have len >= serial count; `needed` shorter than the
-// serial count treats trailing positions as not needed. Malformed input
+// out_values must have len >= serial count; `needed` shorter than the
+// serial count marks trailing positions as not needed. Malformed input
 // fails exactly where deserialize fails.
-// Returns the rowid, bytes consumed, and ok=false on invalid input.
 @(require_results)
 deserialize_needed :: proc(
 	src: []u8,
@@ -409,6 +421,8 @@ deserialize_needed :: proc(
 	return types.Row_ID(rowid_val), pos - offset, true
 }
 
+// read_int_by_size reads a little-endian signed integer of 1/2/3/4/6/8
+// bytes, sign-extending to i64. ok=false on unsupported size or short buffer.
 @(private = "file")
 read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: bool) {
 	if offset + size > len(data) {
@@ -442,6 +456,8 @@ read_int_by_size :: proc(data: []u8, offset: int, size: int) -> (val: i64, ok: b
 	return 0, false
 }
 
+// write_int_by_size writes the low `size` bytes of value little-endian.
+// ok=false on unsupported size or short buffer.
 @(private = "file")
 write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> bool {
 	if offset + size > len(dest) {
@@ -470,6 +486,9 @@ write_int_by_size :: proc(dest: []u8, offset: int, value: i64, size: int) -> boo
 	return false
 }
 
+// serial_type_for_value picks the smallest serial type that holds v:
+// NULL/0/1 shortcodes, the narrowest signed int width, FLOAT64 for reals,
+// and length-derived codes for TEXT (odd, 2n+13) and BLOB (even, 2n+12).
 @(private = "file")
 serial_type_for_value :: proc(v: types.Value) -> u64 {
 	switch val in v {
@@ -509,8 +528,10 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 	}
 }
 
+// is_text_serial reports whether serial encodes TEXT (odd, >= 13).
 @(private = "file")
 is_text_serial :: proc(serial: u64) -> bool { return serial >= 13 && (serial % 2 != 0) }
 
+// is_blob_serial reports whether serial encodes BLOB (even, >= 12).
 @(private = "file")
 is_blob_serial :: proc(serial: u64) -> bool { return serial >= 12 && (serial % 2 == 0) }

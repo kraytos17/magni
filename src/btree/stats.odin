@@ -109,6 +109,8 @@ stats_range_reset :: proc(s: ^Stats, page_id: u32) {
 	}
 }
 
+// on_evict_stats clears a page's cached stats when the pager evicts or frees
+// it, so a later reuse of the same page id never reads stale values.
 @(private = "file")
 on_evict_stats :: proc(data: rawptr, page_num: u32) {
 	if data == nil {
@@ -120,6 +122,7 @@ on_evict_stats :: proc(data: rawptr, page_num: u32) {
 	stats_range_reset(s, page_num)
 }
 
+// free_stats_proc releases a Stats instance (pager close hook).
 @(private = "file")
 free_stats_proc :: proc(data: rawptr) {
 	if data == nil {

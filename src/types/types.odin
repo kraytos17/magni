@@ -1,5 +1,8 @@
-// Package types defines the shared domain model: Value, Column, Table, Row_ID,
-// serial types, and storage constants.
+// Package types — shared domain model and storage constants.
+//
+// Leaf package: imports only core: so every other src: package can depend
+// on it. Defines the Value union, schema structs (Column/Table/Index_Def),
+// Row_ID, serial-type codes, and on-disk format constants.
 package types
 
 import "core:fmt"
@@ -11,16 +14,16 @@ import "core:strings"
 PAGE_SIZE            :: 4096
 DATABASE_HEADER_SIZE :: 100
 
-// MAX_COLS is the maximum number of columns a table can have. It's constrained by
-// the inline scratch buffers in cell.deserialize, which use
-// [dynamic; types.MAX_COLS]T for stack-allocated storage (no heap alloc per row).
-// Increasing this value increases stack frame size in the deserialization hot path.
+// MAX_COLS caps table width. Inline row-decode scratch buffers in cell are
+// sized by it for stack storage, so raising it grows stack frames in the
+// deserialization hot path.
 MAX_COLS :: 10
 
-// Storage_Config is shared between btree and cell for consistent deserialization settings.
+// Storage_Config controls value materialization during cell deserialization.
+// Shared by btree and cell so both decode rows byte-for-byte the same way.
 Storage_Config :: struct {
 	allocator: mem.Allocator,
-	zero_copy: bool,
+	zero_copy: bool, // true = text/blob borrow the page buffer, never owned
 }
 
 MAGIC_STRING          :: "MAGNI_DB"
@@ -32,7 +35,8 @@ WAL_FRAME_HEADER_SIZE :: 24
 WAL_FRAME_SIZE        :: WAL_FRAME_HEADER_SIZE + PAGE_SIZE // 24 + 4096 = 4120
 NANOS_PER_MICRO       :: 1000
 
-// Serial types used for encoding values in cells
+// Serial_Type tags a value's cell encoding: fixed-width integers, FLOAT64,
+// the ZERO/ONE shortcodes, and length-encoded BLOB/TEXT from 12 up.
 Serial_Type :: enum u64 {
 	NULL    = 0,
 	INT8    = 1,
@@ -49,6 +53,7 @@ Serial_Type :: enum u64 {
 	// >= 13 (odd): TEXT with length (N-13)/2
 }
 
+// Column_Type is the declared SQL type of a column.
 Column_Type :: enum u8 {
 	INTEGER,
 	TEXT,
@@ -56,10 +61,11 @@ Column_Type :: enum u8 {
 	BLOB,
 }
 
+// Null is the unit payload for SQL NULL (union tag carries the meaning).
 Null :: struct {}
 
-// Value union representing database values
-// string and []u8 are borrowed references - caller manages lifetime
+// Value is one SQL value. string and []u8 carry borrowed payloads: the
+// producer (page buffer, arena) owns the bytes, consumers must not free.
 Value :: union {
 	i64,
 	f64,
@@ -68,31 +74,40 @@ Value :: union {
 	Null,
 }
 
+// value_null returns the SQL NULL value.
 value_null :: proc() -> Value {
 	return Null{}
 }
 
+// value_int returns an INTEGER value.
 value_int :: proc(v: i64) -> Value {
 	return v
 }
 
+// value_real returns a REAL value.
 value_real :: proc(v: f64) -> Value {
 	return v
 }
 
+// value_text returns a TEXT value borrowing v.
 value_text :: proc(v: string) -> Value {
 	return v
 }
 
+// value_blob returns a BLOB value borrowing v.
 value_blob :: proc(v: []u8) -> Value {
 	return v
 }
 
+// is_null reports whether v is SQL NULL.
 is_null :: proc(v: Value) -> bool {
 	_, ok := v.(Null)
 	return ok
 }
 
+// value_clone returns a deep copy of v: string/blob payloads are cloned into
+// allocator; scalar and NULL values are returned unchanged. Caller frees
+// string/blob copies with value_delete.
 @(require_results)
 value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.Allocator_Error) {
 	#partial switch val in v {
@@ -113,6 +128,8 @@ value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.All
 	}
 }
 
+// value_delete frees a value returned by value_clone; scalars and NULL are
+// no-ops.
 value_delete :: proc(v: Value, allocator := context.allocator) {
 	#partial switch val in v {
 	case string:
@@ -122,6 +139,7 @@ value_delete :: proc(v: Value, allocator := context.allocator) {
 	}
 }
 
+// values_delete frees every cloned payload in values, then the slice itself.
 values_delete :: proc(values: []Value, allocator := context.allocator) {
 	for v in values {
 		value_delete(v, allocator)
@@ -129,6 +147,8 @@ values_delete :: proc(values: []Value, allocator := context.allocator) {
 	delete(values, allocator)
 }
 
+// value_compare reports equality with type tags: INTEGER 1, REAL 1.0, and
+// TEXT "1" never compare equal; NULL equals only NULL.
 value_compare :: proc(a, b: Value) -> bool {
 	#partial switch va in a {
 	case Null:
@@ -151,9 +171,9 @@ value_compare :: proc(a, b: Value) -> bool {
 	}
 }
 
-// Convert value to string representation
-// If allocator is context.temp_allocator (default), the result is temporary.
-// If a persistent allocator is provided, the result is a new copy you must free.
+// value_to_string renders v as display text. The result is allocated from
+// allocator: temp (default) results live until arena reset; a persistent
+// allocator returns an owned copy the caller must free.
 value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string {
 	switch val in v {
 	case Null:
@@ -171,6 +191,9 @@ value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string
 	}
 }
 
+// serial_type_content_size returns the payload byte size for a serial type
+// code: fixed widths for the primitive codes, (N-12)/2 for BLOB and
+// (N-13)/2 for TEXT length-carrying codes. valid=false for unknown codes.
 serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
 	if serial >= 12 {
 		// BLOB (even): length = (N-12)/2
@@ -198,8 +221,12 @@ serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
 	}
 }
 
+// Row_ID is the primary-key value space: distinct i64 so rowids never mix
+// with plain integers. Ordering is numeric (encoded keys stay order-
+// preserving via sign bias).
 Row_ID :: distinct i64
 
+// Column is one table column definition.
 Column :: struct {
 	name         : string,
 	type         : Column_Type,
@@ -209,6 +236,8 @@ Column :: struct {
 	check_expr   : Maybe(string),
 }
 
+// hash_string derives a table's schema-rowid from its name: FNV-1a with the
+// sign bit cleared, so catalog keys stay in the positive rowid space.
 hash_string :: proc(s: string) -> u64 {
 	return hash.fnv64a(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
 }
@@ -222,6 +251,7 @@ Index_Def :: struct {
 	root  : u32, // root page of the text index (0 = none, never routed)
 }
 
+// Table is an in-memory table definition as published in the catalog.
 Table :: struct {
 	name        : string,
 	columns     : []Column,
@@ -235,6 +265,7 @@ Table :: struct {
 	indexes     : []Index_Def,
 }
 
+// Foreign_Key is a REFERENCES clause: col references ref_table(ref_col).
 Foreign_Key :: struct {
 	col      : string,
 	ref_table: string,

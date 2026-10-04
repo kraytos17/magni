@@ -1,13 +1,14 @@
+// Package btree — page layout primitives shared by all page kinds: headers,
+// cell-area geometry, and bulk cell moves. Decoders validate page bytes;
+// writers store little-endian fields explicitly.
 package btree
 
 import "src:types"
 
 PAGE_SIZE :: types.PAGE_SIZE
 
-// Page types are exactly the live encodings. V2 row-major variants were
-// removed in the full V3 migration: nothing writes them, and
-// layout_for_page rejects their bytes loudly, so keeping the discriminants
-// would only invite dead routes.
+// Page_Type covers exactly the live on-disk encodings; layout_for_page
+// rejects any other byte loudly rather than guessing a layout.
 Page_Type :: enum u8 {
 	INTERIOR_DENSE = 6, // Interior node: dense u64/FOR keys + u32le children
 	LEAF_SLOTDIR   = 15, // Leaf node: sorted (rowid, offset) slots
@@ -15,7 +16,9 @@ Page_Type :: enum u8 {
 	TEXT_INTERIOR  = 17, // Interior node: full-key text separators + u32le children
 }
 
-
+// Page_Header is the fixed 8-byte header at the start of every page (after
+// the 100-byte database header on page 1). first_freeblock and cell_content
+// _offset are byte offsets within the page; a zero freeblock means "none".
 Page_Header :: struct #packed #simple {
 	page_type          : Page_Type, // Byte 0
 	first_freeblock    : u16le, // Bytes 1-2
@@ -25,22 +28,23 @@ Page_Header :: struct #packed #simple {
 }
 #assert(size_of(Page_Header) == 8)
 
-
+// Leaf_Header is a Page_Header alias for leaves; kept distinct so leaf code
+// reads as leaves.
 Leaf_Header :: struct #packed #simple {
 	using common: Page_Header,
 }
 #assert(size_of(Leaf_Header) == 8)
 
-// Page 1 has a 100-byte database header prefix (types.DATABASE_HEADER_SIZE);
-// all other pages start at offset 0.
-// force_inline + contextless: per-cell hot path, no context use.
+// get_page_header_offset returns the header offset for a page: 100 on page 1
+// (database header prefix), 0 elsewhere. force_inline: per-cell hot path.
 get_page_header_offset :: #force_inline proc "contextless" (page_num: u32) -> int {
 	return int(page_num == 1 ? types.DATABASE_HEADER_SIZE : 0)
 }
 
+// page_header_size returns the fixed header size for a page type. Assignment
+// (not per-arm return) means adding a Page_Type is a compile error here,
+// forcing a conscious size decision.
 page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> int {
-	// Assigned, not returned, per arm: adding a Page_Type is a compile
-	// error here, forcing a conscious size decision
 	sz := size_of(Leaf_Header)
 	switch page_type {
 	case .INTERIOR_DENSE:
@@ -53,6 +57,7 @@ page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> i
 	return sz
 }
 
+// get_header returns the page header, or nil when the buffer is too short.
 get_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Page_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Page_Header) {
@@ -61,6 +66,8 @@ get_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Pa
 	return (^Page_Header)(raw_data(data[off:]))
 }
 
+// get_leaf_header returns the leaf header (currently a Page_Header alias),
+// or nil when the buffer is too short.
 get_leaf_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Leaf_Header {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + size_of(Leaf_Header) {
@@ -69,11 +76,14 @@ get_leaf_header :: #force_inline proc "contextless" (data: []u8, page_id: u32) -
 	return (^Leaf_Header)(raw_data(data[off:]))
 }
 
+// get_cell_count returns a page's cell count; 0 when the header is unreadable.
 get_cell_count :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> int {
 	hdr := get_header(data, page_id)
 	return hdr != nil ? int(hdr.cell_count) : 0
 }
 
+// entry_area_end returns the byte offset just past the fixed-stride entry
+// area of a page: header offset + header size + count * stride.
 entry_area_end :: proc(data: []u8, page_id: u32, stride: int) -> int {
 	off := get_page_header_offset(page_id)
 	hdr := get_header(data, page_id)
@@ -82,6 +92,9 @@ entry_area_end :: proc(data: []u8, page_id: u32, stride: int) -> int {
 	return off + hdr_sz + cell_count * stride
 }
 
+// move_cells_to appends count fixed-stride cells from src (starting at entry
+// index src_start) onto the end of dst's entry area. Fixed-stride entries
+// only; variable-width cells are rebuilt by their page-kind code.
 move_cells_to :: proc(
 	dst: []u8,
 	dst_id: u32,

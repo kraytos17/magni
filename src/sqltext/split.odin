@@ -1,12 +1,13 @@
+// Package sqltext splits SQL text on statement boundaries for the REPL
+// script runner and the exec fuzz harness.
 package sqltext
 
 import "core:strings"
 
-// split_statements splits SQL text on ';' outside string literals, keeping
-// the terminator on each statement and passing through any trailing
-// fragment. Shared by the REPL script runner (src/script.odin) and the
-// exec fuzz harness (fuzz_exec/main.odin) so the two can never drift —
-// previously each carried a hand-synced copy.
+// split_statements splits sql on ';' outside single-quoted string literals,
+// keeping the terminator on each statement and returning any non-empty
+// trailing fragment. Statements borrow sql; only the result slice is
+// allocated. Shared so statement boundaries cannot drift between callers.
 split_statements :: proc(sql: string, allocator := context.allocator) -> []string {
 	result := make([dynamic]string, allocator)
 	start := 0

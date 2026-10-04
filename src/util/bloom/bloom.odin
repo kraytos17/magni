@@ -9,9 +9,10 @@ package bloom
 
 import "core:hash"
 
-// Counting Bloom with COUNTERS cells and HASHES probes. At n = 256 live keys
-// (the pager cache capacity) this is m/n = 16, k = 11 -> ~0.05% false-positive
-// rate. COUNTERS must be a power of two so probe positions mask, not modulo.
+// Counting Bloom with COUNTERS cells and HASHES probes, sized for the
+// 256-entry page cache: m/n = 16, k = 11 gives a ~0.05% false-positive
+// rate. COUNTERS must be a power of two so probe positions mask, not
+// modulo.
 COUNTER_BITS :: 4
 COUNTERS     :: 4096
 MAX_COUNT    :: (1 << COUNTER_BITS) - 1
@@ -32,7 +33,7 @@ reset :: proc(f: ^Filter) {
 	f.counters = {}
 }
 
-// add records key. Counters saturate at MAX_COUNT and never wrap.
+// add records one occurrence of key. Counters saturate at MAX_COUNT.
 add :: proc(f: ^Filter, key: u32) {
 	h1, h2 := probe_seeds(key)
 	for i in 0 ..< HASHES {
@@ -41,9 +42,9 @@ add :: proc(f: ^Filter, key: u32) {
 	}
 }
 
-// remove un-records key. Callers must pair every remove with a prior add
+// remove undoes one add of key. Every remove must pair with a prior add
 // (a remove for a key never added corrupts shared counters into false
-// negatives); counters floor at zero otherwise.
+// negatives); counters floor at zero.
 remove :: proc(f: ^Filter, key: u32) {
 	h1, h2 := probe_seeds(key)
 	for i in 0 ..< HASHES {
@@ -52,8 +53,8 @@ remove :: proc(f: ^Filter, key: u32) {
 	}
 }
 
-// might_contain reports whether key is possibly present. false is definitive
-// (no false negatives); true may be a false positive. Early-outs on the first
+// might_contain reports whether key may be present. False is definitive (no
+// false negatives); true may be a false positive. Early-outs on the first
 // zero counter, so the common miss path touches few bytes.
 might_contain :: proc(f: ^Filter, key: u32) -> bool {
 	h1, h2 := probe_seeds(key)
@@ -67,9 +68,8 @@ might_contain :: proc(f: ^Filter, key: u32) -> bool {
 }
 
 // probe_seeds derives the two double-hashing seeds (Kirsch-Mitzenmacher) from
-// one 64-bit mix of the key. h2 is forced odd so that, with a power-of-two
-// COUNTERS, the k probe positions never degenerate to a short cycle (the
-// RocksDB fix).
+// one 64-bit mix of the key. h2 is forced odd so probe positions never
+// degenerate to a short cycle on power-of-two COUNTERS.
 @(private = "file")
 probe_seeds :: proc(key: u32) -> (h1, h2: u32) {
 	bytes := transmute([4]u8)key
@@ -77,6 +77,7 @@ probe_seeds :: proc(key: u32) -> (h1, h2: u32) {
 	return u32(h), u32(h >> 32) | 1
 }
 
+// counter_get returns the 4-bit counter at pos (low nibble first).
 @(private = "file")
 counter_get :: #force_inline proc(f: ^Filter, pos: u32) -> u8 {
 	idx := pos >> 1
@@ -85,6 +86,8 @@ counter_get :: #force_inline proc(f: ^Filter, pos: u32) -> u8 {
 	return u8(b & 0x0F) if (pos & 1) == 0 else u8(b >> 4)
 }
 
+// counter_add applies delta (+1/-1) with saturation: the counter clamps to
+// [0, MAX_COUNT], never wrapping (a wrap would create false negatives).
 @(private = "file")
 counter_add :: #force_inline proc(f: ^Filter, pos: u32, delta: int) {
 	idx := pos >> 1

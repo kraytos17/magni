@@ -1,22 +1,22 @@
 // Package cell — secondary-text index key codec.
 //
-// V3 scope: BINARY collation only, NULL-not-indexed. Extended:
-// only TEXT (string) values encode — every other storage class (int, real,
-// blob, Null) reports ok=false so the caller skips the entry instead of
-// failing the row. Single-column text indexes; the tag byte reserves space
-// for future composite keys.
+// Keys are single-column, BINARY-collated TEXT: only string values encode;
+// every other storage class (int, real, blob, Null) reports ok=false so the
+// caller skips the entry instead of failing the row. The tag byte reserves
+// space for future composite keys.
 //
 // Wire format (all multi-byte ints big-endian):
 //   [0x54 'T'][len:u32be][text bytes][rowid:u64be sign-biased]
-// Rowid bias (XOR sign bit) makes unsigned word order == signed numeric
-// order, so same-text keys sort by rowid deterministically (uniqueness
-// tiebreak for non-UNIQUE indexes; UNIQUE checks the text region only).
-// NOTE: key order is defined by text_index_compare (text bytes, then
-// length, then rowid) — NOT by raw memcmp of the encoding, because the
-// length prefix would otherwise impose length-first order.
+// Sign bias (XOR sign bit) makes unsigned word order equal signed numeric
+// order, so same-text keys sort by rowid deterministically (tiebreak for
+// non-UNIQUE indexes; UNIQUE compares the text region only).
 //
-// All procs borrow (encode writes into caller buf, decode borrows src).
-// No allocations, no context use (all "contextless"). Malformed input fails
+// Key order is defined by text_index_compare (text bytes, then rowid), NOT
+// by raw memcmp of the encoding: the length prefix would otherwise impose
+// length-first order.
+//
+// All procs borrow (encode writes into caller buf, decode borrows src); no
+// allocations and no context use ("contextless"). Malformed input fails
 // closed (false), never partial.
 package cell
 
@@ -41,10 +41,10 @@ text_index_encoded_len :: #force_inline proc "contextless" (val: types.Value) ->
 	return TEXT_INDEX_PREFIX_LEN + len(s) + TEXT_INDEX_ROWID_LEN
 }
 
-// text_index_encode writes the index key into buf. Returns bytes written.
-// ok=false when val is not TEXT (skip, not error) or buf is too small.
-// require_results: an unhandled false either drops an index entry ( UNIQUE
-// violation missed) or overruns the caller's sizing — always check.
+// text_index_encode writes the index key for (val, rowid) into buf and
+// returns bytes written. ok=false when val is not TEXT (skip the entry, not
+// an error) or buf is too small. require_results is load-bearing: an
+// unhandled false silently drops an index entry.
 @(require_results)
 text_index_encode :: proc "contextless" (
 	val: types.Value,
@@ -162,11 +162,11 @@ text_index_compare :: #force_inline proc "contextless" (a: []u8, b: []u8) -> int
 	return 0
 }
 
-// text_index_shared_prefix returns the common byte prefix length of a,b
-// capped at max_cap (Masstree insight, page-local use). Negative cap → 0.
-// 8-at-a-time word fast path; tail byte loop. Same result as the naive
-// loop, fewer iterations on long shared prefixes. Bounds: cap is clamped to
-// both lengths first, so every index below is in range.
+// text_index_shared_prefix returns the common byte-prefix length of a and b,
+// clamped to min(max_cap, len(a), len(b)); negative cap yields 0. Word-at-a-
+// time fast path with a byte tail (same result as a naive loop, fewer
+// iterations on long prefixes). Every index below is in range because cap is
+// clamped to both lengths first.
 text_index_shared_prefix :: #force_inline proc "contextless" (
 	a: []u8,
 	b: []u8,
@@ -211,8 +211,8 @@ text_index_shared_prefix :: #force_inline proc "contextless" (
 }
 
 // text_index_has_prefix reports whether text starts with prefix (BINARY).
-// Feeds LIKE 'abc%' prefix-range planning: leading-wildcard
-// patterns never reach here (caller checks first char).
+// Feeds LIKE 'abc%' prefix-range planning; leading-wildcard patterns never
+// reach here (the caller checks the first char).
 text_index_has_prefix :: #force_inline proc "contextless" (text: []u8, prefix: []u8) -> bool {
 	if len(prefix) > len(text) {
 		return false

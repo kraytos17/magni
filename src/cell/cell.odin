@@ -1,4 +1,8 @@
-// Package cell serializes/deserializes rows (cells) to/from the on-disk format.
+// Package cell — row (cell) serialization for the on-disk page format.
+//
+// A cell is one row: [rowid][serial-type header][payload]. Two codecs live
+// here: row-major cells (row_codec.odin) and secondary-text index keys
+// (text_codec.odin). All decode paths fail closed on corrupt input.
 package cell
 
 import "core:fmt"
@@ -6,14 +10,20 @@ import "core:mem"
 import "src:types"
 import "src:util/varint"
 
+// Cell is one row materialized in memory. values are owned when owns_data
+// (cloned by create/deserialize); otherwise they borrow page memory and
+// stay valid only while the source page is pinned.
 Cell :: struct {
 	rowid    : types.Row_ID,
 	values   : []types.Value,
 	owns_data: bool,
 }
 
+// Config re-exports the shared storage configuration used by all codecs.
 Config :: types.Storage_Config
 
+// create returns a Cell with every string/blob value cloned into allocator.
+// On failure, partially cloned values are freed before returning.
 create :: proc(
 	rowid: types.Row_ID,
 	values: []types.Value,
@@ -41,9 +51,8 @@ create :: proc(
 	return Cell{rowid = rowid, values = values_copy, owns_data = true}, nil
 }
 
-// destroy frees the cell's values.
-// allocator MUST match the allocator used when the cell was created.
-// A mismatch causes memory corruption (bad free on string/blob values).
+// destroy frees the cell's values. allocator MUST match the allocator used
+// when the cell was created: a mismatch corrupts string/blob payloads.
 destroy :: proc(c: ^Cell, allocator := context.allocator) {
 	if c.values == nil {
 		return
@@ -58,6 +67,8 @@ destroy :: proc(c: ^Cell, allocator := context.allocator) {
 	c.values = nil
 }
 
+// get_rowid reads the rowid from a serialized cell at offset, skipping the
+// leading payload-size varint. ok=false on truncated input.
 @(require_results)
 get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	if offset >= len(src) {
@@ -78,6 +89,8 @@ get_rowid :: proc(src: []u8, offset := 0) -> (types.Row_ID, bool) {
 	return types.Row_ID(rowid), true
 }
 
+// get_size returns the serialized cell's total byte length (size varint +
+// payload). ok=false on truncated input.
 @(require_results)
 get_size :: proc(src: []u8, offset := 0) -> (int, bool) {
 	if offset >= len(src) {
@@ -91,6 +104,7 @@ get_size :: proc(src: []u8, offset := 0) -> (int, bool) {
 	return n + int(payload_size), true
 }
 
+// debug_print writes a human-readable cell dump to stdout.
 debug_print :: proc(c: Cell) {
 	fmt.printf("Cell(rowid=%d, owned=%t, values=[", c.rowid, c.owns_data)
 	for val, i in c.values {
@@ -102,6 +116,9 @@ debug_print :: proc(c: Cell) {
 	fmt.println("])")
 }
 
+// validate checks value count against the schema and per-column rules:
+// NOT NULL rejects nulls; INTEGER requires i64; REAL accepts i64/f64;
+// TEXT and BLOB accept string or []u8 (the two text forms interchange).
 validate :: proc(values: []types.Value, columns: []types.Column) -> bool {
 	if len(values) != len(columns) {
 		return false

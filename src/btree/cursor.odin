@@ -1,3 +1,10 @@
+// Package btree — in-order cursor over the leaf chain.
+//
+// A cursor materializes one root→leaf path plus a page cache (one pin, one
+// resolved layout per visited page). Traversal is leaf-local until the leaf
+// is exhausted, then walks up to the next sibling and drills back down.
+// Borrowed cell bytes (TEXT/BLOB) stay valid only while the cursor holds
+// the page; clone before advancing.
 package btree
 
 import "base:intrinsics"
@@ -6,11 +13,15 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
+// Cursor_Stack_Item is one level of the cursor's root→leaf path: the page
+// and the child/cell index taken at that level.
 Cursor_Stack_Item :: struct {
 	page_id   : u32,
 	cell_index: u16,
 }
 
+// Cursor is a single-threaded in-order iterator. Zero value is invalid;
+// start with cursor_start. Destroy with cursor_destroy to release the pin.
 Cursor :: struct {
 	tree             : ^Tree,
 	path             : [MAX_TREE_DEPTH]Cursor_Stack_Item,
@@ -26,6 +37,9 @@ Cursor :: struct {
 	cached_layout    : Page_Layout,
 }
 
+// drill_down_leftmost pushes a path from start_page down the leftmost spine,
+// leaving the cursor on the first leaf. Fails when the tree is deeper than
+// MAX_TREE_DEPTH or a child pointer is unreadable.
 @(private = "file")
 drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	curr := start_page
@@ -33,6 +47,7 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 		if int(c.depth) >= MAX_TREE_DEPTH {
 			return .Invalid_Page_Header
 		}
+
 		c.path[c.depth] = Cursor_Stack_Item {
 			page_id    = curr,
 			cell_index = 0,
@@ -55,16 +70,17 @@ drill_down_leftmost :: proc(c: ^Cursor, start_page: u32) -> Error {
 	return .None
 }
 
+// cursor_destroy releases the cursor's pin on its cached page.
 cursor_destroy :: proc(c: ^Cursor) {
 	if c.cached_page_id != 0 {
 		pager.unpin_page(c.tree.pager, c.cached_page_id)
 	}
 }
 
-// Initialize a cursor for in-order traversal starting at the leftmost leaf.
-// Returns an invalid cursor if the tree is empty. Empty leaves (possible after
-// COW deletes empty a leading leaf) are skipped so the cursor always lands on
-// the first cell-bearing leaf.
+// cursor_start initializes an in-order traversal at the leftmost leaf.
+// Returns an invalid cursor when the tree is empty. Empty leaves (possible
+// after deletes empty a leading leaf) are skipped so the cursor lands on the
+// first cell-bearing leaf.
 cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, err: Error) {
 	c = Cursor {
 		tree     = t,
@@ -189,10 +205,9 @@ cursor_seek_to_page :: proc(c: ^Cursor, page_id: u32) -> Error {
 	}
 }
 
-// Loads a node, caching the page in the cursor to avoid repeated loads.
-// The page stays pinned until the cursor moves to a different page or is destroyed.
-// likely(hit): sequential scans hit the pinned page once per cell, so the
-// cached path dominates by orders of magnitude.
+// load_cached_page returns the node for page_id, reusing the cursor's cached
+// page when it matches (hot path: sequential scans hit it once per cell).
+// The page stays pinned until the cursor moves on or is destroyed.
 // require_results: using a zero Node after a failed load reads garbage.
 @(private = "file", require_results)
 load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
@@ -213,7 +228,6 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 
 	c.cached_page_id = page_id
 	c.cached_page_data = page.data
-
 	layout, _, l_err := layout_for_page(page.data, Page_Id(page_id))
 	if l_err != .None {
 		return {}, l_err
@@ -230,13 +244,14 @@ load_cached_page :: proc(c: ^Cursor, page_id: u32) -> (Node, Error) {
 	return n, .None
 }
 
-// Move the cursor to the next cell in in-order. Sets is_valid=false at end of tree.
+// cursor_advance moves to the next cell in in-order, setting is_valid=false
+// at end of tree.
 cursor_advance :: proc(c: ^Cursor) -> Error {
 	if !c.is_valid || c.depth == 0 {
 		return .None
 	}
 
-	// Leaf fast path: use cached cell count to avoid load_cached_page
+	// Fast path: the cached cell count avoids load_cached_page entirely.
 	item := &c.path[c.depth - 1]
 	if c.cached_is_leaf {
 		item.cell_index += 1
@@ -289,13 +304,14 @@ descend_to_next_leaf :: proc(c: ^Cursor) -> Error {
 	return .None
 }
 
-// cursor_get_cell_needed decodes the cell at the current cursor position but
+// cursor_get_cell_needed decodes the cell at the cursor position but
 // materializes only the columns flagged in `needed` (index = serial
 // position) into `out_values` (caller storage: stack or reused batch
-// buffer). Unneeded positions are set to Null. TEXT/BLOB for needed
-// columns are ALWAYS borrowed from the page: valid only while the cursor
-// stays on the page (single-page pin, slot-buffer reuse on eviction) —
-// clone survivors before advancing. Zero allocations via
+// buffer). Unneeded positions are set to Null.
+//
+// TEXT/BLOB for needed columns are ALWAYS borrowed from the page: valid only
+// while the cursor stays on the page (single-page pin, slot-buffer reuse on
+// eviction) — clone survivors before advancing. Zero allocations, via
 // cell.deserialize_needed.
 cursor_get_cell_needed :: proc(
 	c: ^Cursor,
@@ -336,8 +352,10 @@ cursor_get_cell_needed :: proc(
 	return rid, .None
 }
 
-// Deserialize and return the cell at the current cursor position.
-// Values are allocated per the allocator. Zero-copy mode returns string/blob pointing into the page.
+// cursor_get_cell deserializes the cell at the cursor position. Values are
+// allocated from allocator (defaults to context.allocator); with the tree's
+// zero_copy config, string/blob values point into the page and are valid
+// only until the cursor advances.
 cursor_get_cell :: proc(c: ^Cursor, allocator: mem.Allocator) -> (cell.Cell, Error) {
 	if !c.is_valid || c.depth == 0 {
 		return {}, .Cell_Not_Found
