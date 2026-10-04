@@ -1,3 +1,9 @@
+// Package btree — copy-on-write write path.
+//
+// Every mutation copies pages along the touched path (copy_on_write), so
+// readers keep their root and snapshots stay readable. Entry points return
+// the new root; callers publish it (schema/pending overlay). A root split
+// happens at the copy: the current root page is rewritten when possible.
 package btree
 
 import "core:mem"
@@ -34,10 +40,9 @@ relocate_copied_page1 :: proc(page: ^pager.Page) -> bool {
 	SRC_HDR_OFF :: types.DATABASE_HEADER_SIZE
 	DST_HDR_OFF :: 0
 
-	// Whole-area move (header + all bytes uniformly down by 100): the
-	// only layout-correct move now that fixed-stride V2 entries are gone.
-	// All live layouts (slotdir, dense, text) are preserved verbatim
-	// by a uniform shift.
+	// Whole-area move (header + all bytes uniformly down by 100): valid for
+	// every live layout (slotdir, dense, text) because all of them are
+	// preserved by a uniform shift.
 	data_sz := types.PAGE_SIZE - SRC_HDR_OFF
 	tmp := make([]u8, data_sz, context.temp_allocator)
 	copy(tmp, page.data[SRC_HDR_OFF:])
@@ -47,6 +52,9 @@ relocate_copied_page1 :: proc(page: ^pager.Page) -> bool {
 	return true
 }
 
+// tree_insert_cow inserts (rowid, values) with COW copies along the touched
+// path. Returns the new root (== t.root when the page was rewritten in
+// place). Leaf roots fast-path; full leaves split the root.
 tree_insert_cow :: proc(
 	t: ^Tree,
 	rowid: types.Row_ID,
@@ -59,6 +67,7 @@ tree_insert_cow :: proc(
 	if load_err != .None {
 		return 0, load_err
 	}
+
 	defer unpin_node(t, root_node)
 	if is_leaf(root_node) {
 		new_root, err = copy_on_write(t, t.root)
@@ -70,8 +79,8 @@ tree_insert_cow :: proc(
 		if n_err != .None {
 			return 0, n_err
 		}
-		defer unpin_node(t, cow_node)
 
+		defer unpin_node(t, cow_node)
 		e := node_insert_leaf_cell(t, &cow_node, rowid, values)
 		if e != .Page_Full {
 			pager.unpin_page(t.pager, new_root)
@@ -118,6 +127,9 @@ tree_insert_cow :: proc(
 	return new_root, .None
 }
 
+// tree_delete_cow deletes key with COW copies along the path. No merge/
+// rebalance: emptied leaves stay, reclaimed by vacuum. Returns the new root
+// (== t.root when the root was rewritten in place).
 tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Error) {
 	Update_COW_Result :: struct {
 		new_page: u32,
@@ -145,8 +157,8 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 		if n_err != .None {
 			return {}, n_err
 		}
-		defer unpin_node(t, node)
 
+		defer unpin_node(t, node)
 		if is_leaf(node) {
 			return Update_COW_Result{new_page = node.id}, delete_from_leaf(t, &node, key)
 		}
@@ -178,6 +190,9 @@ tree_delete_cow :: proc(t: ^Tree, key: types.Row_ID) -> (new_root: u32, err: Err
 	return result.new_page, .None
 }
 
+// tree_update_cow replaces the value at rowid (delete + reinsert within the
+// copied leaf) with COW copies along the path. The rowid must already exist
+// (callers resolve/validate before reaching here). Returns the new root.
 tree_update_cow :: proc(
 	t: ^Tree,
 	rowid: types.Row_ID,
@@ -213,6 +228,7 @@ tree_update_cow :: proc(
 		if n_err != .None {
 			return {}, n_err
 		}
+
 		defer unpin_node(t, node)
 		if is_leaf(node) {
 			if d_err := delete_from_leaf(t, &node, rowid); d_err != .None {

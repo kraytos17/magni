@@ -1,3 +1,11 @@
+// Package btree — skip index: one-zone-map-per-leaf page for cheap range
+// pruning.
+//
+// Each leaf page contributes (page, min_int, max_int) zones for one column;
+// query_skip_index_range binary-searches the sorted zones into a
+// conservative [start, end] leaf window (a superset — the WHERE predicate
+// still filters). A missing/mismatched page or skip-unsafe operator simply
+// disables skipping: correctness never depends on the index.
 package btree
 
 import "core:encoding/endian"
@@ -291,8 +299,9 @@ write_skip_page :: proc(t: ^Tree, entries: []Skip_Entry, col_index: int) -> (Ski
 // 0 = unbounded). The window is a superset of every matching row, so applying
 // it is always safe: rows inside the window are still filtered by the WHERE
 // predicate, and rows outside it cannot match. Returns ok=false (no skipping)
-// when the index is missing, unreadable, legacy-format, built for a different
-// column, or the operator is not skip-safe.
+// when the skip page cannot be read (including no index at all), is not a
+// skip-index page (magic mismatch), was built for a different column, or the
+// operator is not skip-safe.
 query_skip_index_range :: proc(
 	p: ^pager.Pager,
 	skip_root: u32,
@@ -308,8 +317,8 @@ query_skip_index_range :: proc(
 	if err != .None {
 		return 0, 0, false
 	}
+	
 	defer pager.unpin_page(p, skip_root)
-
 	data := pg.data
 	if len(data) < 12 {
 		return 0, 0, false

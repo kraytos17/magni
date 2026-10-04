@@ -126,8 +126,9 @@ free_page :: proc(p: ^Pager, page_num: u32) {
 	slot.page.dirty = true
 	wal_append_frame(p, page_num, slot._data_buf[:], false, 0)
 	// Link frame already written above, so drop without a second writeback.
-	// evict_slot fully resets the slot (old code left dirty=true, which
-	// would make the next mark_slot_dirty skip dirty_pages tracking).
+	// evict_slot fully resets the slot (dirty flag included): leaving a
+	// stale dirty=true would make the next mark_slot_dirty skip dirty_pages
+	// tracking.
 	evict_slot(p, slot, false)
 	p.first_free_page = page_num
 	bit_array.unset(&p.page_bitmap, page_num, p.allocator)

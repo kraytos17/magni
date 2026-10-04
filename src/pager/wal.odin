@@ -31,8 +31,8 @@ WAL_FORMAT_VERSION :: 1
 
 // WAL_COMMIT_PAGE marks commit-marker frames: page_num 0 with a nonzero
 // db_size_after. The marker test lives here (not inline at the three scan
-// sites) so wal_abort_txn, wal_checkpoint, and wal_recover can never fork
-// the committed_upto rule again.
+// sites) so wal_abort_txn, wal_checkpoint, and wal_recover share one
+// committed_upto rule instead of three hand-rolled copies.
 WAL_COMMIT_PAGE :: 0
 
 // frame_is_commit reports whether a frame header is a commit marker as
@@ -44,10 +44,10 @@ frame_is_commit :: proc(fh: WAL_Frame_Header) -> bool {
 // wal_scan_committed_upto returns the end offset of the last commit marker
 // (WAL_HEADER_SIZE when there is none): frames past it are uncommitted. One
 // rule shared by abort (drop), checkpoint (don't copy), and recover (don't
-// replay) so the three can never fork it again. check_salt additionally
-// stops at the first foreign-generation frame (crash-torn tails); only
-// recover needs it, since abort/checkpoint run on a live WAL whose salts
-// cannot change mid-scan.
+// replay) — all three call this rather than re-deriving the boundary.
+// check_salt additionally stops at the first foreign-generation frame
+// (crash-torn tails); only recover needs it, since abort/checkpoint run on
+// a live WAL whose salts cannot change mid-scan.
 @(private = "file")
 wal_scan_committed_upto :: proc(ws: ^Wal_State, file_size: i64, check_salt: bool) -> i64 {
 	committed_upto := i64(types.WAL_HEADER_SIZE)
@@ -86,17 +86,24 @@ Wal_State :: struct {
 	txn_active    : bool,
 }
 
+// wal_frame_hash checksums a frame: FNV-64 over the header (with both
+// checksum fields zeroed, so they don't fold into themselves) followed by
+// the page data.
 @(private = "file")
 wal_frame_hash :: proc(h: ^WAL_Frame_Header, page_data: []u8) -> u64 {
 	local := h^
 	local.checksum1 = 0
 	local.checksum2 = 0
 	hdr_bytes := transmute([types.WAL_FRAME_HEADER_SIZE]u8)local
-	hv := hash.fnv64(hdr_bytes[:])
-	hv = hash.fnv64(page_data, hv)
+	hv := hash.fnv64a(hdr_bytes[:])
+	hv = hash.fnv64a(page_data, hv)
 	return hv
 }
 
+// wal_open opens (or creates) the -wal sibling file. A valid existing
+// header means a previous run left frames behind: salts are adopted and
+// wal_recover replays them before returning. Otherwise a fresh header with
+// new time-derived salts is written and the write offset set past it.
 @(private)
 wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	ws := &p.wal_state
@@ -134,8 +141,8 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	nsec := u64(time.to_unix_nanoseconds(time.now()))
 	b1 := transmute([8]u8)nsec
 	b2 := transmute([8]u8)(nsec + 1)
-	ws.salt1 = u32(hash.fnv64(b1[:]))
-	ws.salt2 = u32(hash.fnv64(b2[:]))
+	ws.salt1 = u32(hash.fnv64a(b1[:]))
+	ws.salt2 = u32(hash.fnv64a(b2[:]))
 
 	buf: [types.WAL_HEADER_SIZE]u8
 	header := (^WAL_Header)(raw_data(buf[:]))
@@ -155,6 +162,9 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 	return .None
 }
 
+// wal_close closes the WAL file and frees its path and index maps.
+// Frames are not fsynced here — close expects commit/checkpoint to have
+// done any needed durability.
 @(private)
 wal_close :: proc(p: ^Pager) {
 	ws := &p.wal_state
@@ -168,10 +178,17 @@ wal_close :: proc(p: ^Pager) {
 	delete(ws.wal_path)
 }
 
+// wal_begin_txn marks a write txn active: subsequent frame appends go to
+// txn_index (kept only if the txn commits, dropped on abort).
 wal_begin_txn :: proc(p: ^Pager) {
 	p.wal_state.txn_active = true
 }
 
+// wal_commit_txn writes every dirtied page as a frame, appends a commit
+// marker, fsyncs the WAL (durability point), then merges txn_index into
+// page_index — that merge is what makes the writes visible to subsequent
+// reads (readers resolve a page's newest frame through page_index).
+// No-op when no txn is active.
 wal_commit_txn :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
 	if !ws.txn_active {
@@ -203,6 +220,15 @@ wal_commit_txn :: proc(p: ^Pager) -> Error {
 	return .None
 }
 
+// wal_abort_txn discards everything the active txn wrote: frame offsets
+// past the last commit marker are dropped from page_index (and the WAL
+// truncated back to it), txn_index and the dirty list are cleared, and the
+// txn's dirtied pages are evicted from cache WITHOUT writeback. Safe
+// because the newer images existed only in the dropped frames + dirty
+// cache: pre-existing pages read back their main-file image, and pages the
+// txn allocated are never reachable (staged roots die with the txn; the
+// caller rewinds the file tail). Returns the purge report; pinned
+// survivors are left for the next GC.
 wal_abort_txn :: proc(p: ^Pager) -> Evict_Report {
 	ws := &p.wal_state
 	if ws.file != nil {
@@ -237,6 +263,13 @@ wal_abort_txn :: proc(p: ^Pager) -> Evict_Report {
 	return report
 }
 
+// wal_append_frame writes one frame (header + full page image — short data
+// is zero-padded) at the current write offset, checksums it, and indexes
+// its location: txn_index while a txn is active (retained only on commit,
+// discarded on abort), page_index otherwise (visible to reads right away;
+// durability still depends on a later fsync/checkpoint). is_commit also
+// writes db_size_after (falling back to the logical page count) so the
+// frame doubles as the commit marker.
 @(private)
 wal_append_frame :: proc(
 	p: ^Pager,
@@ -295,6 +328,14 @@ wal_append_frame :: proc(
 	return .None
 }
 
+// wal_checkpoint copies every committed frame into the main file (frames
+// past the commit marker are skipped — see wal_scan_committed_upto), fsyncs
+// main, then resets the WAL: page_index cleared, header rewritten with fresh
+// salts, file truncated back to the header. Callers must not checkpoint
+// mid-txn (an active txn's dirty pages live only in cache and its frames
+// are uncommitted — there is no internal guard). The salt rewrite runs
+// before the truncate so a crash between them leaves old-salt frames that
+// recovery stops at (foreign generation), never a half-checkpointed mix.
 wal_checkpoint :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
 	if ws.file == nil {
@@ -351,8 +392,8 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 	nsec := u64(time.to_unix_nanoseconds(time.now()))
 	b1 := transmute([8]u8)nsec
 	b2 := transmute([8]u8)(nsec + 1)
-	ws.salt1 = u32(hash.fnv64(b1[:]))
-	ws.salt2 = u32(hash.fnv64(b2[:]))
+	ws.salt1 = u32(hash.fnv64a(b1[:]))
+	ws.salt2 = u32(hash.fnv64a(b2[:]))
 
 	buf: [types.WAL_HEADER_SIZE]u8
 	header := (^WAL_Header)(raw_data(buf[:]))
@@ -380,6 +421,12 @@ Page_Offset :: struct {
 	offset  : i64,
 }
 
+// wal_recover replays a leftover WAL into the main file at open: scans the
+// committed region (stopping at the last commit marker and at any
+// checksum/salt mismatch), then copies each valid frame's page image into
+// main. Frames from other generations or torn tails are ignored, so
+// recovery converges on the last committed state. No-op when the WAL is
+// header-only or has nothing valid to replay.
 wal_recover :: proc(p: ^Pager) -> Error {
 	ws := &p.wal_state
 	if ws.file == nil {

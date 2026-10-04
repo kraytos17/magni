@@ -16,9 +16,8 @@ PAGE_CACHE_SIZE :: 256
 
 // CACHE_TABLE_SIZE is the capacity of the page-cache lookup table: a power of
 // two >= 8 * PAGE_CACHE_SIZE. Linear probing under heavy evict/insert churn
-// clusters into long runs (measured: ~10% of lookups walked >=128 buckets at
-// 2x sizing, max = whole table), so the extra headroom keeps the load factor
-// <= 0.125 and collapses the tail. 2048 * 16B = 32 KiB, L2-resident.
+// clusters into long runs, so the headroom keeps the load factor <= 0.125
+// and collapses the probe tail. 2048 * 16B = 32 KiB, L2-resident.
 CACHE_TABLE_SIZE :: 2048
 
 // The table must stay a power of two (bucket mask) and large enough that an
@@ -62,9 +61,9 @@ is_special_page :: proc(page_num: u32) -> bool {
 	return page_num == 1
 }
 
-// Pager_Stats records hot-path counts for a measurement floor. Counters
-// are always kept (plain integer increments, release-mode cheap); reporting is
-// opt-in via pager_stats_report / the MAGNI_PAGER_STATS env flag at close.
+// Pager_Stats records hot-path counters. Counters are always kept (plain
+// integer increments, release-mode cheap); reporting is opt-in via
+// pager_stats_report / the MAGNI_PAGER_STATS env flag at close.
 PROBE_HIST_BUCKETS :: 8 // 1, 2-3, 4-7, 8-15, 16-31, 32-63, 64-127, 128+
 
 Pager_Stats :: struct {
@@ -161,8 +160,9 @@ pager_layout_report :: proc() {
 	)
 }
 
-// pager_stats_report prints the collected counters (P0 measurement floor).
-// Call explicitly, or set MAGNI_PAGER_STATS=1 to print at pager.close.
+// pager_stats_report prints the collected counters (always-on collection;
+// reporting is opt-in). Call explicitly, or set MAGNI_PAGER_STATS=1 to
+// print at pager.close.
 pager_stats_report :: proc(p: ^Pager) {
 	s := p.stats_counters
 	if s.get_page_calls == 0 {
@@ -262,6 +262,8 @@ Error :: enum u8 {
 	Invalid_Page_Num,
 }
 
+// cache_bucket maps a page number to its home bucket (mask requires
+// CACHE_TABLE_SIZE to be a power of two).
 @(private)
 cache_bucket :: proc(page_num: u32) -> u32 { return page_num & (CACHE_TABLE_SIZE - 1) }
 
@@ -356,9 +358,13 @@ cache_delete :: proc(p: ^Pager, page_num: u32) {
 	}
 }
 
+// find_slot is the cache index lookup: the slot holding page_num, or nil.
 @(private)
 find_slot :: proc(p: ^Pager, page_num: u32) -> ^Page_Slot { return cache_lookup(p, page_num) }
 
+// find_empty_slot returns a free slot, evicting (clock sweep) first when
+// the cache is full. nil when the sweep found nothing evictable (all
+// pinned) or a dirty-page writeback failed.
 @(private)
 find_empty_slot :: proc(p: ^Pager) -> ^Page_Slot {
 	if p.slot_count >= p.max_cache_pages {
@@ -403,7 +409,11 @@ evict_slot :: proc(p: ^Pager, slot: ^Page_Slot, writeback: bool) -> Error {
 	return .None
 }
 
-@(private = "file")
+// evict_one_slot runs one clock-sweep pass: skips pinned pages, clears the
+// referenced bit once before taking a victim, and evicts it with writeback
+// (dirty pages go to WAL first). .Cache_Full when a full sweep found no
+// victim (everything pinned). Caller must hold p.mutex (write-locked).
+@(private)
 evict_one_slot :: proc(p: ^Pager) -> Error {
 	n := len(p.slots)
 	p.stats_counters.evict_calls += 1
@@ -441,9 +451,11 @@ Evict_Report :: struct {
 
 // evict_aborted drops cached copies of aborted-txn pages WITHOUT writeback:
 // after wal_abort_txn their content is unreachable by construction (live
-// roots restored, WAL frames dropped). Mirrors evict_one_slot minus the WAL
-// frame. Takes p.mutex itself; callers must hold db.mu at most (never
-// p.mutex) to respect the db.mu -> p.mutex order.
+// roots restored, WAL frames dropped). It releases each slot through
+// evict_slot with writeback=false (the clock sweep in evict_one_slot is
+// not involved — specific pages, chosen by the caller). Takes p.mutex
+// itself; callers must hold db.mu at most (never p.mutex) to respect the
+// db.mu -> p.mutex order.
 @(private)
 evict_aborted :: proc(p: ^Pager, pages: []u32) -> (report: Evict_Report) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
@@ -653,6 +665,11 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 	return &slot.page, .None
 }
 
+// get_or_allocate_page pins an existing page, or — when page_num is exactly
+// the next file page — creates it (zeroed header area, marked dirty, bitmap
+// set, file extended) and returns it pinned. Page 0 or any page past
+// current_max+1 returns .Page_Not_Found; a full cache returns
+// .Cache_Full. Caller must unpin when done.
 get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	if page_num < 1 {
@@ -698,6 +715,8 @@ page_count :: proc(p: ^Pager) -> u32 {
 	return u32(p.file_len / i64(p.page_size))
 }
 
+// page_in_cache reports whether page_num currently has a cache slot (read
+// lock only; a miss says nothing about whether the page exists on disk).
 page_in_cache :: proc(p: ^Pager, page_num: u32) -> bool {
 	sync.rw_mutex_shared_lock(&p.mutex); defer sync.rw_mutex_shared_unlock(&p.mutex)
 	return find_slot(p, page_num) != nil
@@ -733,6 +752,9 @@ mark_slot_dirty :: proc(p: ^Pager, slot: ^Page_Slot) {
 	}
 }
 
+// mark_dirty flags a cached page dirty and records it in the current WAL
+// txn's dirty list (idempotent — only the first transition enqueues).
+// No-op for uncached pages; caller need not hold p.mutex (taken here).
 mark_dirty :: proc(p: ^Pager, page_num: u32) {
 	sync.rw_mutex_lock(&p.mutex); defer sync.rw_mutex_unlock(&p.mutex)
 	mark_slot_dirty(p, find_slot(p, page_num))

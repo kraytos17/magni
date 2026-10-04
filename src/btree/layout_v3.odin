@@ -1,3 +1,10 @@
+// Package btree — dense page codec (INTERIOR_DENSE, LEAF_SLOTDIR slots).
+//
+// All dense arrays are little-endian (native loads, SIMD-friendly). Every
+// proc operates on caller-supplied buffers and is contextless; fallible
+// procs carry require_results; page indexing stays bounds-checked because
+// counts come from on-disk bytes (corrupt counts must trap, never read out
+// of bounds).
 package btree
 
 import "base:intrinsics"
@@ -5,23 +12,8 @@ import "core:encoding/endian"
 import "core:mem"
 import "src:types"
 
-// V3 dense page vocabulary.
-//
-// No production callers, no writers, no version bump (PAGE_FORMAT_VERSION
-// stays 2; the flip ticket owns the bump). Everything here operates on
-// caller-supplied buffers; nothing touches the pager.
-//
-// Endianness: all dense arrays are LITTLE-endian — native
-// loads, future SIMD compares. The file's legacy BE usage is a
-// varint-cell-era artifact; V3 has no compat constraint.
-//
-// Standing rules apply: all procs contextless, require_results on
-// fallible, bounds-checked page indexing (dense counts come from on-disk
-// bytes — corrupt counts trap, never read out of bounds).
-
 // DENSE_FLAG_FOR selects u32le delta keys (base + delta) over full u64le
-// keys. Decided per page at split time (Phase B2); bit validated strict
-// (unknown flag bits fail closed).
+// keys. Decided per page at split time; unknown flag bits fail closed.
 DENSE_FLAG_FOR :: 0x01
 
 DENSE_FULL_KEY_WIDTH :: 8
@@ -227,6 +219,7 @@ dense_page_lower_bound :: proc "contextless" (
 			}
 			probe = w
 		}
+
 		if probe < target {
 			left = mid + 1
 		} else {
@@ -264,10 +257,10 @@ dense_split_mid :: #force_inline proc "contextless" (n: int) -> int {
 
 // dense_build_from_sorted writes a complete dense interior page from sorted
 // keys with children[0..n] (last = rightmost): init + encoding choice +
-// fill, self-checked by validate at the end. Serves B4 splits and the
-// future bulk loader — one builder, both callers. Empty keys valid
-// (single-child page). Unsorted input fails (sortedness is the caller's
-// contract; per-key range checks make corruption loud, not truncated).
+// fill, self-checked by validate at the end. Used by splits and bulk loads.
+// Empty keys are valid (single-child page). Unsorted input fails
+// (sortedness is the caller's contract; per-key range checks make
+// corruption loud, never silently truncated).
 @(require_results)
 dense_build_from_sorted :: proc "contextless" (
 	data: []u8,
@@ -453,10 +446,10 @@ init_slot_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 	return true
 }
 
-// validate_dense_interior checks sortedness, bounds, FOR range, and the
-// fixed fields. Never rejects a page the writers (B2) can validly produce:
-// nonzero-FOR-range with !FOR flag is the encoder's choice, not an error;
-// count == 0 is tolerated (transient empty interiors exist today).
+// validate_dense_interior checks sortedness, bounds, FOR range, and fixed
+// fields. It never rejects a page the writers can validly produce:
+// nonzero-FOR-range with the !FOR flag is the encoder's choice, not an
+// error; count == 0 is tolerated (transient empty interiors exist).
 @(require_results)
 validate_dense_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	h := get_dense_interior_header(data, u32(id))

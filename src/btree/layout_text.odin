@@ -1,7 +1,7 @@
 // B-tree text leaf pages (LEAF_TEXT): prefix-compressed secondary text index
 // leaves.
 //
-// V3.0 scope: BINARY collation only, NULL-not-indexed (NULL rows never reach
+// Scope: BINARY collation only, NULL-not-indexed (NULL rows never reach
 // these pages — DML skips them, so the format has no NULL encoding),
 // single-column text, covering only SELECT rowid (entries carry rowids).
 //
@@ -382,9 +382,9 @@ text_validate_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 // like the dense path: child[i] holds keys < sep[i], child[n] is rightmost.
 // cell_count = n separators. Reuses Text_Slot (off+len of the codec blob).
 //
-// Writers live in text_tree.odin (C3b: online COW inserts, splits, root
-// growth); separator_insert stays refused at the table (full-key
-// separators flow through the free functions, never the vtable).
+// Writers live in text_tree.odin (online COW inserts, splits, root growth);
+// separator_insert stays refused at the table (full-key separators flow
+// through the free functions, never the vtable).
 
 // init_text_interior_page zeroes and headers a fresh TEXT_INTERIOR page.
 // Same short-buffer contract as init_text_leaf_page.
@@ -547,8 +547,8 @@ text_interior_find_upper :: #force_inline proc "contextless" (
 	return child, idx
 }
 
-// text_interior_find_child is the public routing primitive (C3b descent
-// uses it; tests pin the boundary behavior through it).
+// text_interior_find_child is the public routing primitive (descent uses it;
+// tests pin boundary behavior through it).
 @(require_results)
 text_interior_find_child :: proc "contextless" (
 	data: []u8,
@@ -675,10 +675,11 @@ text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error 
 }
 
 // text_slot_insert shifts slots right from idx and writes Text_Slot{off,len}.
-// Mirrors slot_leaf_insert exactly: NO count bump (the caller owns it — same
-// Option-A asymmetry as the rowid families), NO cell I/O (the caller places
-// cell bytes via freeblock/bump first), capacity-vs-cells pre-checked by the
-// caller (.Page_Full leaves the page untouched one level up).
+// NO count bump (the caller owns it — same convention as the slot family;
+// dense separator_insert is the exception that bumps itself), NO cell I/O
+// (the caller places cell bytes via freeblock/bump first),
+// capacity-vs-cells pre-checked by the caller (.Page_Full leaves the
+// page untouched one level up).
 @(require_results)
 text_slot_insert :: proc "contextless" (
 	data: []u8,
@@ -762,9 +763,9 @@ text_interior_child_store :: proc "contextless" (
 	return .None
 }
 
-// text_slot_delete shifts slots left from idx, dropping it. Mirrors
-// slot_leaf_delete: NO count change (the caller owns the bump, same Option-A
-// asymmetry as insert), NO cell I/O (the caller reclaims the cell).
+// text_slot_delete shifts slots left from idx, dropping it. NO count change
+// (the caller owns the decrement — same convention as insert), NO cell I/O
+// (the caller reclaims the cell).
 @(require_results)
 text_slot_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Error {
 	hdr := get_header(data, u32(id))

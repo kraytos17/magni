@@ -1,4 +1,23 @@
-// Package btree implements the copy-on-write B+tree.
+// Package btree — core rowid B+tree: node access, insert/find/delete/count,
+// iteration, and structural verification.
+//
+// Ownership: load_node returns a PINNED node; pair it with unpin_node
+// (a defer immediately after load is the norm). Descent helpers unpin every
+// intermediate page and hand back the one pinned leaf/interior.
+//
+// Reads and writes navigate through the page's resolved layout vtable
+// (layout_for_page), never by re-interpreting bytes directly — a wrong-kind
+// page fails closed instead of decoding garbage.
+//
+// Two mutation families share this file's recursion:
+//   - tree_insert / tree_delete mutate pages in place: the root id never
+//     changes, so the Tree handle stays valid as-is.
+//   - tree_insert_cow / tree_delete_cow (cow.odin) copy the touched path and
+//     return a new root for the caller to publish, so roots handed out
+//     earlier stay readable (snapshots, GC).
+// Error modes: capacity failures surface as .Page_Full (the caller splits,
+// never partial-mutates), missing rows as .Cell_Not_Found / .Duplicate_Rowid,
+// structural corruption as .Invalid_Page_Header / .Invalid_Cell_Pointer.
 package btree
 
 import "base:intrinsics"
@@ -10,6 +29,8 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
+// MAX_TREE_DEPTH bounds the verifier's recursion: a well-formed tree never
+// exceeds it for u64 keys, so a deeper walk means a cycle or corruption.
 MAX_TREE_DEPTH :: 12
 
 DEFAULT_CONFIG := Config {
@@ -18,17 +39,27 @@ DEFAULT_CONFIG := Config {
 	check_duplicates = true,
 }
 
+// Tree is a handle over one B+tree: pinned pager, current root page, and
+// config. It owns no pages itself — pager pins are taken and released
+// per operation (see load_node/unpin_node).
 Tree :: struct {
 	pager : ^pager.Pager,
 	root  : u32,
 	config: Config,
 }
 
+// Config selects read/write behavior: where cells allocate (allocator),
+// whether tree_find returns zero-copy slices into page buffers
+// (zero_copy — the buffer must outlive the cell), and whether inserts
+// reject an existing rowid (.Duplicate_Rowid) instead of overwriting.
 Config :: struct #all_or_none {
 	using _         : types.Storage_Config,
 	check_duplicates: bool,
 }
 
+// Error is the btree error surface. Callers map these to SQL errors;
+// .Page_Full is special: it is a retry signal for the split paths, not
+// a failure, until a split itself fails.
 Error :: enum u8 {
 	None,
 	Page_Read_Failed,
@@ -44,6 +75,9 @@ Error :: enum u8 {
 	Unsupported_Format,
 }
 
+// Node is a pinned view of one page: its buffer, header pointer, and
+// resolved layout. Valid only until the matching unpin_node — never
+// stash one across operations.
 Node :: struct {
 	id    : u32,
 	data  : []u8,
@@ -51,6 +85,10 @@ Node :: struct {
 	layout: Page_Layout,
 }
 
+// Insert_COW_Result reports what one recursive insert step did: which page
+// now holds the row (new_page), and whether this level split (did_split →
+// the parent must absorb right_page under split_key). #all_or_none: when
+// did_split is false, the remaining fields are zero.
 Insert_COW_Result :: struct #all_or_none {
 	new_page  : u32,
 	did_split : bool,
@@ -58,6 +96,9 @@ Insert_COW_Result :: struct #all_or_none {
 	split_key : types.Row_ID,
 }
 
+// init binds a Tree to a pager and root page (root_page from the schema or
+// 2 for a fresh database). A zero allocator falls back to context.allocator.
+// The returned handle does not pin the root; each operation does.
 init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree {
 	c := config
 	if c.allocator.procedure == nil {
@@ -74,21 +115,28 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 	return t
 }
 
-// is_leaf is public: the leaf/interior question is asked by every page
-// reader (and pinned by tests for each new page type).
+// is_leaf reports whether a node is a leaf (both leaf page kinds: rowid
+// slotdir and text). Public because every page reader must ask it and each
+// new leaf page type is pinned by tests through it.
 is_leaf :: #force_inline proc "contextless" (n: Node) -> bool {
 	return n.header.page_type == .LEAF_SLOTDIR || n.header.page_type == .LEAF_TEXT
 }
 
+// node_leaf reinterprets the node's buffer as a leaf header (callers have
+// already checked is_leaf).
 @(private)
 node_leaf :: #force_inline proc "contextless" (n: Node) -> ^Leaf_Header {return get_leaf_header(
 		n.data,
 		n.id,
 	)}
 
+// unpin_node releases the pin load_node took; safe to defer immediately.
 @(private)
 unpin_node :: #force_inline proc(t: ^Tree, n: Node) { pager.unpin_page(t.pager, n.id) }
 
+// load_node pins page_id and resolves its layout, returning a Node the
+// caller must release with unpin_node. Fails closed on unreadable pages
+// (.Page_Read_Failed) or unrecognizable headers (.Invalid_Page_Header).
 @(require_results)
 load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	page, err := pager.get_page(t.pager, page_id)
@@ -103,6 +151,8 @@ load_node :: proc(t: ^Tree, page_id: u32) -> (Node, Error) {
 	return node_from_bytes(page_id, page.data, layout)
 }
 
+// node_from_bytes wraps a validated page buffer in a Node once the common
+// header parses; any other header shape is .Invalid_Page_Header.
 @(private)
 node_from_bytes :: proc(id: u32, data: []u8, layout: Page_Layout) -> (Node, Error) {
 	common_hdr := get_header(data, id)
@@ -112,6 +162,10 @@ node_from_bytes :: proc(id: u32, data: []u8, layout: Page_Layout) -> (Node, Erro
 	return Node{id = id, data = data, header = common_hdr, layout = layout}, .None
 }
 
+// leaf_lower_bound binary-searches for the first slot whose key >= target,
+// using the layout's key_at. Returns (index, true) on success; (left, false)
+// on an unreadable key, letting the caller treat the position as "past end"
+// rather than retrying a corrupt page.
 @(private = "file")
 leaf_lower_bound :: #force_inline proc(
 	data: []u8,
@@ -140,11 +194,21 @@ leaf_lower_bound :: #force_inline proc(
 	return left, true
 }
 
+// node_find_child routes a key to its child page on an interior node.
+// Returns (child_id, index); index is -1 when the key falls in the
+// rightmost span (child is then the rightmost child).
 @(private)
 node_find_child :: #force_inline proc(n: ^Node, key: types.Row_ID) -> (u32, int) {
 	return node_find_child_data(n.data, n.id, key, n.layout)
 }
 
+// node_insert_leaf_cell inserts one row into a leaf: resolves the layout,
+// optionally rejects a duplicate rowid (config.check_duplicates), then
+// serializes the cell — first into a freeblock hole if one fits, else into
+// fresh space at the content offset. .Page_Full means neither fits: the
+// page is left exactly as found (capacity is checked before any write) so
+// the caller can split and retry. Marks the page dirty and invalidates the
+// rowid-range cache entry on success.
 @(private, require_results)
 node_insert_leaf_cell :: proc(
 	t: ^Tree,
@@ -237,6 +301,9 @@ node_insert_leaf_cell :: proc(
 	return .None
 }
 
+// node_update_child_ptr repoints the child slot for key to new_sibling on a
+// dense interior page (the no-split path after a COW child copy). Returns
+// false on geometry errors or a key outside the page's range.
 @(private, require_results)
 node_update_child_ptr :: proc(n: ^Node, key: types.Row_ID, new_sibling: u32) -> bool {
 	pid := Page_Id(n.id)
@@ -255,6 +322,13 @@ node_update_child_ptr :: proc(n: ^Node, key: types.Row_ID, new_sibling: u32) -> 
 	return true
 }
 
+// insert_recursive is the shared descent used by both mutation families:
+// when cow is set, the page is copied first and the recursion works on the
+// copy (the pages being replaced stay untouched for readers/snapshots);
+// when clear, pages are mutated in place. Leaves call insert_into_leaf,
+// interiors descend and absorb child splits (insert_into_interior). The
+// result reports what the parent must do: repoint (new_page != page_id)
+// or absorb a split.
 @(private, require_results)
 insert_recursive :: proc(
 	t: ^Tree,
@@ -554,6 +628,9 @@ handle_interior_child_split :: proc(
 	return split_interior_halves(t, curr, keys[:], children[:], new_page_num)
 }
 
+// rowid_exists reports whether target_rowid is present on the leaf page:
+// lower-bound probe plus an exact rowid match. Unreadable keys/pointers
+// report false (absence, not corruption — the probe never surfaces errors).
 @(private = "file")
 rowid_exists :: proc(
 	data: []u8,
@@ -634,6 +711,11 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 	return finish_root_split(t, result)
 }
 
+// descend_to_leaf walks from the root to a leaf using get_child's routing
+// decision, unpinning every interior page and returning the leaf PINNED
+// (caller unpins). root_override starts below t.root when the caller
+// already knows a subtree root. A child callback returning 0 (corruption)
+// surfaces on the next load as .Page_Read_Failed rather than looping.
 @(private = "file")
 descend_to_leaf :: proc(
 	t: ^Tree,
@@ -654,6 +736,12 @@ descend_to_leaf :: proc(
 	}
 }
 
+// node_find_child_data is node_find_child's body over raw page bytes
+// (descent callbacks get bytes + layout, not a Node). Returns
+// (child, slot_index); index -1 marks the rightmost span (child is the
+// rightmost pointer). A failed lower bound or slot read falls back to the
+// rightmost child; if the rightmost pointer itself is unreadable the result
+// is (0, -1), and page 0 never loads, so the descent fails closed.
 @(private = "file")
 node_find_child_data :: #force_inline proc(
 	data: []u8,
@@ -686,6 +774,9 @@ node_find_child_data :: #force_inline proc(
 	return child, idx
 }
 
+// descend_by_rightmost routes to the rightmost child (get_child callback
+// for tree_next_rowid: the largest key lives in the rightmost leaf chain).
+// Page 0 on any error fails the descent.
 @(private = "file")
 descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	pid := Page_Id(page_id)
@@ -702,10 +793,15 @@ descend_by_rightmost :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	return rc
 }
 
+// Descend_Key_Ctx carries the routing key for descend_by_key (the get_child
+// interface takes an opaque ctx to stay allocation-free).
 Descend_Key_Ctx :: struct {
 	key: types.Row_ID,
 }
 
+// descend_by_key routes key to its child via node_find_child_data
+// (get_child callback for tree_find). Page 0 on a layout error fails the
+// descent; routing misses fall back to the rightmost child.
 @(private = "file")
 descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	dk := (^Descend_Key_Ctx)(ctx)
@@ -718,8 +814,13 @@ descend_by_key :: proc(data: []u8, page_id: u32, ctx: rawptr) -> u32 {
 	return child
 }
 
-// Find a row by Row_ID. Returns a Cell (with deep-copied or zero-copy values per Config).
-// Returns .Cell_Not_Found if the row doesn't exist.
+// tree_find returns the cell stored at key, or .Cell_Not_Found if absent.
+// Values are deep-copied into allocator unless config.zero_copy: zero-copy
+// TEXT/BLOB borrow the pager's page buffer, which tree_find unpins on
+// return and the pager may later evict or overwrite — only safe when the
+// caller finishes before the next write (or cache eviction). Unreadable
+// slots or headers surface as .Invalid_Cell_Pointer /
+// .Cell_Deserialize_Failed.
 @(require_results)
 tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cell.Cell, Error) {
 	dk := Descend_Key_Ctx {
@@ -730,8 +831,8 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 	if err != .None {
 		return {}, err
 	}
-	defer unpin_node(t, leaf)
 
+	defer unpin_node(t, leaf)
 	lid := Page_Id(leaf.id)
 	idx, ok := leaf_lower_bound(leaf.data, leaf.id, key, leaf.layout)
 	if !ok {
@@ -761,6 +862,9 @@ tree_find :: proc(t: ^Tree, key: types.Row_ID, allocator: mem.Allocator) -> (cel
 	return {}, .Cell_Not_Found
 }
 
+// tree_next_rowid returns the rowid to use for the next auto-numbered row:
+// last key + 1 along the rightmost leaf chain, or 1 on an empty tree.
+// Errors only on unreadable pages/slots (.Invalid_Cell_Pointer et al).
 tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
 	leaf := descend_to_leaf(t, descend_by_rightmost, nil) or_return
 	defer unpin_node(t, leaf)
@@ -789,6 +893,9 @@ tree_next_rowid :: proc(t: ^Tree) -> (result: types.Row_ID, err: Error) {
 	return
 }
 
+// tree_count_rows returns the row count, served from the per-page count
+// cache when available (stats_row_count_get) or computed by count_recursive
+// and cached. Maintained incrementally by insert/delete paths.
 tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
 	if c, ok := stats_row_count_get(tree_stats(t), t.root); ok {
 		count = c
@@ -799,6 +906,10 @@ tree_count_rows :: proc(t: ^Tree) -> (count: int, err: Error) {
 	return
 }
 
+// count_recursive sums the subtree rooted at page_id: leaves contribute
+// their cell_count, interiors sum children + rightmost. Caches each page's
+// subtotal; insert/delete keep the cache current (update_row_count), so
+// later counts are O(1) for untouched subtrees.
 @(private, require_results)
 count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	if count, ok := stats_row_count_get(tree_stats(t), page_id); ok {
@@ -838,6 +949,9 @@ count_recursive :: proc(t: ^Tree, page_id: u32) -> (result: int, err: Error) {
 	return
 }
 
+// update_row_count applies delta to the cached count for page_id, if one is
+// cached (absent entries are left alone — count_recursive will recompute
+// and store on the next full count). No-op for pages never counted.
 @(private)
 update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
 	s := tree_stats(t)
@@ -846,6 +960,11 @@ update_row_count :: proc(t: ^Tree, page_id: u32, delta: int) {
 	}
 }
 
+// delete_recursive removes key from the subtree at page_id: leaves through
+// delete_from_leaf, interiors by descending and then decrementing their
+// cached count. Returns whether a row was actually removed (false +
+// .None = key absent). No merge/rebalance: emptied pages stay until vacuum
+// reclaims them.
 @(private = "file", require_results)
 delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Error) {
 	node, err := load_node(t, page_id)
@@ -875,6 +994,11 @@ delete_recursive :: proc(t: ^Tree, page_id: u32, key: types.Row_ID) -> (bool, Er
 	return deleted, .None
 }
 
+// delete_from_leaf removes key's cell from the leaf and recycles the space:
+// the hole joins the freeblock list, shrinks the content area if it sat at
+// the content offset, or counts toward fragmentation when too small for a
+// freeblock header. Returns .Cell_Not_Found when the key is absent; page
+// kind/layout errors surface as .Invalid_Page_Header / layout errors.
 @(private, require_results)
 delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error {
 	if !is_leaf(leaf_node^) {
@@ -944,13 +1068,18 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 	return .None
 }
 
-// Delete a row by Row_ID. Removes the cell and adds the freed space to the freeblock list.
+// tree_delete removes the row stored at key (in-place mutation: root page
+// unchanged). Frees the cell space back to the page's freeblock list.
+// Returns .Cell_Not_Found if the key is absent.
 @(require_results)
 tree_delete :: proc(t: ^Tree, key: types.Row_ID) -> Error {
 	_, err := delete_recursive(t, t.root, key)
 	return err
 }
 
+// tree_foreach visits every cell in key order (left-to-right descent).
+// callback returns false to stop iteration early (.None, not an error).
+// Cells passed to the callback are destroyed by foreach after it returns.
 @(require_results)
 tree_foreach :: proc(
 	t: ^Tree,
@@ -960,6 +1089,10 @@ tree_foreach :: proc(
 	return foreach_recursive(t, t.root, callback, user_data)
 }
 
+// foreach_recursive is tree_foreach's body: interiors visit children in
+// key order (including rightmost), leaves deserialize each cell and hand it
+// to cb. Stops early when cb returns false; deserialization failures
+// surface as .Cell_Deserialize_Failed.
 @(private = "file", require_results)
 foreach_recursive :: proc(
 	t: ^Tree,
@@ -1015,6 +1148,9 @@ foreach_recursive :: proc(
 	return foreach_recursive(t, rightmost, cb, ud)
 }
 
+// tree_debug_print_node logs one page's header and cells (per-cell
+// deserialize, best-effort: bad slots log a marker and continue). Cold path
+// for diagnosing page contents; never on hot paths.
 @(cold)
 tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 	node, err := load_node(t, page_id)
@@ -1054,6 +1190,11 @@ tree_debug_print_node :: proc(t: ^Tree, page_id: u32) {
 	}
 }
 
+// tree_verify walks the whole tree checking structure: key order inside
+// leaves, separator bounds in interiors, no page visited twice (cycle
+// guard), depth within MAX_TREE_DEPTH. Logs each problem at debug level
+// and returns false on the first violation. Allocates a visited map and
+// touches every page — diagnostics only, never on hot paths.
 @(cold)
 tree_verify :: proc(t: ^Tree) -> bool {
 	visited := make(map[u32]bool, context.temp_allocator)
@@ -1061,9 +1202,11 @@ tree_verify :: proc(t: ^Tree) -> bool {
 	return verify_recursive(t, t.root, 0, types.Row_ID(max(i64)), 0, &visited)
 }
 
-// verify_config_enabled can be set via -define:VERIFY_TREE=true at build time.
-// tree_verify allocates a map and walks the full tree — do not call on hot paths.
-VERIFY_TREE            :: #config(VERIFY_TREE, false)
+// VERIFY_TREE enables tree_verify_if_enabled's walk; set at build time
+// with -define:VERIFY_TREE=true (off by default: the walk is O(n) I/O).
+VERIFY_TREE :: #config(VERIFY_TREE, false)
+// tree_verify_if_enabled runs tree_verify when VERIFY_TREE is set,
+// otherwise returns true. Use around suspect mutations in tests/dev builds.
 tree_verify_if_enabled :: proc(t: ^Tree) -> bool {
 	if !VERIFY_TREE {
 		return true
@@ -1146,6 +1289,10 @@ verify_interior_children :: proc(
 	return verify_recursive(t, rightmost, prev_k, max_k, depth + 1, visited)
 }
 
+// verify_recursive is tree_verify's per-page step: rejects page 0, revisits
+// (cycles), and depth > MAX_TREE_DEPTH, then delegates to the leaf or
+// interior checker. Logs its findings at debug level; returns false on the
+// first violation.
 @(private = "file", cold)
 verify_recursive :: proc(
 	t: ^Tree,
@@ -1173,8 +1320,8 @@ verify_recursive :: proc(
 		log.debugf("Failed to load page %d", page_id)
 		return false
 	}
-	defer unpin_node(t, node)
 
+	defer unpin_node(t, node)
 	indent := strings.repeat("  ", depth, context.temp_allocator)
 	log.debugf(
 		"%sPage %d [%v] count=%d",
@@ -1189,7 +1336,6 @@ verify_recursive :: proc(
 	if is_leaf(node) {
 		return verify_leaf_keys(node, nid, cell_count, min_k, max_k)
 	}
-
 	return verify_interior_children(
 		t,
 		node,
@@ -1203,6 +1349,11 @@ verify_recursive :: proc(
 	)
 }
 
+// collect_pages records every page reachable from root (root marked first,
+// then recursion) into pages — the live-set oracle snapshot GC uses to
+// decide what to reclaim. Idempotent via the visited set; a page that fails
+// to load is still marked live but its children are not reached (GC errs
+// toward keeping data it cannot read).
 collect_pages :: proc(t: ^Tree, root: u32, pages: ^map[u32]bool) {
 	if root == 0 || root in pages {
 		return

@@ -1,3 +1,10 @@
+// Package btree — vacuum: rebuild trees into fresh, densely packed pages.
+//
+// Collect all live entries (in key order), pack leaves greedily, build
+// interior levels bottom-up, return a new root. Original pages are never
+// touched, so existing roots/snapshots stay readable until GC reclaims the
+// superseded pages. O(n) maintenance for explicit VACUUM — not hot-path use.
+// Rowid tree: tree_vacuum; text index: text_tree_vacuum.
 package btree
 
 import "src:cell"
@@ -108,8 +115,8 @@ tree_depth :: proc(t: ^Tree, root: u32) -> (depth: int, err: Error) {
 // existing tree: one new 2-child interior over [old, batch] with the batch
 // minimum as separator (the descent convention — never a left maximum).
 // Both sides must already sit at equal depth (caller compares tree_depth);
-// the old pages are never touched, so COW/rollback hold unchanged. Counts
-// compose exactly (no recount).
+// the pages of the existing tree are never touched, so COW/rollback hold
+// unchanged. Counts compose exactly (no recount).
 graft_right_chain :: proc(
 	t: ^Tree,
 	old_root: u32,
@@ -335,9 +342,9 @@ vacuum_build_interiors :: proc(
 
 // tree_vacuum rebuilds the tree into fresh, densely packed pages and returns
 // the new root. The original pages are left untouched (COW-safe), so
-// time-travel snapshots remain readable; the old pages are reclaimed by the
-// next garbage-collection pass. It is an O(n) maintenance operation intended
-// for an explicit VACUUM, not for hot-path use.
+// time-travel snapshots remain readable; the superseded pages are reclaimed
+// by the next garbage-collection pass. It is an O(n) maintenance operation
+// intended for an explicit VACUUM, not for hot-path use.
 tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
 	handles := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
 	vc := vacuum_ctx {
@@ -465,10 +472,10 @@ vacuum_finish_leaf :: proc(vc: ^vacuum_ctx) -> Error {
 }
 
 // Text_Node_Handle identifies a packed text node and its subtree edge keys
-// (full codec keys, temp-owned) for rebuilding text interior levels. Both
-// edges are tracked: bulk builds separate on right-child minima (the text
-// descent convention — equality continues rightward), while the vacuum path
-// below continues on maxima.
+// (full codec keys, temp-owned) for rebuilding text interior levels.
+// Separators are right-child minima on every path (the text descent
+// convention — equality routes rightward); max_key travels alongside so
+// each handle keeps its node's full edge range.
 @(private)
 Text_Node_Handle :: struct {
 	id     : u32,
@@ -536,8 +543,9 @@ text_vacuum_collect :: proc(
 
 // text_leaf_chunk_bytes measures entries [lo,hi) as one packed leaf:
 // prefix (exact shared of first/last — sorted input shares it across all),
-// slots, and cells. Mirrors the builder's own measure so chunking agrees
-// with building by construction.
+// slots, and cells. Must match text_build_from_sorted's own accounting
+// exactly, or chunk planning would under/over-fill pages the builder then
+// rejects.
 @(private = "file")
 text_leaf_chunk_bytes :: proc(texts: [][]u8, lo: int, hi: int) -> (total: int, plen: int) {
 	plen = cell.text_index_shared_prefix(texts[lo], texts[hi - 1], PAGE_SIZE)
@@ -873,10 +881,10 @@ text_index_is_empty :: proc(t: ^Tree, root: u32) -> bool {
 }
 
 // text_tree_vacuum rebuilds a text index into fresh, packed pages and
-// returns the new root. Mirrors tree_vacuum (collect in order, pack leaves
-// greedily, build interior levels bottom-up; originals untouched for COW
-// safety). Separators propagate verbatim as child maxima — no re-encoding,
-// no recomparison. O(n) maintenance for explicit VACUUM, not hot-path use.
+// returns the new root: collect in key order, pack leaves greedily, build
+// interior levels bottom-up; originals untouched for COW safety. Separators
+// propagate verbatim as right-child minima — no re-encoding, no
+// recomparison. O(n) maintenance for explicit VACUUM, not hot-path use.
 text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
 	texts := make([dynamic][]u8, 0, 64, context.temp_allocator)
 	rids := make([dynamic]types.Row_ID, 0, 64, context.temp_allocator)

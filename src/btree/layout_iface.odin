@@ -1,3 +1,22 @@
+// Package btree — layout dispatch and key codecs.
+//
+// Two dispatch mechanisms, split by call frequency:
+//   - Page_Layout is a vtable resolved ONCE per page visit (cursor caches
+//     it): one indirect hop per page is noise. Layouts are plain values
+//     built only by the constructors at the bottom of this file — never a
+//     struct literal, never a pointer into a global.
+//   - Key_Codec dispatches on a static enum: key_compare runs O(log n)
+//     times inside a binary search, where an indirect call per probe would
+//     be load-bearing. #force_inline lets it melt into the search loop.
+//
+// Invariants:
+//   - Every slot/impl is "contextless" (searches never allocate).
+//   - Dispatch fails closed: unknown page types resolve to the stub table
+//     (.Unsupported_Format), never a nil vtable.
+//   - Page-byte indexing from on-disk headers stays bounds-checked; a
+//     corrupt count must trap, never read out of bounds.
+//   - #no_bounds_check appears only on in-memory spans with a proven cap
+//     (each site names its proof).
 package btree
 
 import "base:intrinsics"
@@ -6,35 +25,7 @@ import "core:mem"
 import "src:cell"
 import "src:types"
 
-// V3 layout/key interfaces.
-//
-// Zig inspiration (std.mem.Allocator): layout is a plain value built ONLY by
-// the constructors below — never a struct literal, never a pointer into a
-// global.
-//
-// Rust inspiration: fallible ops return (T, Error), dispatch on Page_Type
-// fails closed (never a nil vtable), and key dispatch is an exhaustive
-// switch over Key_Kind (compiler-checked match, no default arm).
-//
-// Deliberate split, by call frequency:
-//   - Page_Layout stays a vtable: 7 ops resolved ONCE per page visit
-//     (cursor caches it next to cached_page_id), so one indirect hop per
-//     page is noise.
-//   - Key_Codec is a static enum dispatch: compare runs O(log n) per
-//     search INSIDE the binary-search loop, where an indirect call per
-//     probe would be load-bearing. Static + #force_inline lets it melt
-//     into the search loop; @(require_results) on key_encode is enforced
-//     (unlike vtable slots, where Odin types can't carry the attribute).
-//
-// Odin notes:
-//   - Every slot/impl is "contextless": layout queries never allocate and
-//     never touch context. The compiler rejects any future context use.
-//   - Page-byte indexing from on-disk headers STAYS bounds-checked: a
-//     corrupt cell_count must trap, never read out of bounds.
-//   - #no_bounds_check appears only on in-memory spans with a proven cap
-//     (each site names its proof). Release builds elide checks globally
-//     via -no-bounds-check anyway; these pay off in debug/test builds.
-
+// Page_Layout is a resolved page-kind handler; see the dispatch notes above.
 Page_Layout :: struct {
 	vtable: ^Page_Layout_VTable,
 }
@@ -241,13 +232,12 @@ rowid_encoded_len :: #force_inline proc "contextless" (val: types.Value) -> int 
 	return ROWID_INDEX_ENCODED_LEN if ok else 0
 }
 
-
 // dense_separator_insert inserts (key, child) at idx on a dense interior
-// page and OWNS the cell_count bump (Option A: mirrors the deleted V2
-// builder; asymmetric with slot_insert by lineage, each family consistent).
-// FOR pages reject keys outside the page's [base, base+max(u32)] with
-// .Page_Full (no silent re-encoding; the caller splits and the halves
-// re-derive their encodings). Full pages fail only on capacity.
+// page and owns the cell_count bump (unlike the slot family, whose callers
+// own the count — each family is internally consistent).
+// FOR pages reject keys outside [base, base+max(u32)] with .Page_Full (no
+// silent re-encoding; the caller splits and the halves re-derive). Full
+// pages fail only on capacity.
 @(private = "file", require_results)
 dense_separator_insert :: proc "contextless" (
 	data: []u8,
@@ -283,8 +273,8 @@ dense_separator_insert :: proc "contextless" (
 	// key count, so it moves first (whole block right by one key width),
 	// then the keys tail shifts inside the fixed keys region, then the new
 	// key+child land in the new geometry. All moves are rightward memmoves
-	// into prechecked free space. (Shifting children in the OLD geometry
-	// and bumping after — the naive order — strands them under the new
+	// into prechecked free space. (Naive order — shift children using
+	// pre-bump offsets, then bump the count — strands them under the new
 	// offset and returns stale children.)
 	new_children_off := keys_off + (count + 1) * kwidth
 	copy(
@@ -323,6 +313,8 @@ shared_cell_count :: #force_inline proc "contextless" (data: []u8, id: Page_Id) 
 	return get_cell_count(data, u32(id))
 }
 
+// Dense interior table: dense keys + u32le children; slot-family ops are
+// stubs because dense pages rewrite wholesale rather than mutate slots.
 @(private = "file")
 dense_interior_table := Page_Layout_VTable {
 	header_size       = page_header_size,
@@ -339,9 +331,9 @@ dense_interior_table := Page_Layout_VTable {
 }
 
 // slot_leaf_* are the LEAF_SLOTDIR mechanics: same shift/write shapes as
-// the slot ops, Slot-typed. They check the page type:
-// the tables route by discriminant, but a direct call on V2 bytes must fail
-// never reinterpret a Cell_Entry as a Slot.
+// slot_at but with explicit page-type checks. The tables route by
+// discriminant, yet a direct call on foreign bytes must fail rather than
+// reinterpret them as Slots.
 @(private = "file", require_results)
 slot_leaf_key_at :: #force_inline proc "contextless" (
 	data: []u8,
@@ -476,6 +468,8 @@ slot_leaf_repoint :: proc "contextless" (
 	return .None
 }
 
+// slot_leaf_table is the LEAF_SLOTDIR vtable: cell ops for the slot layout,
+// stubs for interior-only slots.
 @(private = "file")
 slot_leaf_table := Page_Layout_VTable {
 	header_size       = page_header_size,
@@ -491,6 +485,9 @@ slot_leaf_table := Page_Layout_VTable {
 	validate          = validate_slot_leaf,
 }
 
+// v3_stub_* are the fail-closed slots for operations a page kind does not
+// implement: every call reports .Unsupported_Format instead of silently
+// succeeding. cold: reachable only from corrupt- or wrong-kind calls.
 @(private = "file", cold)
 v3_stub_int :: proc "contextless" (pt: Page_Type) -> int {
 	_ = pt
@@ -668,11 +665,10 @@ prefix_interior_layout :: proc() -> Page_Layout {
 }
 
 // layout_for_page resolves the (Page_Layout, Key_Kind) pair for the page in
-// front of the caller. One dynamic hop per page visit; key comparisons run
-// through the static key_* dispatch (zero further hops). Unknown or
-// headerless pages fail closed — never a nil vtable.
-// require_results: an unresolved layout used as zero-value would nil-deref
-// the vtable — always check.
+// front of the caller: one dynamic hop per page visit, with key comparisons
+// running through static dispatch after. Unknown or headerless pages fail
+// closed (never a nil vtable).
+// require_results: a zero Page_Layout would nil-deref the vtable.
 @(require_results)
 layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Error) {
 	hdr := get_header(data, u32(id))

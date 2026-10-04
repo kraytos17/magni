@@ -555,7 +555,7 @@ Schema is stored as a B-tree on page 1.
 
 | Index | Type | Content |
 |---|---|---|
-| RowID | i64 | `fnv64(table_name) & 0x7FFFFFFFFFFFFFFF` (63-bit, sign bit cleared) |
+| RowID | i64 | `fnv64a(table_name) & 0x7FFFFFFFFFFFFFFF` (63-bit, sign bit cleared) |
 | [0] | i64 | Kind discriminator (`0` = table) |
 | [1] | TEXT | Table name |
 | [2] | INT | B-tree root page number |

@@ -1,9 +1,10 @@
 // Text secondary-index insert chain: online COW inserts over
 // single-kind text trees (LEAF_TEXT leaves + TEXT_INTERIOR interiors).
-// Mirrors the primary chain (tree/split/cow) with codec-key routing —
-// primary paths are untouched. DML fan-out drives text_insert_cow; tests drive it directly.
+// Everything here is text-tree-specific (codec-key routing); the rowid
+// chain in tree.odin/split.odin/cow.odin is independent. The DML entry
+// point is text_insert_cow.
 //
-// Differences from the primary chain (deliberate, each documented):
+// Deliberate differences from the rowid chain (each explained at use):
 // - No kind dispatch: a text tree holds only text pages. Per-proc type
 //   checks fail closed on foreign bytes (never reinterpreted).
 // - Absorb-then-split: the pending key joins the snapshot arrays BEFORE
@@ -141,10 +142,9 @@ text_snapshot_with_pending :: proc(
 }
 
 // text_node_insert_leaf_cell inserts one entry into a text leaf, splitting
-// nothing (callers own Page_Full). Mirrors node_insert_leaf_cell with no
-// duplicate check (non-UNIQUE index —
-// duplicate texts with distinct rowids are legal; exact (text,rowid)
-// duplicates are caller bugs the validator rejects loudly).
+// nothing (callers own Page_Full). No duplicate check: a non-UNIQUE index
+// holds duplicate texts with distinct rowids; exact (text,rowid) duplicates
+// are caller bugs the validator rejects loudly.
 @(require_results)
 text_node_insert_leaf_cell :: proc(t: ^Tree, n: ^Node, text: []u8, rowid: types.Row_ID) -> Error {
 	if !is_leaf(n^) {
@@ -489,12 +489,12 @@ text_absorb_child_split :: proc(
 	} else if b_err != .Page_Full {
 		return {}, b_err
 	}
-
 	return split_text_halves(t, curr, seps[:], children[:], new_page_num)
 }
 
-// text_insert_into_interior descends, then repoints or absorbs. Mirrors
-// insert_into_interior (COW repoint via indexed store, stats, dirty).
+// text_insert_into_interior descends to the child, then repoints the parent
+// at the copied child or absorbs its split halves (COW repoint via indexed
+// store, stats update, dirty marking).
 @(private = "file", require_results)
 text_insert_into_interior :: proc(
 	t: ^Tree,
@@ -543,7 +543,6 @@ text_insert_into_interior :: proc(
 			},
 			.None
 	}
-
 	return text_absorb_child_split(t, curr, &child_result, was_rightmost, child_idx, new_page_num)
 }
 
@@ -579,8 +578,9 @@ text_insert_recursive :: proc(
 }
 
 // text_split_leaf_root splits a full leaf root with the pending key
-// absorbed: snapshot + sorted pending + byte-balanced halves + single-sep
-// interior root. Mirrors split_leaf_root without the move/retry dance.
+// absorbed: snapshot the entries, sorted-insert the pending key, rebuild
+// both halves byte-balanced with fresh prefixes, then rewrite the root as a
+// single-separator interior (root id stays the same).
 @(require_results)
 text_split_leaf_root :: proc(
 	t: ^Tree,
@@ -624,14 +624,14 @@ text_split_leaf_root :: proc(
 	if l_err != nil {
 		return 0, .Page_Full
 	}
-	defer pager.unpin_page(t.pager, left_page.page_num)
 
+	defer pager.unpin_page(t.pager, left_page.page_num)
 	right_page, r_err := pager.allocate_page(t.pager)
 	if r_err != nil {
 		return 0, .Page_Full
 	}
-	defer pager.unpin_page(t.pager, right_page.page_num)
 
+	defer pager.unpin_page(t.pager, right_page.page_num)
 	sizes := make([dynamic]int, 0, len(fulls), context.temp_allocator)
 	total := 0
 	for i in 0 ..< len(fulls) {
@@ -683,8 +683,10 @@ text_split_leaf_root :: proc(
 	return root_page, .None
 }
 
-// text_split_interior_root grows a new single-separator interior root over
-// the split halves. Mirrors split_interior_root.
+// text_split_interior_root grows the text root by one level: copies the
+// current root's separators + children to a fresh left page, then rewrites
+// the root as a single separator over (left, split.right_page). Root id
+// stays the same.
 @(require_results)
 text_split_interior_root :: proc(
 	t: ^Tree,
@@ -754,8 +756,9 @@ text_split_interior_root :: proc(
 	return t.root, .None
 }
 
-// text_insert_cow inserts one (text,rowid) into a text tree, COW. Entry
-// point for DML fan-out (Phase D) and C3b tests. Mirrors tree_insert_cow.
+// text_insert_cow inserts one (text,rowid) into a text tree with COW copies
+// along the touched path. Returns the new root for the caller to publish.
+// Entry point for the DML text-index fan-out.
 @(require_results)
 text_insert_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root: u32, err: Error) {
 	tkey, k_err := text_make_key(text, rowid)
@@ -1055,12 +1058,12 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 }
 
 // text_find_prefix collects the rowids of every entry whose text starts with
-// prefix (BINARY collation). Mirrors text_find_rowids exactly — descend once
-// with (prefix, -inf), lower-bound the first leaf, collect while entries
-// carry the prefix, stop at the first greater non-prefix entry, sibling-or-
-// carry across leaves while the run continues. An entry smaller than the
-// prefix can never carry it (any P-prefixed string sorts >= P), and the
-// first greater non-prefix entry ends the run (later keys sort higher still).
+// prefix (BINARY collation): descend once with (prefix, -inf), lower-bound
+// the first leaf, collect while entries carry the prefix, stop at the first
+// greater non-prefix entry, sibling-or-carry across leaves while the run
+// continues. An entry smaller than the prefix can never carry it (any
+// P-prefixed string sorts >= P), and the first greater non-prefix entry
+// ends the run (later keys sort higher still).
 // Empty prefix matches everything (a full-index scan); the router never
 // sends one (LIKE '%' falls back to the scan path), and the btree honors it
 // literally rather than second-guessing the caller.
@@ -1082,11 +1085,10 @@ text_find_prefix :: proc(
 }
 
 // text_node_delete_leaf_cell removes one exact (text,rowid) entry from a
-// text leaf. Mirrors delete_from_leaf (no merge — reclamation is
-// freeblock/fragmented, vacuum compacts later): lower_bound, exact-match
-// verify (suffix + rowid — a neighbor with the same text but another rowid
-// must NOT delete), slot shift, count--, cell reclaim. .Cell_Not_Found
-// when absent (never a wrong delete).
+// text leaf: lower_bound, exact-match verify (suffix + rowid — a neighbor
+// with the same text but another rowid must NOT delete), slot shift, count--,
+// cell reclaim (no merge — space returns to the freeblock/fragment pool,
+// vacuum compacts later). .Cell_Not_Found when absent (never a wrong delete).
 @(require_results)
 text_node_delete_leaf_cell :: proc(
 	t: ^Tree,
@@ -1168,8 +1170,9 @@ text_node_delete_leaf_cell :: proc(
 	return .None
 }
 
-// text_delete_recursive removes one exact entry, non-COW. Mirrors
-// delete_recursive (stats maintained on the way out).
+// text_delete_recursive removes one exact entry without COW: descends,
+// deletes at the leaf, maintains stats on the way back up (leaf set,
+// interior -1).
 @(private = "file", require_results)
 text_delete_recursive :: proc(
 	t: ^Tree,
@@ -1185,8 +1188,8 @@ text_delete_recursive :: proc(
 	if err != .None {
 		return false, err
 	}
-	defer unpin_node(t, node)
 
+	defer unpin_node(t, node)
 	if is_leaf(node) {
 		e := text_node_delete_leaf_cell(t, &node, text, rowid)
 		if e != .None {
@@ -1208,8 +1211,7 @@ text_delete_recursive :: proc(
 	return deleted, .None
 }
 
-// text_delete removes one exact (text,rowid) entry in place (Direct mode).
-// Mirrors tree_delete.
+// text_delete removes one exact (text,rowid) entry in place (no COW).
 @(require_results)
 text_delete :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 	tkey, k_err := text_make_key(text, rowid)
@@ -1221,11 +1223,10 @@ text_delete :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 	return err
 }
 
-// text_delete_cow removes one exact entry copy-on-write. Mirrors
-// tree_delete_cow (nested cow-recursive, repoint on change, root dance).
-// Unlike the primary COW path it maintains stats (leaf set + interior -1:
-// both exact here — the primary path omits them, leaving stale counts
-// until recount; no legacy forces the same quirk on a new tree type).
+// text_delete_cow removes one exact entry copy-on-write (nested
+// cow-recursive, repoint on change, root dance). Unlike the rowid COW
+// path it maintains stats (leaf set + interior -1 — both exact here; the
+// rowid path leaves counts stale until the next recount).
 @(require_results)
 text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root: u32, err: Error) {
 	Text_Update_COW_Result :: struct {
@@ -1313,8 +1314,8 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 }
 
 // finish_text_root_split grows the text root when a recursive insert split
-// it, then recounts. Mirrors finish_root_split (dense): the leaf fast path
-// below additionally recounts unconditionally.
+// it, then recounts. The leaf fast path in text_insert additionally
+// recounts unconditionally (its own count changed before the split).
 @(private = "file")
 finish_text_root_split :: proc(t: ^Tree, result: Text_Insert_Result) -> Error {
 	if result.did_split {
@@ -1328,9 +1329,9 @@ finish_text_root_split :: proc(t: ^Tree, result: Text_Insert_Result) -> Error {
 	return .None
 }
 
-// text_insert inserts one (text,rowid) in place (Direct mode, no COW).
-// Mirrors tree_insert: leaf fast-path, root split in place (root id is
-// stable — splits rebuild it as an interior), recursive absorb, recount.
+// text_insert inserts one (text,rowid) in place (no COW): leaf fast-path,
+// root split in place (root id is stable — splits rebuild it as an
+// interior), recursive absorb, recount.
 @(require_results)
 text_insert :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 	tkey, k_err := text_make_key(text, rowid)

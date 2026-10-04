@@ -1,9 +1,18 @@
+// Package btree — node splits (leaf and interior) and root splits.
+//
+// Leaf splits move the upper half to a fresh sibling and compact the left
+// half; interior splits rebuild both halves from snapshotted keys/children.
+// Root splits grow the tree by writing a new single-separator root over the
+// current one (the root id is stable; pages are COW-fresh at call time).
 package btree
 
 import "src:cell"
 import "src:pager"
 import "src:types"
 
+// Split_Result reports one completed node split: the right sibling page and
+// the separator key that routes to it. #all_or_none: only did_split=true
+// carries meaningful page/key fields.
 Split_Result :: struct #all_or_none {
 	did_split : bool,
 	right_page: u32,
@@ -147,13 +156,14 @@ leaf_cell_size :: proc(data: []u8, off: int) -> (int, bool) {
 	return cell.get_size(data, off)
 }
 
+// split_leaf_node splits curr into itself (lower half) plus a fresh right
+// sibling. Revalidates the page is a non-empty slotdir leaf; the parent
+// absorbs the returned separator.
 @(private)
 split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if node_leaf(curr^).cell_count == 0 {
 		return {}, .Page_Full
 	}
-	// Slotdir-only: V2 leaves cannot occur (unloadable since full
-	// migration) — anything else fails fast, never reinterpreted.
 	if curr.header.page_type != .LEAF_SLOTDIR {
 		return {}, .Invalid_Page_Header
 	}
@@ -199,6 +209,8 @@ split_leaf_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	return Split_Result{did_split = true, right_page = right_node.id, split_key = sep}, .None
 }
 
+// split_interior_node rebuilds curr as its lower half and writes the upper
+// half to a fresh sibling. The separator is the first key of the right half.
 @(private)
 split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	pid := Page_Id(curr.id)
@@ -227,6 +239,7 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	if rc_err != .None {
 		return {}, rc_err
 	}
+
 	append(&children, rc)
 
 	mid := dense_split_mid(total)
@@ -279,6 +292,7 @@ load_split_root :: proc(t: ^Tree, root_page: u32) -> (root_node: Node, err: Erro
 	if load_err != .None {
 		return {}, load_err
 	}
+
 	root_node = loaded
 	if !is_leaf(root_node) {
 		unpin_node(t, root_node)
@@ -331,6 +345,10 @@ insert_pending_leaf :: proc(
 	return node_insert_leaf_cell(t, target, rid, vals)
 }
 
+// split_leaf_root grows a leaf root by one level: allocates the left and
+// right halves, moves both, optionally inserts the pending (rowid, values)
+// into its half, then rewrites root_page as a single-separator interior
+// (root id stays the same). Returns root_page unchanged.
 split_leaf_root :: proc(
 	t: ^Tree,
 	root_page: u32,
@@ -347,7 +365,6 @@ split_leaf_root :: proc(
 
 	left_id := left_page.page_num
 	defer pager.unpin_page(t.pager, left_id)
-
 	right_page, r_err := alloc_init_leaf(t)
 	if r_err != .None {
 		return 0, r_err
@@ -401,6 +418,9 @@ split_leaf_root :: proc(
 	return root_page, .None
 }
 
+// split_interior_root grows an interior root by one level: copies the whole
+// root to a fresh left page, then rewrites the root as a single separator
+// over (left, split.right_page).
 @(private)
 split_interior_root :: proc(t: ^Tree, split: Split_Result) -> (err: Error) {
 	root_node := load_node(t, t.root) or_return
@@ -431,12 +451,13 @@ split_interior_root :: proc(t: ^Tree, split: Split_Result) -> (err: Error) {
 	if rc_err != .None {
 		return rc_err
 	}
-	append(&children, rc)
 
+	append(&children, rc)
 	left_page, a_err := pager.allocate_page(t.pager)
 	if a_err != nil {
 		return .Page_Full
 	}
+
 	defer pager.unpin_page(t.pager, left_page.page_num)
 	if lb_err := dense_build_from_sorted(
 		left_page.data,
