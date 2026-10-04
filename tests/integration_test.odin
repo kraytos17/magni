@@ -150,6 +150,80 @@ test_integration_time_travel_with_limit :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_integration_bulk_rollback :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "bulk_rollback")
+	defer teardown_db(d, "bulk_rollback")
+
+	db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v TEXT);")
+	schema_root_before := d.schema_root_page
+
+	// Multi-row bulk into the empty table, then rollback: fresh bulk pages
+	// truncate away, the schema root is restored, and the table reads empty.
+	db.begin(d)
+	db.execute(d, "INSERT INTO t VALUES (3, 'c'), (1, 'a'), (2, 'b'), (5, 'e'), (4, 'd');")
+
+	q := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q.ok && len(q.rows) == 1, "COUNT should run inside txn")
+	db.rollback(d)
+	testing.expect_value(t, d.schema_root_page, schema_root_before)
+
+	q2 := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, q2.ok, "COUNT should run after rollback")
+	if q2.ok && len(q2.rows) == 1 {
+		testing.expect_value(t, q2.rows[0][0].(i64), 0)
+	}
+}
+
+@(test)
+test_create_index_backfill_boundaries :: proc(t: ^testing.T) {
+	// 2000-row table, then CREATE INDEX: the backfill collects, sorts, and
+	// bulk-builds (multi-leaf). Every key is point-queried, pinning
+	// leaf-boundary separators exactly like the INSERT-time sweep.
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "idxfill_bounds")
+	defer teardown_db(d, "idxfill_bounds")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create",
+	)
+	sb: strings.Builder
+	strings.builder_init(&sb, context.temp_allocator)
+	strings.write_string(&sb, "INSERT INTO docs VALUES ")
+	for i in 1 ..= 2000 {
+		if i > 1 {
+			strings.write_string(&sb, ",")
+		}
+		fmt.sbprintf(&sb, "(%d,'b%04d')", i, i)
+	}
+	strings.write_string(&sb, ";")
+	testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "bulk load")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+
+	q := db.query(d, "SELECT COUNT(*) FROM docs;")
+	testing.expect(t, q.ok, "count runs")
+	if q.ok && len(q.rows) == 1 {
+		testing.expect_value(t, q.rows[0][0].(i64), 2000)
+	}
+
+	for i in 1 ..= 2000 {
+		free_all(context.temp_allocator)
+		r := db.query(d, fmt.tprintf("SELECT id FROM docs WHERE body = 'b%04d';", i))
+		if !r.ok || len(r.rows) != 1 {
+			testing.expect(t, false, fmt.tprintf("body b%04d missing after backfill", i))
+			break
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
 test_integration_rollback_restores_schema :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	d := setup_db(t, "rollback")
@@ -1802,6 +1876,97 @@ test_integration_delete_multipage :: proc(t: ^testing.T) {
 	r4 := db.query(d, "SELECT COUNT(*) AS n FROM t WHERE id = 5;")
 	testing.expect(t, r4.ok, "deleted row gone")
 	testing.expect_value(t, r4.rows[0][0].(i64), i64(0))
+}
+
+@(test)
+test_integration_vacuum_boundary_sweep :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "vac_sweep")
+	defer teardown_db(d, "vac_sweep")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (id INT PRIMARY KEY, v INT);") == .None,
+		"create",
+	)
+	// Single-row loop inserts (split-built, correct): 2000 rows across
+	// many leaves so vacuumed interiors have many chunk boundaries.
+	for i in 1 ..= 2000 {
+		free_all(context.temp_allocator)
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, %d);", i, i * 2)) == .None,
+			"insert",
+		)
+	}
+	free_all(context.temp_allocator)
+
+	sweep_all :: proc(t: ^testing.T, d: ^db.Database, label: string) -> int {
+		missing := 0
+		for i in 1 ..= 2000 {
+			free_all(context.temp_allocator)
+			r := db.query(d, fmt.tprintf("SELECT v FROM t WHERE id = %d;", i))
+			if !r.ok || len(r.rows) != 1 {
+				missing += 1
+			}
+		}
+		free_all(context.temp_allocator)
+		if missing != 0 {
+			testing.expect(t, false, fmt.tprintf("%s: %d rows unfindable", label, missing))
+		}
+		return missing
+	}
+
+	testing.expect_value(t, sweep_all(t, d, "pre-vacuum"), 0)
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
+	testing.expect_value(t, sweep_all(t, d, "post-vacuum"), 0)
+}
+
+@(test)
+test_integration_vacuum_text_boundary_sweep :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "vac_text_sweep")
+	defer teardown_db(d, "vac_text_sweep")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+	for i in 1 ..= 2000 {
+		free_all(context.temp_allocator)
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO docs VALUES (%d, 'w%04d');", i, i)) == .None,
+			"insert",
+		)
+	}
+	free_all(context.temp_allocator)
+
+	sweep_text :: proc(t: ^testing.T, d: ^db.Database, label: string) -> int {
+		missing := 0
+		for i in 1 ..= 2000 {
+			free_all(context.temp_allocator)
+			r := db.query(d, fmt.tprintf("SELECT id FROM docs WHERE body = 'w%04d';", i))
+			if !r.ok || len(r.rows) != 1 {
+				missing += 1
+			}
+		}
+		free_all(context.temp_allocator)
+		if missing != 0 {
+			testing.expect(t, false, fmt.tprintf("%s: %d bodies unfindable", label, missing))
+		}
+		return missing
+	}
+
+	testing.expect_value(t, sweep_text(t, d, "pre-vacuum"), 0)
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
+	testing.expect_value(t, sweep_text(t, d, "post-vacuum"), 0)
 }
 
 @(test)
@@ -3512,7 +3677,11 @@ test_index_update :: proc(t: ^testing.T) {
 	)
 	st1 := db.Schema_Tree(d)
 	tbl1, _ := schema.find_table(&st1, "docs", context.temp_allocator)
-	testing.expect(t, index_root_of(t, tbl1, "i_body") == root_before, "untouched index keeps its root")
+	testing.expect(
+		t,
+		index_root_of(t, tbl1, "i_body") == root_before,
+		"untouched index keeps its root",
+	)
 
 	// NULL -> text and text -> NULL transitions.
 	testing.expect(
@@ -3622,7 +3791,11 @@ test_index_txn_rollback_mixed :: proc(t: ^testing.T) {
 
 	st1 := db.Schema_Tree(d)
 	tbl1, _ := schema.find_table(&st1, "docs", context.temp_allocator)
-	testing.expect(t, index_root_of(t, tbl1, "i_body") == root_before, "rollback restores index root")
+	testing.expect(
+		t,
+		index_root_of(t, tbl1, "i_body") == root_before,
+		"rollback restores index root",
+	)
 	verify_text_index(t, d, "docs", expect)
 }
 
@@ -4564,11 +4737,7 @@ test_index_explain :: proc(t: ^testing.T) {
 		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE NOT body = 'a';"),
 		"FULL SCAN ON docs",
 	)
-	testing.expect_value(
-		t,
-		explain(t, d, "EXPLAIN SELECT id FROM docs;"),
-		"FULL SCAN ON docs",
-	)
+	testing.expect_value(t, explain(t, d, "EXPLAIN SELECT id FROM docs;"), "FULL SCAN ON docs")
 	testing.expect_value(
 		t,
 		explain(t, d, "EXPLAIN SELECT id FROM plain WHERE body = 'a';"),

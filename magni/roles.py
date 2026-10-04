@@ -61,22 +61,27 @@ TARGETS = {
 EXEC_ENV = {"ASAN_OPTIONS": config.ASAN_FUZZ_OPTIONS}
 
 ROLES: dict[str, Role] = {
-    "master":  Role("cov", sched=("-p", "exploit")),
+    "master": Role("cov", sched=("-p", "exploit")),
     "explore": Role("cov", sched=("-p", "explore")),
-    "fast":    Role("cov", sched=("-p", "fast")),
-    "coe":     Role("cov", sched=("-p", "coe")),
-    "seek":    Role("cov", sched=("-p", "seek")),
-    "cmplog":  Role("cov", afl_flags=("-c", "cmplog_bin", "-l", "2AT")),
-    "asan":    Role("asan", env=dict(EXEC_ENV)),
-    "laf":     Role("laf"),
-    "mopt":    Role("cov", afl_flags=("-L", "0")),
-    "oldq":    Role("cov", afl_flags=("-Z",)),
-    "exec":    Role("exec", corpus=config.EXEC_CORPUS_DIR,
-                    timeout_ms=config.EXEC_TIMEOUT_MS, env=dict(EXEC_ENV)),
+    "fast": Role("cov", sched=("-p", "fast")),
+    "coe": Role("cov", sched=("-p", "coe")),
+    "seek": Role("cov", sched=("-p", "seek")),
+    "cmplog": Role("cov", afl_flags=("-c", "cmplog_bin", "-l", "2AT")),
+    "asan": Role("asan", env=dict(EXEC_ENV)),
+    "laf": Role("laf"),
+    "mopt": Role("cov", afl_flags=("-L", "0")),
+    "oldq": Role("cov", afl_flags=("-Z",)),
+    "exec": Role(
+        "exec", corpus=config.EXEC_CORPUS_DIR, timeout_ms=config.EXEC_TIMEOUT_MS, env=dict(EXEC_ENV)
+    ),
     "grammar": Role("cov", sched=("-p", "explore"), python_mutator=True),
-    "exec_grammar": Role("exec", corpus=config.EXEC_CORPUS_DIR,
-                         timeout_ms=config.EXEC_TIMEOUT_MS,
-                         env=dict(EXEC_ENV), python_mutator=True),
+    "exec_grammar": Role(
+        "exec",
+        corpus=config.EXEC_CORPUS_DIR,
+        timeout_ms=config.EXEC_TIMEOUT_MS,
+        env=dict(EXEC_ENV),
+        python_mutator=True,
+    ),
 }
 
 # Default secondary rotation when roles aren't specified.

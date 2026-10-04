@@ -1,0 +1,20 @@
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+# Generator scripts and promoted-seed tables are data, not code: entries are
+# machine-written/appended one-per-line, so the formatter must leave them alone
+# (otherwise every promote re-dirties the tree).
+exclude = [
+    "fuzz/generators/*.py",
+    "fuzz/corpus/promoted_seeds.py",
+    "fuzz/corpus_exec/promoted_seeds.py",
+]
+
+[tool.ruff.lint]
+# F: pyflakes. E4/E7/E9: syntax/whitespace-critical pycodestyle. B: bugbear.
+# UP: pyupgrade. I: import order. S102/S110: exec-use and silent
+# try/except-pass (gen-script loading is intentional; each site carries a
+# noqa with its reason). BLE: blind except. PLW1510: explicit check=.
+# (Broad S is off: subprocess/md5//tmp are the tool's job, all covered by
+# tests; S102/S110 keep the two patterns that deserve a second look.)
+select = ["F", "E4", "E7", "E9", "B", "UP", "I", "S102", "S110", "BLE", "PLW1510"]

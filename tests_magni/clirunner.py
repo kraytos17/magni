@@ -34,8 +34,7 @@ class MagniCLITestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not BINARY.is_file():
-            raise unittest.SkipTest(
-                f"{BINARY} missing; build first: python3 magni.py build")
+            raise unittest.SkipTest(f"{BINARY} missing; build first: python3 magni.py build")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="magni_cli_")
@@ -53,20 +52,28 @@ class MagniCLITestCase(unittest.TestCase):
         p.touch()
         return p
 
-    def run_raw(self, args: list[str], stdin_text: str | None = None,
-                cwd: Path | None = None,
-                timeout: int = DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
+    def run_raw(
+        self,
+        args: list[str],
+        stdin_text: str | None = None,
+        cwd: Path | None = None,
+        timeout: int = DEFAULT_TIMEOUT,
+    ) -> subprocess.CompletedProcess:
         try:
             return subprocess.run(
                 [str(BINARY), *args],
                 input=stdin_text,
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
                 cwd=str(cwd or self.tmp),
                 timeout=timeout,
-                check=False)  # exit codes asserted explicitly via assertOk
+                check=False,
+            )  # exit codes asserted explicitly via assertOk
         except subprocess.TimeoutExpired as e:
-            self.fail(f"timed out after {timeout}s (hung binary?) "
-                      f"cmd={args} stdout={e.stdout!r} stderr={e.stderr!r}")
+            self.fail(
+                f"timed out after {timeout}s (hung binary?) "
+                f"cmd={args} stdout={e.stdout!r} stderr={e.stderr!r}"
+            )
 
     def run_eval(self, sql: str, db: Path | None = None, **kw) -> subprocess.CompletedProcess:
         return self.run_raw(["--eval", sql, str(db or self.db())], **kw)
@@ -85,25 +92,29 @@ class MagniCLITestCase(unittest.TestCase):
         return (proc.stdout or "") + "\n" + (proc.stderr or "")
 
     def assertHas(self, proc: subprocess.CompletedProcess, needle: str):
-        self.assertIn(needle.lower(), self.combined(proc).lower(),
-                      f"missing {needle!r} in output:\n{self.combined(proc)}")
+        self.assertIn(
+            needle.lower(),
+            self.combined(proc).lower(),
+            f"missing {needle!r} in output:\n{self.combined(proc)}",
+        )
 
     def assertHasStdout(self, proc: subprocess.CompletedProcess, needle: str):
         """Result contract: user-facing results live on stdout, not stderr."""
-        self.assertIn(needle.lower(), (proc.stdout or "").lower(),
-                      f"missing {needle!r} on stdout:\nstdout={proc.stdout!r}\n"
-                      f"stderr={proc.stderr!r}")
+        self.assertIn(
+            needle.lower(),
+            (proc.stdout or "").lower(),
+            f"missing {needle!r} on stdout:\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}",
+        )
 
     def assertNoErr(self, proc: subprocess.CompletedProcess):
         out = self.combined(proc)
-        self.assertNotRegex(out, r"(?i)error",
-                            f"unexpected error in output:\n{out}")
+        self.assertNotRegex(out, r"(?i)error", f"unexpected error in output:\n{out}")
 
     def assertIsErr(self, proc: subprocess.CompletedProcess):
         out = self.combined(proc)
-        self.assertRegex(out, r"(?i)error",
-                         f"expected an error in output:\n{out}")
+        self.assertRegex(out, r"(?i)error", f"expected an error in output:\n{out}")
 
     def assertOk(self, proc: subprocess.CompletedProcess):
-        self.assertEqual(proc.returncode, 0,
-                         f"nonzero exit {proc.returncode}:\n{self.combined(proc)}")
+        self.assertEqual(
+            proc.returncode, 0, f"nonzero exit {proc.returncode}:\n{self.combined(proc)}"
+        )

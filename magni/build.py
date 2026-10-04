@@ -26,23 +26,45 @@ def cmd_build(args: argparse.Namespace) -> None:
     elif args.exec_fuzz:
         build_exec()
     elif args.release:
-        run([config.ODIN, "build", str(config.SRC_DIR),
-             f"-out:{config.TARGET_RELEASE}/magni_release",
-             *config.COLLECTIONS, *config.RELEASE_FLAGS])
+        run(
+            [
+                config.ODIN,
+                "build",
+                str(config.SRC_DIR),
+                f"-out:{config.TARGET_RELEASE}/magni_release",
+                *config.COLLECTIONS,
+                *config.RELEASE_FLAGS,
+            ]
+        )
         log(f"Built {config.TARGET_RELEASE}/magni_release (release)")
     elif args.check_only:
-        run([config.ODIN, "check", str(config.SRC_DIR), *config.COLLECTIONS,
-             "-warnings-as-errors"])
+        run([config.ODIN, "check", str(config.SRC_DIR), *config.COLLECTIONS, "-warnings-as-errors"])
     else:
-        run([config.ODIN, "build", str(config.SRC_DIR),
-             f"-out:{config.TARGET_DEBUG}/magni",
-             *config.COLLECTIONS, *config.DEBUG_FLAGS])
+        run(
+            [
+                config.ODIN,
+                "build",
+                str(config.SRC_DIR),
+                f"-out:{config.TARGET_DEBUG}/magni",
+                *config.COLLECTIONS,
+                *config.DEBUG_FLAGS,
+            ]
+        )
         log(f"Built {config.TARGET_DEBUG}/magni (debug)")
 
 
 def build_asan() -> None:
-    run([config.ODIN, "build", "fuzz", *config.COLLECTIONS, "-o:none",
-         "-sanitize:address", f"-out:{config.FUZZ_TARGET}"])
+    run(
+        [
+            config.ODIN,
+            "build",
+            "fuzz",
+            *config.COLLECTIONS,
+            "-o:none",
+            "-sanitize:address",
+            f"-out:{config.FUZZ_TARGET}",
+        ]
+    )
     log(f"Built {config.FUZZ_TARGET} (AddressSanitizer)")
 
 
@@ -53,10 +75,11 @@ COV_TARGETS = {
     # load on this toolchain (undefined llvm::DebugLoc::get). NATIVE uses
     # clang's own SanitizerCoverage, which always matches the compiler.
     "cov": (config.FUZZ_TARGET_COV, {"AFL_LLVM_INSTRUMENT": "NATIVE"}),
-    "cmplog": (config.FUZZ_TARGET_CMPLOG, {"AFL_LLVM_INSTRUMENT": "NATIVE",
-                                           "AFL_LLVM_CMPLOG": "1"}),
-    "laf": (config.FUZZ_TARGET_LAF, {"AFL_LLVM_INSTRUMENT": "NATIVE",
-                                     "AFL_LLVM_LAF_ALL": "1"}),
+    "cmplog": (
+        config.FUZZ_TARGET_CMPLOG,
+        {"AFL_LLVM_INSTRUMENT": "NATIVE", "AFL_LLVM_CMPLOG": "1"},
+    ),
+    "laf": (config.FUZZ_TARGET_LAF, {"AFL_LLVM_INSTRUMENT": "NATIVE", "AFL_LLVM_LAF_ALL": "1"}),
 }
 
 
@@ -70,8 +93,17 @@ def llvm_ir_sources(harness: str) -> list[str]:
     if config.TARGET_FUZZ.exists():
         shutil.rmtree(config.TARGET_FUZZ)
     config.TARGET_FUZZ.mkdir(parents=True, exist_ok=True)
-    run([config.ODIN, "build", harness, "-build-mode:llvm-ir",
-         *config.COLLECTIONS, "-o:speed", f"-out:{config.TARGET_FUZZ}"])
+    run(
+        [
+            config.ODIN,
+            "build",
+            harness,
+            "-build-mode:llvm-ir",
+            *config.COLLECTIONS,
+            "-o:speed",
+            f"-out:{config.TARGET_FUZZ}",
+        ]
+    )
     single = config.TARGET_FUZZ / ".ll"
     ll_files = [single] if single.is_file() else sorted(config.TARGET_FUZZ.glob("*.ll"))
     if not ll_files:
@@ -102,9 +134,10 @@ def build_exec() -> None:
     instrumentation, same rationale as COV_TARGETS.
     """
     ll_files = llvm_ir_sources("fuzz_exec")
-    run(["afl-clang-fast", "-fsanitize=address",
-         *ll_files, "-o", str(config.FUZZ_EXEC_TARGET)],
-        env={"AFL_LLVM_INSTRUMENT": "NATIVE"})
+    run(
+        ["afl-clang-fast", "-fsanitize=address", *ll_files, "-o", str(config.FUZZ_EXEC_TARGET)],
+        env={"AFL_LLVM_INSTRUMENT": "NATIVE"},
+    )
     log(f"Built {config.FUZZ_EXEC_TARGET} (AFL++ coverage + ASan)")
 
 
@@ -121,6 +154,7 @@ def apply_rebuild_flag(args) -> None:
     global FORCE_REBUILD
     if getattr(args, "rebuild", False):
         FORCE_REBUILD = True
+
 
 # Harness source roots whose mtime invalidates a linked target.
 # (Odin core itself is toolchain-versioned; fuzz/toolchain-version.txt pins it.)

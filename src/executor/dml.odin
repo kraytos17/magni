@@ -1,6 +1,8 @@
 package executor
 
 import "core:log"
+import "core:slice"
+import "core:strings"
 import "core:sync"
 import "src:btree"
 import "src:cell"
@@ -137,6 +139,11 @@ exec_create_index :: proc(
 	}
 
 	defer btree.cursor_destroy(&cursor)
+	// Bulk collect: every TEXT value (empty included; NULLs and non-TEXT
+	// skipped by the type assertion, exactly as the per-row path). Texts
+	// are cloned: cells die per iteration but the build consumes them after
+	// the scan. Corrupt rows skip-and-continue, same as before.
+	pairs := make([dynamic]Text_Bulk_Pair, 0, 64, context.temp_allocator)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
@@ -145,18 +152,45 @@ exec_create_index :: proc(
 			continue
 		}
 		if s, is_text := c.values[col_idx].(string); is_text {
-			idx_tree := btree.init(t.pager, index_root)
-			new_root, ins_err := btree.text_insert_cow(&idx_tree, transmute([]u8)s, c.rowid)
-			if ins_err != .None {
-				log.errorf("Error: Failed to index row %d", c.rowid)
+			owned, c_err := strings.clone(s, context.temp_allocator)
+			if c_err != .None {
 				cell.destroy(&c, context.temp_allocator)
-				return false, t.root, {}
+				btree.cursor_advance(&cursor)
+				continue
 			}
-			index_root = new_root
+			append(&pairs, Text_Bulk_Pair{text = owned, rid = c.rowid})
 		}
 
 		cell.destroy(&c, context.temp_allocator)
 		btree.cursor_advance(&cursor)
+	}
+	// Sort once (codec order), build once. Zero pairs keeps the
+	// pre-allocated empty leaf root, exactly as the per-row path which
+	// inserts nothing.
+	if len(pairs) > 0 {
+		slice.sort_by(pairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
+			if c := strings.compare(a.text, b.text); c != 0 {
+				return c < 0
+			}
+			return a.rid < b.rid
+		})
+
+		texts := make([][]u8, len(pairs), context.temp_allocator)
+		rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
+		for p, i in pairs {
+			texts[i] = transmute([]u8)p.text
+			rids[i] = p.rid
+		}
+
+		idx_tree := btree.init(t.pager, index_root)
+		new_root, build_err := btree.build_sorted_text_index(&idx_tree, texts, rids)
+		if build_err != .None {
+			log.errorf("Error: Failed to bulk index '%s' on %s", stmt.index_name, stmt.table_name)
+			return false, t.root, {}
+		}
+		if new_root != 0 {
+			index_root = new_root
+		}
 	}
 
 	new_schema_root, ok := schema.update_index_def_cow(
@@ -225,7 +259,11 @@ exec_drop_index :: proc(
 			return false, t.root, {}
 		}
 		if len(owners) > 1 {
-			log.errorf("Error: Ambiguous index name '%s'; use DROP INDEX %s ON <table>", stmt.index_name, stmt.index_name)
+			log.errorf(
+				"Error: Ambiguous index name '%s'; use DROP INDEX %s ON <table>",
+				stmt.index_name,
+				stmt.index_name,
+			)
 			return false, t.root, {}
 		}
 		table_name = owners[0]
@@ -297,6 +335,7 @@ prepare_insert_row :: proc(
 	t: ^btree.Tree,
 	root_page: u32,
 	checks: []Resolved_Check,
+	next_id: ^types.Row_ID = nil,
 ) -> (
 	Insert_Row_Info,
 	bool,
@@ -313,7 +352,7 @@ prepare_insert_row :: proc(
 	}
 	return Insert_Row_Info {
 			values = values,
-			row_id = assign_insert_rowid(table, values, t, root_page),
+			row_id = assign_insert_rowid(table, values, t, root_page, next_id),
 			table_tree = btree.init(t.pager, root_page),
 		},
 		true
@@ -376,15 +415,38 @@ reorder_insert_values :: proc(
 	return values, true
 }
 
-// assign_insert_rowid picks the row's Row_ID: an explicit integer PK value, else
-// the next tree rowid (which fills an implicit/missing PK slot in place).
+// assign_insert_rowid resolves a row's rowid: explicit integer PKs win;
+// otherwise max+1. next_id threads a running maximum across a multi-row
+// batch on a static tree, reproducing the sequential assignment the row
+// loop gets from re-reading the advancing tree.
 @(private = "file")
 assign_insert_rowid :: proc(
 	table: types.Table,
 	values: []types.Value,
 	t: ^btree.Tree,
 	root_page: u32,
+	next_id: ^types.Row_ID = nil,
 ) -> types.Row_ID {
+	if next_id != nil {
+		pk_idx, has_pk := schema.get_pk_column(table.columns)
+		if has_pk {
+			if val, is_int := values[pk_idx].(i64); is_int {
+				id := types.Row_ID(val)
+				if id > next_id^ {
+					next_id^ = id
+				}
+				return id
+			}
+		}
+
+		next_id^ += 1
+		id := next_id^
+		if has_pk {
+			values[pk_idx] = types.value_int(i64(id))
+		}
+		return id
+	}
+
 	table_tree := btree.init(t.pager, root_page)
 	pk_idx, has_pk := schema.get_pk_column(table.columns)
 	if has_pk {
@@ -400,6 +462,314 @@ assign_insert_rowid :: proc(
 
 	id, err := btree.tree_next_rowid(&table_tree)
 	return id if err == .None else 1
+}
+
+// Bulk_Outcome tells the INSERT gate what the bulk attempt decided:
+// Committed/Failed are terminal (same shape as the row loop's returns);
+// Fallback_Loop reruns the existing row loop (overlap or depth mismatch —
+// the tree is untouched, so re-validation assigns identically).
+Bulk_Outcome :: enum {
+	Committed,
+	Failed,
+	Fallback_Loop,
+}
+
+// prepare_sorted_batch validates every VALUES row in statement order with a
+// running-max rowid hint (reproducing the row loop's sequential assignment
+// on a static tree), then sorts by rowid and rejects intra-batch
+// duplicates. Failures return the original root, exactly like the row loop's
+// first-failure abort.
+@(private)
+prepare_sorted_batch :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	stmt: parser.Insert_Stmt,
+	checks: []Resolved_Check,
+) -> (
+	infos: []Insert_Row_Info,
+	ok: bool,
+) {
+	probe := btree.init(t.pager, table.root_page)
+	base, base_err := btree.tree_next_rowid(&probe)
+	next_id := types.Row_ID(0)
+	if base_err == .None {
+		next_id = base - 1
+	}
+
+	infos = make([]Insert_Row_Info, len(stmt.values), context.temp_allocator)
+	for row_values, i in stmt.values {
+		info, iok := prepare_insert_row(
+			table,
+			stmt.columns,
+			row_values,
+			t,
+			table.root_page,
+			checks,
+			&next_id,
+		)
+		if !iok {
+			return nil, false
+		}
+
+		infos[i] = info
+	}
+
+	slice.sort_by(infos[:], proc(a, b: Insert_Row_Info) -> bool { return a.row_id < b.row_id })
+	for i in 1 ..< len(infos) {
+		if infos[i].row_id == infos[i - 1].row_id {
+			log.errorf("Error inserting row: %v", btree.Error.Duplicate_Rowid)
+			return nil, false
+		}
+	}
+	return infos, true
+}
+
+// Text_Bulk_Pair is one indexable (text, rowid) for bulk text builds.
+Text_Bulk_Pair :: struct {
+	text: string,
+	rid : types.Row_ID,
+}
+
+// collect_text_pairs projects one index's text values out of sorted infos,
+// skipping exactly what the per-row fan-out skips (same index_col_text
+// predicate, so NULLs and non-TEXT values never reach the index either way).
+@(private = "file")
+collect_text_pairs :: proc(
+	table: types.Table,
+	column: string,
+	infos: []Insert_Row_Info,
+) -> [dynamic]Text_Bulk_Pair {
+	pairs := make([dynamic]Text_Bulk_Pair, 0, len(infos), context.temp_allocator)
+	for info in infos {
+		if text, ok := index_col_text(table, column, info.values); ok {
+			append(&pairs, Text_Bulk_Pair{text = text, rid = info.row_id})
+		}
+	}
+
+	slice.sort_by(pairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
+		if c := strings.compare(a.text, b.text); c != 0 {
+			return c < 0
+		}
+		return a.rid < b.rid
+	})
+	return pairs
+}
+
+// fanout_bulk_text builds one fresh text index bottom-up from sorted pairs
+// (codec order: text bytes, then rowid). The caller gates on emptiness;
+// zero pairs keep the existing root (nothing to index, same as the loop
+// inserting nothing).
+@(private = "file")
+fanout_bulk_text :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	def: types.Index_Def,
+	index_root: u32,
+	pairs: [dynamic]Text_Bulk_Pair,
+) -> (
+	u32,
+	bool,
+) {
+	if len(pairs) == 0 {
+		return index_root, true
+	}
+
+	texts := make([][]u8, len(pairs), context.temp_allocator)
+	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
+	for p, i in pairs {
+		texts[i] = transmute([]u8)p.text
+		rids[i] = p.rid
+	}
+
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, build_err := btree.build_sorted_text_index(&idx_tree, texts, rids)
+	if build_err != .None {
+		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		return index_root, false
+	}
+	if new_root == 0 {
+		return index_root, true
+	}
+	return new_root, true
+}
+
+// commit_bulk_inserts runs the shared bulk tail: text fan-out over sorted
+// infos (bottom-up build for fresh indexes, per-row loop otherwise), then
+// the same root/index commits as the row loop.
+@(private)
+commit_bulk_inserts :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	stmt: parser.Insert_Stmt,
+	infos: []Insert_Row_Info,
+	idx_roots: [dynamic]u32,
+	new_data_root: u32,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
+	ok := true
+	idx_tree: btree.Tree
+	for def, i in table.indexes {
+		if def.root == 0 {
+			continue
+		}
+
+		idx_tree = btree.init(t.pager, def.root)
+		if btree.text_index_is_empty(&idx_tree, def.root) {
+			pairs := collect_text_pairs(table, def.column, infos)
+			idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
+			if !ok {
+				return false, t.root, {}
+			}
+			continue
+		}
+		for info in infos {
+			idx_roots[i], ok = fanout_insert_row(
+				t,
+				table,
+				def.column,
+				idx_roots[i],
+				info.row_id,
+				info.values,
+			)
+			if !ok {
+				return false, t.root, {}
+			}
+		}
+	}
+	for info in infos {
+		log.infof("Inserted row %d", info.row_id)
+	}
+
+	new_schema_root, info, cok := commit_cow_root(
+		t,
+		stmt.table_name,
+		new_data_root,
+		pending,
+		cache,
+	)
+	if !cok {
+		log.error("Error: Failed to update schema root page")
+		return false, t.root, {}
+	}
+
+	new_schema_root, ok = commit_all_index_roots(
+		t,
+		stmt.table_name,
+		table,
+		idx_roots[:],
+		new_schema_root,
+		pending,
+		cache,
+	)
+	if !ok {
+		log.error("Error: Failed to update index root page")
+		return false, t.root, {}
+	}
+	return true, new_schema_root, info
+}
+
+// exec_insert_bulk fast-paths a multi-row VALUES statement: empty tables
+// build bottom-up (phase 1); strictly-above-max batches graft at the right
+// edge when both sides share a depth (phase 2); anything else falls back to
+// the row loop. Fresh pages only in both build paths, so the COW/rollback
+// contract holds unchanged.
+@(private)
+exec_insert_bulk :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	stmt: parser.Insert_Stmt,
+	checks: []Resolved_Check,
+	old_count: int,
+	idx_roots: [dynamic]u32,
+	pending: ^Pending_Roots = nil,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	ok: bool,
+	root: u32,
+	mutated: Mutated_Table_Info,
+	outcome: Bulk_Outcome,
+) {
+	infos, iok := prepare_sorted_batch(t, table, stmt, checks)
+	if !iok {
+		return false, t.root, {}, .Failed
+	}
+
+	rowids := make([]types.Row_ID, len(infos), context.temp_allocator)
+	valuess := make([][]types.Value, len(infos), context.temp_allocator)
+	for info, i in infos {
+		rowids[i] = info.row_id
+		valuess[i] = info.values
+	}
+
+	table_tree := btree.init(t.pager, table.root_page)
+	if old_count == 0 {
+		new_data_root, build_err := btree.build_sorted_tree(&table_tree, rowids, valuess)
+		if build_err != .None {
+			log.errorf("Error inserting row: %v", build_err)
+			return false, t.root, {}, .Failed
+		}
+
+		cok, croot, cmut := commit_bulk_inserts(
+			t,
+			table,
+			stmt,
+			infos,
+			idx_roots,
+			new_data_root,
+			pending,
+			cache,
+		)
+		return cok, croot, cmut, .Committed if cok else .Failed
+	}
+
+	probe := btree.init(t.pager, table.root_page)
+	next, n_err := btree.tree_next_rowid(&probe)
+	if n_err != .None || infos[0].row_id < next {
+		return false, t.root, {}, .Fallback_Loop
+	}
+
+	batch_tree := btree.init(t.pager, table.root_page)
+	batch_root, build_err := btree.build_sorted_tree(&batch_tree, rowids, valuess)
+	if build_err != .None {
+		log.errorf("Error inserting row: %v", build_err)
+		return false, t.root, {}, .Failed
+	}
+
+	old_depth, d_err := btree.tree_depth(&table_tree, table.root_page)
+	batch_depth, bderr := btree.tree_depth(&batch_tree, batch_root)
+	if d_err != .None || bderr != .None || old_depth != batch_depth {
+		return false, t.root, {}, .Fallback_Loop
+	}
+
+	new_data_root, g_err := btree.graft_right_chain(
+		&table_tree,
+		table.root_page,
+		old_count,
+		batch_root,
+		rowids[0],
+		len(infos),
+	)
+	if g_err != .None {
+		log.errorf("Error inserting row: %v", g_err)
+		return false, t.root, {}, .Failed
+	}
+
+	cok, croot, cmut := commit_bulk_inserts(
+		t,
+		table,
+		stmt,
+		infos,
+		idx_roots,
+		new_data_root,
+		pending,
+		cache,
+	)
+	return cok, croot, cmut, .Committed if cok else .Failed
 }
 
 @(private)
@@ -425,6 +795,26 @@ exec_insert_impl :: proc(
 
 	data_root := table.root_page
 	idx_roots := fanout_index_state(table, context.temp_allocator)
+	// Bulk fast paths (empty build, right-edge graft): the row loop below
+	// stays the fallback for overlaps, depth mismatches, and single rows.
+	if len(stmt.values) > 1 {
+		probe := btree.init(t.pager, data_root)
+		if n, n_err := btree.tree_count_rows(&probe); n_err == .None {
+			bok, broot, bmut, bout := exec_insert_bulk(
+				t,
+				table,
+				stmt,
+				checks,
+				n,
+				idx_roots,
+				pending,
+				cache,
+			)
+			if bout != .Fallback_Loop {
+				return bok, broot, bmut
+			}
+		}
+	}
 	for row_values in stmt.values {
 		info, ok := prepare_insert_row(table, stmt.columns, row_values, t, data_root, checks)
 		if !ok {
@@ -720,10 +1110,7 @@ commit_index_cow_root :: proc(
 // parallel to table.indexes). Multi-row statements thread these across
 // rows and commit once — same shape as the single-root threading before.
 @(private = "file")
-fanout_index_state :: proc(
-	table: types.Table,
-	allocator := context.allocator,
-) -> [dynamic]u32 {
+fanout_index_state :: proc(table: types.Table, allocator := context.allocator) -> [dynamic]u32 {
 	roots := make([dynamic]u32, 0, len(table.indexes), allocator)
 	for def in table.indexes {
 		append(&roots, def.root)

@@ -27,8 +27,9 @@ class TestCliSmoke(MagniCLITestCase):
     def test_default_database_path_creates_test_db(self):
         p = self.run_raw(["--eval", "CREATE TABLE t (x INT);"])
         self.assertOk(p)
-        self.assertTrue((self.tmp / "test.db").is_file(),
-                        "default database path must create test.db in cwd")
+        self.assertTrue(
+            (self.tmp / "test.db").is_file(), "default database path must create test.db in cwd"
+        )
 
     def test_positional_database_path_works(self):
         d = self.db()
@@ -39,16 +40,16 @@ class TestCliSmoke(MagniCLITestCase):
     def test_file_executes_sql(self):
         d = self.db()
         p = self.run_file(
-            "CREATE TABLE t (x INT);\nINSERT INTO t VALUES (42);\n"
-            "SELECT * FROM t;\n", d)
+            "CREATE TABLE t (x INT);\nINSERT INTO t VALUES (42);\nSELECT * FROM t;\n", d
+        )
         self.assertOk(p)
         self.assertHas(p, "42")
 
     def test_pipe_mode_reads_sql_from_stdin(self):
         d = self.db()
         p = self.run_stdin(
-            "CREATE TABLE t (x INT);\nINSERT INTO t VALUES (99);\n"
-            "SELECT * FROM t;\n", d)
+            "CREATE TABLE t (x INT);\nINSERT INTO t VALUES (99);\nSELECT * FROM t;\n", d
+        )
         self.assertOk(p)
         self.assertHas(p, "99")
 

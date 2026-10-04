@@ -124,6 +124,321 @@ test_exec_insert_select :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_exec_insert_bulk_multirow :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_multi")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("players"))
+	stmt, parse_ok, _ := parser.parse(
+		"INSERT INTO players VALUES (3, 'C', 3.0), (1, 'A', 1.0), (2, 'B', 2.0);",
+		context.temp_allocator,
+	)
+
+	testing.expect(t, parse_ok, "multi-row INSERT should parse")
+	success, _, _ := executor.execute(&tree, stmt)
+	testing.expect(t, success, "bulk INSERT should succeed")
+
+	table, _ := schema.get_table(&tree, "players", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 3)
+
+	ids := []types.Row_ID{1, 2, 3}
+	names := []string{"A", "B", "C"}
+	for i in 0 ..< len(ids) {
+		cell, err := btree.tree_find(&table_tree, ids[i], context.temp_allocator)
+		testing.expect(t, err == .None, "bulk row should be findable")
+		if err == .None {
+			testing.expect_value(t, cell.values[1].(string), names[i])
+		}
+	}
+}
+
+@(test)
+test_exec_insert_bulk_auto_ids :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_auto")
+	defer teardown_executor_env(tree, file)
+
+	// No-PK table: every row takes the auto path (max+1). The running-max
+	// hint must reproduce the row loop's 1, 2, 3 — not 1, 1, 1.
+	stmt_c, _, _ := parser.parse("CREATE TABLE t (name TEXT);", context.temp_allocator)
+	executor.execute(&tree, stmt_c)
+	stmt, parse_ok, _ := parser.parse(
+		"INSERT INTO t VALUES ('A'), ('B'), ('C');",
+		context.temp_allocator,
+	)
+
+	testing.expect(t, parse_ok, "auto-id multi-row INSERT should parse")
+	success, _, _ := executor.execute(&tree, stmt)
+	testing.expect(t, success, "bulk auto-id INSERT should succeed")
+
+	table, _ := schema.get_table(&tree, "t", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 3)
+
+	ids := []types.Row_ID{1, 2, 3}
+	names := []string{"A", "B", "C"}
+	for i in 0 ..< len(ids) {
+		cell, err := btree.tree_find(&table_tree, ids[i], context.temp_allocator)
+		testing.expect(t, err == .None, "auto-assigned row should be findable")
+		if err == .None {
+			testing.expect_value(t, cell.values[0].(string), names[i])
+		}
+	}
+}
+
+@(test)
+test_exec_insert_bulk_auto_explicit_mix :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_mix")
+	defer teardown_executor_env(tree, file)
+
+	// Nullable PK: NULL takes auto, integers are explicit. Running max
+	// reproduces the loop: auto → 1, explicit 5, auto → 6.
+	stmt_c, _, _ := parser.parse(
+		"CREATE TABLE m (id INT PRIMARY KEY, name TEXT);",
+		context.temp_allocator,
+	)
+	executor.execute(&tree, stmt_c)
+	stmt, parse_ok, _ := parser.parse(
+		"INSERT INTO m VALUES (NULL, 'A'), (5, 'E'), (NULL, 'F');",
+		context.temp_allocator,
+	)
+	testing.expect(t, parse_ok, "mixed multi-row INSERT should parse")
+	success, _, _ := executor.execute(&tree, stmt)
+	testing.expect(t, success, "bulk mixed INSERT should succeed")
+
+	table, _ := schema.get_table(&tree, "m", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	ids := []types.Row_ID{1, 5, 6}
+	names := []string{"A", "E", "F"}
+	for i in 0 ..< len(ids) {
+		cell, err := btree.tree_find(&table_tree, ids[i], context.temp_allocator)
+		testing.expect(t, err == .None, "mixed row should be findable")
+		if err == .None {
+			testing.expect_value(t, cell.values[1].(string), names[i])
+		}
+	}
+}
+
+@(test)
+test_exec_insert_bulk_dup_fails_atomic :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_dup")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("players"))
+	stmt, parse_ok, _ := parser.parse(
+		"INSERT INTO players VALUES (1, 'A', 1.0), (1, 'DUP', 9.0);",
+		context.temp_allocator,
+	)
+	testing.expect(t, parse_ok, "dup multi-row INSERT should parse")
+
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "duplicate rowid in batch should fail")
+
+	table, _ := schema.get_table(&tree, "players", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 0)
+}
+
+@(test)
+test_exec_insert_bulk_check_fail_atomic :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_check")
+	defer teardown_executor_env(tree, file)
+
+	stmt_c, _, _ := parser.parse(
+		"CREATE TABLE t (age INT CHECK (age > 0));",
+		context.temp_allocator,
+	)
+	executor.execute(&tree, stmt_c)
+	stmt, parse_ok, _ := parser.parse(
+		"INSERT INTO t VALUES (1), (2), (-3);",
+		context.temp_allocator,
+	)
+	testing.expect(t, parse_ok, "multi-row CHECK INSERT should parse")
+
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "CHECK violation mid-batch should fail")
+
+	table, _ := schema.get_table(&tree, "t", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 0)
+}
+
+@(test)
+test_exec_insert_bulk_matches_loop :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree_bulk, file_bulk := setup_executor_env(t, "bulk_diff_b")
+	defer teardown_executor_env(tree_bulk, file_bulk)
+	tree_loop, file_loop := setup_executor_env(t, "bulk_diff_l")
+	defer teardown_executor_env(tree_loop, file_loop)
+
+	executor.execute(&tree_bulk, make_create_stmt("players"))
+	executor.execute(&tree_loop, make_create_stmt("players"))
+
+	stmt, parse_ok, _ := parser.parse(
+		"INSERT INTO players VALUES (4, 'D', 4.0), (2, 'B', 2.0), (5, 'E', 5.0), (1, 'A', 1.0), (3, 'C', 3.0);",
+		context.temp_allocator,
+	)
+	testing.expect(t, parse_ok, "bulk statement should parse")
+	success, _, _ := executor.execute(&tree_bulk, stmt)
+	testing.expect(t, success, "bulk path should succeed")
+	loop_ids := []i64{4, 2, 5, 1, 3}
+	loop_names := []string{"D", "B", "E", "A", "C"}
+	for i in 0 ..< len(loop_ids) {
+		ok, _, _ := executor.execute(
+			&tree_loop,
+			make_insert_stmt("players", loop_ids[i], loop_names[i], f64(loop_ids[i])),
+		)
+		testing.expect(t, ok, "loop path should succeed")
+	}
+
+	table_bulk, _ := schema.get_table(&tree_bulk, "players", context.temp_allocator)
+	tree_b := btree.init(tree_bulk.pager, table_bulk.root_page)
+	count_bulk, _ := btree.tree_count_rows(&tree_b)
+	table_loop, _ := schema.get_table(&tree_loop, "players", context.temp_allocator)
+	tree_l := btree.init(tree_loop.pager, table_loop.root_page)
+	count_loop, _ := btree.tree_count_rows(&tree_l)
+	testing.expect_value(t, count_bulk, 5)
+	testing.expect_value(t, count_loop, 5)
+
+	// Same rows, same values through both paths.
+	for i in 0 ..< len(loop_ids) {
+		rid := types.Row_ID(loop_ids[i])
+		cb, eb := btree.tree_find(&tree_b, rid, context.temp_allocator)
+		cl, el := btree.tree_find(&tree_l, rid, context.temp_allocator)
+		testing.expect(t, eb == .None && el == .None, "row present in both")
+		if eb == .None && el == .None {
+			testing.expect_value(t, cb.values[1].(string), loop_names[i])
+			testing.expect_value(t, cl.values[1].(string), loop_names[i])
+		}
+	}
+}
+
+@(test)
+test_exec_insert_bulk_multileaf_boundaries :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_bounds")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("players"))
+
+	// 2000 rows in one statement: multi-leaf bulk with interior levels.
+	// Every rowid is point-looked-up, pinning exact leaf-boundary keys
+	// (interior separators store right-child minima — a left maximum here
+	// would misroute boundary lookups).
+	sb: strings.Builder
+	strings.builder_init(&sb, context.temp_allocator)
+	strings.write_string(&sb, "INSERT INTO players VALUES ")
+	for i in 1 ..= 2000 {
+		if i > 1 {
+			strings.write_string(&sb, ",")
+		}
+		fmt.sbprintf(&sb, "(%d,'n%d',%d.0)", i, i, i)
+	}
+	strings.write_string(&sb, ";")
+	stmt, parse_ok, _ := parser.parse(strings.to_string(sb), context.temp_allocator)
+	testing.expect(t, parse_ok, "large multi-row INSERT should parse")
+	success, _, _ := executor.execute(&tree, stmt)
+	testing.expect(t, success, "multi-leaf bulk should succeed")
+
+	table, _ := schema.get_table(&tree, "players", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 2000)
+
+	for id in 1 ..= 2000 {
+		_, err := btree.tree_find(&table_tree, types.Row_ID(id), context.temp_allocator)
+		if err != .None {
+			testing.expect(t, false, fmt.tprintf("row %d missing after bulk", id))
+			break
+		}
+	}
+}
+
+@(test)
+test_exec_insert_append_graft :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_append")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("players"))
+	stmt1, _, _ := parser.parse(
+		"INSERT INTO players VALUES (2, 'B', 2.0), (1, 'A', 1.0);",
+		context.temp_allocator,
+	)
+	ok1, _, _ := executor.execute(&tree, stmt1)
+	testing.expect(t, ok1, "seed bulk should succeed")
+
+	// Strictly-above-max batch on a non-empty table: graft when depths
+	// match, row loop otherwise — data identical either way.
+	stmt2, _, _ := parser.parse(
+		"INSERT INTO players VALUES (4, 'D', 4.0), (3, 'C', 3.0);",
+		context.temp_allocator,
+	)
+	ok2, _, _ := executor.execute(&tree, stmt2)
+	testing.expect(t, ok2, "append bulk should succeed")
+
+	table, _ := schema.get_table(&tree, "players", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 4)
+
+	names := []string{"A", "B", "C", "D"}
+	for i in 0 ..< 4 {
+		cell, err := btree.tree_find(&table_tree, types.Row_ID(i + 1), context.temp_allocator)
+		testing.expect(t, err == .None, "appended row should be findable")
+		if err == .None {
+			testing.expect_value(t, cell.values[1].(string), names[i])
+		}
+	}
+}
+
+@(test)
+test_exec_insert_append_overlap_falls_back :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	tree, file := setup_executor_env(t, "bulk_overlap")
+	defer teardown_executor_env(tree, file)
+
+	executor.execute(&tree, make_create_stmt("players"))
+	stmt1, _, _ := parser.parse(
+		"INSERT INTO players VALUES (1, 'A', 1.0), (2, 'B', 2.0);",
+		context.temp_allocator,
+	)
+	ok1, _, _ := executor.execute(&tree, stmt1)
+	testing.expect(t, ok1, "seed bulk should succeed")
+
+	// Straddling batch (one overlapping key): the row loop owns this shape.
+	stmt2, _, _ := parser.parse(
+		"INSERT INTO players VALUES (2, 'B2', 2.5), (3, 'C', 3.0);",
+		context.temp_allocator,
+	)
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt2)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "overlapping rowid should fail")
+
+	table, _ := schema.get_table(&tree, "players", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 2)
+}
+
+@(test)
 test_exec_insert_validation_failure :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "insert_fail")

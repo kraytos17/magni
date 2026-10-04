@@ -276,13 +276,12 @@ wal_append_frame :: proc(
 
 	file_size := ws.write_offset
 	hdr_bytes := transmute([types.WAL_FRAME_HEADER_SIZE]u8)fh
-	_, hdr_err := os.write_at(ws.file, hdr_bytes[:], file_size)
-	if hdr_err != nil {
-		return .IO_Error
-	}
+	frame: [types.WAL_FRAME_SIZE]u8
 
-	_, data_err := os.write_at(ws.file, page_data, file_size + types.WAL_FRAME_HEADER_SIZE)
-	if data_err != nil {
+	copy(frame[:], hdr_bytes[:])
+	copy(frame[types.WAL_FRAME_HEADER_SIZE:], page_data)
+	_, w_err := os.write_at(ws.file, frame[:], file_size)
+	if w_err != nil {
 		return .IO_Error
 	}
 

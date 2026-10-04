@@ -13,20 +13,21 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def die(msg: str, code: int = 1) -> "sys.NoReturn":
+def die(msg: str, code: int = 1) -> sys.NoReturn:
     """Log an error and exit. Replaces the log(...); sys.exit(1) pattern."""
     log(msg)
     sys.exit(code)
 
 
-def run(cmd: list[str], check: bool = True, env: dict | None = None,
-        cwd: Path | None = None) -> subprocess.CompletedProcess:
+def run(
+    cmd: list[str], check: bool = True, env: dict | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess:
     """Run a command with logging. Raises on failure if check=True."""
     log(f"  $ {' '.join(str(c) for c in cmd)}")
     e = os.environ.copy()
     if env:
         e.update(env)
-    result = subprocess.run(cmd, cwd=str(cwd or config.ROOT), env=e)
+    result = subprocess.run(cmd, cwd=str(cwd or config.ROOT), env=e)  # noqa: PLW1510 - check=False callers inspect returncode themselves
     if check and result.returncode != 0:
         sys.exit(result.returncode)
     return result

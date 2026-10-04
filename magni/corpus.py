@@ -50,25 +50,44 @@ def md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
-def parse_seeds() -> dict[str, bytes]:
-    """Load SEEDS from gen_corpus.py via exec. Returns {md5: (name, content)}."""
-    ns = {"__name__": "gen_corpus_parsing", "__file__": str(config.GEN_CORPUS)}
+def parse_seed_tables(script: Path, *tables: str) -> dict[str, tuple[str, bytes]]:
+    """Load seed tables from a generator script via exec. Returns {md5: (name, content)}.
+
+    Shared by the parser corpus (SEEDS) and the exec pool (EXEC_SEEDS +
+    EXEC_PROMOTED). The gen script calls sys.exit(main()) — ignored, like any
+    corrupt-script failure (falls back to an empty set; the on-disk scan in
+    load_existing still applies).
+    """
+    ns = {"__name__": "seed_parsing", "__file__": str(script)}
     try:
-        exec(compile(config.GEN_CORPUS.read_text(), str(config.GEN_CORPUS), "exec"), ns)
+        exec(compile(script.read_text(), str(script), "exec"), ns)  # noqa: S102 - gen script is first-party, exec is the loader by design
     except SystemExit:
-        pass  # gen_corpus.py calls sys.exit(main()) — ignore it
-    except Exception:
+        pass  # gen script calls sys.exit(main()) — ignore it
+    except Exception:  # noqa: BLE001, S110 - corrupt gen script falls back to empty seed set by design
         pass
     seeds = {}
-    for entry in ns.get("SEEDS", []):
-        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
-            continue
-        name, content = entry
-        if isinstance(content, str):
-            content = content.encode("utf-8")
-        if isinstance(content, bytes):
-            seeds[md5(content)] = (name, content)
+    for table in tables:
+        for entry in ns.get(table, []):
+            if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                continue
+            name, content = entry
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            if isinstance(content, bytes):
+                seeds[md5(content)] = (name, content)
     return seeds
+
+
+def parse_seeds() -> dict[str, tuple[str, bytes]]:
+    """Load SEEDS from gen_corpus.py via exec. Returns {md5: (name, content)}."""
+    return parse_seed_tables(config.GEN_CORPUS, "SEEDS")
+
+
+def purge_pycache(corpus_dir: Path) -> None:
+    """Remove a corpus dir's __pycache__ (regenerators leave it behind)."""
+    pycache = corpus_dir / "__pycache__"
+    if pycache.exists():
+        shutil.rmtree(pycache)
 
 
 def parse_afl_metadata(filename: str) -> str:
@@ -89,29 +108,29 @@ def corpus_generate(exec_scripts: bool = False) -> None:
     if exec_scripts:
         gen_exec = config.GEN_EXEC_CORPUS
         run([sys.executable, str(gen_exec)])
-        pycache = config.EXEC_CORPUS_DIR / "__pycache__"
-        if pycache.exists():
-            shutil.rmtree(pycache)
+        purge_pycache(config.EXEC_CORPUS_DIR)
         # NOTE: counts every non-.py file, including any future promoted file.
-        n = sum(1 for f in config.EXEC_CORPUS_DIR.iterdir()
-                if f.is_file() and f.suffix != ".py" and f.name != "__pycache__")
+        n = sum(
+            1
+            for f in config.EXEC_CORPUS_DIR.iterdir()
+            if f.is_file() and f.suffix != ".py" and f.name != "__pycache__"
+        )
         log(f"exec corpus: {n} seeds in {config.EXEC_CORPUS_DIR}/")
         return
     run([sys.executable, str(config.GEN_CORPUS)])
-    pycache = config.CORPUS_DIR / "__pycache__"
-    if pycache.exists():
-        shutil.rmtree(pycache)
+    purge_pycache(config.CORPUS_DIR)
     # NOTE: intentionally counts promoted_seeds.py as well (historical quirk).
-    n = sum(1 for f in config.CORPUS_DIR.iterdir()
-            if f.is_file() and f.name != "gen_corpus.py" and f.name != "__pycache__")
-    size = subprocess.run(["du", "-sh", str(config.CORPUS_DIR)],
-                          capture_output=True, text=True)
+    n = sum(
+        1
+        for f in config.CORPUS_DIR.iterdir()
+        if f.is_file() and f.name != "gen_corpus.py" and f.name != "__pycache__"
+    )
+    size = subprocess.run(["du", "-sh", str(config.CORPUS_DIR)], capture_output=True, text=True)  # noqa: PLW1510 - du failure yields "?" size, not fatal
     sz = size.stdout.split()[0] if size.stdout else "?"
     log(f"corpus: {n} seeds in {config.CORPUS_DIR}/ ({sz})")
 
 
-def gate_seeds(target: Path, seeds: list[Path], env: dict,
-               fail_label: str, ok_label: str) -> int:
+def gate_seeds(target: Path, seeds: list[Path], env: dict, fail_label: str, ok_label: str) -> int:
     """Run every seed through target under ASan; die on first failure."""
     n = 0
     for f in seeds:
@@ -127,14 +146,15 @@ def corpus_test(exec_scripts: bool = False) -> None:
     """ASan gate over every seed (parser corpus or exec scripts)."""
     if exec_scripts:
         ensure_exec_target()
-        seeds = sorted(f for f in config.EXEC_CORPUS_DIR.iterdir()
-                       if config.is_staged_seed(f))
-        gate_seeds(config.FUZZ_EXEC_TARGET, seeds,
-                   {"ASAN_OPTIONS": "abort_on_error=1:symbolize=0"},
-                   "exec seed", "exec")
+        seeds = sorted(f for f in config.EXEC_CORPUS_DIR.iterdir() if config.is_staged_seed(f))
+        gate_seeds(
+            config.FUZZ_EXEC_TARGET,
+            seeds,
+            {"ASAN_OPTIONS": "abort_on_error=1:symbolize=0"},
+            "exec seed",
+            "exec",
+        )
         return
     ensure_asan_target()
-    seeds = sorted(f for f in config.CORPUS_DIR.iterdir()
-                   if config.is_staged_seed(f))
-    gate_seeds(config.FUZZ_TARGET, seeds,
-               {"ASAN_OPTIONS": "detect_leaks=0"}, "seed", "fuzz")
+    seeds = sorted(f for f in config.CORPUS_DIR.iterdir() if config.is_staged_seed(f))
+    gate_seeds(config.FUZZ_TARGET, seeds, {"ASAN_OPTIONS": "detect_leaks=0"}, "seed", "fuzz")

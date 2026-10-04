@@ -21,7 +21,7 @@ ROLES ?=
 
 .PHONY: all build release run rebuild clean clean-all
 .PHONY: test test-verbose test-single test-py test-cli test-cli-full smoke quick ci
-.PHONY: check vet vet-all
+.PHONY: check vet vet-all lint
 .PHONY: perf bench census
 .PHONY: fuzz-build fuzz-test fuzz-exec-build fuzz-exec-test
 .PHONY: fuzz-corpus fuzz-exec-corpus fuzz-cov fuzz-run fuzz-campaign fuzz-status fuzz-stop
@@ -75,11 +75,15 @@ ci: vet-all test test-py fuzz-test fuzz-exec-test ## CI gate: vet-all + test + t
 check: ## parse + type check (no vet)
 	@python3 magni.py build --check-only
 
-vet: ## vet (fast, no LLVM): vet | vet VET_FLAGS=shadowing
-	@python3 magni.py vet $(VET_FLAGS)
+vet: ## fast vet (odin check, full flags); extra: vet --shadowing|--unused|--style|--cast|--semicolon via magni.py vet
+	@python3 magni.py vet
 
 vet-all: ## vet via build+test (LLVM, strict-style, shadowing)
 	@python3 magni.py vet --all
+
+lint: ## ruff check + format check on tooling (needs ruff)
+	@ruff check magni/ tests_magni/
+	@ruff format --check magni/ tests_magni/
 
 perf: ## run timing baseline (release flags)
 	$(ODIN) run tests/perf $(COLLECTIONS) $(RELEASE_FLAGS)

@@ -22,12 +22,21 @@ def run_showmap(input_dir: Path, map_file: Path) -> int | None:
     for attempt in (1, 2):
         if map_file.exists():
             map_file.unlink()
-        cmd = ["afl-showmap", "-C", "-i", str(input_dir), "-o", str(map_file),
-               "--", str(config.FUZZ_TARGET_COV), "@@"]
+        cmd = [
+            "afl-showmap",
+            "-C",
+            "-i",
+            str(input_dir),
+            "-o",
+            str(map_file),
+            "--",
+            str(config.FUZZ_TARGET_COV),
+            "@@",
+        ]
         e = {"AFL_MAP_SIZE": config.AFL_MAP_SIZE}
-        result = subprocess.run(cmd, cwd=str(config.ROOT),
-                                env={**os.environ, **e},
-                                capture_output=True, text=True)
+        result = subprocess.run(  # noqa: PLW1510 - returncode ignored by design, health judged by tuple count
+            cmd, cwd=str(config.ROOT), env={**os.environ, **e}, capture_output=True, text=True
+        )  # noqa: PLW1510 - returncode ignored by design, health judged by tuple count
         captured = None
         for line in result.stdout.splitlines() + result.stderr.splitlines():
             clean = re.sub(r"\x1b\[[0-9;]*m", "", line)
@@ -40,8 +49,10 @@ def run_showmap(input_dir: Path, map_file: Path) -> int | None:
         # the forkserver handshake degraded — retry, don't trust it.
         if captured is not None and captured >= config.SHOWMAP_HEALTHY_MIN_TUPLES:
             return captured
-        log(f"showmap run {attempt}: suspicious tuple count ({captured}), "
-            f"{'retrying' if attempt == 1 else 'aborting'}")
+        log(
+            f"showmap run {attempt}: suspicious tuple count ({captured}), "
+            f"{'retrying' if attempt == 1 else 'aborting'}"
+        )
     return None
 
 
@@ -63,8 +74,11 @@ def cmd_fuzz_showmap() -> None:
         if n is None:
             die("showmap failed or degraded twice; see above")
         try:
-            listed = sum(1 for _ in config.FUZZ_CMIN_MAP_FILE.read_text().splitlines()) \
-                if config.FUZZ_CMIN_MAP_FILE.exists() else 0
+            listed = (
+                sum(1 for _ in config.FUZZ_CMIN_MAP_FILE.read_text().splitlines())
+                if config.FUZZ_CMIN_MAP_FILE.exists()
+                else 0
+            )
         except OSError:
             listed = 0
         log(f"map: {listed} tuples listed in {config.FUZZ_CMIN_MAP_FILE}")

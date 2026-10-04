@@ -5,8 +5,8 @@
 //
 // Coverage tracks recently restructured paths: the COUNT(*) fast path
 // (ported to the data path), post-projection DISTINCT dedup, ORDER BY sort,
-// and GROUP BY aggregation. A BUG-class regression here is a >2x slowdown
-// on any single line, not small noise (the join in particular is noisy).
+// GROUP BY aggregation, and the text-index shared scan (R1.1: descend +
+// leaf-run for both equality and prefix modes).
 package main
 
 import "core:fmt"
@@ -172,5 +172,111 @@ main :: proc() {
 		1000,
 	)
 
+	// Text index (R1.1 shared scan path): backfill build over 20000 rows,
+	// then prefix LIKE (Prefix mode) and equality (Exact mode) queries.
+	// Stems avoid '_' (a LIKE wildcard that forces the full-scan fallback).
+	db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);")
+	db.execute(d, "BEGIN;")
+	for i in 1 ..= 20000 {
+		db.execute(d, fmt.tprintf("INSERT INTO docs VALUES (%d, 'doc%d');", i, i))
+	}
+
+	db.execute(d, "COMMIT;")
+	start = time.now()
+	if db.execute(d, "CREATE INDEX i_body ON docs (body);") != .None {
+		fail("create text index")
+	}
+
+	el = time.duration_milliseconds(time.since(start))
+	fmt.printf("perf_textbuild: text index backfill over 20000 rows in %.1f ms\n", el)
+	timed_query(
+		d,
+		"texteq",
+		"text index equality",
+		"SELECT id FROM docs WHERE body = 'doc15000';",
+		1,
+	)
+
+	start = time.now()
+	for i in 1 ..= 200 {
+		r := db.query(d, fmt.tprintf("SELECT id FROM docs WHERE body LIKE 'doc%d%%';", i))
+		if !r.ok {
+			fail("text prefix query")
+		}
+	}
+
+	el = time.duration_milliseconds(time.since(start))
+	fmt.printf("perf_textprefix: 200 text prefix queries in %.1f ms\n", el)
+	// Bulk multi-row INSERT (bottom-up build, one frame per page): a single
+	// 20000-row statement into an empty table. Compare against perf_check's
+	// single-row rate (~30µs/row); the win is frames-per-page, not per-row.
+	db.execute(d, "CREATE TABLE bulk (id INT PRIMARY KEY, v INT);")
+	bulk_sql: strings.Builder
+	strings.builder_init(&bulk_sql, context.temp_allocator)
+	strings.write_string(&bulk_sql, "INSERT INTO bulk VALUES ")
+	for i in 1 ..= 20000 {
+		if i > 1 {
+			strings.write_string(&bulk_sql, ",")
+		}
+		fmt.sbprintf(&bulk_sql, "(%d,%d)", i, i * 2)
+	}
+
+	strings.write_string(&bulk_sql, ";")
+	start = time.now()
+	if db.execute(d, strings.to_string(bulk_sql)) != .None {
+		fail("bulk insert")
+	}
+
+	el = time.duration_milliseconds(time.since(start))
+	fmt.printf("perf_bulk: single 20000-row multi-row INSERT in %.1f ms\n", el)
+
+	timed_query(d, "bulkcnt", "COUNT of bulk table", "SELECT COUNT(*) FROM bulk;", 1)
+	qbulk := db.query(d, "SELECT COUNT(*) FROM bulk;")
+	if !qbulk.ok || len(qbulk.rows) != 1 || qbulk.rows[0][0].(i64) != 20000 {
+		fail("bulk count value")
+	}
+
+	timed_query(d, "bulkspot", "bulk spot check", "SELECT v FROM bulk WHERE id = 19999;", 1)
+
+	// Bulk append (right-edge graft when depths match, row loop otherwise):
+	// a second 20000-row statement strictly above the existing max.
+	bulk2: strings.Builder
+	strings.builder_init(&bulk2, context.temp_allocator)
+	strings.write_string(&bulk2, "INSERT INTO bulk VALUES ")
+	for i in 20001 ..= 40000 {
+		if i > 20001 {
+			strings.write_string(&bulk2, ",")
+		}
+		fmt.sbprintf(&bulk2, "(%d,%d)", i, i * 2)
+	}
+	strings.write_string(&bulk2, ";")
+	start = time.now()
+	if db.execute(d, strings.to_string(bulk2)) != .None {
+		fail("bulk append")
+	}
+	el = time.duration_milliseconds(time.since(start))
+	fmt.printf("perf_bulkappend: 20000-row multi-row append in %.1f ms\n", el)
+
+	// Bulk text index: table + index on the empty table, then one 20000-row
+	// multi-row INSERT exercises the bulk text build (fresh index). Compare
+	// against the per-row fan-out this replaces.
+	db.execute(d, "CREATE TABLE tdocs (id INT PRIMARY KEY, body TEXT);")
+	db.execute(d, "CREATE INDEX i_tdocs ON tdocs (body);")
+	bulkt: strings.Builder
+	strings.builder_init(&bulkt, context.temp_allocator)
+	strings.write_string(&bulkt, "INSERT INTO tdocs VALUES ")
+	for i in 1 ..= 20000 {
+		if i > 1 {
+			strings.write_string(&bulkt, ",")
+		}
+		fmt.sbprintf(&bulkt, "(%d,'tdoc%d')", i, i)
+	}
+	strings.write_string(&bulkt, ";")
+	start = time.now()
+	if db.execute(d, strings.to_string(bulkt)) != .None {
+		fail("bulk text insert")
+	}
+	el = time.duration_milliseconds(time.since(start))
+	fmt.printf("perf_bulktext: 20000-row multi-row INSERT with text index in %.1f ms\n", el)
 	pager.pager_stats_report(d.pager)
 }

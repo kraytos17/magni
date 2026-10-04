@@ -93,15 +93,22 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--release", action="store_true")
     pb.add_argument("--asan", action="store_true")
     pb.add_argument("--cov", action="store_true")
-    pb.add_argument("--cmplog", action="store_true",
-                    help="with --cov: RedQueen input-to-state binary")
-    pb.add_argument("--laf", action="store_true",
-                    help="with --cov: LAF-INTEL comparison-splitting binary")
-    pb.add_argument("--exec", dest="exec_fuzz", action="store_true",
-                    help="executor/storage target (coverage + ASan combined)")
+    pb.add_argument(
+        "--cmplog", action="store_true", help="with --cov: RedQueen input-to-state binary"
+    )
+    pb.add_argument(
+        "--laf", action="store_true", help="with --cov: LAF-INTEL comparison-splitting binary"
+    )
+    pb.add_argument(
+        "--exec",
+        dest="exec_fuzz",
+        action="store_true",
+        help="executor/storage target (coverage + ASan combined)",
+    )
     pb.add_argument("--check-only", action="store_true")
-    pb.add_argument("--rebuild", action="store_true",
-                    help="force rebuild even if the target looks fresh")
+    pb.add_argument(
+        "--rebuild", action="store_true", help="force rebuild even if the target looks fresh"
+    )
     pb.set_defaults(func=cmd_build)
 
     # test
@@ -133,17 +140,17 @@ def build_parser() -> argparse.ArgumentParser:
     pf = sub.add_parser("fuzz", help="AFL++ campaign management")
     fsub = pf.add_subparsers(dest="fuzz_cmd", required=True)
     fr = fsub.add_parser("run", help="interactive AFL++ campaign")
-    fr.add_argument("--rebuild", action="store_true",
-                    help="force target rebuild even if fresh")
+    fr.add_argument("--rebuild", action="store_true", help="force target rebuild even if fresh")
     fr.add_argument("extra", nargs=argparse.REMAINDER)
     fc = fsub.add_parser("campaign", help="headless parallel campaign")
     fc.add_argument("-w", "--workers", type=int, default=4)
     fc.add_argument("-s", "--seconds", type=int, default=3600)
-    fc.add_argument("--rebuild", action="store_true",
-                    help="force target rebuild even if fresh")
-    fc.add_argument("--roles", default=None,
-                    help="comma-separated worker roles (default: master + rotation). "
-                         f"Roles: {role_names()}")
+    fc.add_argument("--rebuild", action="store_true", help="force target rebuild even if fresh")
+    fc.add_argument(
+        "--roles",
+        default=None,
+        help=f"comma-separated worker roles (default: master + rotation). Roles: {role_names()}",
+    )
     fc.add_argument("extra", nargs=argparse.REMAINDER)
     fsub.add_parser("status", help="per-worker fuzzer_stats")
     fsub.add_parser("stop", help="pkill afl-fuzz")
@@ -155,25 +162,36 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("corpus", help="seed corpus management")
     csub = pc.add_subparsers(dest="corpus_cmd", required=True)
     cg = csub.add_parser("generate", help="regenerate corpus from gen_corpus.py")
-    cg.add_argument("--exec", dest="exec_gen", action="store_true",
-                    help="regenerate exec scripts from gen_exec_corpus.py instead")
+    cg.add_argument(
+        "--exec",
+        dest="exec_gen",
+        action="store_true",
+        help="regenerate exec scripts from gen_exec_corpus.py instead",
+    )
     cg.set_defaults(func=lambda args: corpus_generate(exec_scripts=args.exec_gen))
     ct = csub.add_parser("test", help="ASan gate on every seed")
-    ct.add_argument("--exec", dest="exec_test", action="store_true",
-                    help="gate exec seeds with the exec target instead")
-    ct.add_argument("--rebuild", action="store_true",
-                    help="force target rebuild even if fresh")
+    ct.add_argument(
+        "--exec",
+        dest="exec_test",
+        action="store_true",
+        help="gate exec seeds with the exec target instead",
+    )
+    ct.add_argument("--rebuild", action="store_true", help="force target rebuild even if fresh")
     ct.set_defaults(func=_corpus_test)
     pp = csub.add_parser("promote", help="promote grown queue into gen_corpus.py")
     pp.add_argument("--minimize", action="store_true")
     pp.add_argument("--dry-run", action="store_true")
-    pp.add_argument("--test", action="store_true",
-                    help="regenerate corpus + ASan gate after promoting")
-    pp.add_argument("--exec", dest="exec_promote", action="store_true",
-                    help="promote exec queue into corpus_exec/promoted_seeds.py instead")
+    pp.add_argument(
+        "--test", action="store_true", help="regenerate corpus + ASan gate after promoting"
+    )
+    pp.add_argument(
+        "--exec",
+        dest="exec_promote",
+        action="store_true",
+        help="promote exec queue into corpus_exec/promoted_seeds.py instead",
+    )
     pp.set_defaults(func=_corpus_promote)
-    cm = csub.add_parser("minimize",
-                         help="afl-cmin + monster purge, rewrite promoted_seeds.py")
+    cm = csub.add_parser("minimize", help="afl-cmin + monster purge, rewrite promoted_seeds.py")
     cm.set_defaults(func=lambda _args: corpus_minimize())
 
     # clean

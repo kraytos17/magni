@@ -43,8 +43,9 @@ NEW_CASES = [
 
 
 def run_help(argv: list[str]) -> str:
-    r = subprocess.run([sys.executable, str(MAGNI), *argv],
-                       capture_output=True, text=True, cwd=str(MAGNI.parent))
+    r = subprocess.run(  # noqa: PLW1510 - help output read from stdout regardless of returncode
+        [sys.executable, str(MAGNI), *argv], capture_output=True, text=True, cwd=str(MAGNI.parent)
+    )  # noqa: PLW1510 - help output read from stdout regardless of returncode
     return r.stdout
 
 
@@ -59,7 +60,8 @@ class TestCliSurface(unittest.TestCase):
             elif actual != expected:
                 failures.append(
                     f"{golden}: drift detected.\n"
-                    f"--- golden ---\n{expected}\n--- actual ---\n{actual}")
+                    f"--- golden ---\n{expected}\n--- actual ---\n{actual}"
+                )
         self.assertEqual(failures, [])
 
 

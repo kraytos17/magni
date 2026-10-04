@@ -319,3 +319,157 @@ test_multi_index :: proc(t: ^testing.T) {
 	testing.expect(t, got3.ok, "survivor routes")
 	testing.expect_value(t, len(got3.rows), 3)
 }
+
+@(test)
+test_index_bulk_text_boundaries :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "bulk_text_bounds")
+	defer teardown_db(d, "bulk_text_bounds")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create docs",
+	)
+	// Index on the empty table: fresh root, zero cells — the bulk-text gate.
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+
+	// 2000 unique bodies in one statement: multi-leaf bulk text build.
+	// Every key is point-queried, pinning leaf-boundary separators
+	// (right-child minima — a left maximum would misroute exact hits).
+	sb: strings.Builder
+	strings.builder_init(&sb, context.temp_allocator)
+	strings.write_string(&sb, "INSERT INTO docs VALUES ")
+	for i in 1 ..= 2000 {
+		if i > 1 {
+			strings.write_string(&sb, ",")
+		}
+		fmt.sbprintf(&sb, "(%d,'w%04d')", i, i)
+	}
+	strings.write_string(&sb, ";")
+	testing.expect(t, db.execute(d, strings.to_string(sb)) == .None, "bulk insert")
+
+	q := db.query(d, "SELECT COUNT(*) FROM docs;")
+	testing.expect(t, q.ok, "count runs")
+	if q.ok && len(q.rows) == 1 {
+		testing.expect_value(t, q.rows[0][0].(i64), 2000)
+	}
+
+	for i in 1 ..= 2000 {
+		free_all(context.temp_allocator)
+		r := db.query(d, fmt.tprintf("SELECT id FROM docs WHERE body = 'w%04d';", i))
+		if !r.ok || len(r.rows) != 1 {
+			testing.expect(t, false, fmt.tprintf("body w%04d missing from index", i))
+			break
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
+test_index_bulk_text_matches_loop :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "bulk_text_twin")
+	defer teardown_db(d, "bulk_text_twin")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create docs",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs2 (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create docs2",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index docs",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body2 ON docs2 (body);") == .None,
+		"create index docs2",
+	)
+
+	// Bulk path: one multi-row statement into the fresh index.
+	testing.expect(
+		t,
+		db.execute(
+			d,
+			"INSERT INTO docs VALUES (1, 'alpha'), (2, 'alphabet'), (3, 'alpha'), (4, 'bb'), (5, ''), (6, 'gamma'), (7, NULL), (8, 'alph');",
+		) ==
+		.None,
+		"bulk insert docs",
+	)
+	// Loop path: single-row statements into the fresh index.
+	bodies := []string{"alpha", "alphabet", "alpha", "bb", "", "gamma", "NULL", "alph"}
+	for i in 1 ..= 8 {
+		free_all(context.temp_allocator)
+		testing.expect(
+			t,
+			db.execute(
+				d,
+				fmt.tprintf("INSERT INTO docs2 VALUES (%d, '%s');", i, bodies[i - 1]),
+			) ==
+			.None,
+			"loop insert docs2",
+		)
+	}
+	free_all(context.temp_allocator)
+
+	// Same rows through both index paths: identical answers, including the
+	// duplicate body, the empty body, and prefix scans across boundaries.
+	queries := []string{
+		"SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;",
+		"SELECT id FROM docs WHERE body = 'bb';",
+		"SELECT id FROM docs WHERE body = '';",
+		"SELECT id FROM docs WHERE body LIKE 'alph%';",
+		"SELECT id FROM docs WHERE body LIKE 'a%';",
+		"SELECT COUNT(*) FROM docs;",
+	}
+	routing_twin(t, d, queries)
+}
+
+@(test)
+test_index_bulk_text_rollback :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "bulk_text_rb")
+	defer teardown_db(d, "bulk_text_rb")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		"create docs",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
+		"create index",
+	)
+	schema_root_before := d.schema_root_page
+
+	db.begin(d)
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO docs VALUES (2, 'b'), (1, 'a'), (3, 'c');") == .None,
+		"bulk insert in txn",
+	)
+	q := db.query(d, "SELECT id FROM docs WHERE body = 'a';")
+	testing.expect(t, q.ok && len(q.rows) == 1, "index answers in txn")
+	db.rollback(d)
+	testing.expect_value(t, d.schema_root_page, schema_root_before)
+
+	q2 := db.query(d, "SELECT COUNT(*) FROM docs;")
+	testing.expect(t, q2.ok, "count runs after rollback")
+	if q2.ok && len(q2.rows) == 1 {
+		testing.expect_value(t, q2.rows[0][0].(i64), 0)
+	}
+	q3 := db.query(d, "SELECT id FROM docs WHERE body = 'a';")
+	testing.expect(t, q3.ok && len(q3.rows) == 0, "index empty after rollback")
+}

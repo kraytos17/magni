@@ -10,18 +10,34 @@ from .corpus import stage_corpus_tmp
 from .util import die, log
 
 
-def afl_cmin(src: Path, dst: Path, timeout_ms: str = "1000",
-           target: Path | None = None) -> list[str]:
+def afl_cmin(
+    src: Path, dst: Path, timeout_ms: str = "1000", target: Path | None = None
+) -> list[str]:
     """Minimize src corpus into dst with afl-cmin. Returns kept filenames."""
     if target is None:
         target = config.FUZZ_TARGET_COV
     dst.mkdir(parents=True, exist_ok=True)
     e = {**os.environ, "AFL_MAP_SIZE": config.AFL_MAP_SIZE}
-    result = subprocess.run(
-        ["afl-cmin", "-i", str(src), "-o", str(dst),
-         "-m", "none", "-t", timeout_ms,
-         "--", str(target), "@@"],
-        cwd=str(config.ROOT), env=e, capture_output=True, text=True)
+    result = subprocess.run(  # noqa: PLW1510 - returncode checked manually below for die() message
+        [
+            "afl-cmin",
+            "-i",
+            str(src),
+            "-o",
+            str(dst),
+            "-m",
+            "none",
+            "-t",
+            timeout_ms,
+            "--",
+            str(target),
+            "@@",
+        ],
+        cwd=str(config.ROOT),
+        env=e,
+        capture_output=True,
+        text=True,
+    )  # noqa: PLW1510 - returncode checked manually below for die() message
     if result.returncode != 0:
         die(f"afl-cmin failed:\n{result.stderr}")
     return sorted(f.name for f in dst.iterdir() if f.is_file())
@@ -35,16 +51,7 @@ def cmd_fuzz_cmin() -> None:
         if out.exists():
             shutil.rmtree(out)
         out.mkdir(parents=True, exist_ok=True)
-        e = {**os.environ, "AFL_MAP_SIZE": config.AFL_MAP_SIZE}
-        result = subprocess.run(
-            ["afl-cmin", "-i", str(tmp), "-o", str(out),
-             "-m", "none", "-t", "1000",
-             "--", str(config.FUZZ_TARGET_COV), "@@"],
-            cwd=str(config.ROOT), env=e, capture_output=True, text=True)
-        tail = (result.stdout + result.stderr).strip().splitlines()[-5:]
-        for line in tail:
-            log(line)
-        n = sum(1 for _ in out.iterdir()) if out.exists() else 0
-        log(f"minimized: {n} files in {out}")
+        kept = afl_cmin(tmp, out)
+        log(f"minimized: {len(kept)} files in {out}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

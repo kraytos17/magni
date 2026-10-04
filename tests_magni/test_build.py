@@ -15,6 +15,7 @@ from magni.build import is_fresh, newest_mtime_under
 class TestNewestMtime(unittest.TestCase):
     def test_max_over_mixed_roots(self):
         import tempfile
+
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "a.odin").write_text("x")
@@ -28,6 +29,7 @@ class TestNewestMtime(unittest.TestCase):
 
     def test_empty_and_missing(self):
         import tempfile
+
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             self.assertEqual(newest_mtime_under([root]), 0.0)
@@ -37,6 +39,7 @@ class TestNewestMtime(unittest.TestCase):
 class TestIsFresh(unittest.TestCase):
     def setUp(self):
         import tempfile
+
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.src = self.root / "src"
@@ -94,6 +97,7 @@ class TestIsFresh(unittest.TestCase):
 
     def test_apply_rebuild_flag(self):
         import argparse
+
         build_mod.apply_rebuild_flag(argparse.Namespace(rebuild=True))
         self.assertTrue(build_mod.FORCE_REBUILD)
         build_mod.FORCE_REBUILD = False

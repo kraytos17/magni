@@ -31,14 +31,10 @@ class TestCleanExtra(unittest.TestCase):
 
 class TestAflMetadata(unittest.TestCase):
     def test_orig_and_cov(self):
-        self.assertEqual(
-            parse_afl_metadata("id:000000,orig:hello,+cov,op:havoc"),
-            "hello,+cov")
+        self.assertEqual(parse_afl_metadata("id:000000,orig:hello,+cov,op:havoc"), "hello,+cov")
 
     def test_sync(self):
-        self.assertEqual(
-            parse_afl_metadata("id:000001,sync:master,src:000000"),
-            "sync:master")
+        self.assertEqual(parse_afl_metadata("id:000001,sync:master,src:000000"), "sync:master")
 
     def test_no_metadata_returns_filename(self):
         self.assertEqual(parse_afl_metadata("id:000002"), "id:000002")
@@ -47,23 +43,39 @@ class TestAflMetadata(unittest.TestCase):
 class TestMd5(unittest.TestCase):
     def test_known(self):
         import hashlib
+
         self.assertEqual(md5(b"SELECT 1;"), hashlib.md5(b"SELECT 1;").hexdigest())
 
 
 class TestRoles(unittest.TestCase):
     def test_all_thirteen_present(self):
-        self.assertEqual(set(ROLES), {
-            "master", "explore", "fast", "coe", "seek", "cmplog", "asan",
-            "laf", "mopt", "oldq", "exec", "grammar", "exec_grammar"})
+        self.assertEqual(
+            set(ROLES),
+            {
+                "master",
+                "explore",
+                "fast",
+                "coe",
+                "seek",
+                "cmplog",
+                "asan",
+                "laf",
+                "mopt",
+                "oldq",
+                "exec",
+                "grammar",
+                "exec_grammar",
+            },
+        )
 
     def test_default_rotation(self):
         self.assertEqual(default_roles(1), ["master"])
-        self.assertEqual(default_roles(4),
-                         ["master", "cmplog", "asan", "fast"])
+        self.assertEqual(default_roles(4), ["master", "cmplog", "asan", "fast"])
         # Rotation wraps.
-        self.assertEqual(default_roles(9)[1:],
-                         ["cmplog", "asan", "fast", "explore", "coe", "laf",
-                          "mopt", "cmplog"])
+        self.assertEqual(
+            default_roles(9)[1:],
+            ["cmplog", "asan", "fast", "explore", "coe", "laf", "mopt", "cmplog"],
+        )
 
     def test_role_names_single_source(self):
         for name in ROLES:
@@ -92,18 +104,27 @@ class TestRoles(unittest.TestCase):
         self.assertNotIn("AFL_PYTHON_MODULE", ROLES["master"].worker_env())
 
     def test_role_is_immutable(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception):  # noqa: B017 - frozen dataclass raises FrozenInstanceError (an Exception)
             ROLES["master"].timeout_ms = "9999"  # type: ignore[misc]
 
 
 class TestWorkerCmd(unittest.TestCase):
     def test_master_cmd(self):
-        cmd = build_worker_cmd("master", "master", Path("/out"), 60, [],
-                               is_master=True)
-        self.assertEqual(cmd[:9],
-                         ["afl-fuzz", "-i", str(config.CORPUS_DIR),
-                          "-o", "/out", "-x", str(config.SQL_DICT),
-                          "-t", "1000"])
+        cmd = build_worker_cmd("master", "master", Path("/out"), 60, [], is_master=True)
+        self.assertEqual(
+            cmd[:9],
+            [
+                "afl-fuzz",
+                "-i",
+                str(config.CORPUS_DIR),
+                "-o",
+                "/out",
+                "-x",
+                str(config.SQL_DICT),
+                "-t",
+                "1000",
+            ],
+        )
         self.assertIn("-M", cmd)
         self.assertIn("master", cmd)
         self.assertIn("-p", cmd)
@@ -128,14 +149,14 @@ class TestWorkerCmd(unittest.TestCase):
         self.assertEqual(cmd[-2:], [str(config.FUZZ_EXEC_TARGET), "@@"])
 
     def test_staged_corpus_override(self):
-        cmd = build_worker_cmd("master", "master", Path("/out"), 60, [],
-                               corpus="/staged", is_master=True)
+        cmd = build_worker_cmd(
+            "master", "master", Path("/out"), 60, [], corpus="/staged", is_master=True
+        )
         self.assertIn("/staged", cmd)
         self.assertNotIn(str(config.CORPUS_DIR), cmd)
 
     def test_extra_args_appended_before_target(self):
-        cmd = build_worker_cmd("master", "master", Path("/out"), 60,
-                               ["-V", "120"], is_master=True)
+        cmd = build_worker_cmd("master", "master", Path("/out"), 60, ["-V", "120"], is_master=True)
         self.assertLess(cmd.index("-V"), cmd.index(str(config.FUZZ_TARGET_COV)))
 
     def test_unknown_role_raises(self):
@@ -146,6 +167,7 @@ class TestWorkerCmd(unittest.TestCase):
 class TestStaging(unittest.TestCase):
     def test_filters_py_and_pycache(self):
         import tempfile
+
         with tempfile.TemporaryDirectory() as src_s, tempfile.TemporaryDirectory() as d:
             src = Path(src_s)
             (src / "seed1").write_text("SELECT 1;")
@@ -158,6 +180,7 @@ class TestStaging(unittest.TestCase):
 
     def test_is_staged_seed(self):
         import tempfile
+
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
             (p / "a").write_text("x")
