@@ -98,35 +98,44 @@ schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 	// Triples from [6]: complete [root INT][column TEXT][name TEXT]
 	// groups only (trailing partials ignored, skip-style). Legacy
 	// widths: 8-wide single unnamed ([6],[7]), 9-wide single named
-	// (+[8]); both parse as one triple.
+	// (+[8]); both parse as one triple. Requires len(values) >= 8.
 	if len(values) >= 8 {
-		triples := make([dynamic]types.Index_Def, 0, 2, context.temp_allocator)
-		i := 6
-		for i + 1 < len(values) {
-			iroot, rok := values[i].(i64)
-			col, cok := values[i + 1].(string)
-			if !rok || !cok {
-				break
-			}
+		sr.indexes = decode_index_triples(values)
+	}
+	return sr, true
+}
 
-			iname := ""
-			if i + 2 < len(values) {
-				if nm, nok := values[i + 2].(string); nok {
-					iname = nm
-				} else {
-					break
-				}
-			}
+// decode_index_triples parses complete [root INT][column TEXT][name TEXT]
+// groups from values[6:] into index defs. Trailing partial groups stop the
+// scan (fail-soft, skip-style); the legacy 8-wide width stops after one
+// triple. Caller guarantees len(values) >= 8.
+@(private)
+decode_index_triples :: proc(values: []types.Value) -> []types.Index_Def {
+	triples := make([dynamic]types.Index_Def, 0, 2, context.temp_allocator)
+	i := 6
+	for i + 1 < len(values) {
+		iroot, rok := values[i].(i64)
+		col, cok := values[i + 1].(string)
+		if !rok || !cok {
+			break
+		}
 
-			append(&triples, types.Index_Def{name = iname, column = col, root = u32(iroot)})
-			i += 3
-			if len(values) == 8 {
+		iname := ""
+		if i + 2 < len(values) {
+			if nm, nok := values[i + 2].(string); nok {
+				iname = nm
+			} else {
 				break
 			}
 		}
-		sr.indexes = triples[:]
+
+		append(&triples, types.Index_Def{name = iname, column = col, root = u32(iroot)})
+		i += 3
+		if len(values) == 8 {
+			break
+		}
 	}
-	return sr, true
+	return triples[:]
 }
 
 add_table :: proc(

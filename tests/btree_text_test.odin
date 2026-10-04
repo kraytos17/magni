@@ -5,7 +5,6 @@ package tests
 
 import "core:encoding/endian"
 import "core:fmt"
-import "core:os"
 import "core:strings"
 import "core:testing"
 import "src:btree"
@@ -1174,36 +1173,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 
 // setup_text_tree mirrors setup_tree with a LEAF_TEXT root: the harness
 // for C3b chain tests (D wires real index trees through the catalog).
+// Shared body lives in setup_tree_with (tests/btree_test.odin).
 setup_text_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
-	context.logger.lowest_level = .Error
-	// Owned filename (see setup_tree): temp strings dangle across the
-	// test's own free_all calls; teardown_tree owns and deletes this.
-	filename, _ := strings.clone(fmt.tprintf("test_text_%s.db", name), context.allocator)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-
-	p, err := pager.open(filename)
-	if err != nil {
-		testing.fail_now(t, fmt.tprintf("FATAL: Failed to open pager for %s", name))
-	}
-
-	pg1, alloc_err := pager.allocate_page(p)
-	if alloc_err != nil {
-		_ = pager.close(p)
-		testing.fail_now(t, "FATAL: Failed to allocate root page")
-	}
-	if pg1.page_num != 1 {
-		_ = pager.close(p)
-		testing.fail_now(t, fmt.tprintf("FATAL: Allocated page was %d, expected 1", pg1.page_num))
-	}
-	if !btree.init_text_leaf_page(pg1.data, pg1.page_num) {
-		_ = pager.close(p)
-		testing.fail_now(t, "FATAL: Failed to init text root page")
-	}
-
-	tree_inst := btree.init(p, 1)
-	return Test_Context{pager = p, tree = tree_inst, filename = filename}
+	return setup_tree_with(t, name, "test_text_", "text", btree.init_text_leaf_page)
 }
 
 @(test)

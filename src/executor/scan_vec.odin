@@ -28,6 +28,7 @@
 // the benchmark gate passes; the scalar scan_table stays the default path.
 package executor
 
+import "core:mem"
 import "core:os"
 import "src:btree"
 import "src:parser"
@@ -101,6 +102,145 @@ collect_node_cols :: proc(node: ^Resolved_Node, needed: []bool) {
 	}
 }
 
+// resolve_vec_widths resolves ORDER BY sort keys + the display projection for
+// the vector scan. Sort keys must decode even when unprojected (ORDER BY
+// sorts full rows before projection); the projection itself must decode
+// everything finish_select might read.
+@(private = "file")
+resolve_vec_widths :: proc(
+	stmt: parser.Select_Stmt,
+	resolver: Column_Resolver,
+	total_cols: int,
+	allocator: mem.Allocator,
+) -> (
+	sort_indices, proj_indices: []int,
+	has_order: bool,
+	ok: bool,
+) {
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		has_order = true
+		si, si_ok := resolve_sort_indices(order_clause, resolver)
+		if !si_ok {
+			return nil, nil, false, false
+		}
+		sort_indices = si
+	}
+	if len(stmt.columns) > 0 {
+		pi, pi_ok := build_display_indices(stmt.columns, resolver, total_cols)
+		if !pi_ok {
+			return nil, nil, false, false
+		}
+		proj_indices = pi
+	} else {
+		// SELECT *: every column is projected; mark all needed. (The
+		// empty-columns case must NOT yield an all-false mask, which
+		// would decode every row to Null.)
+		proj_indices = make([]int, total_cols, allocator)
+		for i in 0 ..< total_cols {
+			proj_indices[i] = i
+		}
+	}
+	return sort_indices, proj_indices, has_order, true
+}
+
+// vec_seek_cursor opens a scan cursor and applies the plan's skip-start
+// bound, restarting cleanly when the seek target is unreachable. The
+// returned cursor stays live: the caller must defer cursor_destroy (defer
+// cannot cross the helper boundary).
+@(private = "file")
+vec_seek_cursor :: proc(
+	tree: ^btree.Tree,
+	plan: Scan_Plan,
+	allocator: mem.Allocator,
+) -> (
+	cursor: btree.Cursor,
+	ok: bool,
+) {
+	start, c_err := btree.cursor_start(tree, allocator)
+	if c_err != .None {
+		return {}, false
+	}
+
+	cursor = start
+	if plan.skip_start > 0 {
+		if seek_err := btree.cursor_seek_to_page(&cursor, plan.skip_start); seek_err != .None {
+			btree.cursor_destroy(&cursor)
+			cursor, c_err = btree.cursor_start(tree, allocator)
+			if c_err != .None {
+				return {}, false
+			}
+		}
+	}
+	return cursor, true
+}
+
+// clone_fused_row materializes one survivor directly at projected width:
+// display position i from table column proj_indices[i]. Text/blob clones
+// once per column and shares the header on repeats (SELECT a, a), exactly
+// like finish_select's copy. Mutates row_buf (clone-once sharing), same as
+// the inline code it replaces.
+@(private = "file")
+clone_fused_row :: proc(
+	row_buf: []types.Value,
+	proj_indices: []int,
+	out_width: int,
+	allocator: mem.Allocator,
+) -> (
+	vals: []types.Value,
+	ok: bool,
+) {
+	vals = make([]types.Value, out_width, allocator)
+	cloned_cols: [types.MAX_COLS]bool
+	for idx, i in proj_indices {
+		src := row_buf[idx]
+		#partial switch _ in src {
+		case string, []u8:
+			if !cloned_cols[idx] {
+				c, c_err := types.value_clone(src, allocator)
+				if c_err != nil {
+					delete(vals, allocator)
+					return nil, false
+				}
+
+				row_buf[idx] = c
+				cloned_cols[idx] = true
+			}
+			vals[i] = row_buf[idx]
+		case:
+			vals[i] = src
+		}
+	}
+	return vals, true
+}
+
+// clone_full_row clones one full-width survivor (text/blob owned, scalars
+// shared), matching scalar scan_table ownership: values live in allocator.
+@(private = "file")
+clone_full_row :: proc(
+	row_buf: []types.Value,
+	total_cols: int,
+	allocator: mem.Allocator,
+) -> (
+	vals: []types.Value,
+	ok: bool,
+) {
+	vals = make([]types.Value, total_cols, allocator)
+	for i in 0 ..< total_cols {
+		#partial switch _ in row_buf[i] {
+		case string, []u8:
+			cloned, c_err := types.value_clone(row_buf[i], allocator)
+			if c_err != nil {
+				delete(vals, allocator)
+				return nil, false
+			}
+			vals[i] = cloned
+		case:
+			vals[i] = row_buf[i]
+		}
+	}
+	return vals, true
+}
+
 // scan_table_vec is the vector counterpart of scan_table: same plan
 // construction (shared build_scan_plan, so skip bounds, LIMIT pushdown
 // counting, and filter resolution cannot diverge), same row order, same
@@ -156,36 +296,14 @@ scan_table_vec :: proc(
 	// so every column finish_select might read must decode).
 	total_cols := len(table.columns)
 	resolver := build_column_resolver(table.columns, table_ranges)
-	has_order := false
-	sort_indices: []int
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		has_order = true
-		si, si_ok := resolve_sort_indices(order_clause, resolver)
-		if !si_ok {
-			// Logged canonically inside resolve_sort_indices, same outcome
-			// as the scalar path failing later in sort_rows.
-			return nil, nil, false, true
-		}
-		sort_indices = si
-	}
-
-	proj_indices: []int
-	if len(stmt.columns) > 0 {
-		pi, pi_ok := build_display_indices(stmt.columns, resolver, len(table.columns))
-		if !pi_ok {
-			// Logged canonically inside build_display_indices, same
-			// outcome as the scalar finish_select failing on projection.
-			return nil, nil, false, true
-		}
-		proj_indices = pi
-	} else {
-		// SELECT *: every column is projected; mark all needed. (The
-		// empty-columns case must NOT yield an all-false mask, which
-		// would decode every row to Null.)
-		proj_indices = make([]int, total_cols, allocator)
-		for i in 0 ..< total_cols {
-			proj_indices[i] = i
-		}
+	sort_indices, proj_indices, has_order, widths_ok := resolve_vec_widths(
+		stmt,
+		resolver,
+		total_cols,
+		allocator,
+	)
+	if !widths_ok {
+		return nil, nil, false, true
 	}
 
 	filter_root: ^Resolved_Node
@@ -206,18 +324,9 @@ scan_table_vec :: proc(
 	}
 
 	r := make([dynamic]Row_Entry, allocator)
-	cursor, c_err := btree.cursor_start(tree, allocator)
-	if c_err != .None {
+	cursor, cursor_ok := vec_seek_cursor(tree, plan, allocator)
+	if !cursor_ok {
 		return nil, nil, false, true
-	}
-	if plan.skip_start > 0 {
-		if seek_err := btree.cursor_seek_to_page(&cursor, plan.skip_start); seek_err != .None {
-			btree.cursor_destroy(&cursor)
-			cursor, c_err = btree.cursor_start(tree, allocator)
-			if c_err != .None {
-				return nil, nil, false, true
-			}
-		}
 	}
 
 	defer btree.cursor_destroy(&cursor)
@@ -274,42 +383,16 @@ scan_table_vec :: proc(
 		// mode writes display position i from table column proj_indices[i];
 		// a column projected twice (SELECT a, a) clones once and shares
 		// the header, exactly like finish_select's copy.
-		vals := make([]types.Value, out_width, allocator)
+		vals: []types.Value
+		vals_ok := true
 		if fused {
-			cloned_cols: [types.MAX_COLS]bool
-			for idx, i in proj_indices {
-				src := row_buf[idx]
-				#partial switch _ in src {
-				case string, []u8:
-					if !cloned_cols[idx] {
-						c, c_err := types.value_clone(src, allocator)
-						if c_err != nil {
-							delete(vals, allocator)
-							return nil, nil, false, true
-						}
-
-						row_buf[idx] = c
-						cloned_cols[idx] = true
-					}
-					vals[i] = row_buf[idx]
-				case:
-					vals[i] = src
-				}
-			}
+			vals, vals_ok = clone_fused_row(row_buf[:], proj_indices, out_width, allocator)
 		} else {
-			for i in 0 ..< total_cols {
-				#partial switch _ in row_buf[i] {
-				case string, []u8:
-					cloned, c_err := types.value_clone(row_buf[i], allocator)
-					if c_err != nil {
-						delete(vals, allocator)
-						return nil, nil, false, true
-					}
-					vals[i] = cloned
-				case:
-					vals[i] = row_buf[i]
-				}
-			}
+			vals, vals_ok = clone_full_row(row_buf[:], total_cols, allocator)
+		}
+
+		if !vals_ok {
+			return nil, nil, false, true
 		}
 
 		append(&r, Row_Entry{rowid, vals})

@@ -16,13 +16,23 @@ Test_Context :: struct {
 	filename: string,
 }
 
-setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
+// setup_tree_with opens a pager, allocates + inits page 1 as a btree root,
+// and returns the test context. Shared by setup_tree (slotdir) and
+// setup_text_tree (text leaf): only the filename prefix, the root-page
+// initializer, and the FATAL page label differ.
+setup_tree_with :: proc(
+	t: ^testing.T,
+	name: string,
+	file_prefix: string,
+	page_kind: string,
+	init_root: proc "contextless" (data: []u8, page_id: u32) -> bool,
+) -> Test_Context {
 	context.logger.lowest_level = .Error
 	// Owned (heap) filename: tests free_all(temp) mid-run, so a temp string
 	// stashed in ctx would dangle by teardown (this left test_text_*.db
 	// behind). teardown_tree deletes it — same contract as
 	// setup_schema_env / setup_executor_env.
-	filename, _ := strings.clone(fmt.tprintf("test_%s.db", name), context.allocator)
+	filename, _ := strings.clone(fmt.tprintf("%s%s.db", file_prefix, name), context.allocator)
 	if os.exists(filename) {
 		os.remove(filename)
 	}
@@ -41,13 +51,17 @@ setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 		_ = pager.close(p)
 		testing.fail_now(t, fmt.tprintf("FATAL: Allocated page was %d, expected 1", pg1.page_num))
 	}
-	if !btree.init_slot_leaf_page(pg1.data, pg1.page_num) {
+	if !init_root(pg1.data, pg1.page_num) {
 		_ = pager.close(p)
-		testing.fail_now(t, "FATAL: Failed to init slotdir root page")
+		testing.fail_now(t, fmt.tprintf("FATAL: Failed to init %s root page", page_kind))
 	}
 
 	tree_inst := btree.init(p, 1)
 	return Test_Context{pager = p, tree = tree_inst, filename = filename}
+}
+
+setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
+	return setup_tree_with(t, name, "test_", "slotdir", btree.init_slot_leaf_page)
 }
 
 teardown_tree :: proc(ctx: ^Test_Context) {

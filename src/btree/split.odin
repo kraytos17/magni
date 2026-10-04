@@ -255,7 +255,82 @@ split_interior_node :: proc(t: ^Tree, curr: ^Node) -> (Split_Result, Error) {
 	return Split_Result{did_split = true, right_page = new_page.page_num, split_key = sep}, .None
 }
 
-@(private)
+@(private = "file")
+alloc_init_leaf :: proc(t: ^Tree) -> (page: ^pager.Page, err: Error) {
+	new_leaf, a_err := pager.allocate_page(t.pager)
+	if a_err != .None {
+		return nil, .Page_Full
+	}
+
+	page = new_leaf
+	if !init_slot_leaf_page(page.data, page.page_num) {
+		pager.unpin_page(t.pager, page.page_num)
+		return nil, .Invalid_Page_Header
+	}
+	return page, .None
+}
+
+// load_split_root loads the splitting root and validates it is a non-empty
+// slotdir leaf. Failure paths unpin before returning; the success path
+// stays pinned for the caller's deferred unpin.
+@(private = "file")
+load_split_root :: proc(t: ^Tree, root_page: u32) -> (root_node: Node, err: Error) {
+	loaded, load_err := load_node(t, root_page)
+	if load_err != .None {
+		return {}, load_err
+	}
+	root_node = loaded
+	if !is_leaf(root_node) {
+		unpin_node(t, root_node)
+		return {}, .Invalid_Page_Header
+	}
+	if node_leaf(root_node).cell_count == 0 {
+		unpin_node(t, root_node)
+		return {}, .Page_Full
+	}
+	if root_node.header.page_type != .LEAF_SLOTDIR {
+		unpin_node(t, root_node)
+		return {}, .Invalid_Page_Header
+	}
+
+	rl, _, rl_err := layout_for_page(root_node.data, Page_Id(root_node.id))
+	if rl_err != .None {
+		unpin_node(t, root_node)
+		return {}, rl_err
+	}
+
+	root_node.layout = rl
+	return root_node, .None
+}
+
+// insert_pending_leaf routes a pending (rowid, values) insert into the split
+// half its key orders into. Both arrive together; a rowid without values is
+// a serialization failure. Absent rowid inserts nothing.
+@(private = "file")
+insert_pending_leaf :: proc(
+	t: ^Tree,
+	left_node, right_node: ^Node,
+	sep: types.Row_ID,
+	rowid: Maybe(types.Row_ID),
+	values: Maybe([]types.Value),
+) -> Error {
+	rid, has_rid := rowid.?
+	if !has_rid {
+		return .None
+	}
+
+	vals, has_vals := values.?
+	if !has_vals {
+		return .Serialization_Failed
+	}
+
+	target := right_node
+	if rid < sep {
+		target = left_node
+	}
+	return node_insert_leaf_cell(t, target, rid, vals)
+}
+
 split_leaf_root :: proc(
 	t: ^Tree,
 	root_page: u32,
@@ -265,54 +340,32 @@ split_leaf_root :: proc(
 	new_root: u32,
 	err: Error,
 ) {
-	left_page, l_err := pager.allocate_page(t.pager)
+	left_page, l_err := alloc_init_leaf(t)
 	if l_err != .None {
-		return 0, .Page_Full
+		return 0, l_err
 	}
 
 	left_id := left_page.page_num
 	defer pager.unpin_page(t.pager, left_id)
 
-	right_page, r_err := pager.allocate_page(t.pager)
+	right_page, r_err := alloc_init_leaf(t)
 	if r_err != .None {
-		return 0, .Page_Full
+		return 0, r_err
 	}
 
 	right_id := right_page.page_num
 	defer pager.unpin_page(t.pager, right_id)
-	if !init_slot_leaf_page(left_page.data, left_page.page_num) {
-		return 0, .Invalid_Page_Header
-	}
-	if !init_slot_leaf_page(right_page.data, right_page.page_num) {
-		return 0, .Invalid_Page_Header
-	}
 
 	l_layout, _ := layout_for_page(left_page.data, Page_Id(left_page.page_num)) or_return
 	left_node, _ := node_from_bytes(left_page.page_num, left_page.data, l_layout)
 	r_layout, _ := layout_for_page(right_page.data, Page_Id(right_page.page_num)) or_return
 	right_node, _ := node_from_bytes(right_page.page_num, right_page.data, r_layout)
-	root_node, load_err := load_node(t, root_page)
+	root_node, load_err := load_split_root(t, root_page)
 	if load_err != .None {
 		return 0, load_err
 	}
 
 	defer unpin_node(t, root_node)
-	if !is_leaf(root_node) {
-		return 0, .Invalid_Page_Header
-	}
-	if node_leaf(root_node).cell_count == 0 {
-		return 0, .Page_Full
-	}
-	if root_node.header.page_type != .LEAF_SLOTDIR {
-		return 0, .Invalid_Page_Header
-	}
-
-	rl, _, rl_err := layout_for_page(root_node.data, Page_Id(root_node.id))
-	if rl_err != .None {
-		return 0, rl_err
-	}
-
-	root_node.layout = rl
 	total := int(node_leaf(root_node).cell_count)
 	mid := total / 2
 	if !move_leaf_cells(&root_node, &left_node, 0, mid) {
@@ -326,20 +379,9 @@ split_leaf_root :: proc(
 	if s_err != .None {
 		return 0, .Invalid_Cell_Pointer
 	}
-	if rid, has_rid := rowid.?; has_rid {
-		vals, has_vals := values.?
-		if !has_vals {
-			return 0, .Serialization_Failed
-		}
-		if rid >= sep {
-			if e := node_insert_leaf_cell(t, &right_node, rid, vals); e != .None {
-				return 0, e
-			}
-		} else {
-			if e := node_insert_leaf_cell(t, &left_node, rid, vals); e != .None {
-				return 0, e
-			}
-		}
+	if p_err := insert_pending_leaf(t, &left_node, &right_node, sep, rowid, values);
+	   p_err != .None {
+		return 0, p_err
 	}
 
 	rkeys := [1]types.Row_ID{sep}

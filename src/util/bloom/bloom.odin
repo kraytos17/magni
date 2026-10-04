@@ -37,7 +37,7 @@ add :: proc(f: ^Filter, key: u32) {
 	h1, h2 := probe_seeds(key)
 	for i in 0 ..< HASHES {
 		pos := (h1 + u32(i) * h2) & (COUNTERS - 1)
-		counter_inc(f, pos)
+		counter_add(f, pos, +1)
 	}
 }
 
@@ -48,7 +48,7 @@ remove :: proc(f: ^Filter, key: u32) {
 	h1, h2 := probe_seeds(key)
 	for i in 0 ..< HASHES {
 		pos := (h1 + u32(i) * h2) & (COUNTERS - 1)
-		counter_dec(f, pos)
+		counter_add(f, pos, -1)
 	}
 }
 
@@ -86,33 +86,13 @@ counter_get :: #force_inline proc(f: ^Filter, pos: u32) -> u8 {
 }
 
 @(private = "file")
-counter_inc :: #force_inline proc(f: ^Filter, pos: u32) {
+counter_add :: #force_inline proc(f: ^Filter, pos: u32, delta: int) {
 	idx := pos >> 1
 	lo := (pos & 1) == 0
 	#no_bounds_check {
 		b := f.counters[idx]
 		nib := b & 0x0F if lo else b >> 4
-		if nib >= MAX_COUNT {
-			return
-		}
-
-		nib += 1
-		f.counters[idx] = (b & 0xF0) | nib if lo else (b & 0x0F) | (nib << 4)
-	}
-}
-
-@(private = "file")
-counter_dec :: #force_inline proc(f: ^Filter, pos: u32) {
-	idx := pos >> 1
-	lo := (pos & 1) == 0
-	#no_bounds_check {
-		b := f.counters[idx]
-		nib := b & 0x0F if lo else b >> 4
-		if nib == 0 {
-			return
-		}
-
-		nib -= 1
+		nib = u8(clamp(int(nib) + delta, 0, MAX_COUNT))
 		f.counters[idx] = (b & 0xF0) | nib if lo else (b & 0x0F) | (nib << 4)
 	}
 }

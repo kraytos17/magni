@@ -390,6 +390,91 @@ try_hash_join :: proc(
 	return true
 }
 
+// init_join_filter resolves the ON clause once (not per pair). Absent ON
+// matches everything (nil filter); unresolvable ON matches nothing —
+// signalled by ok=false so the caller can null-extend every outer row
+// (mirrors evaluate_where).
+@(private = "file")
+init_join_filter :: proc(
+	jb: ^Join_Build,
+	jc: parser.Join_Clause,
+) -> (
+	filter: Maybe(Where_Eval_Ctx),
+	ok: bool,
+) {
+	if on_cl, has := jc.on_clause.?; has {
+		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, nil, context.temp_allocator)
+		if _, fok := filter.?; !fok {
+			return nil, false
+		}
+	}
+	return filter, true
+}
+
+// probe_left_driven pairs each left row against all right rows, null-
+// extending unmatched left rows for LEFT JOIN. Records right-side hits in
+// matched_right for the RIGHT JOIN tail.
+@(private = "file")
+probe_left_driven :: proc(
+	rows, right_rows: []Row_Entry,
+	filter: Maybe(Where_Eval_Ctx),
+	is_left: bool,
+	right_col_count: int,
+	matched_right: ^map[int]bool,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	for outer_row in rows {
+		matched := false
+		for right_row, ri in right_rows {
+			try_join_match(outer_row, right_row.values, filter, new_rows, &matched)
+			if matched {
+				matched_right[ri] = true
+			}
+		}
+		if is_left && !matched {
+			join_emit_null_row(outer_row, right_col_count, new_rows)
+		}
+	}
+}
+
+// probe_right_driven pairs each right row against all left rows (the small-
+// side-first orientation). No null extension here: misses are handled by
+// the LEFT/RIGHT tails from matched_right.
+@(private = "file")
+probe_right_driven :: proc(
+	rows, right_rows: []Row_Entry,
+	filter: Maybe(Where_Eval_Ctx),
+	matched_right: ^map[int]bool,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	for r_row, r_idx in right_rows {
+		for l_row in rows {
+			dummy := false
+			try_join_match(l_row, r_row.values, filter, new_rows, &dummy)
+			if dummy {
+				matched_right[r_idx] = true
+			}
+		}
+	}
+}
+
+// emit_unmatched_right null-extends every right row with no match (the
+// RIGHT JOIN tail).
+@(private = "file")
+emit_unmatched_right :: proc(
+	right_rows: []Row_Entry,
+	matched_right: ^map[int]bool,
+	left_col_count: int,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	for ri in 0 ..< len(right_rows) {
+		if ri in matched_right {
+			continue
+		}
+		join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
+	}
+}
+
 // nested_loop_join is the fallback for non-equi and multi-conjunct joins:
 // pair-wise ON evaluation with null extension for outer joins.
 @(private = "file")
@@ -409,56 +494,37 @@ nested_loop_join :: proc(
 	right_col_count := jb.ctxs[info_idx].range.col_count
 	// Resolve the ON filter once, not per pair. Unresolvable ON matches
 	// nothing (mirrors evaluate_where); absent ON matches everything.
-	filter: Maybe(Where_Eval_Ctx)
-	if on_cl, has := jc.on_clause.?; has {
-		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, nil, context.temp_allocator)
-		if _, ok := filter.?; !ok {
-			emit_unmatched_outer(
-				is_left,
-				is_right,
-				rows,
-				right_rows,
-				left_col_count,
-				right_col_count,
-				new_rows,
-			)
-			return
-		}
+	filter, filter_ok := init_join_filter(jb, jc)
+	if !filter_ok {
+		emit_unmatched_outer(
+			is_left,
+			is_right,
+			rows,
+			right_rows,
+			left_col_count,
+			right_col_count,
+			new_rows,
+		)
+		return
 	}
 
 	matched_right := make(map[int]bool, len(right_rows), context.temp_allocator)
 	if is_left || len(right_rows) >= len(rows) {
-		for outer_row in rows {
-			matched := false
-			for right_row, ri in right_rows {
-				try_join_match(outer_row, right_row.values, filter, new_rows, &matched)
-				if matched {
-					matched_right[ri] = true
-				}
-			}
-			if is_left && !matched {
-				join_emit_null_row(outer_row, right_col_count, new_rows)
-			}
-		}
+		probe_left_driven(
+			rows,
+			right_rows,
+			filter,
+			is_left,
+			right_col_count,
+			&matched_right,
+			new_rows,
+		)
 	} else {
-		for r_row, r_idx in right_rows {
-			for l_row in rows {
-				dummy := false
-				try_join_match(l_row, r_row.values, filter, new_rows, &dummy)
-				if dummy {
-					matched_right[r_idx] = true
-				}
-			}
-		}
+		probe_right_driven(rows, right_rows, filter, &matched_right, new_rows)
 	}
 
 	if is_right {
-		for ri in 0 ..< len(right_rows) {
-			if ri in matched_right {
-				continue
-			}
-			join_emit_null_left_row(right_rows[ri], left_col_count, new_rows)
-		}
+		emit_unmatched_right(right_rows, &matched_right, left_col_count, new_rows)
 	}
 	delete(matched_right)
 }

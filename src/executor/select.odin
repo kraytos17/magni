@@ -210,6 +210,115 @@ seek_single_row :: proc(
 	return r[:], cols, single_range, true
 }
 
+// is_count_star_query recognizes SELECT COUNT(*) FROM table with no other
+// clauses: exactly one projected column, COUNT(*) over no column, no WHERE,
+// GROUP BY, HAVING, DISTINCT, ORDER BY, LIMIT, or OFFSET. The single-column
+// check is load-bearing: companion columns (e.g. SELECT 0, COUNT(*)) must
+// take the general aggregate path, never be silently dropped here.
+@(private = "file")
+is_count_star_query :: proc(stmt: parser.Select_Stmt, has_order: bool) -> bool {
+	return(
+		len(stmt.aggregates) == 1 &&
+		len(stmt.columns) == 1 &&
+		stmt.aggregates[0].func == .COUNT &&
+		stmt.aggregates[0].column == "" &&
+		stmt.where_clause == nil &&
+		len(stmt.group_by) == 0 &&
+		stmt.having == nil &&
+		!stmt.is_distinct &&
+		!has_order &&
+		stmt.limit == nil &&
+		stmt.offset == nil \
+	)
+}
+
+// exec_count_star runs the COUNT(*) fast path: one tree count, materialized
+// as a single INTEGER row honoring the projection alias.
+@(private = "file")
+exec_count_star :: proc(
+	table_tree: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
+	count, count_err := btree.tree_count_rows(table_tree)
+	if count_err != .None {
+		log.error("Error: Failed to count rows")
+		return nil, nil, false
+	}
+
+	vals := make([]types.Value, 1, context.temp_allocator)
+	vals[0] = types.value_int(i64(count))
+	rows_mat := make([]Row_Entry, 1, context.temp_allocator)
+	rows_mat[0] = Row_Entry {
+		rowid  = 1,
+		values = vals,
+	}
+
+	name := "COUNT(*)"
+	if len(stmt.columns) > 0 {
+		name = stmt.columns[0]
+	}
+	if len(stmt.aliases) > 0 && stmt.aliases[0] != "" {
+		name = stmt.aliases[0]
+	}
+
+	cols_mat := make([]types.Column, 1, context.temp_allocator)
+	cols_mat[0] = types.Column {
+		name = name,
+		type = .INTEGER,
+	}
+	return rows_mat, cols_mat, true
+}
+
+// vec_route_eligible gates the vector scan route (MAGNI_VECTOR=1): same
+// fetch contract via fetch_single_rows_vec. Excluded exactly where the
+// aggregate tail takes over (aggregates/GROUP BY/HAVING change cardinality
+// and resolve their own columns). Joins/subqueries/setops never reach here.
+@(private = "file")
+vec_route_eligible :: proc(stmt: parser.Select_Stmt) -> bool {
+	return(
+		len(stmt.aggregates) == 0 &&
+		len(stmt.group_by) == 0 &&
+		stmt.having == nil &&
+		vec_scan_enabled() \
+	)
+}
+
+// exec_vec_route runs the vector scan route: fused rows (no ORDER BY,
+// explicit projection) take finish_projected (dedup + limit only);
+// full-width rows take the shared finish_select tail.
+@(private = "file")
+exec_vec_route :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	tbl_name: string,
+	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	[]Row_Entry,
+	[]types.Column,
+	bool,
+) {
+	vrows, vcols, vranges, vproj, v_ok := fetch_single_rows_vec(
+		t,
+		table,
+		tbl_name,
+		stmt,
+		context.temp_allocator,
+		cache,
+	)
+	if !v_ok {
+		return nil, nil, false
+	}
+	if vproj {
+		return finish_projected(stmt, vrows, vcols)
+	}
+	return finish_select(stmt, vrows, vcols, vranges)
+}
+
 exec_select_single_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -236,77 +345,15 @@ exec_select_single_data :: proc(
 		has_order = true
 	}
 	// Fast path: SELECT COUNT(*) FROM table (exactly one projected column, no
-	// WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT). The single-column check is
-	// load-bearing: companion columns (e.g. SELECT 0, COUNT(*)) must take the
-	// general aggregate path, never be silently dropped here.
-	if len(stmt.aggregates) == 1 &&
-	   len(stmt.columns) == 1 &&
-	   stmt.aggregates[0].func == .COUNT &&
-	   stmt.aggregates[0].column == "" &&
-	   stmt.where_clause == nil &&
-	   len(stmt.group_by) == 0 &&
-	   stmt.having == nil &&
-	   !stmt.is_distinct &&
-	   !has_order &&
-	   stmt.limit == nil &&
-	   stmt.offset == nil {
-		count, count_err := btree.tree_count_rows(&table_tree)
-		if count_err != .None {
-			log.error("Error: Failed to count rows")
-			return nil, nil, false
-		}
-
-		vals := make([]types.Value, 1, context.temp_allocator)
-		vals[0] = types.value_int(i64(count))
-		rows_mat := make([]Row_Entry, 1, context.temp_allocator)
-		rows_mat[0] = Row_Entry {
-			rowid  = 1,
-			values = vals,
-		}
-
-		name := "COUNT(*)"
-		if len(stmt.columns) > 0 {
-			name = stmt.columns[0]
-		}
-		if len(stmt.aliases) > 0 && stmt.aliases[0] != "" {
-			name = stmt.aliases[0]
-		}
-
-		cols_mat := make([]types.Column, 1, context.temp_allocator)
-		cols_mat[0] = types.Column {
-			name = name,
-			type = .INTEGER,
-		}
-		return rows_mat, cols_mat, true
+	// WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT). See is_count_star_query.
+	if is_count_star_query(stmt, has_order) {
+		return exec_count_star(&table_tree, stmt)
 	}
-
-	// Vector scan route (MAGNI_VECTOR=1): same fetch contract via
-	// fetch_single_rows_vec. Fused rows (no ORDER BY, explicit projection)
-	// take finish_projected (dedup + limit only); full-width rows take the
-	// shared finish_select tail. Excluded exactly where the aggregate tail
-	// takes over (aggregates/GROUP BY/HAVING change cardinality and resolve
-	// their own columns). Joins/subqueries/setops never reach this proc.
-	// All error paths log canonically through the shared helpers,
-	// identical to the scalar route.
-	if len(stmt.aggregates) == 0 &&
-	   len(stmt.group_by) == 0 &&
-	   stmt.having == nil &&
-	   vec_scan_enabled() {
-		vrows, vcols, vranges, vproj, v_ok := fetch_single_rows_vec(
-			t,
-			table^,
-			tbl_name,
-			stmt,
-			context.temp_allocator,
-			cache,
-		)
-		if !v_ok {
-			return nil, nil, false
-		}
-		if vproj {
-			return finish_projected(stmt, vrows, vcols)
-		}
-		return finish_select(stmt, vrows, vcols, vranges)
+	// Vector scan route (MAGNI_VECTOR=1); see vec_route_eligible. All error
+	// paths log canonically through the shared helpers, identical to the
+	// scalar route.
+	if vec_route_eligible(stmt) {
+		return exec_vec_route(t, table^, tbl_name, stmt, cache)
 	}
 
 	rows, cols, single_range, f_ok := fetch_single_rows(
@@ -599,11 +646,21 @@ build_scan_plan :: proc(
 	}
 
 	ok = true
+	apply_skip_bounds(tree, table, &plan)
+	return plan, true
+}
+
+// apply_skip_bounds tightens a scan plan's skip-start/skip-end page bounds
+// from usable skip-index range conditions: flat top-level AND conjuncts
+// over integer columns with supported operators. OR subtrees, non-integer
+// RHS values, and unknown operators keep the current (wider, safe) bounds.
+@(private = "file")
+apply_skip_bounds :: proc(tree: ^btree.Tree, table: ^types.Table, plan: ^Scan_Plan) {
 	if _, has_f := plan.filter.?; !has_f {
-		return plan, true
+		return
 	}
 	if table.skip_root == 0 {
-		return plan, true
+		return
 	}
 	for rc in skip_chain_conditions(plan.filter.?.root) {
 		if rc.has_right_col || rc.has_in {
@@ -632,7 +689,6 @@ build_scan_plan :: proc(
 			}
 		}
 	}
-	return plan, true
 }
 
 // skip_chain_conditions collects the leaf conditions of a top-level AND chain.

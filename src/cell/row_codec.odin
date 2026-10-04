@@ -1,6 +1,7 @@
 package cell
 
 import "core:encoding/endian"
+import "core:mem"
 import "core:strings"
 import "src:types"
 import "src:util/varint"
@@ -97,6 +98,110 @@ serialize :: proc(
 	return offset, true
 }
 
+// decode_row_prefix reads the payload-size, rowid, and header-size varints
+// at offset, returning the rowid, header size, and the position of the
+// serial-type header. ok=false on short/truncated input (varint.decode
+// fails closed; same call order as the inline code it replaces).
+@(private = "file")
+decode_row_prefix :: proc(
+	src: []u8,
+	offset: int,
+) -> (
+	rowid: u64,
+	header_size: u64,
+	pos: int,
+	ok: bool,
+) {
+	if offset >= len(src) {
+		return 0, 0, offset, false
+	}
+
+	pos = offset
+	_, n, ok_payload := varint.decode(src, pos)
+	if !ok_payload {
+		return 0, 0, pos, false
+	}
+
+	pos += n
+	rowid_val, n2, ok_rowid := varint.decode(src, pos)
+	if !ok_rowid {
+		return 0, 0, pos, false
+	}
+
+	pos += n2
+	hdr, n3, ok_header := varint.decode(src, pos)
+	if !ok_header {
+		return 0, 0, pos, false
+	}
+	return rowid_val, hdr, pos + n3, true
+}
+
+// decode_row_values materializes one value per serial type into the
+// caller-owned result_values (len == serial_count), advancing past each
+// payload. TEXT/BLOB honor zero_copy (borrow vs clone). Bounds: every
+// payload is range-checked before read (untrusted page bytes); the loop
+// keeps its proven-index annotation. Returns the first unconsumed position.
+@(private = "file")
+decode_row_values :: proc(
+	src: []u8,
+	serials: []u64,
+	serial_count: int,
+	result_values: []types.Value,
+	pos: int,
+	config: Config,
+	alloc: mem.Allocator,
+) -> (
+	next_pos: int,
+	ok: bool,
+) {
+	next_pos = pos
+	#no_bounds_check for st_idx in 0 ..< serial_count {
+		st := serials[st_idx]
+		content_size, _ := types.serial_type_content_size(st)
+		type_code := types.Serial_Type(st)
+		if next_pos + content_size > len(src) {
+			return next_pos, false
+		}
+		if type_code == .ZERO {
+			result_values[st_idx] = types.value_int(0)
+		} else if type_code == .ONE {
+			result_values[st_idx] = types.value_int(1)
+		} else if st == u64(types.Serial_Type.NULL) {
+			result_values[st_idx] = types.value_null()
+		} else if st >= u64(types.Serial_Type.INT8) && st <= u64(types.Serial_Type.INT64) {
+			int_val, _ := read_int_by_size(src, next_pos, content_size)
+			result_values[st_idx] = types.value_int(int_val)
+			next_pos += content_size
+		} else if type_code == .FLOAT64 {
+			float_val, _ := endian.get_f64(src[next_pos:], .Big)
+			result_values[st_idx] = types.value_real(float_val)
+			next_pos += 8
+		} else if is_text_serial(st) {
+			text_bytes := src[next_pos:next_pos + content_size]
+			if config.zero_copy {
+				result_values[st_idx] = types.value_text(string(text_bytes))
+			} else {
+				str := strings.clone_from(text_bytes, alloc)
+				result_values[st_idx] = types.value_text(str)
+			}
+			next_pos += content_size
+		} else if is_blob_serial(st) {
+			blob_bytes := src[next_pos:next_pos + content_size]
+			if config.zero_copy {
+				result_values[st_idx] = types.value_blob(blob_bytes)
+			} else {
+				blob_copy := make([]u8, content_size, alloc)
+				copy(blob_copy, blob_bytes)
+				result_values[st_idx] = types.value_blob(blob_copy)
+			}
+			next_pos += content_size
+		} else {
+			return next_pos, false
+		}
+	}
+	return next_pos, true
+}
+
 // Returns the Cell + bytes consumed. ok=false on invalid input.
 @(require_results)
 deserialize :: proc(
@@ -117,25 +222,11 @@ deserialize :: proc(
 		alloc = context.allocator
 	}
 
-	pos := offset
-	_, n, ok_payload := varint.decode(src, pos)
-	if !ok_payload {
+	rowid_val, header_size, pos, prefix_ok := decode_row_prefix(src, offset)
+	if !prefix_ok {
 		return {}, 0, false
 	}
 
-	pos += n
-	rowid_val, n2, ok_rowid := varint.decode(src, pos)
-	if !ok_rowid {
-		return {}, 0, false
-	}
-
-	pos += n2
-	header_size, n3, ok_header := varint.decode(src, pos)
-	if !ok_header {
-		return {}, 0, false
-	}
-
-	pos += n3
 	header_start := pos
 	// Stack scratch covers every user row; wider rows (schema catalog
 	// rows past one index) spill the whole header to temp. The header
@@ -144,7 +235,6 @@ deserialize :: proc(
 	serial_stack: [types.MAX_COLS]u64
 	serial_spill: [dynamic]u64
 	serial_count := 0
-
 	for pos < header_start + int(header_size) {
 		st, n4, ok_st := varint.decode(src, pos)
 		if !ok_st {
@@ -171,49 +261,17 @@ deserialize :: proc(
 		types.values_delete(result_values, alloc)
 	}
 
-	#no_bounds_check for st_idx in 0 ..< serial_count {
-		st := serials[st_idx]
-		content_size, _ := types.serial_type_content_size(st)
-		type_code := types.Serial_Type(st)
-		if pos + content_size > len(src) {
-			return {}, 0, false
-		}
-		if type_code == .ZERO {
-			result_values[st_idx] = types.value_int(0)
-		} else if type_code == .ONE {
-			result_values[st_idx] = types.value_int(1)
-		} else if st == u64(types.Serial_Type.NULL) {
-			result_values[st_idx] = types.value_null()
-		} else if st >= u64(types.Serial_Type.INT8) && st <= u64(types.Serial_Type.INT64) {
-			int_val, _ := read_int_by_size(src, pos, content_size)
-			result_values[st_idx] = types.value_int(int_val)
-			pos += content_size
-		} else if type_code == .FLOAT64 {
-			float_val, _ := endian.get_f64(src[pos:], .Big)
-			result_values[st_idx] = types.value_real(float_val)
-			pos += 8
-		} else if is_text_serial(st) {
-			text_bytes := src[pos:pos + content_size]
-			if config.zero_copy {
-				result_values[st_idx] = types.value_text(string(text_bytes))
-			} else {
-				str := strings.clone_from(text_bytes, alloc)
-				result_values[st_idx] = types.value_text(str)
-			}
-			pos += content_size
-		} else if is_blob_serial(st) {
-			blob_bytes := src[pos:pos + content_size]
-			if config.zero_copy {
-				result_values[st_idx] = types.value_blob(blob_bytes)
-			} else {
-				blob_copy := make([]u8, content_size, alloc)
-				copy(blob_copy, blob_bytes)
-				result_values[st_idx] = types.value_blob(blob_copy)
-			}
-			pos += content_size
-		} else {
-			return {}, 0, false
-		}
+	end_pos, values_ok := decode_row_values(
+		src,
+		serials,
+		serial_count,
+		result_values,
+		pos,
+		config,
+		alloc,
+	)
+	if !values_ok {
+		return {}, 0, false
 	}
 
 	success = true
@@ -222,7 +280,7 @@ deserialize :: proc(
 		values    = result_values,
 		owns_data = !config.zero_copy,
 	}
-	return cell, pos - offset, true
+	return cell, end_pos - offset, true
 }
 
 // deserialize_needed decodes one row-major cell but materializes only the

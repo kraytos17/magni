@@ -321,30 +321,26 @@ text_insert_into_leaf :: proc(
 		e
 }
 
-// text_absorb_child_split absorbs a split child into a text interior:
-// snapshot all pairs (temp copies — borrows die on rebuild), splice at the
-// proven child_idx+1 position (never a raw bound — same rule as the dense
-// absorb), rebuild; overflow splits the absorbed arrays directly.
-@(require_results)
-text_absorb_child_split :: proc(
-	t: ^Tree,
+// Helpers for the text-interior absorb/split chain below.
+// decode_text_interior reads the current separators + children (including
+// the rightmost child). Separators are temp-copied: borrows die on rebuild,
+// so the absorbed arrays must own their bytes before any build runs.
+@(private = "file")
+decode_text_interior :: proc(
 	curr: ^Node,
-	child_result: ^Text_Insert_Result,
-	was_rightmost: bool,
-	child_idx: int,
-	new_page_num: u32,
 ) -> (
-	Text_Insert_Result,
-	Error,
+	seps: [dynamic][]u8,
+	children: [dynamic]u32,
+	err: Error,
 ) {
 	pid := Page_Id(curr.id)
 	n := get_cell_count(curr.data, curr.id)
-	seps := make([dynamic][]u8, 0, n + 1, context.temp_allocator)
-	children := make([dynamic]u32, 0, n + 2, context.temp_allocator)
+	seps = make([dynamic][]u8, 0, n + 1, context.temp_allocator)
+	children = make([dynamic]u32, 0, n + 2, context.temp_allocator)
 	for i in 0 ..< n {
 		s, s_err := text_interior_sep_at(curr.data, pid, i)
 		if s_err != .None {
-			return {}, s_err
+			return nil, nil, s_err
 		}
 
 		sc := make([]u8, len(s), context.temp_allocator)
@@ -353,70 +349,35 @@ text_absorb_child_split :: proc(
 
 		c, c_err := text_interior_child_at(curr.data, pid, i)
 		if c_err != .None {
-			return {}, c_err
+			return nil, nil, c_err
 		}
 		append(&children, c)
 	}
 
 	rc, rc_err := text_interior_child_at(curr.data, pid, n)
 	if rc_err != .None {
-		return {}, rc_err
+		return nil, nil, rc_err
 	}
 
 	append(&children, rc)
-	split_key := child_result.split_key
-	if was_rightmost {
-		append(&seps, split_key)
-		children[n] = child_result.new_page
-		append(&children, child_result.right_page)
-	} else {
-		idx := child_idx
-		if idx < 0 || idx >= n {
-			return {}, .Invalid_Page_Header
-		}
+	return seps, children, .None
+}
 
-		old_sep := seps[idx]
-		seps[idx] = split_key
-		children[idx] = child_result.new_page
-		nseps := make([dynamic][]u8, 0, len(seps) + 1, context.temp_allocator)
-		for s in seps[:idx + 1] {
-			append(&nseps, s)
-		}
-
-		append(&nseps, old_sep)
-		for s in seps[idx + 1:] {
-			append(&nseps, s)
-		}
-
-		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
-		for c in children[:idx + 1] {
-			append(&nchildren, c)
-		}
-
-		append(&nchildren, child_result.right_page)
-		for c in children[idx + 1:] {
-			append(&nchildren, c)
-		}
-
-		seps, children = nseps, nchildren
-		split_key = old_sep
-	}
-
-	if b_err := text_interior_build_from_sorted(curr.data, pid, seps[:], children[:]);
-	   b_err == .None {
-		update_row_count(t, curr.id, 1)
-		pager.mark_dirty(t.pager, curr.id)
-		return Text_Insert_Result {
-				new_page = new_page_num,
-				did_split = false,
-				right_page = 0,
-				split_key = nil,
-			},
-			.None
-	} else if b_err != .Page_Full {
-		return {}, b_err
-	}
-
+// split_text_halves rebuilds an overfull text interior in place as the left
+// half (byte-balanced via text_split_mid) and spills the right half to a
+// fresh page. Returns the upward split result.
+@(private = "file")
+split_text_halves :: proc(
+	t: ^Tree,
+	curr: ^Node,
+	seps: [][]u8,
+	children: []u32,
+	new_page_num: u32,
+) -> (
+	Text_Insert_Result,
+	Error,
+) {
+	pid := Page_Id(curr.id)
 	m := len(seps)
 	sizes := make([dynamic]int, 0, m, context.temp_allocator)
 	total := 0
@@ -461,6 +422,75 @@ text_absorb_child_split :: proc(
 			split_key = seps[mid],
 		},
 		.None
+}
+
+// text_absorb_child_split absorbs a split child into a text interior:
+// snapshot all pairs (temp copies — borrows die on rebuild), splice at the
+// proven child_idx+1 position (never a raw bound — same rule as the dense
+// absorb), rebuild; overflow splits the absorbed arrays directly.
+@(require_results)
+text_absorb_child_split :: proc(
+	t: ^Tree,
+	curr: ^Node,
+	child_result: ^Text_Insert_Result,
+	was_rightmost: bool,
+	child_idx: int,
+	new_page_num: u32,
+) -> (
+	Text_Insert_Result,
+	Error,
+) {
+	pid := Page_Id(curr.id)
+	n := get_cell_count(curr.data, curr.id)
+	seps, children, d_err := decode_text_interior(curr)
+	if d_err != .None {
+		return {}, d_err
+	}
+
+	split_key := child_result.split_key
+	if was_rightmost {
+		append(&seps, split_key)
+		children[n] = child_result.new_page
+		append(&children, child_result.right_page)
+	} else {
+		idx := child_idx
+		if idx < 0 || idx >= n {
+			return {}, .Invalid_Page_Header
+		}
+
+		old_sep := seps[idx]
+		seps[idx] = split_key
+		children[idx] = child_result.new_page
+		nseps := make([dynamic][]u8, 0, len(seps) + 1, context.temp_allocator)
+		append(&nseps, ..seps[:idx + 1])
+		append(&nseps, old_sep)
+		append(&nseps, ..seps[idx + 1:])
+
+		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
+		append(&nchildren, ..children[:idx + 1])
+		append(&nchildren, child_result.right_page)
+		append(&nchildren, ..children[idx + 1:])
+
+		seps, children = nseps, nchildren
+		split_key = old_sep
+	}
+
+	if b_err := text_interior_build_from_sorted(curr.data, pid, seps[:], children[:]);
+	   b_err == .None {
+		update_row_count(t, curr.id, 1)
+		pager.mark_dirty(t.pager, curr.id)
+		return Text_Insert_Result {
+				new_page = new_page_num,
+				did_split = false,
+				right_page = 0,
+				split_key = nil,
+			},
+			.None
+	} else if b_err != .Page_Full {
+		return {}, b_err
+	}
+
+	return split_text_halves(t, curr, seps[:], children[:], new_page_num)
 }
 
 // text_insert_into_interior descends, then repoints or absorbs. Mirrors
@@ -1282,6 +1312,22 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 	return result.new_page, .None
 }
 
+// finish_text_root_split grows the text root when a recursive insert split
+// it, then recounts. Mirrors finish_root_split (dense): the leaf fast path
+// below additionally recounts unconditionally.
+@(private = "file")
+finish_text_root_split :: proc(t: ^Tree, result: Text_Insert_Result) -> Error {
+	if result.did_split {
+		if _, s_err := text_split_interior_root(t, result); s_err != .None {
+			return s_err
+		}
+		if _, c_err := count_recursive(t, t.root); c_err != .None {
+			return c_err
+		}
+	}
+	return .None
+}
+
 // text_insert inserts one (text,rowid) in place (Direct mode, no COW).
 // Mirrors tree_insert: leaf fast-path, root split in place (root id is
 // stable — splits rebuild it as an interior), recursive absorb, recount.
@@ -1314,10 +1360,8 @@ text_insert :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 		if r_err != .None {
 			return r_err
 		}
-		if result.did_split {
-			if _, s_err := text_split_interior_root(t, result); s_err != .None {
-				return s_err
-			}
+		if f_err := finish_text_root_split(t, result); f_err != .None {
+			return f_err
 		}
 		if _, c_err := count_recursive(t, t.root); c_err != .None {
 			return c_err
@@ -1329,13 +1373,5 @@ text_insert :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 	if i_err != .None {
 		return i_err
 	}
-	if result.did_split {
-		if _, s_err := text_split_interior_root(t, result); s_err != .None {
-			return s_err
-		}
-		if _, c_err := count_recursive(t, t.root); c_err != .None {
-			return c_err
-		}
-	}
-	return .None
+	return finish_text_root_split(t, result)
 }

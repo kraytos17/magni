@@ -118,16 +118,65 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 	}
 }
 
+// Reverse_Search carries interactive reverse-search state across key
+// presses: the history cursor, miss/wrap flags, and the current match
+// (the line-buffer contents until the first hit).
+@(private = "file")
+Reverse_Search :: struct {
+	search_idx: int,
+	failed    : bool,
+	wrapped   : bool,
+	matched   : string,
+}
+
+// search_step runs one history lookup for query from `from`, recording a
+// hit into st (misses leave state untouched, so a failed wrap-around keeps
+// the prior miss flag). wrapped marks second-pass (wrap) hits.
+@(private = "file")
+search_step :: proc(
+	ed: ^Editor,
+	query: string,
+	from: int,
+	st: ^Reverse_Search,
+	wrapped: bool,
+) -> bool {
+	idx, found := history_search_prev(&ed.history, query, from)
+	if found {
+		st.failed = false
+		st.wrapped = wrapped
+		st.search_idx = idx
+		st.matched = ed.history.entries[idx]
+	}
+	return found
+}
+
+// query_pop_rune removes the last UTF-8 rune from a query builder (a
+// trailing byte 10xxxxxx continues the sequence started before it).
+@(private = "file")
+query_pop_rune :: proc(query: ^strings.Builder) {
+	q := strings.to_string(query^)
+	last := len(q)
+	for last > 0 {
+		last -= 1
+		if (q[last] & 0xC0) != 0x80 {
+			break
+		}
+	}
+
+	strings.builder_reset(query)
+	strings.write_string(query, q[:last])
+}
+
 @(private = "file")
 run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	query := strings.builder_make()
 	defer strings.builder_destroy(&query)
 
 	original := lb_to_string(lb, context.temp_allocator)
-	search_idx := len(ed.history.entries)
-	search_failed := false
-	search_wrapped := false
-	matched_entry := original
+	st := Reverse_Search {
+		search_idx = len(ed.history.entries),
+		matched    = original,
+	}
 	defer {
 		if ed.prev_search_rows > 0 {
 			fmt.fprintf(os.stdout, "\x1b[%dA", 1)
@@ -136,14 +185,14 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	}
 	for {
 		prompt_prefix := "(reverse-i-search)"
-		if search_failed {
+		if st.failed {
 			prompt_prefix = "(failed reverse-i-search)"
-		} else if search_wrapped {
+		} else if st.wrapped {
 			prompt_prefix = "(wrapped reverse-i-search)"
 		}
 
 		search_prompt := fmt.tprintf("%s`%s': ", prompt_prefix, strings.to_string(query))
-		render_search_overlay(ed, search_prompt, matched_entry)
+		render_search_overlay(ed, search_prompt, st.matched)
 		ev, ok := read_key(ed.term.fd)
 		if !ok {
 			break
@@ -151,76 +200,33 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 
 		#partial switch ev.key {
 		case .Enter:
-			if !search_failed && strings.builder_len(query) > 0 {
-				lb_set(lb, matched_entry)
+			if !st.failed && strings.builder_len(query) > 0 {
+				lb_set(lb, st.matched)
 			}
 			return
 		case .Escape, .Ctrl_C:
 			return
 		case .Ctrl_R:
 			if strings.builder_len(query) > 0 {
-				idx, found := history_search_prev(
-					&ed.history,
-					strings.to_string(query),
-					search_idx,
-				)
-				if found {
-					search_failed = false
-					search_wrapped = false
-					search_idx = idx
-					matched_entry = ed.history.entries[idx]
-				} else {
-					idx2, found2 := history_search_prev(
-						&ed.history,
-						strings.to_string(query),
-						len(ed.history.entries),
-					)
-					if found2 {
-						search_failed = false
-						search_wrapped = true
-						search_idx = idx2
-						matched_entry = ed.history.entries[idx2]
-					}
+				q := strings.to_string(query)
+				if !search_step(ed, q, st.search_idx, &st, false) {
+					search_step(ed, q, len(ed.history.entries), &st, true)
 				}
 			}
 		case .Char:
 			strings.write_rune(&query, ev.char)
-			search_wrapped = false
-			search_idx = len(ed.history.entries)
-			idx, found := history_search_prev(&ed.history, strings.to_string(query), search_idx)
-			if found {
-				search_failed = false
-				search_idx = idx
-				matched_entry = ed.history.entries[idx]
-			} else {
-				search_failed = true
+			st.wrapped = false
+			st.search_idx = len(ed.history.entries)
+			if !search_step(ed, strings.to_string(query), st.search_idx, &st, false) {
+				st.failed = true
 			}
 		case .Backspace:
 			if strings.builder_len(query) > 0 {
-				q := strings.to_string(query)
-				last := len(q)
-				for last > 0 {
-					last -= 1
-					if (q[last] & 0xC0) != 0x80 {
-						break
-					}
-				}
-
-				strings.builder_reset(&query)
-				strings.write_string(&query, q[:last])
-				search_wrapped = false
-				search_idx = len(ed.history.entries)
-				idx, found := history_search_prev(
-					&ed.history,
-					strings.to_string(query),
-					search_idx,
-				)
-				if found {
-					search_failed = false
-					search_idx = idx
-					matched_entry = ed.history.entries[idx]
-				} else {
-					search_failed = true
+				query_pop_rune(&query)
+				st.wrapped = false
+				st.search_idx = len(ed.history.entries)
+				if !search_step(ed, strings.to_string(query), st.search_idx, &st, false) {
+					st.failed = true
 				}
 			}
 		}

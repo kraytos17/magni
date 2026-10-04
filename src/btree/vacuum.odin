@@ -4,47 +4,36 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
-// tree_vacuum rebuilds the tree into fresh, densely packed pages and returns
-// the new root. The original pages are left untouched (COW-safe), so
-// time-travel snapshots remain readable; the old pages are reclaimed by the
-// next garbage-collection pass. It is an O(n) maintenance operation intended
-// for an explicit VACUUM, not for hot-path use.
-tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
-	handles := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
-	vc := vacuum_ctx {
-		t          = t,
-		leaf_empty = true,
-		handles    = &handles,
-	}
-
-	if e := tree_foreach(t, vacuum_collect_cb, &vc); e != .None {
-		return 0, e
-	}
-	if vc.failed {
+// vacuum_empty_root allocates a fresh empty slotdir leaf for vacuuming an
+// empty tree (the collect phase yielded nothing to rebuild).
+@(private = "file")
+vacuum_empty_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
+	page, a_err := pager.allocate_page(t.pager)
+	if a_err != .None {
 		return 0, .Page_Full
 	}
-	if !vc.leaf_empty {
-		if e := vacuum_finish_leaf(&vc); e != .None {
-			return 0, e
-		}
-	}
-	if len(handles) == 0 {
-		page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None {
-			return 0, .Page_Full
-		}
-		if !init_slot_leaf_page(page.data, page.page_num) {
-			pager.unpin_page(t.pager, page.page_num)
-			return 0, .Invalid_Page_Header
-		}
-
-		root := page.page_num
-		pager.unpin_page(t.pager, root)
-		return root, .None
+	if !init_slot_leaf_page(page.data, page.page_num) {
+		pager.unpin_page(t.pager, page.page_num)
+		return 0, .Invalid_Page_Header
 	}
 
-	// Build interior levels bottom-up. Each interior node holds cells for all
-	// children except the last, which becomes the rightmost pointer.
+	root = page.page_num
+	pager.unpin_page(t.pager, root)
+	return root, .None
+}
+
+// vacuum_build_interiors packs handle levels bottom-up into dense interiors
+// until one root remains. Each interior node holds cells for all children
+// except the last, which becomes the rightmost pointer. handles must be
+// non-empty (the caller routes the empty tree to vacuum_empty_root).
+@(private = "file")
+vacuum_build_interiors :: proc(
+	t: ^Tree,
+	handles: [dynamic]Node_Handle,
+) -> (
+	root: u32,
+	err: Error,
+) {
 	level := handles
 	for len(level) > 1 {
 		next := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
@@ -99,6 +88,36 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 		level = next
 	}
 	return level[0].id, .None
+}
+
+// tree_vacuum rebuilds the tree into fresh, densely packed pages and returns
+// the new root. The original pages are left untouched (COW-safe), so
+// time-travel snapshots remain readable; the old pages are reclaimed by the
+// next garbage-collection pass. It is an O(n) maintenance operation intended
+// for an explicit VACUUM, not for hot-path use.
+tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
+	handles := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
+	vc := vacuum_ctx {
+		t          = t,
+		leaf_empty = true,
+		handles    = &handles,
+	}
+
+	if e := tree_foreach(t, vacuum_collect_cb, &vc); e != .None {
+		return 0, e
+	}
+	if vc.failed {
+		return 0, .Page_Full
+	}
+	if !vc.leaf_empty {
+		if e := vacuum_finish_leaf(&vc); e != .None {
+			return 0, e
+		}
+	}
+	if len(handles) == 0 {
+		return vacuum_empty_root(t)
+	}
+	return vacuum_build_interiors(t, handles)
 }
 
 // Node_Handle identifies a packed node and the maximum key in its subtree,
@@ -276,37 +295,38 @@ text_leaf_chunk_bytes :: proc(texts: [][]u8, lo: int, hi: int) -> (total: int, p
 	return
 }
 
-// text_tree_vacuum rebuilds a text index into fresh, packed pages and
-// returns the new root. Mirrors tree_vacuum (collect in order, pack leaves
-// greedily, build interior levels bottom-up; originals untouched for COW
-// safety). Separators propagate verbatim as child maxima — no re-encoding,
-// no recomparison. O(n) maintenance for explicit VACUUM, not hot-path use.
-text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
-	texts := make([dynamic][]u8, 0, 64, context.temp_allocator)
-	rids := make([dynamic]types.Row_ID, 0, 64, context.temp_allocator)
-	if c_err := text_vacuum_collect(t, t.root, &texts, &rids); c_err != .None {
-		return 0, c_err
+// vacuum_empty_text_root allocates a fresh empty text leaf for vacuuming an
+// empty text index (the collect phase yielded nothing to rebuild).
+@(private = "file")
+vacuum_empty_text_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
+	page, a_err := pager.allocate_page(t.pager)
+	if a_err != .None {
+		return 0, .Page_Full
+	}
+	if !init_text_leaf_page(page.data, page.page_num) {
+		pager.unpin_page(t.pager, page.page_num)
+		return 0, .Invalid_Page_Header
 	}
 
+	root = page.page_num
+	pager.unpin_page(t.pager, root)
+	return root, .None
+}
+
+// vacuum_pack_text_leaves greedily packs collected (text, rowid) runs into
+// fresh leaves, extending each chunk while it measures to fit. A lone
+// oversize entry fails the build loudly (same as primary).
+@(private = "file")
+vacuum_pack_text_leaves :: proc(
+	t: ^Tree,
+	texts: [dynamic][]u8,
+	rids: [dynamic]types.Row_ID,
+) -> (
+	handles: [dynamic]Text_Node_Handle,
+	err: Error,
+) {
+	handles = make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
 	n := len(texts)
-	if n == 0 {
-		page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None {
-			return 0, .Page_Full
-		}
-		if !init_text_leaf_page(page.data, page.page_num) {
-			pager.unpin_page(t.pager, page.page_num)
-			return 0, .Invalid_Page_Header
-		}
-
-		root := page.page_num
-		pager.unpin_page(t.pager, root)
-		return root, .None
-	}
-
-	// Pack leaves greedily: extend each chunk while it measures to fit.
-	// A lone oversize entry fails the build loudly (same as primary).
-	handles := make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
 	i := 0
 	for i < n {
 		e := i
@@ -320,7 +340,7 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 
 		page, a_err := pager.allocate_page(t.pager)
 		if a_err != .None {
-			return 0, .Page_Full
+			return nil, .Page_Full
 		}
 		if b_err := text_build_from_sorted(
 			page.data,
@@ -329,13 +349,13 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 			rids[i:e + 1],
 		); b_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
-			return 0, b_err
+			return nil, b_err
 		}
 
 		max_key, m_err := text_make_key(texts[e], rids[e])
 		if m_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
-			return 0, m_err
+			return nil, m_err
 		}
 
 		page_id := page.page_num
@@ -343,11 +363,23 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 		append(&handles, Text_Node_Handle{id = page_id, max_key = max_key})
 		i = e + 1
 	}
+	return handles, .None
+}
 
-	// Build interior levels bottom-up. Chunk children [lo..hi] with
-	// separators keys[lo..<hi] (the last child becomes the rightmost);
-	// capacity is exact byte arithmetic — no trial builds. A lone child
-	// always fits (~16 bytes), so every chunk is non-empty.
+// vacuum_build_text_interiors packs text handle levels bottom-up until one
+// root remains. Chunk children [lo..hi] with separators keys[lo..<hi] (the
+// last child becomes the rightmost); capacity is exact byte arithmetic — no
+// trial builds. A lone child always fits (~16 bytes), so every chunk is
+// non-empty. handles must be non-empty (the caller routes the empty index
+// to vacuum_empty_text_root).
+@(private = "file")
+vacuum_build_text_interiors :: proc(
+	t: ^Tree,
+	handles: [dynamic]Text_Node_Handle,
+) -> (
+	root: u32,
+	err: Error,
+) {
 	level := handles
 	for len(level) > 1 {
 		next := make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
@@ -398,4 +430,28 @@ text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root:
 		level = next
 	}
 	return level[0].id, .None
+}
+
+// text_tree_vacuum rebuilds a text index into fresh, packed pages and
+// returns the new root. Mirrors tree_vacuum (collect in order, pack leaves
+// greedily, build interior levels bottom-up; originals untouched for COW
+// safety). Separators propagate verbatim as child maxima — no re-encoding,
+// no recomparison. O(n) maintenance for explicit VACUUM, not hot-path use.
+text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
+	texts := make([dynamic][]u8, 0, 64, context.temp_allocator)
+	rids := make([dynamic]types.Row_ID, 0, 64, context.temp_allocator)
+	if c_err := text_vacuum_collect(t, t.root, &texts, &rids); c_err != .None {
+		return 0, c_err
+	}
+
+	n := len(texts)
+	if n == 0 {
+		return vacuum_empty_text_root(t)
+	}
+
+	handles, h_err := vacuum_pack_text_leaves(t, texts, rids)
+	if h_err != .None {
+		return 0, h_err
+	}
+	return vacuum_build_text_interiors(t, handles)
 }

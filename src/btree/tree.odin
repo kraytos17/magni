@@ -394,88 +394,57 @@ insert_into_interior :: proc(
 	)
 }
 
-// handle_interior_child_split absorbs a split child: the left half keeps the
-// child's slot (with a new upper bound) and the right half gets a new entry.
-// The rightmost child (reachable only via right_ptr) is special-cased.
-@(private = "file", require_results)
-handle_interior_child_split :: proc(
-	t: ^Tree,
+// decode_interior_entries reads the current keys + children (including the
+// rightmost child, reachable only via right_ptr) through the layout vtable.
+@(private = "file")
+decode_interior_entries :: proc(
 	curr: ^Node,
-	child_result: ^Insert_COW_Result,
-	was_rightmost: bool,
-	child_idx: int,
-	new_page_num: u32,
 ) -> (
-	Insert_COW_Result,
-	Error,
+	keys: [dynamic]types.Row_ID,
+	children: [dynamic]u32,
+	err: Error,
 ) {
 	pid := Page_Id(curr.id)
 	n := get_cell_count(curr.data, curr.id)
-	keys := make([dynamic]types.Row_ID, 0, n + 1, context.temp_allocator)
-	children := make([dynamic]u32, 0, n + 2, context.temp_allocator)
+	keys = make([dynamic]types.Row_ID, 0, n + 1, context.temp_allocator)
+	children = make([dynamic]u32, 0, n + 2, context.temp_allocator)
 	for i in 0 ..< n {
 		k, k_err := curr.layout.vtable.key_at(curr.data, pid, i)
 		if k_err != .None {
-			return {}, k_err
+			return nil, nil, k_err
 		}
 
 		append(&keys, k)
 		c, c_err := curr.layout.vtable.child_at(curr.data, pid, i)
 		if c_err != .None {
-			return {}, c_err
+			return nil, nil, c_err
 		}
 		append(&children, c)
 	}
 
 	rc, rc_err := curr.layout.vtable.child_at(curr.data, pid, n)
 	if rc_err != .None {
-		return {}, rc_err
+		return nil, nil, rc_err
 	}
 
 	append(&children, rc)
-	insert_key := child_result.split_key
-	if was_rightmost {
-		append(&keys, insert_key)
-		children[n] = child_result.new_page
-		append(&children, child_result.right_page)
-	} else {
-		idx := child_idx
-		if idx < 0 || idx >= n {
-			return {}, .Invalid_Page_Header
-		}
+	return keys, children, .None
+}
 
-		old_sep := keys[idx]
-		keys[idx] = insert_key
-		children[idx] = child_result.new_page
-		nkeys := make([dynamic]types.Row_ID, 0, len(keys) + 1, context.temp_allocator)
-		append(&nkeys, ..keys[:idx + 1])
-		append(&nkeys, old_sep)
-		append(&nkeys, ..keys[idx + 1:])
-
-		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
-		append(&nchildren, ..children[:idx + 1])
-		append(&nchildren, child_result.right_page)
-		append(&nchildren, ..children[idx + 1:])
-
-		keys, children = nkeys, nchildren
-		insert_key = old_sep
-	}
-
-	if b_err := dense_build_from_sorted(curr.data, Page_Id(curr.id), keys[:], children[:]);
-	   b_err == .None {
-		update_row_count(t, curr.id, 1)
-		pager.mark_dirty(t.pager, curr.id)
-		return Insert_COW_Result {
-				new_page = new_page_num,
-				did_split = false,
-				right_page = 0,
-				split_key = 0,
-			},
-			.None
-	} else if b_err != .Page_Full {
-		return {}, b_err
-	}
-
+// split_interior_halves rebuilds an overfull interior in place as the left
+// half and spills the right half to a fresh page (COW: the original page
+// bytes are untouched until rebuild). Returns the upward split result.
+@(private = "file")
+split_interior_halves :: proc(
+	t: ^Tree,
+	curr: ^Node,
+	keys: []types.Row_ID,
+	children: []u32,
+	new_page_num: u32,
+) -> (
+	Insert_COW_Result,
+	Error,
+) {
 	m := len(keys)
 	mid := dense_split_mid(m)
 	if lb_err := dense_build_from_sorted(
@@ -519,6 +488,72 @@ handle_interior_child_split :: proc(
 		.None
 }
 
+// handle_interior_child_split absorbs a split child: the left half keeps the
+// child's slot (with a new upper bound) and the right half gets a new entry.
+// The rightmost child (reachable only via right_ptr) is special-cased.
+@(private = "file", require_results)
+handle_interior_child_split :: proc(
+	t: ^Tree,
+	curr: ^Node,
+	child_result: ^Insert_COW_Result,
+	was_rightmost: bool,
+	child_idx: int,
+	new_page_num: u32,
+) -> (
+	Insert_COW_Result,
+	Error,
+) {
+	n := get_cell_count(curr.data, curr.id)
+	keys, children, d_err := decode_interior_entries(curr)
+	if d_err != .None {
+		return {}, d_err
+	}
+
+	insert_key := child_result.split_key
+	if was_rightmost {
+		append(&keys, insert_key)
+		children[n] = child_result.new_page
+		append(&children, child_result.right_page)
+	} else {
+		idx := child_idx
+		if idx < 0 || idx >= n {
+			return {}, .Invalid_Page_Header
+		}
+
+		old_sep := keys[idx]
+		keys[idx] = insert_key
+		children[idx] = child_result.new_page
+		nkeys := make([dynamic]types.Row_ID, 0, len(keys) + 1, context.temp_allocator)
+		append(&nkeys, ..keys[:idx + 1])
+		append(&nkeys, old_sep)
+		append(&nkeys, ..keys[idx + 1:])
+
+		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
+		append(&nchildren, ..children[:idx + 1])
+		append(&nchildren, child_result.right_page)
+		append(&nchildren, ..children[idx + 1:])
+
+		keys, children = nkeys, nchildren
+		insert_key = old_sep
+	}
+
+	if b_err := dense_build_from_sorted(curr.data, Page_Id(curr.id), keys[:], children[:]);
+	   b_err == .None {
+		update_row_count(t, curr.id, 1)
+		pager.mark_dirty(t.pager, curr.id)
+		return Insert_COW_Result {
+				new_page = new_page_num,
+				did_split = false,
+				right_page = 0,
+				split_key = 0,
+			},
+			.None
+	} else if b_err != .Page_Full {
+		return {}, b_err
+	}
+	return split_interior_halves(t, curr, keys[:], children[:], new_page_num)
+}
+
 @(private = "file")
 rowid_exists :: proc(
 	data: []u8,
@@ -539,6 +574,26 @@ rowid_exists :: proc(
 
 	rowid, ok2 := cell.get_rowid(data, int(ptr))
 	return ok2 && rowid == target_rowid
+}
+
+// finish_root_split grows the root when a recursive insert split it, then
+// recounts. Shared by the leaf-root fast path and the general path below
+// (which differ only in what surrounds it: duplicate checks and an
+// unconditional recount on the leaf path).
+@(private = "file")
+finish_root_split :: proc(t: ^Tree, result: Insert_COW_Result) -> Error {
+	if result.did_split {
+		if s_err := split_interior_root(
+			t,
+			{did_split = true, right_page = result.right_page, split_key = result.split_key},
+		); s_err != .None {
+			return s_err
+		}
+		if _, c_err := count_recursive(t, t.root); c_err != .None {
+			return c_err
+		}
+	}
+	return .None
 }
 
 // Insert a row into the b-tree. Handles root splits transparently.
@@ -563,13 +618,8 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 		if r_err != .None {
 			return r_err
 		}
-		if result.did_split {
-			if s_err := split_interior_root(
-				t,
-				{did_split = true, right_page = result.right_page, split_key = result.split_key},
-			); s_err != .None {
-				return s_err
-			}
+		if f_err := finish_root_split(t, result); f_err != .None {
+			return f_err
 		}
 		if _, c_err := count_recursive(t, t.root); c_err != .None {
 			return c_err
@@ -581,18 +631,7 @@ tree_insert :: proc(t: ^Tree, rowid: types.Row_ID, values: []types.Value) -> Err
 	if i_err != .None {
 		return i_err
 	}
-	if result.did_split {
-		if s_err := split_interior_root(
-			t,
-			{did_split = true, right_page = result.right_page, split_key = result.split_key},
-		); s_err != .None {
-			return s_err
-		}
-		if _, c_err := count_recursive(t, t.root); c_err != .None {
-			return c_err
-		}
-	}
-	return .None
+	return finish_root_split(t, result)
 }
 
 @(private = "file")
@@ -1032,6 +1071,81 @@ tree_verify_if_enabled :: proc(t: ^Tree) -> bool {
 	return tree_verify(t)
 }
 
+// verify_leaf_keys checks one leaf's keys are non-decreasing and within
+// [min_k, max_k]. Cold path (explicit VERIFY only).
+@(private = "file", cold)
+verify_leaf_keys :: proc(
+	node: Node,
+	nid: Page_Id,
+	cell_count: int,
+	min_k: types.Row_ID,
+	max_k: types.Row_ID,
+) -> bool {
+	prev := min_k
+	for i in 0 ..< cell_count {
+		rowid, r_err := node.layout.vtable.key_at(node.data, nid, i)
+		if r_err != .None {
+			log.debugf("Unreadable leaf key at slot %d", i)
+			return false
+		}
+		if rowid < prev {
+			log.debugf("Leaf key disorder: %d came after %d", rowid, prev)
+			return false
+		}
+		if rowid > max_k {
+			log.debugf("Leaf key %d > max %d", rowid, max_k)
+			return false
+		}
+		prev = rowid
+	}
+	return true
+}
+
+// verify_interior_children checks one interior's separator bounds and
+// recurses into each child (plus the rightmost) with narrowed ranges.
+@(private = "file", cold)
+verify_interior_children :: proc(
+	t: ^Tree,
+	node: Node,
+	nid: Page_Id,
+	cell_count: int,
+	page_id: u32,
+	min_k: types.Row_ID,
+	max_k: types.Row_ID,
+	depth: int,
+	visited: ^map[u32]bool,
+) -> bool {
+	prev_k := min_k
+	for i in 0 ..< cell_count {
+		child, c_err := node.layout.vtable.child_at(node.data, nid, i)
+		if c_err != .None {
+			log.debugf("Corrupt interior slot %d", i)
+			return false
+		}
+
+		key, k_err := node.layout.vtable.key_at(node.data, nid, i)
+		if k_err != .None {
+			log.debugf("Unreadable interior key at slot %d", i)
+			return false
+		}
+		if key < prev_k || key > max_k {
+			log.debugf("Interior key %d out of bounds [%d, %d]", key, prev_k, max_k)
+			return false
+		}
+		if !verify_recursive(t, child, prev_k, key, depth + 1, visited) {
+			return false
+		}
+		prev_k = key
+	}
+
+	rightmost, r_err := node.layout.vtable.child_at(node.data, nid, cell_count)
+	if r_err != .None {
+		log.debugf("Unreadable rightmost child on page %d", page_id)
+		return false
+	}
+	return verify_recursive(t, rightmost, prev_k, max_k, depth + 1, visited)
+}
+
 @(private = "file", cold)
 verify_recursive :: proc(
 	t: ^Tree,
@@ -1073,55 +1187,20 @@ verify_recursive :: proc(
 	nid := Page_Id(page_id)
 	cell_count := get_cell_count(node.data, page_id)
 	if is_leaf(node) {
-		prev := min_k
-		for i in 0 ..< cell_count {
-			rowid, r_err := node.layout.vtable.key_at(node.data, nid, i)
-			if r_err != .None {
-				log.debugf("Unreadable leaf key at slot %d", i)
-				return false
-			}
-			if rowid < prev {
-				log.debugf("Leaf key disorder: %d came after %d", rowid, prev)
-				return false
-			}
-			if rowid > max_k {
-				log.debugf("Leaf key %d > max %d", rowid, max_k)
-				return false
-			}
-			prev = rowid
-		}
-		return true
+		return verify_leaf_keys(node, nid, cell_count, min_k, max_k)
 	}
 
-	prev_k := min_k
-	for i in 0 ..< cell_count {
-		child, c_err := node.layout.vtable.child_at(node.data, nid, i)
-		if c_err != .None {
-			log.debugf("Corrupt interior slot %d", i)
-			return false
-		}
-
-		key, k_err := node.layout.vtable.key_at(node.data, nid, i)
-		if k_err != .None {
-			log.debugf("Unreadable interior key at slot %d", i)
-			return false
-		}
-		if key < prev_k || key > max_k {
-			log.debugf("Interior key %d out of bounds [%d, %d]", key, prev_k, max_k)
-			return false
-		}
-		if !verify_recursive(t, child, prev_k, key, depth + 1, visited) {
-			return false
-		}
-		prev_k = key
-	}
-
-	rightmost, r_err := node.layout.vtable.child_at(node.data, nid, cell_count)
-	if r_err != .None {
-		log.debugf("Unreadable rightmost child on page %d", page_id)
-		return false
-	}
-	return verify_recursive(t, rightmost, prev_k, max_k, depth + 1, visited)
+	return verify_interior_children(
+		t,
+		node,
+		nid,
+		cell_count,
+		page_id,
+		min_k,
+		max_k,
+		depth,
+		visited,
+	)
 }
 
 collect_pages :: proc(t: ^Tree, root: u32, pages: ^map[u32]bool) {

@@ -26,36 +26,7 @@ repl :: proc(database: ^db.Database) {
 		return
 	}
 
-	ed.complete_fn = proc(word: string, user_data: rawptr, allocator: mem.Allocator) -> []string {
-		database_ptr := (^db.Database)(user_data)
-		st := db.Schema_Tree(database_ptr)
-		tables := schema.list_tables(&st, allocator)
-		if dot_pos := strings.last_index(word, "."); dot_pos >= 0 {
-			tbl_name := word[:dot_pos]
-			col_prefix := word[dot_pos + 1:]
-			for tbl in tables {
-				if tbl.name == tbl_name {
-					cands := make([dynamic]string, allocator)
-					for col in tbl.columns {
-						if strings.has_prefix(col.name, col_prefix) {
-							append(&cands, fmt.tprintf("%s.%s", tbl_name, col.name))
-						}
-					}
-					return cands[:]
-				}
-			}
-			return nil
-		}
-
-		cands := make([dynamic]string, allocator)
-		for tbl in tables {
-			if strings.has_prefix(tbl.name, word) {
-				append(&cands, tbl.name)
-			}
-		}
-		return cands[:]
-	}
-
+	ed.complete_fn = complete_sql_ident
 	ed.complete_ud = database
 	defer linedit.destroy(&ed)
 
@@ -89,13 +60,65 @@ repl :: proc(database: ^db.Database) {
 		strings.write_string(&query_buffer, line)
 		strings.write_byte(&query_buffer, '\n')
 		if strings.has_suffix(trimmed, ";") {
-			full_sql := strings.to_string(query_buffer)
-			linedit.history_add(&ed.history, strings.trim_space(full_sql))
-			if exec_err := db.execute(database, full_sql); exec_err != .None {
-				log.errorf("%s", db.db_error_string(exec_err))
-			}
-			strings.builder_reset(&query_buffer)
+			repl_submit(database, &ed, &query_buffer, line, trimmed)
 		}
+	}
+}
+
+// complete_sql_ident completes table names, or table-qualified column
+// names after a dot, from the live schema. Stateless by design: the
+// database arrives via user_data (the linedit completion contract).
+@(private = "file")
+complete_sql_ident :: proc(word: string, user_data: rawptr, allocator: mem.Allocator) -> []string {
+	database_ptr := (^db.Database)(user_data)
+	st := db.Schema_Tree(database_ptr)
+	tables := schema.list_tables(&st, allocator)
+	if dot_pos := strings.last_index(word, "."); dot_pos >= 0 {
+		tbl_name := word[:dot_pos]
+		col_prefix := word[dot_pos + 1:]
+		for tbl in tables {
+			if tbl.name == tbl_name {
+				cands := make([dynamic]string, allocator)
+				for col in tbl.columns {
+					if strings.has_prefix(col.name, col_prefix) {
+						append(&cands, fmt.tprintf("%s.%s", tbl_name, col.name))
+					}
+				}
+				return cands[:]
+			}
+		}
+		return nil
+	}
+
+	cands := make([dynamic]string, allocator)
+	for tbl in tables {
+		if strings.has_prefix(tbl.name, word) {
+			append(&cands, tbl.name)
+		}
+	}
+	return cands[:]
+}
+
+// repl_submit appends a line to the pending statement; a ;-terminated line
+// runs the buffered SQL (history first), reports errors canonically, and
+// resets the buffer for the next statement.
+@(private = "file")
+repl_submit :: proc(
+	database: ^db.Database,
+	ed: ^linedit.Editor,
+	query_buffer: ^strings.Builder,
+	line: string,
+	trimmed: string,
+) {
+	strings.write_string(query_buffer, line)
+	strings.write_byte(query_buffer, '\n')
+	if strings.has_suffix(trimmed, ";") {
+		full_sql := strings.to_string(query_buffer^)
+		linedit.history_add(&ed.history, strings.trim_space(full_sql))
+		if exec_err := db.execute(database, full_sql); exec_err != .None {
+			log.errorf("%s", db.db_error_string(exec_err))
+		}
+		strings.builder_reset(query_buffer)
 	}
 }
 

@@ -105,6 +105,112 @@ is_alias :: proc(p: ^Parser) -> bool {
 	return peek(p).type == .IDENTIFIER && peek(p).lexeme != "("
 }
 
+// parse_using_columns parses USING (c1, c2, ...) into an AND of
+// left.c = right.c equality conditions (nil root is impossible here:
+// empty column lists fail).
+@(private = "file")
+parse_using_columns :: proc(
+	p: ^Parser,
+	left: string,
+	right: string,
+	alloc: mem.Allocator,
+) -> (
+	cl: Where_Clause,
+	ok: bool,
+) {
+	if !match(p, .LPAREN) {
+		return {}, false
+	}
+
+	cols := make([dynamic]string, alloc)
+	for {
+		col, col_ok := parse_identifier(p, alloc)
+		if !col_ok {
+			return {}, false
+		}
+
+		append(&cols, col)
+		if match(p, .RPAREN) {
+			break
+		}
+		if !match(p, .COMMA) {
+			return {}, false
+		}
+	}
+	if len(cols) == 0 {
+		return {}, false
+	}
+
+	root: ^Where_Node = nil
+	for i in 0 ..< len(cols) {
+		c := cols[i]
+		left_col := strings.concatenate({left, ".", c}, alloc)
+		right_col := strings.concatenate({right, ".", c}, alloc)
+		cond := Condition {
+			column   = left_col,
+			operator = .EQUALS,
+			rhs      = right_col,
+		}
+
+		node := new(Where_Node, alloc)
+		node^ = Where_Node {
+			kind = .COND,
+			cond = cond,
+		}
+		if i == 0 {
+			root = node
+		} else {
+			children := make([dynamic]^Where_Node, alloc)
+			append(&children, root)
+			append(&children, node)
+
+			wrapper := new(Where_Node, alloc)
+			wrapper^ = Where_Node {
+				kind     = .AND,
+				children = children,
+			}
+			root = wrapper
+		}
+	}
+	for c in cols {
+		delete(c, alloc)
+	}
+
+	delete(cols)
+	return Where_Clause{root = root}, true
+}
+
+// parse_join_condition parses the trailing ON/USING clause of one JOIN.
+// Absent clauses fail only when required (elsewhere the join is
+// cross-like); either keyword parses the same in both modes.
+@(private = "file")
+parse_join_condition :: proc(
+	p: ^Parser,
+	left_alias: string,
+	right_alias: string,
+	allocator: mem.Allocator,
+	required: bool,
+) -> (
+	on_cl: Maybe(Where_Clause),
+	ok: bool,
+) {
+	if match(p, .ON) {
+		on_cl, ok = parse_where_clause(p, allocator)
+		if !ok {
+			return nil, false
+		}
+		return on_cl, true
+	}
+	if match(p, .USING) {
+		on_cl, ok = parse_using_columns(p, left_alias, right_alias, allocator)
+		if !ok {
+			return nil, false
+		}
+		return on_cl, true
+	}
+	return nil, !required
+}
+
 @(private = "file")
 parse_single_join :: proc(
 	p: ^Parser,
@@ -128,109 +234,15 @@ parse_single_join :: proc(
 		}
 	}
 
-	parse_using := proc(
-		p: ^Parser,
-		left: string,
-		right: string,
-		alloc: mem.Allocator,
-	) -> (
-		cl: Where_Clause,
-		ok: bool,
-	) {
-		if !match(p, .LPAREN) {
-			return {}, false
-		}
-
-		cols := make([dynamic]string, alloc)
-		for {
-			col, col_ok := parse_identifier(p, alloc)
-			if !col_ok {
-				return {}, false
-			}
-
-			append(&cols, col)
-			if match(p, .RPAREN) {
-				break
-			}
-			if !match(p, .COMMA) {
-				return {}, false
-			}
-		}
-		if len(cols) == 0 {
-			return {}, false
-		}
-
-		root: ^Where_Node = nil
-		for i in 0 ..< len(cols) {
-			c := cols[i]
-			left_col := strings.concatenate({left, ".", c}, alloc)
-			right_col := strings.concatenate({right, ".", c}, alloc)
-			cond := Condition {
-				column   = left_col,
-				operator = .EQUALS,
-				rhs      = right_col,
-			}
-
-			node := new(Where_Node, alloc)
-			node^ = Where_Node {
-				kind = .COND,
-				cond = cond,
-			}
-			if i == 0 {
-				root = node
-			} else {
-				children := make([dynamic]^Where_Node, alloc)
-				append(&children, root)
-				append(&children, node)
-
-				wrapper := new(Where_Node, alloc)
-				wrapper^ = Where_Node {
-					kind     = .AND,
-					children = children,
-				}
-				root = wrapper
-			}
-		}
-		for c in cols {
-			delete(c, alloc)
-		}
-
-		delete(cols)
-		return Where_Clause{root = root}, true
+	cond_cl, cond_ok := parse_join_condition(p, left_alias, right_alias, allocator, on_required)
+	if !cond_ok {
+		return {}, false
 	}
-
-	on_cl: Maybe(Where_Clause)
-	if on_required {
-		if match(p, .ON) {
-			on_cl, ok = parse_where_clause(p, allocator)
-			if !ok {
-				return {}, false
-			}
-		} else if match(p, .USING) {
-			on_cl, ok = parse_using(p, left_alias, right_alias, allocator)
-			if !ok {
-				return {}, false
-			}
-		} else {
-			return {}, false
-		}
-	} else if match(p, .ON) {
-		on_cl, ok = parse_where_clause(p, allocator)
-		if !ok {
-			return {}, false
-		}
-	} else if match(p, .USING) {
-		on_cl, ok = parse_using(p, left_alias, right_alias, allocator)
-		if !ok {
-			return {}, false
-		}
-	}
-
 	return Join_Clause {
 			join_type = join_type,
 			source = js.source,
 			alias = js.alias,
-			on_clause = on_cl,
+			on_clause = cond_cl,
 		},
 		true
 }

@@ -33,27 +33,29 @@ Skip_Index :: struct {
 	root: u32,
 }
 
-build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
-	entries := make([dynamic]Skip_Entry, context.temp_allocator)
-	defer delete(entries)
-
+// skip_collect_entries walks every leaf, accumulating (page, min, max) zone
+// entries for col_index. Owns its cursor end to end (open, walk, destroy),
+// so callers hold no cursor state across the later sort/merge/write steps.
+@(private = "file")
+skip_collect_entries :: proc(t: ^Tree, col_index: int, entries: ^[dynamic]Skip_Entry) -> Error {
 	cursor, c_err := cursor_start(t, context.temp_allocator)
 	if c_err != .None {
-		return {}, c_err
+		return c_err
 	}
-	defer cursor_destroy(&cursor)
 
+	defer cursor_destroy(&cursor)
 	acc := Skip_Accumulator{}
 	for cursor.is_valid {
 		item := cursor.path[cursor.depth - 1]
 		page_id := item.page_id
 		node, n_err := load_node(t, page_id)
 		if n_err != .None {
-			return {}, n_err
+			return n_err
 		}
 		if !is_leaf(node) {
 			unpin_node(t, node)
-			cursor_advance(&cursor); continue
+			cursor_advance(&cursor)
+			continue
 		}
 
 		cell_count := get_cell_count(node.data, page_id)
@@ -66,30 +68,21 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 		min_val, max_val := page_int_range(t, node, page_id, cell_count, col_index)
 		unpin_node(t, node)
 		if min_val <= max_val {
-			accumulator_add(&acc, page_id, min_val, max_val, &entries)
+			accumulator_add(&acc, page_id, min_val, max_val, entries)
 		}
 		cursor_advance(&cursor)
 	}
 
-	accumulator_flush(&acc, &entries)
-	if len(entries) == 0 {
-		return {}, .None
-	}
+	accumulator_flush(&acc, entries)
+	return .None
+}
 
-	sort.quick_sort_proc(entries[:], proc(a, b: Skip_Entry) -> int {
-		if a.min_int < b.min_int {
-			return -1
-		}
-		if a.min_int > b.min_int {
-			return 1
-		}
-		return 0
-	})
-
-	// A page holds at most MAX_SKIP_ENTRIES zones. Merge adjacent zones until
-	// the set fits: widening a zone's range keeps query_skip_index_range a
-	// safe superset window (rows are still filtered afterwards); only pruning
-	// granularity drops. Pairs merge left-first, preserving min-sorted order.
+// skip_merge_to_fit pairwise-merges min-sorted zones left-first until the
+// set fits one skip page, returning the surviving count. Widening a zone's
+// range keeps query_skip_index_range a safe superset window (rows are still
+// filtered afterwards); only pruning granularity drops.
+@(private = "file")
+skip_merge_to_fit :: proc(entries: []Skip_Entry) -> int {
 	n := len(entries)
 	for n > MAX_SKIP_ENTRIES {
 		out := 0
@@ -113,6 +106,30 @@ build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
 		}
 		n = out
 	}
+	return n
+}
+
+build_skip_index :: proc(t: ^Tree, col_index: int) -> (Skip_Index, Error) {
+	entries := make([dynamic]Skip_Entry, context.temp_allocator)
+	defer delete(entries)
+	if c_err := skip_collect_entries(t, col_index, &entries); c_err != .None {
+		return {}, c_err
+	}
+	if len(entries) == 0 {
+		return {}, .None
+	}
+
+	sort.quick_sort_proc(entries[:], proc(a, b: Skip_Entry) -> int {
+		if a.min_int < b.min_int {
+			return -1
+		}
+		if a.min_int > b.min_int {
+			return 1
+		}
+		return 0
+	})
+
+	n := skip_merge_to_fit(entries[:])
 	return write_skip_page(t, entries[:n], col_index)
 }
 
