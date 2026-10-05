@@ -9,6 +9,12 @@ import "src:schema"
 import "src:snapshot"
 import "src:types"
 
+// execute runs one SQL statement (any type) against db. Takes the shared
+// lock for reads, the exclusive lock for writes; TRANSACTION statements
+// dispatch before execution. Successful writes run WAL/snapshot bookkeeping
+// (maybe_snapshot) and publish their schema root unless the statement
+// deferred it (in-txn DML staging, AS OF). SELECT output is rendered to
+// stdout here — use query when you want the rows back instead.
 execute :: proc(db: ^Database, sql: string) -> DB_Error {
 	db_check(db) or_return
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
@@ -140,7 +146,9 @@ snapshot_op :: proc(stmt: parser.Statement) -> snapshot.Snapshot_Operation {
 
 // maybe_snapshot runs WAL + snapshot bookkeeping for a successful write:
 // batch counting, WAL framing, periodic manifest snapshots, and commit.
-// No-op inside transactions or under AS OF (mirrors the inline guards).
+// No-op inside transactions (txn owns its own commit) or under AS OF
+// (read-only view) — the same conditions the execute tail uses inline to
+// decide root publication.
 @(private = "file")
 maybe_snapshot :: proc(db: ^Database, stmt: parser.Statement, ctx: Exec_Ctx) {
 	if db.txn_state != .None || ctx.as_of_override {
@@ -175,6 +183,11 @@ Query_Result :: struct {
 	err      : DB_Error,
 }
 
+// query runs a read-only statement (SELECT or compound) and returns the
+// rows instead of rendering them. Always takes the shared lock — writes,
+// DDL, and TRANSACTION statements are rejected with .Not_Supported (use
+// execute for those). AS OF is honored. Output slices alias temp allocator
+// memory: consume before the next call.
 query :: proc(db: ^Database, sql: string) -> Query_Result {
 	r := Query_Result{}
 	if err := db_check(db); err != .None {

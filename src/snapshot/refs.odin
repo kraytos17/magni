@@ -6,17 +6,38 @@ import "core:time"
 import "src:pager"
 import "src:types"
 
+// Named refs (branches/tags) plus the restore undo log share one page:
+//
+//	[MAGIC "MAGNIREFS"][u32 entry count][u32 log_count][u32 log_next]
+//	[64-slot ring of Ref_Log_Entry at REFS_LOG_OFFSET]
+//	[packed Ref_Entry + name bytes...]
+//
+// Ref_Kind marks a ref as BRANCH (MAIN_REF — the commit/restore target) or
+// TAG. log_push records the displaced MAIN id on every restore so
+// rollforward can move back; the ring holds the last 64 restores.
+//
+// NOTE: the entry scan starts right after the header counters (offset 21),
+// which overlaps the ring region at [24, ...). REFS_ENTRIES_OFFSET names
+// the intended post-ring base but nothing uses it yet — see the overlap
+// finding (restore corrupts entry 1 and appends a duplicate). Do not treat
+// the current packing as a stable wire contract until that is fixed.
 REFS_MAGIC          :: "MAGNIREFS"
 REFS_LOG_OFFSET     :: 24
 REFS_LOG_SIZE       :: 64 * size_of(Ref_Log_Entry)
 REFS_ENTRIES_OFFSET :: REFS_LOG_OFFSET + REFS_LOG_SIZE
 MAX_LOG_ENTRIES     :: 64
 
+// Ref_Kind distinguishes branch refs (move on commit/restore) from tag
+// refs (fixed labels).
 Ref_Kind :: enum u8 {
 	BRANCH = 0,
 	TAG    = 1,
 }
 
+// Ref_Entry is one named ref: hash of the name (first-pass match),
+// snapshot it points at, name length + kind/protection bits, retention
+// hints (max_age_ms/min_to_keep), then the name bytes. #packed: memcpy'd
+// straight into the page.
 Ref_Entry :: struct #packed #simple {
 	name_hash   : u64,
 	snapshot_id : u64,
@@ -27,13 +48,18 @@ Ref_Entry :: struct #packed #simple {
 	min_to_keep : u32,
 }
 
+// Ref_Log_Entry is one undo-log slot: the MAIN id a restore displaced, with
+// its timestamp. Fixed 16 bytes so the ring indexes by slot.
 Ref_Log_Entry :: struct #packed {
 	snapshot_id: u64,
 	timestamp  : u64,
 }
 
+// MAIN_REF is the branch commit/restore/rollforward all move.
 MAIN_REF :: "main"
 
+// create_refs_page allocates and initializes an empty refs page (magic +
+// zero entry count), unpinned and dirty on return. 0 on allocation failure.
 create_refs_page :: proc(p: ^pager.Pager) -> u32 {
 	page, err := pager.allocate_page(p)
 	if err != .None {
@@ -49,6 +75,10 @@ create_refs_page :: proc(p: ^pager.Pager) -> u32 {
 	return page.page_num
 }
 
+// set_ref upserts the named ref: hash match updates snapshot/kind/flags
+// in place, otherwise the entry is appended (false when the page is full —
+// nothing is written). Matches on name_hash alone (no byte compare), so a
+// 64-bit hash collision would steal the name; get_ref re-checks bytes.
 set_ref :: proc(
 	p: ^pager.Pager,
 	refs_page: u32,
@@ -106,6 +136,10 @@ set_ref :: proc(
 	return true
 }
 
+// get_ref returns the snapshot id a ref points at. Hash pre-filters, but
+// the stored name bytes decide (a different name with the same hash
+// misses). Page 0, unreadable pages, bad magic, and absent names all read
+// as (0, false).
 get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: u64, found: bool) {
 	if refs_page == 0 {
 		return 0, false
@@ -137,6 +171,9 @@ get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: 
 	return 0, false
 }
 
+// list_refs returns the page's raw entries (hash, snapshot, flags — not
+// name strings) under allocator. nil on page 0, unreadable pages, or bad
+// magic.
 @(private = "file")
 list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocator) -> []Ref_Entry {
 	if refs_page == 0 {
@@ -165,6 +202,11 @@ list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocato
 	return entries
 }
 
+// log_push records snapshot_id (the MAIN id a restore displaced) in the
+// ring with the current timestamp, advancing log_next modulo
+// MAX_LOG_ENTRIES. Past 64 entries the oldest is overwritten (count stays
+// capped) — rollforward history is bounded, not an error. False only on
+// unreadable pages or bad magic.
 log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
 	page, err := pager.get_page(p, refs_page)
 	if err != .None {
@@ -195,6 +237,10 @@ log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
 	return true
 }
 
+// log_pop removes and returns the most recent log entry (LIFO — the last
+// restore's displaced id, which is what rollforward moves MAIN back to).
+// ok=false on an empty log (count 0), unreadable pages, or bad magic. The
+// slot bytes are left in place; only the count drops.
 log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool) {
 	page, err := pager.get_page(p, refs_page)
 	if err != .None {
@@ -227,6 +273,10 @@ log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool)
 	return entry.snapshot_id, true
 }
 
+// log_read_range returns up to count log entries starting at logical index
+// start_idx (0 = oldest retained), oldest first, under allocator. Negative
+// starts clamp to 0; overruns truncate; empty log or page 0 returns nil.
+// Logical order accounts for the ring wrap (oldest slot need not be slot 0).
 @(private = "file")
 log_read_range :: proc(
 	p: ^pager.Pager,

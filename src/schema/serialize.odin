@@ -1,3 +1,13 @@
+// Column-list persistence: encodes []types.Column into the versioned blob
+// stored in a schema row (columns_blob) and decodes it back.
+//
+// Layout: [0xFE marker][version] then a varint column count, then per
+// column: varint name len, name bytes, one packed flags byte (type in the
+// low 3 bits, not-null/pk/check-present/default-present as bits), then the
+// optional default value followed by the optional check expression when
+// their bits are set. Decoding validates marker, version, and every length
+// against the blob, returning nil/false on any mismatch rather than a
+// partial list.
 package schema
 
 import "core:encoding/endian"
@@ -8,6 +18,9 @@ import "src:util/varint"
 COL_BLOB_MARKER  :: 0xFE
 COL_BLOB_VERSION :: 1
 
+// serialize_columns_to_blob encodes a column list per the layout above.
+// The size estimate and the writes must agree (no length prefix for the
+// blob itself) — caller stores the returned slice into a schema row.
 serialize_columns_to_blob :: proc(
 	columns: []types.Column,
 	allocator := context.allocator,
@@ -71,6 +84,11 @@ serialize_columns_to_blob :: proc(
 	return blob
 }
 
+// deserialize_columns decodes a blob produced by serialize_columns_to_blob
+// into allocator-owned columns (names/check expressions cloned). Returns
+// nil on any malformed input: wrong marker/version, zero or truncated
+// count, bad name/check length, or an undecodable default — never a
+// partially initialized list.
 deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
 	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER {
 		return nil
@@ -172,6 +190,10 @@ serialize_value_to_blob :: proc(dest: []u8, offset: ^int, val: types.Value) {
 	}
 }
 
+// deserialize_value_from_blob reads one value written by
+// serialize_value_to_blob (same wire format: [type_byte][payload]), checks
+// every length against src, advances offset, and clones TEXT/BLOB payloads
+// into allocator. ok=false on a truncated buffer or unknown type byte.
 @(private = "file")
 deserialize_value_from_blob :: proc(
 	src: []u8,

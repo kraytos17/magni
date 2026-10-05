@@ -19,6 +19,11 @@ Reclaim_Decision :: enum u8 {
 	Blocked_Active_Txn,
 }
 
+// reclaim_decision gates a sweep: no snapshots yet (.Empty_No_Snapshots),
+// an active txn (.Blocked_Active_Txn — uncommitted COW pages belong to no
+// snapshot live set, so sweeping would free them mid-txn), else .Proceed.
+// Blocked/empty callers warn and no-op rather than error (see
+// Reclaim_Decision).
 @(private = "file")
 reclaim_decision :: proc(db: ^Database) -> Reclaim_Decision {
 	if db.latest_snapshot == 0 {
@@ -30,6 +35,9 @@ reclaim_decision :: proc(db: ^Database) -> Reclaim_Decision {
 	return .Proceed
 }
 
+// snapshot_diff prints a table of per-table root changes between two
+// snapshots (taken from the latest snapshot's manifest). Read lock held
+// for the whole call; names are heap-allocated and freed before return.
 snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_shared_lock(&db.mu)
@@ -84,6 +92,10 @@ snapshot_diff :: proc(db: ^Database, older_id: u64, newer_id: u64) -> DB_Error {
 	return .None
 }
 
+// snapshot_tag attaches a human-readable tag to a snapshot's header page.
+// .Snapshot_Not_Found for an id absent from the index. Marks the page
+// dirty without framing a WAL txn: the write reaches disk on the next
+// eviction writeback or checkpoint.
 snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
@@ -96,6 +108,11 @@ snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> DB_Error {
 	return .None
 }
 
+// snapshot_restore points the database at an earlier snapshot: pushes the
+// current MAIN ref onto the undo log, repoints MAIN, and adopts the
+// snapshot's schema root + latest_snapshot, then persists the header
+// through the WAL. Data pages are untouched — restore is a root swap, so
+// subsequent writes COW as usual. .Snapshot_Not_Found for unknown ids.
 snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
@@ -127,6 +144,12 @@ snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> DB_Error {
 	return .None
 }
 
+// rollforward undoes a snapshot_restore: pops the undo log (where restore
+// pushed the snapshot it displaced) and moves MAIN back to it, adopting
+// that snapshot's schema root and persisting the header through the WAL.
+// .Nothing_To_Roll when the log is empty or the entry equals the current
+// ref; .Snapshot_Expired when the entry's snapshot has since been expired
+// (its header page is gone).
 rollforward :: proc(db: ^Database) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
@@ -201,12 +224,17 @@ capture_snapshot :: proc(db: ^Database, op: snapshot.Snapshot_Operation) {
 	}
 }
 
+// expire_snapshots keeps the newest keep_count snapshots, garbage-collects
+// the rest (frees their pages, drops their index entries), and persists the
+// header. Exclusive lock; delegates to expire_snapshots_impl.
 expire_snapshots :: proc(db: ^Database, keep_count: int) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu); defer sync.rw_mutex_unlock(&db.mu)
 	return expire_snapshots_impl(db, keep_count)
 }
 
+// expire_snapshots_impl is the sweep body, shared by the API and dot paths
+// so the keep-count clamp and reclaim gate below live in one place.
 expire_snapshots_impl :: proc(db: ^Database, keep_count: int) -> DB_Error {
 	keep := keep_count
 	if keep < 1 {

@@ -4,6 +4,9 @@ import "src:btree"
 import "src:cell"
 import "src:pager"
 
+// count_committed counts COMMITTED headers reachable from start_page.
+// Non-committed (pending/abandoned) headers play no role in retention and
+// are excluded. Used by tests and the expire path to size the keep window.
 count_committed :: proc(p: ^pager.Pager, start_page: u32) -> int {
 	count := 0
 	walk_chain(p, start_page, &count, proc(h: Snapshot_Header, page: u32, data: rawptr) -> bool {
@@ -15,6 +18,10 @@ count_committed :: proc(p: ^pager.Pager, start_page: u32) -> int {
 	return count
 }
 
+// prune marks all but the newest max_keep COMMITTED snapshots ABANDONED
+// (via mark_abandoned) without sweeping — the state change without the
+// reclamation. Exercised through tests and ad-hoc tooling; the production
+// path is expire_and_collect below.
 prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 	// Single mark pass shared with expire_and_collect; the ids are
 	// temp-allocated and reclaimed with the caller's temp scope.
@@ -24,6 +31,14 @@ prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 
 GC_MIN_PAGES :: 512
 
+// build_live_set collects every page the newest keep_count snapshots can
+// still reach: page 1, each snapshot + manifest page, and each manifest's
+// table roots walked through collect_pages (rows) and mark_index_roots
+// (secondary indexes live in schema-row values, unreachable from rowids).
+// Roots are NOT pre-marked: collect_pages uses presence as its visited
+// guard, so a pre-marked root returns early and drops its whole subtree
+// from the live set (freed while still reachable). Unreadable links end
+// that snapshot's contribution; the chain walk continues below them.
 @(private)
 build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live: ^map[u32]bool) {
 	live[1] = true
@@ -40,10 +55,6 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 			live[h.manifest_page] = true
 		}
 		if h.schema_root != 0 {
-			// NOTE: do NOT pre-mark roots before collect_pages. It marks
-			// the root itself and uses presence as its visited guard, so
-			// a pre-marked root returns early and its whole subtree is
-			// lost from the live set (freed while still reachable).
 			t := btree.init(p, h.schema_root)
 			btree.collect_pages(&t, h.schema_root, live)
 			mark_index_roots(p, &t, live)
@@ -62,7 +73,9 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 				}
 			}
 		}
-		count += 1; page = h.prev_snapshot
+
+		count += 1
+		page = h.prev_snapshot
 	}
 }
 
@@ -97,6 +110,12 @@ mark_index_roots :: proc(p: ^pager.Pager, t: ^btree.Tree, live: ^map[u32]bool) {
 	}
 }
 
+// sweep_dead_pages frees every allocated page (bitmap set) at or above page
+// 2 that is not in the live set — allocated-ness from the bitmap, max_page
+// from the pager. Page 1 and unallocated pages are never freed. No file
+// truncation: freed pages recycle through the freelist; shrinking dead
+// tails from aborted txns is rewind_after_abort (rollback's path, bounded
+// by the allocator truth), not the sweep's.
 @(private)
 sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
 	max_page := pager.page_count(p)
@@ -126,8 +145,7 @@ sweep_dead_pages :: proc(p: ^pager.Pager, live: ^map[u32]bool) {
 			}
 		}
 	}
-	// NOTE: no file truncation here by design. Freed pages recycle through
-	// the freelist; on-disk shrinking of genuinely dead tails (aborted
-	// transactions) is pager.rewind_after_abort, called from rollback with
-	// the allocator truth as its bound.
+	// No file truncation by design (freed pages recycle through the
+	// freelist); shrinking dead tails from aborted txns is
+	// rewind_after_abort on rollback's path.
 }

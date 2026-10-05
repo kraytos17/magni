@@ -8,6 +8,9 @@ import "src:schema"
 import "src:snapshot"
 import "src:types"
 
+// begin_impl opens a transaction: records the file length (later rewind
+// target) and starts the WAL txn so frame appends route to txn_index.
+// .Transaction_Error if one is already active.
 @(private)
 begin_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state == .Active {
@@ -22,6 +25,12 @@ begin_impl :: proc(db: ^Database) -> DB_Error {
 	return .None
 }
 
+// commit_impl closes an active transaction in four steps: flush staged
+// roots into the catalog (one schema COW per dirty table/index, so DDL
+// published mid-txn survives), build a manifest and snapshot, record MAIN,
+// then WAL-commit (the durability point). Any failure returns before
+// wal_commit_txn, so the WAL txn is still open for a later rollback.
+// Ends with an auto-checkpoint decision.
 @(private)
 commit_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state != .Active {
@@ -93,6 +102,12 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 	return .None
 }
 
+// rollback_impl aborts an active transaction: WAL frames dropped and cache
+// purged (wal_abort_txn), the file rewound to its pre-txn length (pages the
+// txn allocated were never snapshotted), the schema root restored from the
+// latest snapshot, and staged roots + table cache cleared. A failed rewind
+// is only a warning — disk stays larger than needed while the in-memory
+// state is already consistent.
 @(private)
 rollback_impl :: proc(db: ^Database) -> DB_Error {
 	if db.txn_state != .Active {
@@ -128,6 +143,8 @@ rollback_impl :: proc(db: ^Database) -> DB_Error {
 	return .None
 }
 
+// begin starts a transaction (exclusive lock). Nested BEGIN fails with
+// .Transaction_Error; DML inside stages roots until commit/rollback.
 begin :: proc(db: ^Database) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu)
@@ -135,6 +152,9 @@ begin :: proc(db: ^Database) -> DB_Error {
 	return begin_impl(db)
 }
 
+// commit persists an active transaction and captures its snapshot
+// (exclusive lock). .Transaction_Error when no txn is active; on inner
+// failures the txn stays open (not rolled back) for the caller to decide.
 commit :: proc(db: ^Database) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu)
@@ -142,6 +162,8 @@ commit :: proc(db: ^Database) -> DB_Error {
 	return commit_impl(db)
 }
 
+// rollback aborts an active transaction, restoring the pre-txn roots and
+// file length (exclusive lock). .Transaction_Error when none is active.
 rollback :: proc(db: ^Database) -> DB_Error {
 	db_check(db) or_return
 	sync.rw_mutex_lock(&db.mu)

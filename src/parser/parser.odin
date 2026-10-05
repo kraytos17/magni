@@ -1,7 +1,18 @@
+// Package parser turns one SQL statement string into an arena-owned AST.
+//
+// Pipeline: tokenize (tokenizer.odin) then a single recursive-descent pass
+// dispatched on the first token (parse, below). Parsers take/hold no locks
+// and keep no global state — a Parser is a cursor over a token slice plus
+// the first error message. Keywords are matched case-insensitively at
+// tokenize time; the AST owns no input memory beyond cloned strings
+// (clone discipline is documented on parse).
 package parser
 
 import "core:strings"
 
+// err records the first parse error (later errors never overwrite it) and
+// fails the current production. Every syntax failure funnels through here
+// so messages stay first-fault, not cascading.
 err :: proc(p: ^Parser, msg: string) -> (Statement_Variant, bool) {
 	if p.err_msg == "" {
 		p.err_msg = msg
@@ -9,6 +20,9 @@ err :: proc(p: ^Parser, msg: string) -> (Statement_Variant, bool) {
 	return nil, false
 }
 
+// expect_match consumes the next token when it has type tt; otherwise it
+// records msg (first-fault, like err) and fails. The common "expect this
+// keyword/symbol or die" step of every production.
 @(private)
 expect_match :: proc(p: ^Parser, tt: Token_Type, msg: string) -> bool {
 	if match(p, tt) {

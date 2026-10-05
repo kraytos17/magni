@@ -3,6 +3,10 @@ package parser
 import "core:strings"
 import "src:types"
 
+// parse_create_table parses CREATE TABLE name (defs...) after CREATE: column
+// definitions interleaved with table-level FOREIGN KEY clauses, comma
+// separated. On failure the deferred cleanup frees the partial names/rows
+// (arena abandonment covers the rest).
 @(private)
 parse_create_table :: proc(
 	p: ^Parser,
@@ -60,10 +64,11 @@ parse_create_table :: proc(
 	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
 }
 
-// parse_create_index parses `CREATE INDEX name ON table (column)` — V3.0:
-// single-column text indexes only (type checked at execution). The caller
-// consumed CREATE INDEX. Same arena-ownership + fail-cleanup discipline as
-// parse_create_table: partial nodes die with the arena on failure.
+// parse_create_index parses `CREATE INDEX name ON table (column)` —
+// single-column only (one identifier; the executor additionally requires a
+// TEXT column). The caller consumed CREATE INDEX. Same arena-ownership +
+// fail-cleanup discipline as parse_create_table: partial nodes die with
+// the arena on failure.
 @(private)
 parse_create_index :: proc(
 	p: ^Parser,
@@ -294,6 +299,8 @@ collect_check_source :: proc(
 	return strings.to_string(b), true
 }
 
+// parse_drop_table parses DROP TABLE name after DROP. Existence is an
+// execution concern (absent tables error there, not here).
 @(private)
 parse_drop_table :: proc(
 	p: ^Parser,

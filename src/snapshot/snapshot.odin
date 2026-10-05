@@ -1,5 +1,10 @@
-// Package snapshot implements the append-only COW snapshot chain, manifests,
-// refs, GC, and diff
+// Package snapshot implements the append-only COW snapshot chain:
+// versioned roots (schema-root + manifest per commit), time-travel reads,
+// tag/branch refs, expiry, and garbage collection.
+//
+// Every snapshot preserves a root that later writes never mutate
+// (all DML is COW), so any committed header in the chain stays readable.
+// Old snapshots are reclaimed only by expire + GC once no ref needs them.
 package snapshot
 
 import "core:encoding/endian"
@@ -73,11 +78,12 @@ TAG_OFFSET :: HEADER_PREFIX_SIZE + MAX_HEADERS_PER_PAGE * size_of(Snapshot_Heade
 TAG_SIZE   :: 64
 
 // headers_on_page returns the packed header slice when data holds the packed
-// format (leading count in 1..MAX_HEADERS_PER_PAGE), or nil for the old
-// single-header layout. The single decode rule for both layouts lives here so
-// the seven call sites can never fork it again. The slice aliases the page
-// buffer: callers must hold the page pin while using it. Short buffers that
-// cannot hold count headers read as nil (old layout), never a slice panic.
+// format (leading count in 1..MAX_HEADERS_PER_PAGE), or nil for the
+// non-packed (single-header) page layout. The single decode rule for both
+// layouts lives here so every call site shares it (no per-site copies).
+// The slice aliases the page buffer: callers must hold the page pin while
+// using it. Short buffers that cannot hold count headers read as nil
+// (non-packed), never a slice panic.
 headers_on_page :: proc(data: []u8) -> []Snapshot_Header {
 	count := int(endian.unchecked_get_u32le(data[:4]))
 	if count > 0 && count <= MAX_HEADERS_PER_PAGE {
@@ -116,6 +122,11 @@ Debug_Data :: struct {
 	count: int,
 }
 
+// create records a snapshot header linking schema_root (and its manifest)
+// into the chain after prev_snapshot: appended to the previous page when it
+// still has header room, otherwise starting a fresh page. The page is
+// unpinned on return and the header is marked dirty (write-back, no WAL
+// frame of its own). ok=false only on page allocation failure.
 create :: proc(
 	p: ^pager.Pager,
 	snapshot_id: u64,
@@ -180,6 +191,10 @@ create :: proc(
 	return page.page_num, true
 }
 
+// load reads one snapshot header from snapshot_page: the newest when no id
+// is given (snapshot_id 0), otherwise the header with the exact id.
+// Returns the header by value (no pin held after return). ok=false when
+// the page is unreadable, not in packed format, or carries no matching id.
 load :: proc(
 	p: ^pager.Pager,
 	snapshot_page: u32,
@@ -208,6 +223,10 @@ load :: proc(
 	return {}, false
 }
 
+// set_tag overwrites the snapshot page's 64-byte tag slot (truncating long
+// tags, zero-clearing the rest) and marks the page dirty. Slot offset is
+// format-independent (past the header region in both layouts). No-op on an
+// unreadable page or short buffer; opens no WAL txn of its own.
 set_tag :: proc(p: ^pager.Pager, snapshot_page: u32, tag: string) {
 	page, err := pager.get_page(p, snapshot_page)
 	if err != .None {
@@ -226,6 +245,10 @@ set_tag :: proc(p: ^pager.Pager, snapshot_page: u32, tag: string) {
 	}
 }
 
+// get_tag reads the snapshot page's tag slot up to the first NUL (the tag
+// set_tag wrote, without its zero padding). "" on an unreadable page,
+// short buffer, or never-tagged slot. Borrowed from the pinned page: the
+// page is unpinned on return, so consume the string before any eviction.
 get_tag :: proc(p: ^pager.Pager, snapshot_page: u32) -> string {
 	page, err := pager.get_page(p, snapshot_page)
 	if err != .None {
@@ -244,6 +267,10 @@ get_tag :: proc(p: ^pager.Pager, snapshot_page: u32) -> string {
 	return ""
 }
 
+// walk_chain visits headers newest-first across linked snapshot pages,
+// stopping when callback returns false. A non-packed page or an I/O error
+// ends the walk (no skipping). Each page is pinned only for its callbacks;
+// headers passed in are copies, safe to keep.
 @(private)
 walk_chain :: proc(
 	p: ^pager.Pager,
@@ -277,6 +304,9 @@ walk_chain :: proc(
 	}
 }
 
+// list_snapshots collects every header in the chain (newest first) under
+// allocator. Heads/previous links define the set; all states included
+// (callers filter on COMMITTED themselves).
 @(private = "file")
 list_snapshots :: proc(
 	p: ^pager.Pager,
@@ -291,6 +321,11 @@ list_snapshots :: proc(
 	return result[:]
 }
 
+// find_snapshot locates the first chain header matching query. By_Id
+// matches that exact id regardless of state; By_Timestamp matches the
+// newest COMMITTED header at or before the timestamp (so in-flight or
+// abandoned writes are never time-traveled to). found=false when nothing
+// matches.
 find_snapshot :: proc(
 	p: ^pager.Pager,
 	start_page: u32,
@@ -322,10 +357,14 @@ find_snapshot :: proc(
 	return result, found
 }
 
+// find_by_id returns the chain header with target_id, if present.
+// find_snapshot's By_Id form (no state filter).
 find_by_id :: proc(p: ^pager.Pager, start_page: u32, target_id: u64) -> (Snapshot_Header, bool) {
 	return find_snapshot(p, start_page, Snapshot_Query{.By_Id, target_id, 0})
 }
 
+// find_by_timestamp returns the newest COMMITTED header at or before
+// target_ts. find_snapshot's By_Timestamp form.
 find_by_timestamp :: proc(
 	p: ^pager.Pager,
 	start_page: u32,
@@ -337,6 +376,9 @@ find_by_timestamp :: proc(
 	return find_snapshot(p, start_page, Snapshot_Query{.By_Timestamp, 0, target_ts})
 }
 
+// debug_print_chain logs every chain link (id, page, op, state, ts, tag)
+// at debug level, newest first — "(empty)" when the chain holds none.
+// Diagnostics only.
 debug_print_chain :: proc(p: ^pager.Pager, start_page: u32) {
 	d := Debug_Data {
 		p = p,
@@ -415,7 +457,8 @@ chain_infos :: proc(
 }
 
 // set_header_state modifies the state of a specific snapshot header on a page.
-// Packed format only; the old single-header layout is rejected at db.open.
+// Packed format only; non-packed (single-header) pages are rejected at
+// db.open before any mutation runs.
 set_header_state :: proc(
 	p: ^pager.Pager,
 	page: u32,

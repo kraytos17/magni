@@ -5,6 +5,10 @@ import "core:strconv"
 import "core:strings"
 import "src:types"
 
+// parse_identifier consumes one name: a plain identifier OR a reserved word
+// (keywords are valid aliases/column names — the executor resolves meaning
+// by position). Returns a clone the caller owns; false leaves the cursor
+// untouched.
 @(private)
 parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: string, ok: bool) {
 	tok := peek(p)
@@ -16,6 +20,9 @@ parse_identifier :: proc(p: ^Parser, allocator := context.allocator) -> (str: st
 	return strings.clone(tok.lexeme, allocator), true
 }
 
+// parse_qualified_identifier consumes [table.]name, returning the dotted
+// form when a DOT follows (owned clone; parts freed after joining) or the
+// bare name otherwise.
 @(private)
 parse_qualified_identifier :: proc(
 	p: ^Parser,
@@ -34,6 +41,11 @@ parse_qualified_identifier :: proc(
 	return first, true
 }
 
+// parse_join_source parses one FROM/JOIN source: a (SELECT ...) subquery
+// (alias optional — see below) or a table with optional [AS] alias. The
+// FROM t AS OF ... form is not an alias: OF rewinds the AS so the AS OF
+// time-travel clause parses next. success=false leaves ownership with the
+// arena (subquery box freed inline where allocated).
 @(private = "file")
 parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_Source_Result {
 	if is_subquery_start(p) {
@@ -91,6 +103,8 @@ parse_join_source :: proc(p: ^Parser, allocator := context.allocator) -> Join_So
 	return {source = tbl, alias = "", success = true}
 }
 
+// is_subquery_start peeks for "( SELECT" without consuming (two-token
+// lookahead). The JOIN/FROM vs parenthesized-expression decision.
 @(private = "file")
 is_subquery_start :: proc(p: ^Parser) -> bool {
 	return(
@@ -100,6 +114,9 @@ is_subquery_start :: proc(p: ^Parser) -> bool {
 	)
 }
 
+// is_alias reports whether the cursor sits on a plausible bare alias: a
+// plain identifier (keywords excluded — a following WHERE/GROUP/... must
+// start the next clause, not be eaten as an alias).
 @(private = "file")
 is_alias :: proc(p: ^Parser) -> bool {
 	return peek(p).type == .IDENTIFIER && peek(p).lexeme != "("
@@ -211,6 +228,12 @@ parse_join_condition :: proc(
 	return nil, !required
 }
 
+// parse_single_join parses one JOIN arm after the join type: the right-hand
+// source, then ON or USING. The clause is required for explicit
+// INNER/LEFT/RIGHT joins, optional for JOIN-by-comma and CROSS (a missing
+// clause there is a plain cross product, not an error). An unaliased table
+// source defaults its alias to the table name so ON resolution always has
+// a qualifier.
 @(private = "file")
 parse_single_join :: proc(
 	p: ^Parser,
@@ -247,6 +270,10 @@ parse_single_join :: proc(
 		true
 }
 
+// parse_select_columns parses the projection list (* or items) into the
+// builder: bare columns, literals, and aggregate calls (name( dispatched
+// by lookahead), each with its optional AS alias. A lone * returns
+// immediately with the builder empty (star = all columns, no slots).
 @(private = "file")
 parse_select_columns :: proc(
 	p: ^Parser,
@@ -296,6 +323,10 @@ builder_emit_column :: proc(
 	append(&b.col_literal_idx, lit_idx)
 }
 
+// parse_column_or_aggregate handles a `name(` slot: an aggregate call when
+// the name resolves (COUNT/SUM/... — recorded in builder.aggregates with a
+// display string), else a bare column. COUNT(*) stores "" as its argument;
+// anything else takes a qualified column.
 @(private = "file")
 parse_column_or_aggregate :: proc(
 	p: ^Parser,
@@ -314,7 +345,8 @@ parse_column_or_aggregate :: proc(
 		return true
 	}
 
-	advance(p); advance(p) // name (
+	advance(p)
+	advance(p)
 	is_star := match(p, .ASTERISK)
 	arg_col: string
 	if !is_star {
@@ -482,6 +514,12 @@ consume_column_alias :: proc(p: ^Parser, aliases: ^[dynamic]string, allocator: m
 	}
 }
 
+// parse_join_clauses parses the trailing join chain after the FROM source,
+// threading the left qualifier (starting at the FROM alias/table, then each
+// arm's alias) into every arm's ON resolution. Stops at the first non-join
+// token — or the first malformed arm, which is silently dropped with the
+// cursor left mid-arm (no error; the outer parse fails later on the
+// unconsumed tokens).
 @(private = "file")
 parse_join_clauses :: proc(
 	p: ^Parser,
@@ -570,6 +608,8 @@ Select_Builder :: struct {
 	aggregates     : [dynamic]Aggregate_Expr,
 }
 
+// builder_new allocates an empty SELECT-list builder under allocator. All
+// six arrays must come from the same allocator (see builder_abandon).
 @(private = "file")
 builder_new :: proc(allocator := context.allocator) -> Select_Builder {
 	return {
@@ -607,6 +647,11 @@ From_Clause :: struct {
 	joins : [dynamic]Join_Clause,
 }
 
+// parse_from_clause parses [FROM source joins...] after the column list.
+// No FROM is not an error: source stays No_From{} (literal-only SELECT).
+// The left qualifier for ON resolution is the alias when present, else the
+// table name (subqueries without alias leave it empty — their columns
+// resolve unqualified or not at all).
 @(private = "file")
 parse_from_clause :: proc(
 	p: ^Parser,
@@ -643,6 +688,10 @@ As_Of :: struct {
 	timestamp: Maybe(u64),
 }
 
+// parse_as_of parses the optional AS OF SNAPSHOT <id> / AS OF TIMESTAMP
+// <micros> clause (absent = read the present). A bare AS OF with neither
+// keyword is accepted and reads as absent — resolution, not syntax, decides
+// validity. NUMBER-only ids (parse_u64 failure rejects).
 @(private = "file")
 parse_as_of :: proc(p: ^Parser) -> (as_of: As_Of, ok: bool) {
 	if match(p, .AS) && match(p, .OF) {
@@ -657,6 +706,10 @@ parse_as_of :: proc(p: ^Parser) -> (as_of: As_Of, ok: bool) {
 	return as_of, true
 }
 
+// parse_group_by parses the optional GROUP BY col, ... list. A GROUP
+// without BY is an error (the GROUP token is already consumed, so this is
+// fail-closed, not silent). Absent clause returns an empty (non-nil)
+// builder array.
 @(private = "file")
 parse_group_by :: proc(
 	p: ^Parser,
@@ -687,6 +740,12 @@ parse_group_by :: proc(
 	return group_by, true
 }
 
+// parse_select parses SELECT [DISTINCT] cols [FROM ...] [AS OF ...]
+// [WHERE ...] [GROUP BY ...] [HAVING ...] [ORDER BY ...] [LIMIT ...] after
+// SELECT. consume_order_limit=false leaves a trailing ORDER BY/LIMIT for
+// the caller (compound operands — the compound tail owns those). HAVING
+// aggregates are registered into the builder so the executor computes them.
+// Failure frees the builder and partial joins (arena covers the rest).
 parse_select :: proc(
 	p: ^Parser,
 	allocator := context.allocator,
@@ -889,6 +948,12 @@ parse_compound_operand :: proc(
 	return Set_Operand{select = sel_ptr, op = op}, true
 }
 
+// parse_compound_select parses SELECT ... [set-op SELECT ...]... after
+// SELECT (the entry point for all SELECT statements): a lone SELECT returns
+// the plain Select_Stmt; any UNION/INTERSECT/EXCEPT tail builds a
+// Compound_Stmt with the trailing ORDER BY/LIMIT bound to the combined
+// result. Each operand records the operator that preceded it; the executor
+// evaluates INTERSECT runs before folding UNION/EXCEPT left to right.
 @(private)
 parse_compound_select :: proc(
 	p: ^Parser,

@@ -1,5 +1,7 @@
 package parser
 
+// Keyword_Entry pairs a lowercase keyword spelling with its token type.
+// The table below is grouped by word length for the bucketed lookup.
 Keyword_Entry :: struct {
 	word: string,
 	tok : Token_Type,
@@ -88,6 +90,10 @@ keyword_table := []Keyword_Entry {
 // keyword_table[offsets[N-2]:offsets[N-1]].
 keyword_bucket_offsets := [10]int{0, 7, 14, 26, 42, 52, 58, 61, 63, 64}
 
+// match_keyword classifies an identifier word case-insensitively (| 0x20
+// fold in a stack buffer — no allocation), scanning only the bucket for
+// its length. Non-keywords (and words outside length 2..11) stay
+// .IDENTIFIER.
 @(private = "file")
 match_keyword :: proc(ident: string) -> Token_Type {
 	if len(ident) < 2 || len(ident) > 11 {
@@ -124,6 +130,7 @@ match_keyword :: proc(ident: string) -> Token_Type {
 	return .IDENTIFIER
 }
 
+// is_hex_digit reports 0-9/a-f/A-F (X'...' literal validation).
 @(private = "file")
 is_hex_digit :: proc(c: byte) -> bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
@@ -136,11 +143,15 @@ is_space_byte :: proc(c: byte) -> bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
+// is_digit_byte reports 0-9 (number scanning); is_alpha_byte reports
+// A-Z/a-z (identifier scanning). ASCII-only, same rationale as
+// is_space_byte above: no Unicode table lookups per byte.
 @(private = "file")
 is_digit_byte :: proc(c: byte) -> bool {
 	return c >= '0' && c <= '9'
 }
 
+// is_alpha_byte reports A-Z/a-z. See is_digit_byte for the ASCII rationale.
 @(private = "file")
 is_alpha_byte :: proc(c: byte) -> bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
@@ -351,12 +362,18 @@ lex_symbol :: proc(l: ^Lexer, tokens: ^[dynamic]Token) -> bool {
 	return true
 }
 
+// tokenize scans SQL into a token slice under allocator, terminated by an
+// EOF token. Comments (-- and /* */) are skipped, not emitted. Any lex
+// failure (unterminated string/block/number/hex, stray byte) frees the
+// partial slice and returns (nil, false) — callers surface "Tokenizer
+// error" without a position. Token lexemes borrow the input string.
 tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool) {
 	tokens := make([dynamic]Token, 0, len(sql) / 4, allocator)
 	l := Lexer {
 		sql  = sql,
 		line = 1,
 	}
+
 	for l.pos < len(l.sql) {
 		c := l.sql[l.pos]
 		if is_space_byte(c) {
@@ -413,6 +430,8 @@ tokenize :: proc(sql: string, allocator := context.allocator) -> ([]Token, bool)
 	return tokens[:], true
 }
 
+// peek returns the current token without consuming it (synthetic EOF past
+// the end, so productions never bounds-check).
 @(private)
 peek :: proc(p: ^Parser) -> Token {
 	if p.current >= len(p.tokens) {
@@ -421,6 +440,8 @@ peek :: proc(p: ^Parser) -> Token {
 	return p.tokens[p.current]
 }
 
+// advance consumes and returns the current token (synthetic EOF past the
+// end). Unconditional — use match/expect when the type matters.
 advance :: proc(p: ^Parser) -> Token {
 	if p.current >= len(p.tokens) {
 		return Token{.EOF, "", 0}
@@ -431,6 +452,9 @@ advance :: proc(p: ^Parser) -> Token {
 	return token
 }
 
+// match consumes the current token when it has one of the given types. A
+// miss leaves the cursor untouched — the non-consuming lookahead behind
+// CREATE/DROP INDEX-vs-TABLE disambiguation.
 match :: proc(p: ^Parser, types: ..Token_Type) -> bool {
 	for t in types {
 		if peek(p).type == t {
@@ -441,6 +465,8 @@ match :: proc(p: ^Parser, types: ..Token_Type) -> bool {
 	return false
 }
 
+// expect peeks for one token type, consuming it on match. Unlike
+// expect_match it sets no error — the caller owns the message (see err).
 expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 	token := peek(p)
 	if token.type != type {
@@ -451,6 +477,9 @@ expect :: proc(p: ^Parser, type: Token_Type) -> (Token, bool) {
 	return token, true
 }
 
+// is_keyword_token reports whether a token type is a reserved word (anything
+// that is not a value/punctuation/EOF token). Identifiers in some positions
+// (aliases, column names) accept reserved words too — see parse_identifier.
 @(private)
 is_keyword_token :: proc(t: Token_Type) -> bool {
 	#partial switch t {

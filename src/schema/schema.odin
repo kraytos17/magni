@@ -10,6 +10,9 @@ import "src:btree"
 import "src:cell"
 import "src:types"
 
+// init verifies a schema tree's root page loads, i.e. the freshly created
+// catalog root is a usable B-tree page. Reads no rows; the sole caller uses
+// it as the sanity check at the end of database initialization.
 init :: proc(t: ^btree.Tree) -> bool {
 	_, err := btree.load_node(t, t.root)
 	return err == .None
@@ -32,6 +35,10 @@ Schema_Row :: struct {
 	indexes     : []types.Index_Def,
 }
 
+// schema_row_to_values encodes a Schema_Row into the column vector the
+// btree cell codec stores: [0]=kind, name, root, sql, blob, optional skip
+// root, then one 3-slot triple per index. Temp-allocated (context.temp by
+// default); the caller consumes it immediately in an insert/update.
 schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator) -> []types.Value {
 	n := 5 // kind + name + root + sql + blob
 	// Triples live at fixed [6+3i] whenever any index exists (root-only
@@ -60,6 +67,11 @@ schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator)
 	return result
 }
 
+// schema_row_from_values decodes a schema row's column vector back into a
+// Schema_Row. Needs at least the 5 base fields (kind, name, root, sql,
+// blob) all of the right dynamic type; the skip root and index triples are
+// optional and parsed leniently (see decode_index_triples). ok=false on any
+// structural mismatch — the row is not a table entry.
 schema_row_from_values :: proc(values: []types.Value) -> (Schema_Row, bool) {
 	if len(values) < 5 {
 		return {}, false
@@ -138,6 +150,11 @@ decode_index_triples :: proc(values: []types.Value) -> []types.Index_Def {
 	return triples[:]
 }
 
+// add_table inserts a catalog row under hash(table_name) in place (root
+// unchanged). Refuses if the key is already taken: an existing row with
+// the same name is "already exists", a different name is a rowid hash
+// collision (both logged, false returned). Non-COW — production DDL goes
+// through add_table_cow; this variant exists for direct-tree tests.
 add_table :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -179,6 +196,10 @@ add_table :: proc(
 	return true
 }
 
+// add_table_cow is add_table's transactional form: same collision checks,
+// but the insert goes through btree.tree_insert_cow and the NEW root is
+// returned for the caller to stage/publish. Returns (new_root, false) with
+// the current root on refusal so callers never publish a partial write.
 add_table_cow :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -223,6 +244,11 @@ add_table_cow :: proc(
 	return new_root, true
 }
 
+// find_table resolves a table by name: hashes to the rowid, fetches, and
+// decodes into an allocator-owned Table. The decoded name is compared
+// against the request after decoding — a hash collision with a different
+// table reads back a different name and is reported as not-found (the
+// collision is not logged here). ok=false when absent or undecodable.
 find_table :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -236,8 +262,8 @@ find_table :: proc(
 	if err != .None {
 		return {}, false
 	}
-	defer cell.destroy(&c, context.temp_allocator)
 
+	defer cell.destroy(&c, context.temp_allocator)
 	table, ok := table_from_values(c.values, allocator)
 	if !ok {
 		return {}, false
@@ -271,6 +297,9 @@ clear_table_cache :: proc(cache: ^Table_Cache) {
 	clear(&cache.tables)
 }
 
+// table_cache_free empties the cache and releases the map itself (unlike
+// table_cache_clear, which keeps the map for reuse). Call at teardown;
+// takes the cache lock.
 table_cache_free :: proc(cache: ^Table_Cache) {
 	sync.rw_mutex_lock(&cache.mu)
 	defer sync.rw_mutex_unlock(&cache.mu)
@@ -333,8 +362,8 @@ find_table_cached :: proc(
 	if err != .None {
 		return nil, false
 	}
-	defer cell.destroy(&c, context.temp_allocator)
 
+	defer cell.destroy(&c, context.temp_allocator)
 	table, ok := table_from_values(c.values, cache.allocator)
 	if !ok {
 		return nil, false
@@ -350,6 +379,8 @@ find_table_cached :: proc(
 	return tbl, true
 }
 
+// get_table is an alias for find_table (kept for call-site readability at
+// the executor layer).
 get_table :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -359,6 +390,10 @@ get_table :: proc(
 	bool,
 ) { return find_table(t, table_name, allocator) }
 
+// list_tables decodes every catalog row into an allocator-owned []Table,
+// using a cursor to walk in rowid order. Undecodable rows are skipped;
+// returns nil if the cursor cannot start. Caller frees with table_free
+// per entry (and the slice itself).
 list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.Table {
 	tables := make([dynamic]types.Table, allocator)
 	cursor, err := btree.cursor_start(t, context.temp_allocator)
@@ -380,10 +415,17 @@ list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.T
 	return tables[:]
 }
 
+// drop_table removes the catalog row in place (root unchanged); false when
+// the row is absent. Non-COW like add_table — transactional DDL uses
+// drop_table_cow. Data pages are never freed here (snapshots may still
+// reference them); GC reclaims them later.
 drop_table :: proc(t: ^btree.Tree, table_name: string) -> bool {
 	return btree.tree_delete(t, types.Row_ID(types.hash_string(table_name))) == .None
 }
 
+// drop_table_cow is drop_table's transactional form: returns the new root
+// for the caller to stage, or (current root, false) when the delete failed
+// so no partial state is published.
 drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
 	new_root, err := btree.tree_delete_cow(t, types.Row_ID(types.hash_string(table_name)))
 	if err != .None {
@@ -393,6 +435,10 @@ drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
 	return new_root, true
 }
 
+// table_exists reports whether any catalog row exists under the hashed
+// name: probe + destroy, nothing retained. Unlike find_table there is no
+// post-decode name check, so a hash collision with a different table
+// reports true (the key exists).
 table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
 	c, err := btree.tree_find(
 		t,
@@ -406,6 +452,10 @@ table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
 	return false
 }
 
+// table_from_values decodes a schema row's values into an allocator-owned
+// types.Table (name, sql, columns, skip root, index defs all cloned).
+// ok=false when the row won't decode or the column blob is malformed —
+// partially cloned strings are released before returning false.
 @(private = "file")
 table_from_values :: proc(
 	values: []types.Value,
@@ -458,6 +508,9 @@ table_index :: proc(table: types.Table, index_name: string) -> (types.Index_Def,
 	return {}, false
 }
 
+// table_free releases every allocation a find_table/list_tables result
+// owns (name, sql, column names/defaults/checks, index defs) under
+// allocator. Not for cache-owned tables — see find_table_cached.
 table_free :: proc(table: types.Table, allocator := context.allocator) {
 	delete(table.name, allocator)
 	delete(table.sql, allocator)
@@ -479,6 +532,9 @@ table_free :: proc(table: types.Table, allocator := context.allocator) {
 	delete(table.columns, allocator)
 }
 
+// update_root_page_cow repoints a table's data root (the B-tree holding its
+// rows) inside the catalog, returning the new schema root for the caller to
+// stage. (current root, false) on any failure.
 update_root_page_cow :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -496,15 +552,19 @@ update_root_page_cow :: proc(
 	)
 }
 
+// set_data_root is the field setter update_schema_root_cow dispatches to
+// when repointing a table's data root.
 @(private = "file")
 set_data_root :: proc(sr: ^Schema_Row, root: u32) { sr.root_page = root }
 
+// set_skip_root is the field setter for a table's skip-index root.
 @(private = "file")
 set_skip_root :: proc(sr: ^Schema_Row, root: u32) { sr.skip_root = root }
 
 // update_schema_root_cow is the shared core behind update_root_page_cow and
 // update_skip_root_cow: fetch the schema row, apply the field setter, and
-// commit it copy-on-write. Callers keep their names, so no call-site churn.
+// commit it copy-on-write. Returns the new schema root, or (current root,
+// false) with the failure logged — never a half-updated row.
 @(private = "file")
 update_schema_root_cow :: proc(
 	t: ^btree.Tree,
@@ -528,8 +588,8 @@ update_schema_root_cow :: proc(
 		)
 		return t.root, false
 	}
-	defer cell.destroy(&c, context.temp_allocator)
 
+	defer cell.destroy(&c, context.temp_allocator)
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {
 		log.errorf("[schema] %s: schema_row_from_values failed for '%s'", op_name, table_name)
@@ -551,6 +611,8 @@ update_schema_root_cow :: proc(
 	return upd_root, true
 }
 
+// update_skip_root_cow repoints a table's skip-index root inside the
+// catalog; same contract as update_root_page_cow.
 update_skip_root_cow :: proc(
 	t: ^btree.Tree,
 	table_name: string,
@@ -685,8 +747,8 @@ clear_index_def_cow :: proc(
 		log.errorf("[schema] clear_index_def_cow: tree_find failed for '%s'", table_name)
 		return t.root, false
 	}
-	defer cell.destroy(&c, context.temp_allocator)
 
+	defer cell.destroy(&c, context.temp_allocator)
 	sr, sr_ok := schema_row_from_values(c.values)
 	if !sr_ok {
 		log.errorf("[schema] clear_index_def_cow: decode failed for '%s'", table_name)
@@ -778,6 +840,9 @@ update_index_root_cow :: proc(
 	return schema_row_commit(t, table_name, rowid, sr, "update_index_root_cow")
 }
 
+// validate_columns checks a CREATE TABLE column list: at least one and at
+// most MAX_COLS, non-empty unique names, at most one PRIMARY KEY. Returns
+// (false, message) with a user-facing reason on the first violation.
 validate_columns :: proc(columns: []types.Column) -> (bool, string) {
 	if len(columns) == 0 {
 		return false, "Table must have at least one column"
@@ -806,6 +871,8 @@ validate_columns :: proc(columns: []types.Column) -> (bool, string) {
 	return true, ""
 }
 
+// find_column_index returns the position of the named column, or (-1, false)
+// when absent (linear scan; column lists are tiny).
 find_column_index :: proc(columns: []types.Column, name: string) -> (int, bool) {
 	for col, i in columns {
 		if col.name == name {
@@ -815,6 +882,8 @@ find_column_index :: proc(columns: []types.Column, name: string) -> (int, bool) 
 	return -1, false
 }
 
+// get_pk_column returns the position of the PRIMARY KEY column, or
+// (-1, false) for rowid tables. At most one exists (validate_columns).
 get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
 	for col, i in columns {
 		if col.pk {
@@ -824,6 +893,8 @@ get_pk_column :: proc(columns: []types.Column) -> (int, bool) {
 	return -1, false
 }
 
+// debug_print_entry prints one table's catalog entry (root, SQL, columns
+// with PK/NN flags) to stdout. Diagnostics only.
 @(private = "file")
 debug_print_entry :: proc(table: types.Table) {
 	fmt.printf("Table: %s (Root: %d)\n", table.name, table.root_page)
@@ -858,6 +929,8 @@ debug_print_entry :: proc(table: types.Table) {
 	}
 }
 
+// debug_print_all prints every catalog entry via debug_print_entry.
+// Diagnostics only (allocates the table list from temp).
 debug_print_all :: proc(t: ^btree.Tree) {
 	fmt.println("=== Database Schema ===")
 	tables := list_tables(t, context.temp_allocator)
@@ -874,6 +947,8 @@ debug_print_all :: proc(t: ^btree.Tree) {
 	fmt.println("=======================")
 }
 
+// print_ddl echoes each table's original CREATE statement (trimmed) to
+// stdout, in rowid order — the catalog's equivalent of .schema.
 print_ddl :: proc(t: ^btree.Tree) {
 	tables := list_tables(t, context.temp_allocator)
 	for table in tables {

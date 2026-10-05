@@ -38,6 +38,12 @@ mark_abandoned :: proc(
 	return expired
 }
 
+// expire_and_collect marks all but the newest keep_count snapshots
+// ABANDONED, then sweeps dead pages back into the freelist (skipped below
+// GC_MIN_PAGES: scan cost dwarfs the gain on small files). Returned ids are
+// temp-allocated — the caller consumes them immediately. The sweep keeps
+// every page reachable from the kept snapshots (build_live_set) and frees
+// the rest (sweep_dead_pages).
 expire_and_collect :: proc(
 	p: ^pager.Pager,
 	latest_page: u32,
@@ -45,8 +51,6 @@ expire_and_collect :: proc(
 ) -> (
 	expired_ids: [dynamic]u64,
 ) {
-	// Temp-scoped ids (consumed immediately by the caller): matches the old
-	// expire_snapshots contract, so per-expire heap churn stays zero.
 	expired_ids = mark_abandoned(p, latest_page, keep_count, context.temp_allocator)
 	max_page := pager.page_count(p)
 	if max_page < GC_MIN_PAGES {

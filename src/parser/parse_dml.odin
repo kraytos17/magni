@@ -2,6 +2,11 @@ package parser
 
 import "src:types"
 
+// parse_insert_column_list parses the optional (col, ...) list after the
+// table name: present only when ( is followed by an identifier or an empty
+// () — anything else (VALUES' paren) leaves the cursor untouched and the
+// list empty (positional insert). A present-but-malformed list is an error,
+// not a fallback to positional.
 @(private = "file")
 parse_insert_column_list :: proc(
 	p: ^Parser,
@@ -23,10 +28,7 @@ parse_insert_column_list :: proc(
 			advance(p)
 			for {
 				col := parse_identifier(p, allocator) or_return; append(&columns, col)
-				if match(
-					p,
-					.RPAREN,
-				) {
+				if match(p, .RPAREN) {
 					break
 				} else if !expect_match(p, .COMMA, "Expected , or ) after column") {
 					return {}, false
@@ -60,10 +62,7 @@ parse_insert_value_row :: proc(
 		}
 
 		append(&acc, val)
-		if match(
-			p,
-			.RPAREN,
-		) {
+		if match(p, .RPAREN) {
 			break
 		} else if !expect_match(p, .COMMA, "Expected , or ) after value") {
 			return nil, false
@@ -72,6 +71,10 @@ parse_insert_value_row :: proc(
 	return acc[:], true
 }
 
+// parse_insert parses INSERT INTO t [(cols)] VALUES (row), (row)... after
+// INSERT: one or more comma-separated value rows. Column count vs value
+// count is an execution check (arity), not a parse error. Partial rows are
+// freed on failure; the statement owns the survivors.
 @(private)
 parse_insert :: proc(
 	p: ^Parser,
@@ -127,6 +130,9 @@ parse_insert :: proc(
 	return Insert_Stmt{table_name = table_name, columns = columns[:], values = rows[:]}, true
 }
 
+// parse_update parses UPDATE t SET col=val, ... [WHERE ...] after UPDATE.
+// SET needs at least one assignment (the loop always runs once); the WHERE
+// clause is optional (absent Maybe = update every row).
 @(private)
 parse_update :: proc(
 	p: ^Parser,
@@ -179,6 +185,9 @@ parse_update :: proc(
 		true
 }
 
+// parse_delete parses DELETE FROM t [WHERE ...] after DELETE. No RETURNING,
+// no USING, no multi-table form — just the filter (absent Maybe = delete
+// every row).
 @(private)
 parse_delete :: proc(
 	p: ^Parser,
@@ -190,6 +199,7 @@ parse_delete :: proc(
 	if !expect_match(p, .FROM, "Expected FROM after DELETE") {
 		return nil, false
 	}
+
 	table_name := parse_identifier(p, allocator) or_return
 	defer if !ok {
 		delete(table_name, allocator)

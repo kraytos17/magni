@@ -6,20 +6,35 @@ import "core:strings"
 import "src:pager"
 import "src:types"
 
+// Snapshots name tables by root page, not by catalog row: one manifest page
+// per snapshot records every table (name hash, root page, name bytes). The
+// chain then supports time-travel and diffs without re-reading old catalog
+// trees — only the header's schema_root + manifest_page travel along.
+//
+// Wire: [MAGIC "MAGNIMNF"][u32 count] then per table: Manifest_Entry
+// (name_hash u64, root_page u32, name_len u16) + name bytes. Entries carry
+// no checksum of their own — a torn manifest page fails the magic or
+// length checks below and reads as absent, never as data.
 MANIFEST_MAGIC :: "MAGNIMNF"
 
+// Manifest_Entry is one table's entry in the manifest wire format above.
+// #packed: the header is memcpy'd straight into the page.
 Manifest_Entry :: struct #packed {
 	name_hash: u64,
 	root_page: u32,
 	name_len : u16,
 }
 
+// Table_Change classifies how a table differs between two manifests.
 Table_Change :: enum u8 {
 	CREATED,
 	DROPPED,
 	MODIFIED,
 }
 
+// Snapshot_Diff_Entry is one changed table between two snapshots.
+// table_name is heap-owned (strings.clone under allocator); free with
+// diff_entries_free.
 Snapshot_Diff_Entry :: struct {
 	table_name: string,
 	change    : Table_Change,
@@ -27,6 +42,8 @@ Snapshot_Diff_Entry :: struct {
 	new_root  : u32,
 }
 
+// diff_entries_free releases a diff_manifests/diff_snapshots result: every
+// cloned name plus the slice itself, under allocator.
 diff_entries_free :: proc(entries: []Snapshot_Diff_Entry, allocator := context.allocator) {
 	for e in entries {
 		delete(e.table_name, allocator)
@@ -34,6 +51,10 @@ diff_entries_free :: proc(entries: []Snapshot_Diff_Entry, allocator := context.a
 	delete(entries, allocator)
 }
 
+// create_manifest snapshots the database's table roots into a fresh page
+// (wire format above) and returns it unpinned + dirty. Empty table list
+// means "no manifest" and returns page 0. ok is signaled by nonzero alone:
+// 0 on allocation failure.
 create_manifest :: proc(p: ^pager.Pager, tables: []types.Table) -> u32 {
 	if len(tables) == 0 {
 		return 0
@@ -69,6 +90,10 @@ create_manifest :: proc(p: ^pager.Pager, tables: []types.Table) -> u32 {
 	return page.page_num
 }
 
+// find_in_manifest returns table_name's data root from a manifest page.
+// The name hash pre-filters, but the stored name bytes decide (a hash
+// collision on a different name misses). Page 0, unreadable pages, bad
+// magic, and absent tables all read as (0, false).
 find_in_manifest :: proc(
 	p: ^pager.Pager,
 	manifest_page: u32,
@@ -85,8 +110,8 @@ find_in_manifest :: proc(
 	if err != .None {
 		return 0, false
 	}
-	defer pager.unpin_page(p, manifest_page)
 
+	defer pager.unpin_page(p, manifest_page)
 	data := page.data
 	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
 		return 0, false
@@ -107,6 +132,9 @@ find_in_manifest :: proc(
 	return 0, false
 }
 
+// load_manifest returns a manifest page's raw entries (hash, root, name
+// length — NOT name strings; use load_manifest_tables for names). Empty or
+// malformed pages return nil.
 @(private = "file")
 load_manifest :: proc(
 	p: ^pager.Pager,
@@ -121,8 +149,8 @@ load_manifest :: proc(
 	if err != .None {
 		return nil
 	}
-	defer pager.unpin_page(p, manifest_page)
 
+	defer pager.unpin_page(p, manifest_page)
 	data := page.data
 	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
 		return nil
@@ -138,6 +166,9 @@ load_manifest :: proc(
 	return entries
 }
 
+// load_manifest_tables returns a manifest page's (name, root) pairs with
+// names cloned under allocator. Page 0 reads as empty-but-ok ({},{},true);
+// unreadable or magic-bad pages read as ({},{},false).
 @(private)
 load_manifest_tables :: proc(
 	p: ^pager.Pager,
@@ -156,8 +187,8 @@ load_manifest_tables :: proc(
 	if err != .None {
 		return {}, {}, false
 	}
-	defer pager.unpin_page(p, manifest_page)
 
+	defer pager.unpin_page(p, manifest_page)
 	data := page.data
 	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
 		return {}, {}, false
@@ -174,6 +205,11 @@ load_manifest_tables :: proc(
 	return names, roots, true
 }
 
+// diff_manifests compares two manifest pages entry-by-entry: same-name
+// different-root is MODIFIED, new-only is CREATED (old_root 0), old-only is
+// DROPPED (new_root 0). Equal roots are not reported. Table names are
+// cloned under allocator (free with diff_entries_free); comparison uses
+// names (not hashes). ok=false when either page fails to load.
 diff_manifests :: proc(
 	p: ^pager.Pager,
 	manifest_a: u32,
@@ -234,6 +270,10 @@ diff_manifests :: proc(
 	return entries[:], true
 }
 
+// diff_snapshots diffs the manifests of the snapshots with older_id and
+// newer_id (both resolved through find_by_id from latest_page). Argument
+// order doesn't matter — reversed ids are swapped internally. Same entry
+// ownership as diff_manifests. ok=false when either id is absent.
 diff_snapshots :: proc(
 	p: ^pager.Pager,
 	older_id: u64,

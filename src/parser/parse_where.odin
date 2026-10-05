@@ -6,6 +6,9 @@ import "core:strconv"
 import "core:strings"
 import "src:types"
 
+// unescape_sql_string folds '' escapes to ' (no-op clone when absent).
+// The lexer keeps the raw interior (lex_string does not unescape), so this
+// is where the SQL string value is materialized. Caller owns the result.
 @(private = "file")
 unescape_sql_string :: proc(s: string, allocator: mem.Allocator) -> string {
 	if !strings.contains(s, "''") {
@@ -16,6 +19,12 @@ unescape_sql_string :: proc(s: string, allocator: mem.Allocator) -> string {
 	return out
 }
 
+// parse_value parses one literal: NUMBER (float when the lexeme holds '.',
+// else int), STRING (unescaped), X'...' hex blob, NULL, or a bare
+// identifier (kept as TEXT — the executor resolves columns/keywords from
+// it). Non-consuming on mismatch (false with the cursor untouched). A
+// leading '-' is already part of the NUMBER token (lexer folds it), so no
+// unary-minus handling lives here.
 @(private)
 parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.Value, ok: bool) {
 	token := peek(p)
@@ -53,6 +62,9 @@ parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.V
 	return {}, false
 }
 
+// parse_where_clause parses the filter after WHERE into a Where_Clause
+// (OR-rooted tree; AND binds tighter by construction of the tiers below).
+// The caller consumed WHERE.
 @(private)
 parse_where_clause :: proc(
 	p: ^Parser,
@@ -79,6 +91,10 @@ parse_where_clause :: proc(
 @(private = "file")
 parse_operand :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool)
 
+// parse_chain parses one tier of the AND/OR grammar (left-associative,
+// n-ary): one operand, then (op operand)* folded into a single node. A lone
+// operand returns unwrapped (no singleton AND/OR node). operand rides as a
+// proc value because the two tiers differ only in their operand parser.
 @(private = "file")
 parse_chain :: proc(
 	p: ^Parser,
@@ -120,11 +136,14 @@ parse_chain :: proc(
 	return node, true
 }
 
+// parse_or_expr parses OR-separated AND operands (lowest precedence tier).
 @(private = "file")
 parse_or_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	return parse_chain(p, allocator, parse_and_expr, .OR, .OR)
 }
 
+// parse_and_expr parses AND-separated primaries. Thin wrapper over
+// parse_chain (see parse_or_expr).
 @(private = "file")
 parse_and_expr :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	return parse_chain(p, allocator, parse_primary, .AND, .AND)
@@ -257,6 +276,11 @@ try_parse_between :: proc(
 	return node, .Parsed
 }
 
+// parse_primary parses one AND operand, in order: BETWEEN (lookahead
+// decides — a non-BETWEEN falls through untouched), NOT primary, a
+// parenthesized OR expression, or a leaf condition. Nesting counts against
+// MAX_PARSE_NESTING (deeply nested AND/OR/NOT/parens reject instead of
+// overflowing the stack).
 @(private = "file")
 parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, bool) {
 	p.nest_depth += 1
@@ -319,6 +343,11 @@ condition_cleanup :: proc(cond: ^Condition, allocator: mem.Allocator) {
 	delete(cond.agg_column, allocator)
 }
 
+// parse_condition parses one leaf predicate: [aggregate-ref] column,
+// optional NOT (IN/LIKE only — NOT before IS is rejected in
+// parse_is_null_condition), then the operator: a binary comparison (rhs
+// follows), IN (list or subquery), or IS [NOT] NULL. Error paths free the
+// partially built condition via condition_cleanup.
 @(private = "file")
 parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Condition, ok: bool) {
 	cond.column = parse_qualified_identifier(p, allocator) or_return
@@ -395,6 +424,10 @@ parse_in_condition :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocato
 	return parse_in_value_list(p, cond, allocator)
 }
 
+// parse_in_subquery parses IN (SELECT ...) after the paren: consumes
+// SELECT, parses the subquery, consumes the closing paren. The subquery
+// AST is heap-boxed into cond.in_subquery (arena-owned, freed with the
+// statement).
 @(private = "file")
 parse_in_subquery :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
 	advance(p)
@@ -412,6 +445,9 @@ parse_in_subquery :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator
 	return true
 }
 
+// parse_in_value_list parses IN (v, v, ...) after the paren into
+// cond.in_values, consuming through the closing paren. Partial lists are
+// freed on failure (cleanup_in_values).
 @(private = "file")
 parse_in_value_list :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocator) -> bool {
 	in_vals := make([dynamic]types.Value, allocator)
@@ -436,6 +472,8 @@ parse_in_value_list :: proc(p: ^Parser, cond: ^Condition, allocator: mem.Allocat
 	return true
 }
 
+// cleanup_in_values frees a partially parsed IN list (values + backing
+// array). Error-path only; success hands the slice to the condition.
 @(private = "file")
 cleanup_in_values :: proc(in_vals: ^[dynamic]types.Value, allocator: mem.Allocator) {
 	for v in in_vals {

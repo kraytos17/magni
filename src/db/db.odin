@@ -37,6 +37,8 @@ DB_Error :: enum u8 {
 	Unsupported_Format,
 }
 
+// db_error_string maps a DB_Error to a user-facing message ("" for .None).
+// Used by the CLI/REPL and API error surfaces; keep texts stable.
 db_error_string :: proc(err: DB_Error) -> string {
 	switch err {
 	case .None:
@@ -122,6 +124,11 @@ Schema_Tree :: proc(db: ^Database) -> btree.Tree {
 	return btree.init(db.pager, db.schema_root_page)
 }
 
+// open connects (creating if empty) the database at path. New files run
+// initialize; existing files run load_existing (header validation,
+// page-format gate, snapshot index). cfg thresholds override the defaults
+// only when positive. On any failure everything allocated is released and
+// (nil, err) returned — the caller gets no half-open handle.
 open :: proc(path: string, cfg: Open_Config = {}) -> (^Database, DB_Error) {
 	db := new(Database)
 	if db == nil {
@@ -221,9 +228,9 @@ load_header_fields :: proc(db: ^Database) -> DB_Error {
 }
 
 // rebuild_snapshot_index walks the snapshot chain from the latest snapshot,
-// indexing each packed header by id. Returns .Unsupported_Format on an old
-// single-header page (hard break, no migration); stops the walk on other
-// mid-chain corruption.
+// indexing each packed header by id. Returns .Unsupported_Format on a
+// non-packed (single-header) page — unsupported, not migrated; stops the
+// walk on other mid-chain corruption.
 @(private = "file")
 rebuild_snapshot_index :: proc(db: ^Database) -> DB_Error {
 	page := db.latest_snapshot
@@ -270,14 +277,17 @@ maybe_auto_checkpoint :: proc(db: ^Database) {
 	}
 }
 
+// close persists a pending snapshot batch if any, writes the header, closes
+// the pager, and frees the handle (nil-safe). A close on db is final —
+// further use is use-after-free. The mutex is unlocked explicitly before
+// free rather than by defer: the deferred unlock would run after free(db)
+// (the mutex lives inside the struct).
 close :: proc(db: ^Database) {
 	if db == nil {
 		return
 	}
 
 	sync.rw_mutex_lock(&db.mu)
-	// NOTE: explicit unlock before free at the end (not defer): the mutex
-	// lives inside db, so unlocking after free(db) is heap-use-after-free.
 	if db.snapshot_batch_count > 0 {
 		db.snapshot_batch_threshold = 1
 		db.snapshot_batch_count = 1
@@ -300,6 +310,11 @@ close :: proc(db: ^Database) {
 	free(db)
 }
 
+// initialize lays out a fresh database file: page 1 (magic, page size,
+// schema/refs roots), an empty slotdir schema tree, and the snapshot refs
+// page, committing the refs pointer through the WAL. Every step assumes an
+// empty file — a partial failure leaves an unusable file the caller closes
+// (no journal-based rollback of initialization).
 @(private = "file")
 initialize :: proc(db: ^Database) -> DB_Error {
 	page1, err := pager.allocate_page(db.pager)
@@ -346,6 +361,11 @@ initialize :: proc(db: ^Database) -> DB_Error {
 	return .None
 }
 
+// verify_header checks page 1 invariants without mutating state: magic
+// (.Corrupted), schema version not newer than this build (.Schema_Newer),
+// and page size matching the compiled one (.Page_Size_Mismatch). Takes no
+// db.mu itself — load_existing runs it during open (no concurrent users
+// yet) and integrity_check runs it under db.mu.
 verify_header :: proc(db: ^Database) -> DB_Error {
 	page, err := pager.get_page(db.pager, 1)
 	if err != .None {
@@ -373,16 +393,21 @@ record_main_ref :: proc(db: ^Database, snap_id: u64) {
 	snapshot.set_ref(db.pager, db.refs_page, snapshot.MAIN_REF, snap_id, .BRANCH, false)
 }
 
-// wal_update_header persists a header change inside a WAL transaction.
-// Covers the bare begin/update/commit sites; transaction commit and
-// multi-page initializers keep their explicit framing (different
-// commit-error semantics).
+// wal_update_header persists a header change inside its own WAL
+// transaction (begin / update_header / commit). Use for standalone header
+// writes; transaction commit and multi-page initializers frame their own
+// WAL calls because their commit-error semantics differ.
 wal_update_header :: proc(db: ^Database) {
 	pager.wal_begin_txn(db.pager)
 	update_header(db)
 	pager.wal_commit_txn(db.pager)
 }
 
+// update_header rewrites page 1's persisted fields from runtime state
+// (page count, schema root, latest snapshot, id counter, freelist head,
+// refs page) and marks it dirty. Best-effort: an unreadable page 1 is
+// silently skipped (the caller's state stays in memory only). Requires the
+// caller to frame WAL/persistence — see wal_update_header.
 update_header :: proc(db: ^Database) {
 	page1, err := pager.get_page(db.pager, 1)
 	if err != .None {
@@ -400,6 +425,8 @@ update_header :: proc(db: ^Database) {
 	pager.mark_dirty(db.pager, 1)
 }
 
+// db_check is the handle guard every public entry point calls first:
+// .Invalid_Handle for a nil database or pager, .None otherwise.
 db_check :: proc(db: ^Database) -> DB_Error {
 	if db == nil || db.pager == nil {
 		return .Invalid_Handle
