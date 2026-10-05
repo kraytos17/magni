@@ -10,17 +10,17 @@ import "src:types"
 //
 //	[MAGIC "MAGNIREFS"][u32 entry count][u32 log_count][u32 log_next]
 //	[64-slot ring of Ref_Log_Entry at REFS_LOG_OFFSET]
-//	[packed Ref_Entry + name bytes...]
+//	[packed Ref_Entry + name bytes at REFS_ENTRIES_OFFSET]
+//
+// The entries base is past the ring deliberately: packing entries at 21
+// (right after the header counters) collides with ring slots. Pages
+// written before the fix keep their entries at 21 and read as ref-less
+// here; the next commit/restore re-creates the refs at the new base
+// (self-healing — no migration pass).
 //
 // Ref_Kind marks a ref as BRANCH (MAIN_REF — the commit/restore target) or
 // TAG. log_push records the displaced MAIN id on every restore so
 // rollforward can move back; the ring holds the last 64 restores.
-//
-// NOTE: the entry scan starts right after the header counters (offset 21),
-// which overlaps the ring region at [24, ...). REFS_ENTRIES_OFFSET names
-// the intended post-ring base but nothing uses it yet — see the overlap
-// finding (restore corrupts entry 1 and appends a duplicate). Do not treat
-// the current packing as a stable wire contract until that is fixed.
 REFS_MAGIC          :: "MAGNIREFS"
 REFS_LOG_OFFSET     :: 24
 REFS_LOG_SIZE       :: 64 * size_of(Ref_Log_Entry)
@@ -71,6 +71,11 @@ create_refs_page :: proc(p: ^pager.Pager) -> u32 {
 	copy(data[:], REFS_MAGIC)
 
 	(^u32)(raw_data(data[len(REFS_MAGIC):]))^ = 0
+	// Zero the undo-log counters too: allocate_page only zeroes the file
+	// header area, so a recycled buffer could otherwise misplace the first
+	// log_push (or panic the slice on a garbage log_next).
+	(^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^ = 0
+	(^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^ = 0
 	pager.mark_dirty(p, page.page_num)
 	return page.page_num
 }
@@ -99,8 +104,11 @@ set_ref :: proc(
 	}
 
 	offset := len(REFS_MAGIC)
-	count := (^u32)(raw_data(data[offset:]))^; offset += 4
-	offset += 8
+	count := (^u32)(raw_data(data[offset:]))^
+	// Entries live past the undo-log ring (REFS_ENTRIES_OFFSET), never in
+	// the header gap: the ring at [24, ...) would collide with entries
+	// packed at 21.
+	offset = REFS_ENTRIES_OFFSET
 	name_hash := hash.fnv64a(transmute([]u8)name)
 	for _ in 0 ..< count {
 		entry := (^Ref_Entry)(raw_data(data[offset:]))
@@ -156,7 +164,7 @@ get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: 
 		return 0, false
 	}
 
-	offset := len(REFS_MAGIC) + 4 + 8
+	offset := REFS_ENTRIES_OFFSET // entries live past the undo-log ring
 	count := (^u32)(raw_data(data[len(REFS_MAGIC):]))^
 	target_hash := hash.fnv64a(transmute([]u8)name)
 	for _ in 0 ..< count {
@@ -191,7 +199,7 @@ list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocato
 		return nil
 	}
 
-	offset := len(REFS_MAGIC) + 4 + 8
+	offset := REFS_ENTRIES_OFFSET // entries live past the undo-log ring
 	count := (^u32)(raw_data(data[len(REFS_MAGIC):]))^
 	entries := make([]Ref_Entry, count, allocator)
 	for i in 0 ..< count {
@@ -239,8 +247,9 @@ log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
 
 // log_pop removes and returns the most recent log entry (LIFO — the last
 // restore's displaced id, which is what rollforward moves MAIN back to).
-// ok=false on an empty log (count 0), unreadable pages, or bad magic. The
-// slot bytes are left in place; only the count drops.
+// ok=false on an empty log (count 0), unreadable pages, or bad magic. Both
+// count and log_next retreat, so consecutive pops walk back correctly; the
+// slot bytes are left in place for the next push to overwrite.
 log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool) {
 	page, err := pager.get_page(p, refs_page)
 	if err != .None {
@@ -259,7 +268,9 @@ log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool)
 		return 0, false
 	}
 
-	// Most recent entry is at index log_count - 1 in logical order
+	// Most recent entry is the slot behind log_next; popping moves log_next
+	// back too, or consecutive pops would return the same slot (count alone
+	// does not relocate the top).
 	ring_idx := (log_next - 1) % MAX_LOG_ENTRIES
 	if ring_idx < 0 {
 		ring_idx += MAX_LOG_ENTRIES
@@ -269,6 +280,7 @@ log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool)
 	entry := (^Ref_Log_Entry)(raw_data(data[off:]))^
 
 	(^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^ = u32(log_count - 1)
+	(^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^ = u32(ring_idx)
 	pager.mark_dirty(p, refs_page)
 	return entry.snapshot_id, true
 }

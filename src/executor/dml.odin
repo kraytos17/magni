@@ -11,6 +11,13 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// exec_create runs CREATE TABLE: validates columns, allocates an empty
+// slotdir root (skipping pages 1 and the schema root itself), checks
+// FOREIGN KEY targets exist, and registers the catalog row via COW.
+// Publishes immediately (DDL is never staged, even in-txn). False with the
+// current root on any failure; pages allocated before the failure stay
+// allocated but unreferenced (reclaimed only by a later vacuum/GC walk
+// that finds them unreachable — no explicit rollback).
 @(private)
 exec_create :: proc(
 	t: ^btree.Tree,
@@ -70,11 +77,11 @@ exec_create :: proc(
 }
 
 // exec_create_index implements `CREATE INDEX name ON table (column)` —
-// V3.0: single-column TEXT indexes only. Validates, allocates an empty
+// single-column TEXT indexes only. Validates, allocates an empty
 // text root, backfills existing rows one by one (loop, not bulk: CREATE
-// INDEX is rare DDL — measure before optimizing), then publishes root +
-// column atomically (readers never see a half index). DDL publishes
-// immediately like exec_create (even in-txn, with reoverlay after).
+// INDEX is rare DDL), then publishes root + column atomically (readers
+// never see a half index). DDL publishes immediately like exec_create
+// (even in-txn, with reoverlay after).
 @(private)
 exec_create_index :: proc(
 	t: ^btree.Tree,
@@ -674,10 +681,10 @@ commit_bulk_inserts :: proc(
 }
 
 // exec_insert_bulk fast-paths a multi-row VALUES statement: empty tables
-// build bottom-up (phase 1); strictly-above-max batches graft at the right
-// edge when both sides share a depth (phase 2); anything else falls back to
-// the row loop. Fresh pages only in both build paths, so the COW/rollback
-// contract holds unchanged.
+// build bottom-up; strictly-above-max batches graft at the right edge
+// when both sides share a depth; anything else falls back to the row loop.
+// Fresh pages only in both build paths, so the COW/rollback contract holds
+// unchanged.
 @(private)
 exec_insert_bulk :: proc(
 	t: ^btree.Tree,
@@ -772,6 +779,11 @@ exec_insert_bulk :: proc(
 	return cok, croot, cmut, .Committed if cok else .Failed
 }
 
+// exec_insert_impl runs INSERT: resolves CHECKs once, snapshots the index
+// roots, then bulk-builds (multi-row, disjoint right edge) or loops rows
+// (single rows, overlaps, depth mismatches). Every row is validated
+// (arity, types, CHECKs, defaults) before any write; the text-index fan-out
+// follows the data write per row.
 @(private)
 exec_insert_impl :: proc(
 	t: ^btree.Tree,
@@ -944,6 +956,10 @@ apply_update :: proc(
 	return new_row, false
 }
 
+// exec_update_impl runs UPDATE: builds the SET map once, resolves the
+// filter plan, then writes per row (pk path by rowid, else scan). No-op
+// rows (new values equal old) are skipped, not rewritten. Reports success
+// with the unchanged root when nothing matched ("Updated 0 rows").
 @(private)
 exec_update_impl :: proc(
 	t: ^btree.Tree,
@@ -991,8 +1007,8 @@ Update_Plan :: struct {
 }
 
 // eval_mutation_filter evaluates a mutation plan's pre-resolved filter
-// against one row. No filter → true; unresolvable filter → false (mirrors
-// evaluate_where). Shared by UPDATE and DELETE.
+// against one row. No filter → true; unresolvable filter → false (same
+// fail-closed convention as evaluate_where). Shared by UPDATE and DELETE.
 @(private = "file")
 eval_mutation_filter :: proc(f: ^Mutation_Filter, values: []types.Value) -> bool {
 	if _, has_wc := f.filter.?; !has_wc {
@@ -1070,8 +1086,9 @@ commit_cow_root :: proc(
 
 // commit_index_cow_root publishes a new secondary-index root: staged into
 // pending under txn (plus the cache overlay), immediate schema COW
-// otherwise. Mirrors commit_cow_root (same two paths, index key space) —
-// D4 fan-out calls both helpers per mutation.
+// otherwise — the same stage-or-publish contract as commit_cow_root, in
+// index key space. The per-mutation text-index fan-out calls both helpers
+// (data root + index root) for every write.
 @(private = "file")
 commit_index_cow_root :: proc(
 	t: ^btree.Tree,
@@ -1412,6 +1429,10 @@ update_scan_cow :: proc(
 	log.info("Updated 0 rows.")
 	return true, t.root, {}
 }
+// exec_delete_impl runs DELETE FROM with the optional filter (absent =
+// every row): pk path by rowid, else scan, then COW-deletes with the
+// text-index fan-out per row. Success with the unchanged root when nothing
+// matched ("Deleted 0 rows").
 @(private)
 exec_delete_impl :: proc(
 	t: ^btree.Tree,
@@ -1626,6 +1647,10 @@ apply_deletes :: proc(
 	log.info("Deleted 0 rows.")
 	return true, t.root, {}
 }
+// exec_drop runs DROP TABLE: removes the catalog row via COW (data pages
+// stay allocated — snapshots may reference them; GC reclaims later).
+// Reports root 0 in the mutated info (no new data root exists). Absent
+// tables are an error (no IF EXISTS).
 @(private)
 exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated_Table_Info) {
 	if !schema.table_exists(t, stmt.table_name) {
@@ -1641,6 +1666,10 @@ exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated
 	return false, t.root, {}
 }
 
+// exec_insert_cow / exec_update_cow / exec_delete_cow resolve the table
+// (cached catalog read; unknown tables fail before any impl runs) and hand
+// off to the shared impls. The _cow suffix marks the COW write contract:
+// the returned root is new, the pre-mutation tree untouched.
 @(private)
 exec_insert_cow :: proc(
 	t: ^btree.Tree,
@@ -1660,6 +1689,7 @@ exec_insert_cow :: proc(
 	return exec_insert_impl(t, table^, stmt, cache, pending)
 }
 
+// exec_update_cow resolves the table; see exec_insert_cow for the contract.
 @(private)
 exec_update_cow :: proc(
 	t: ^btree.Tree,
@@ -1679,6 +1709,7 @@ exec_update_cow :: proc(
 	return exec_update_impl(t, table^, stmt, cache, pending)
 }
 
+// exec_delete_cow resolves the table; see exec_insert_cow for the contract.
 @(private)
 exec_delete_cow :: proc(
 	t: ^btree.Tree,
@@ -1704,12 +1735,12 @@ exec_delete_cow :: proc(
 // for the unindexed hot path. Non-TEXT values (incl. NULL) skip — the
 // type assertion is the whole gate, same as backfill.
 //
-// Old values ride in explicitly (pk sites hold them; scan sites refetch
-// from the pre-mutation tree — COW never mutates it, so the old row is
-// intact). All borrows (old row texts, new values) are consumed
+// Pre-mutation values ride in explicitly (pk sites hold them; scan sites
+// refetch from the pre-mutation tree — COW never mutates it, so the row is
+// intact). All borrows (prior row texts, new values) are consumed
 // synchronously: COW never mutates the pages they borrow, and index
 // writes never touch data pages. Missing index entries on delete
-// tolerate-and-log (mirrors delete_by_pk's "Deleted 0 rows" stance);
+// tolerate-and-log (same stance as delete_by_pk's "Deleted 0 rows");
 // anything else fails loudly.
 
 // index_col_text extracts the indexed TEXT value of a row: ("", false)
@@ -1761,9 +1792,9 @@ fanout_insert_row :: proc(
 	return fanout_insert_text(t, table, index_root, text, rowid)
 }
 
-// fanout_delete_text removes one entry, tolerating absence (mirrors
-// delete_by_pk's "Deleted 0 rows" tolerance — a missing entry is stale
-// state, not a statement failure).
+// fanout_delete_text removes one entry, tolerating absence (a missing entry
+// is stale state, not a statement failure — same tolerance as delete_by_pk's
+// "Deleted 0 rows").
 @(private = "file")
 fanout_delete_text :: proc(
 	t: ^btree.Tree,
@@ -1859,8 +1890,8 @@ fanout_update_row :: proc(
 	return cur, true
 }
 
-// fanout_update_rowid is the scan-path entry: re-fetches the old row
-// from the pre-mutation tree (COW never mutates it), then delegates.
+// fanout_update_rowid is the scan-path entry: re-fetches the pre-mutation
+// row from the pre-mutation tree (COW never mutates it), then delegates.
 @(private = "file")
 fanout_update_rowid :: proc(
 	t: ^btree.Tree,

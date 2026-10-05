@@ -1,3 +1,9 @@
+// Script execution for --file/--eval/stdin modes: split input into
+// statements (sqltext.split_statements) and run each through db.execute.
+// Dot-commands are routed per trimmed line (REPL semantics); everything
+// else runs as SQL. Returns false if any statement failed (and exits 1
+// immediately on stop_on_error); the database still closes cleanly in
+// main.
 package main
 
 import "core:log"
@@ -6,6 +12,8 @@ import "core:strings"
 import "src:db"
 import "src:sqltext"
 
+// execute_script_file runs the SQL file at path. Unreadable files fail
+// closed (false, logged) before any statement runs.
 @(private)
 execute_script_file :: proc(
 	database: ^db.Database,
@@ -20,6 +28,8 @@ execute_script_file :: proc(
 	return execute_sql(database, string(data), stop_on_error)
 }
 
+// execute_script_stream runs SQL piped on stdin (non-TTY mode). Same
+// failure semantics as execute_script_file.
 @(private)
 execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = false) -> bool {
 	data, err := os.read_entire_file_from_file(os.stdin, context.temp_allocator)
@@ -30,6 +40,12 @@ execute_script_stream :: proc(database: ^db.Database, stop_on_error: bool = fals
 	return execute_sql(database, string(data), stop_on_error)
 }
 
+// execute_sql runs a script string: dot-command lines dispatch to
+// handle_dot_command (an exit-requesting command stops the script and
+// returns the running status); SQL between them runs through
+// execute_sql_chunk. A dot line glues to following SQL if routed
+// post-split (no ';' separates them), so partitioning happens per line
+// first and SQL splitting second.
 @(private)
 execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = false) -> bool {
 	// Line-partition first: a dot-command is exactly one trimmed line
@@ -64,6 +80,9 @@ execute_sql :: proc(database: ^db.Database, sql: string, stop_on_error: bool = f
 	return ok
 }
 
+// execute_sql_chunk splits one SQL segment and runs each statement,
+// skipping blanks. stop_on_error exits the process (1) on the first
+// failure instead of collecting statuses.
 @(private = "file")
 execute_sql_chunk :: proc(database: ^db.Database, chunk: string, stop_on_error: bool) -> bool {
 	statements := sqltext.split_statements(chunk)

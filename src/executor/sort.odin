@@ -108,6 +108,9 @@ fp_index_hit :: proc(fps: []u64, fp: u64) -> bool {
 	return found
 }
 
+// dedup_rows removes duplicate rows in first-seen order (fingerprint
+// buckets prefilter, values_equal verifies — hash collisions never merge).
+// Temp-allocated output; zero/one rows return the input slice as-is.
 dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	if len(rows) <= 1 {
 		return rows
@@ -135,6 +138,11 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	return result[:]
 }
 
+// sort_rows orders rows by the ORDER BY clause (stable, NULL placement per
+// Order_By_Column with the DESC default). Single-integer-key sorts take
+// the sort_rows_int_fast path; anything it rejects (non-int values)
+// falls through to the general comparator. False when a sort key won't
+// resolve.
 @(private)
 sort_rows :: proc(
 	rows: []Row_Entry,

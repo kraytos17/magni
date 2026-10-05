@@ -1,81 +1,31 @@
 package executor
 
-import "core:log"
 import "src:btree"
 import "src:parser"
 import "src:schema"
 import "src:types"
 
+// exec_subquery runs a FROM-subquery into materialized rows for the
+// enclosing query by delegating to the full SELECT dispatcher (exec_query):
+// single-table, join, aggregate, ORDER BY/LIMIT, and DISTINCT semantics
+// inside the subquery all apply as written. ok=false when the inner query
+// fails (nil rows with ok=true is a legitimate empty result — callers must
+// check ok, not nilness).
 @(private)
 exec_subquery :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
 	cache: ^schema.Table_Cache = nil,
 ) -> (
-	[]Row_Entry,
-	[]types.Column,
+	rows: []Row_Entry,
+	cols: []types.Column,
+	ok: bool,
 ) {
-	tbl_name, name_ok := stmt.from.(string)
-	if !name_ok {
-		return nil, nil
+	rows, cols, ok = exec_query(t, stmt, cache)
+	if !ok {
+		return nil, nil, false
 	}
-
-	table, found := schema.find_table_cached(t, tbl_name, cache)
-	if !found {
-		log.errorf("Error: Subquery table not found: %s", tbl_name)
-		return nil, nil
-	}
-
-	table_tree := btree.init(t.pager, table.root_page)
-	rows, scan_err := scan_table(&table_tree, table, nil, nil, t, context.temp_allocator, cache)
-	if scan_err {
-		return nil, nil
-	}
-	if where_clause, has_where := stmt.where_clause.?; has_where {
-		rows = filter_rows(
-			rows,
-			&where_clause,
-			table.columns,
-			[]Table_Col_Range {
-				{
-					table_name = stmt.from_alias if stmt.from_alias != "" else tbl_name,
-					start_col = 0,
-					col_count = len(table.columns),
-				},
-			},
-		)
-	}
-	if len(stmt.columns) > 0 {
-		col_indices := make([]int, len(stmt.columns), context.temp_allocator)
-		for req_col, i in stmt.columns {
-			idx, ok := schema.find_column_index(table.columns, req_col)
-			if !ok {
-				return nil, nil
-			}
-			col_indices[i] = idx
-		}
-
-		projected := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
-		for entry in rows {
-			new_vals := make([]types.Value, len(col_indices), context.temp_allocator)
-			for ci, idx in col_indices {
-				cloned, _ := types.value_clone(entry.values[idx], context.temp_allocator)
-				new_vals[ci] = cloned
-			}
-			append(&projected, Row_Entry{entry.rowid, new_vals})
-		}
-
-		proj_cols := make([]types.Column, len(stmt.columns), context.temp_allocator)
-		for col_name, i in stmt.columns {
-			// Borrow: stmt strings share the temp lifetime of the output.
-			proj_cols[i] = types.Column {
-				name = col_name,
-				type = .TEXT,
-			}
-		}
-		return projected[:], proj_cols
-	}
-	return rows, table.columns
+	return rows, cols, true
 }
 
 // materialize_subquery_rows applies the outer WHERE filter to the inner
@@ -131,12 +81,15 @@ exec_subquery_data :: proc(
 		return nil, nil, false
 	}
 
-	inner_rows, virtual_cols := exec_subquery(t, subq^, cache)
-	if inner_rows == nil {
+	inner_rows, virtual_cols, inner_ok := exec_subquery(t, subq^, cache)
+	if !inner_ok {
 		return nil, nil, false
 	}
 
 	rows, single_range := materialize_subquery_rows(inner_rows, virtual_cols, stmt)
+	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
+		return exec_select_aggregate_data(stmt, rows[:], virtual_cols, single_range)
+	}
 	display_indices, ok := build_display_indices(
 		stmt.columns,
 		build_column_resolver(virtual_cols, single_range),

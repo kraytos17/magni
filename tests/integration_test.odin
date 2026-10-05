@@ -4920,3 +4920,62 @@ test_index_explain :: proc(t: ^testing.T) {
 		"CREATE TABLE x (id INT);",
 	)
 }
+
+@(test)
+test_from_subquery_clauses :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "fromsubq")
+	defer teardown_db(d, "fromsubq")
+
+	db.execute(d, "CREATE TABLE t (id INT, v INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+	db.execute(d, "INSERT INTO t VALUES (2, 20);")
+	db.execute(d, "INSERT INTO t VALUES (3, 30);")
+
+	// Aggregates inside FROM-subqueries apply (previously silently dropped).
+	q := db.query(d, "SELECT * FROM (SELECT COUNT(*) FROM t) AS c;")
+	testing.expect(t, q.ok, "aggregate subquery executes")
+	if q.ok && len(q.rows) == 1 {
+		n, _ := q.rows[0][0].(i64)
+		testing.expect_value(t, n, i64(3))
+	}
+
+	// ORDER BY + LIMIT inside FROM-subqueries apply.
+	q2 := db.query(d, "SELECT * FROM (SELECT v FROM t ORDER BY v DESC LIMIT 2) AS s;")
+	testing.expect(t, q2.ok, "order/limit subquery executes")
+	testing.expect(t, len(q2.rows) == 2, "limit applies inside subquery")
+	if q2.ok && len(q2.rows) == 2 {
+		v0, _ := q2.rows[0][0].(i64)
+		v1, _ := q2.rows[1][0].(i64)
+		testing.expect_value(t, v0, i64(30))
+		testing.expect_value(t, v1, i64(20))
+	}
+
+	// WHERE inside FROM-subqueries still applies.
+	q3 := db.query(d, "SELECT * FROM (SELECT v FROM t WHERE v > 15) AS f;")
+	testing.expect(t, q3.ok, "filtered subquery executes")
+	testing.expect(t, len(q3.rows) == 2, "where applies inside subquery")
+}
+
+@(test)
+test_from_subquery_empty :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	d := setup_db(t, "fromsubqempty")
+	defer teardown_db(d, "fromsubqempty")
+
+	db.execute(d, "CREATE TABLE t (id INT, v INT);")
+	db.execute(d, "INSERT INTO t VALUES (1, 10);")
+
+	// Empty inner result is an empty result, not an error.
+	q := db.query(d, "SELECT * FROM (SELECT v FROM t WHERE v > 100) AS e;")
+	testing.expect(t, q.ok, "empty subquery executes")
+	testing.expect(t, len(q.rows) == 0, "empty subquery yields zero rows")
+
+	// Aggregates over the empty set follow SQL: COUNT is 0.
+	q2 := db.query(d, "SELECT COUNT(*) FROM (SELECT v FROM t WHERE v > 100) AS z;")
+	testing.expect(t, q2.ok, "count over empty subquery executes")
+	if q2.ok && len(q2.rows) == 1 {
+		n, _ := q2.rows[0][0].(i64)
+		testing.expect_value(t, n, i64(0))
+	}
+}

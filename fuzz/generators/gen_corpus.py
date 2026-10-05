@@ -173,6 +173,8 @@ from promoted_seeds import PROMOTED_SEEDS
 SEEDS = HAND_SEEDS + PROMOTED_SEEDS
 
 def deep_subquery(levels):
+    """Nesting-depth probe: levels of SELECT * FROM (...) (under/over the
+    512 guard via the caller's level choice)."""
     s = "SELECT * FROM t"
     for i in range(levels):
         s = f"SELECT * FROM ({s}) AS s{i}"
@@ -180,10 +182,12 @@ def deep_subquery(levels):
 
 
 def deep_parens(levels):
+    """Parenthesis-depth probe in WHERE (511 parses, 513 must clean-error)."""
     return "SELECT * FROM t WHERE " + "(" * levels + "a = 1" + ")" * levels + ";"
 
 
 def deep_parens_not(levels):
+    """NOT-nesting probe: NOT (NOT (...)) around one comparison."""
     s = "a = 1"
     for _ in range(levels):
         s = "NOT (" + s + ")"
@@ -191,6 +195,8 @@ def deep_parens_not(levels):
 
 
 def main():
+    """Rewrite the corpus deterministically: hand + promoted seeds, then
+    the guard-boundary probes (under/over nesting limits)."""
     seed_names = seedgen.managed_names(SEEDS)
     seed_names |= {
         "deep_subquery_under_guard",
@@ -202,7 +208,8 @@ def main():
         "deep_check_nested",
     }
 
-    # Clear the corpus dir of any files we manage (keeps stale seeds from lingering).
+    # Clear managed names first so removed/renamed generator entries don't
+    # leave orphan seeds behind.
     seedgen.clear_managed(CORPUS, seed_names)
 
     written = seedgen.write_entries(CORPUS, SEEDS)

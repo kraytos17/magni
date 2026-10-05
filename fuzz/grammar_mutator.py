@@ -70,7 +70,8 @@ def _load_dict_tokens():
     return toks
 
 
-# Fallback if sql.dict is missing/unreadable: today's dict subset, verbatim.
+# Fallback if sql.dict is missing/unreadable: a pinned subset of dict
+# values, verbatim (the selftest asserts no drift in the other direction).
 # Fuzzing must never break on a helper-file problem.
 _DICT_FALLBACK = [
     b"SELECT", b"FROM", b"WHERE", b"JOIN", b"ON", b"USING", b"GROUP BY",
@@ -108,6 +109,10 @@ WRAP_TEMPLATES = [
 ]
 
 
+# AFL++ Python mutator API below (init/fuzz/havoc_mutation/
+# havoc_mutation_probability/describe/fuzz_count): fixed names and
+# signatures imposed by AFL++; see afl-fuzz docs. All state stays in
+# module globals (_rng, _last_desc) — AFL++ loads one module instance.
 def init(seed):
     _rng.seed(seed)
     global _last_desc
@@ -115,11 +120,15 @@ def init(seed):
 
 
 def fuzz_count(buf):
+    # Mutations per fuzz() call: fixed at 4 (AFL++ multiplies by its own
+    # scheduling; this only bounds one custom-mutator application batch).
     return 4
 
 
 def _split_stmts(data: bytes) -> list:
-    """Split on ';' outside string literals (mirrors sqltext.split_statements)."""
+    """Split on ';' outside string literals (''-aware; the sqltext splitter
+    it parallels toggles on every quote, so boundary agreement is
+    approximate — close enough for splice points, never for parsing)."""
     parts, start, in_str = [], 0, False
     i = 0
     while i < len(data):
@@ -141,7 +150,13 @@ def _split_stmts(data: bytes) -> list:
 
 
 def _find_keyword_hit(buf: bytes):
-    """Find (pos, class_idx, alt_idx) for a random swappable keyword."""
+    """Find (pos, class_idx, alt_idx) for a random swappable keyword.
+
+    Candidates match case-insensitively (upper-find); alpha keywords need
+    word boundaries (alnum/_ on either side disqualifies — avoids hitting
+    identifiers containing keywords). Operators skip the check. None when
+    nothing is swappable (caller leaves buf unchanged).
+    """
     cands = []
     upper = buf.upper()
     for ci, cls in enumerate(SWAP_CLASSES):
@@ -164,6 +179,9 @@ def _find_keyword_hit(buf: bytes):
 
 
 def _keyword_swap(buf: bytes) -> bytes:
+    """Replace one swappable keyword with a same-class alternative,
+    preserving the original's case style (upper/lower; mixed falls back to
+    the class's uppercase spelling). No-op when nothing is swappable."""
     hit = _find_keyword_hit(buf)
     if hit is None:
         return buf
@@ -188,6 +206,9 @@ def _split_points(buf: bytes) -> list:
 
 
 def _token_insert(buf: bytes) -> bytes:
+    """Insert a random token at a whitespace/punctuation boundary plus a
+    separating space (no mid-identifier splits; '(' needs no leading space
+    since it already delimits)."""
     tok = _rng.choice(INSERT_TOKENS)
     pos = _rng.choice(_split_points(buf))
     sep = b" " if pos > 0 and buf[pos - 1:pos] not in b" \t\n\r(" else b""
@@ -195,6 +216,10 @@ def _token_insert(buf: bytes) -> bytes:
 
 
 def _splice_stmts(buf: bytes, add_buf: bytes) -> bytes:
+    """Statement-aware splice: random prefix of one input's statements +
+    random suffix of the other's (either order). Empty side falls back:
+    no statements in buf takes add_buf whole, none in add_buf degrades to
+    token_insert. Never returns empty (falls back to buf)."""
     a = _split_stmts(buf)
     b = _split_stmts(add_buf) if add_buf else []
     if not a:
@@ -214,6 +239,10 @@ def _splice_stmts(buf: bytes, add_buf: bytes) -> bytes:
 
 
 def _literal_tweak(buf: bytes) -> bytes:
+    """Mutate one literal in place: strings gain suffixes/quotes, hex swaps
+    among small constants, ints randomize full-range or grow (i64-overflow
+    probe 9223372036854775808), floats pick edge forms, digit-runs append.
+    No literals degrades to token_insert."""
     import re
     # Find int/float/hex literals and quoted strings; tweak one at random.
     pat = re.compile(rb"0[xX][0-9a-fA-F]+|\d+\.?\d*(?:[eE][+-]?\d+)?|'[^']*(?:''[^']*)*'")
@@ -237,6 +266,10 @@ def _literal_tweak(buf: bytes) -> bytes:
 
 
 def _wrap_struct(buf: bytes, add_buf: bytes) -> bytes:
+    """Wrap the input in a structure template (subquery, self-join, WHERE /
+    UNION / ORDER+LIMIT, EXPLAIN). Empty input defaults to SELECT 1; the
+    two-slot templates draw the second statement from add_buf (SELECT 2 on
+    empty)."""
     stmt = buf.strip() or b"SELECT 1;"
     other = (_split_stmts(add_buf)[0].strip()
              if add_buf and _split_stmts(add_buf) else b"SELECT 2;")
@@ -261,6 +294,10 @@ def _mutate(buf: bytes, add_buf: bytes) -> tuple:
 
 
 def fuzz(buf, add_buf, max_size):
+    """AFL++ custom-mutator entry: one weighted strategy over (buf, add_buf),
+    truncated to max_size (marked +trunc in the description). Never raises:
+    any internal failure returns buf unchanged so a mutator bug can't kill
+    the campaign (recorded as fallback:<err>)."""
     global _last_desc
     try:
         data = bytes(buf)
@@ -277,15 +314,22 @@ def fuzz(buf, add_buf, max_size):
 
 
 def havoc_mutation(buf, max_size):
+    """Havoc-stage entry: same strategies without add_buf (splice degrades
+    to token_insert; wrap uses SELECT 2 as the second statement)."""
     out = fuzz(buf, b"", max_size)
     return out
 
 
 def havoc_mutation_probability():
+    # AFL++-consumed application weight (see the module docstring for the
+    # effective rate this produces in the havoc stage).
     return 15
 
 
 def describe(max_description_length):
+    """AFL++ introspection: last mutation's description (init/fallback
+    markers included), truncated to the requested length."""
+    return _last_desc[:max_description_length].encode("utf-8", "replace")
     return _last_desc[:max_description_length].encode("utf-8", "replace")
 
 

@@ -252,7 +252,7 @@ build_sorted_tree :: proc(
 }
 
 // vacuum_empty_root allocates a fresh empty slotdir leaf for vacuuming an
-// empty tree (the collect phase yielded nothing to rebuild).
+// empty tree (collection yielded nothing to rebuild).
 @(private = "file")
 vacuum_empty_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
 	page, a_err := pager.allocate_page(t.pager)
@@ -557,7 +557,7 @@ text_leaf_chunk_bytes :: proc(texts: [][]u8, lo: int, hi: int) -> (total: int, p
 }
 
 // vacuum_empty_text_root allocates a fresh empty text leaf for vacuuming an
-// empty text index (the collect phase yielded nothing to rebuild).
+// empty text index (collection yielded nothing to rebuild).
 @(private = "file")
 vacuum_empty_text_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
 	page, a_err := pager.allocate_page(t.pager)

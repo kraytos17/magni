@@ -518,3 +518,39 @@ test_headers_on_page_dispatch :: proc(t: ^testing.T) {
 	copy(buf[:4], "MAGN") // old-format magic reads as a huge count
 	testing.expect(t, snapshot.headers_on_page(buf[:]) == nil, "magic garbage is old layout")
 }
+
+@(test)
+test_snapshot_refs_survive_log_push :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	p := setup_snapshot_env(t, "refs_log")
+	defer teardown_snapshot_env(p, "refs_log")
+
+	rp := snapshot.create_refs_page(p)
+	testing.expect(t, rp != 0, "refs page alloc failed")
+
+	testing.expect(t, snapshot.set_ref(p, rp, snapshot.MAIN_REF, 2, .BRANCH, false), "set MAIN=2")
+	// Simulate snapshot_restore: push displaced id, re-point MAIN.
+	testing.expect(t, snapshot.log_push(p, rp, 2), "log push 2")
+	testing.expect(t, snapshot.set_ref(p, rp, snapshot.MAIN_REF, 1, .BRANCH, false), "set MAIN=1")
+
+	id, found := snapshot.get_ref(p, rp, snapshot.MAIN_REF)
+	testing.expect(t, found, "MAIN_REF readable after log_push")
+	testing.expect_value(t, id, u64(1))
+
+	// Second cycle: entries must update in place (no duplicate growth).
+	testing.expect(t, snapshot.log_push(p, rp, 1), "log push 1")
+	testing.expect(t, snapshot.set_ref(p, rp, snapshot.MAIN_REF, 2, .BRANCH, false), "set MAIN=2")
+	id2, found2 := snapshot.get_ref(p, rp, snapshot.MAIN_REF)
+	testing.expect(t, found2, "MAIN_REF readable after second cycle")
+	testing.expect_value(t, id2, u64(2))
+
+	// Undo log roundtrips LIFO.
+	popped, ok := snapshot.log_pop(p, rp)
+	testing.expect(t, ok, "log pop ok")
+	testing.expect_value(t, popped, u64(1))
+	popped2, ok2 := snapshot.log_pop(p, rp)
+	testing.expect(t, ok2, "second log pop ok")
+	testing.expect_value(t, popped2, u64(2))
+	_, ok3 := snapshot.log_pop(p, rp)
+	testing.expect(t, !ok3, "empty log pop fails")
+}

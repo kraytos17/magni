@@ -15,6 +15,9 @@ import "src:schema"
 import "src:snapshot"
 import "src:types"
 
+// checkpoint expires to the default keep, WAL-checkpoints committed
+// frames into main, persists the header, and reports. Exclusive lock;
+// the REPL/.checkpoint and close paths share it.
 checkpoint :: proc(database: ^db.Database) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -108,6 +111,10 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 	return .None
 }
 
+// integrity_check verifies page 1, the schema root, and every table's
+// B-tree (tree_verify_if_enabled — a no-op unless built with
+// -define:VERIFY_TREE=true, so a default build only checks readability).
+// Exclusive lock; first failure returns, nothing is mutated.
 integrity_check :: proc(database: ^db.Database) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -120,8 +127,8 @@ integrity_check :: proc(database: ^db.Database) -> db.DB_Error {
 	if err != .None {
 		return .IO_Error
 	}
-	defer pager.unpin_page(database.pager, database.schema_root_page)
 
+	defer pager.unpin_page(database.pager, database.schema_root_page)
 	st := db.Schema_Tree(database)
 	tables := schema.list_tables(&st, context.temp_allocator)
 	for table in tables {
@@ -129,8 +136,8 @@ integrity_check :: proc(database: ^db.Database) -> db.DB_Error {
 		if page_err != .None {
 			return .IO_Error
 		}
-		defer pager.unpin_page(database.pager, table.root_page)
 
+		defer pager.unpin_page(database.pager, table.root_page)
 		table_tree := btree.init(database.pager, table.root_page)
 		if !btree.tree_verify_if_enabled(&table_tree) {
 			fmt.printf("Integrity error: Table '%s' B-tree corrupted\n", table.name)
@@ -142,6 +149,7 @@ integrity_check :: proc(database: ^db.Database) -> db.DB_Error {
 	return .None
 }
 
+// list_tables prints the one-column name table for .tables.
 list_tables :: proc(database: ^db.Database) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -175,6 +183,8 @@ resolve_table :: proc(
 	return schema.get_table(&st, table_name, allocator)
 }
 
+// describe_table prints one table's columns (name/type/pk/null/default)
+// for .desc. .Table_Not_Found when absent.
 describe_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -210,6 +220,9 @@ describe_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Erro
 	return .None
 }
 
+// stats prints the property/value table for .stats (path, page size,
+// page count, size, table count). Read-only; computed from the pager and
+// catalog on the spot.
 stats :: proc(database: ^db.Database) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -240,6 +253,8 @@ stats :: proc(database: ^db.Database) -> db.DB_Error {
 	return .None
 }
 
+// dump_table prints every row of one table for .dump, in key order.
+// Unreadable cells are skipped (not fatal). .Table_Not_Found when absent.
 dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -255,8 +270,8 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	if err != .None {
 		return .IO_Error
 	}
-	defer btree.cursor_destroy(&cursor)
 
+	defer btree.cursor_destroy(&cursor)
 	cols := make([]string, len(table.columns), context.temp_allocator)
 	for i in 0 ..< len(table.columns) {
 		cols[i] = table.columns[i].name
@@ -280,6 +295,8 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	return .None
 }
 
+// print_schema prints CREATE statements (.schema) or the low-level
+// catalog dump (.debug_schema) via schema.
 print_schema :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -294,6 +311,8 @@ print_schema :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 	return .None
 }
 
+// print_tree_page dumps one B-tree page's header + cells at debug level
+// (.tree_page). Best-effort: bad slots log a marker and continue.
 print_tree_page :: proc(database: ^db.Database, page_num: u32) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
@@ -304,6 +323,8 @@ print_tree_page :: proc(database: ^db.Database, page_num: u32) -> db.DB_Error {
 	return .None
 }
 
+// print_snapshots prints the snapshot chain table for .snapshots (shared
+// lock — read-only). debug=true (.snapshot_debug) adds the page column.
 print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.rw_mutex_shared_lock(&database.mu)
@@ -318,9 +339,13 @@ print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 
 	infos := snapshot.chain_infos(database.pager, database.latest_snapshot, context.temp_allocator)
 	cols := []string{"id", "op", "state", "timestamp", "tag"}
+	if debug {
+		cols = []string{"id", "op", "state", "timestamp", "tag", "page"}
+	}
+
 	rows := make([][]string, len(infos), context.temp_allocator)
 	for info, i in infos {
-		rows[i] = executor.row_of(
+		row := executor.row_of(
 			context.temp_allocator,
 			fmt.aprintf("%d", info.id, allocator = context.temp_allocator),
 			fmt.aprintf("%s", info.operation, allocator = context.temp_allocator),
@@ -328,6 +353,13 @@ print_snapshots :: proc(database: ^db.Database, debug := false) -> db.DB_Error {
 			format_snapshot_ts(info.timestamp, context.temp_allocator),
 			info.tag,
 		)
+		if debug {
+			wide := make([]string, len(row) + 1, context.temp_allocator)
+			copy(wide, row)
+			wide[len(row)] = fmt.aprintf("%d", info.page, allocator = context.temp_allocator)
+			row = wide
+		}
+		rows[i] = row
 	}
 
 	executor.render_counted(cols, rows)

@@ -19,6 +19,8 @@ foreign lib {
 	ioctl :: proc(fd: c.int, request: u32, arg: rawptr) -> c.int ---
 }
 
+// Term is the terminal session: fd, saved cooked settings, raw flag,
+// cached size, and a resize-pending flag set by SIGWINCH.
 Term :: struct {
 	fd            : posix.FD,
 	orig          : posix.termios,
@@ -41,6 +43,8 @@ Winsize :: struct {
 	ws_ypixel: u16,
 }
 
+// terminal_query_size refreshes the cached size via ioctl (clamped to ≥1;
+// silently keeps the previous size on failure).
 terminal_query_size :: proc(t: ^Term) {
 	ws: Winsize
 	result := ioctl(c.int(t.fd), TIOCGWINSZ, &ws)
@@ -50,6 +54,8 @@ terminal_query_size :: proc(t: ^Term) {
 	}
 }
 
+// term_init snapshots the fd's current settings (false when not a tty).
+// No terminal state changes yet — that is term_enable_raw.
 @(private)
 term_init :: proc(fd: posix.FD) -> (t: Term, ok: bool) {
 	t.fd = fd
@@ -59,6 +65,10 @@ term_init :: proc(fd: posix.FD) -> (t: Term, ok: bool) {
 	return t, true
 }
 
+// term_enable_raw switches to raw mode (no echo/canonical/signals, 8-bit,
+// byte-at-a-time reads), installs the crash/CTRL-C restore handlers,
+// caches the size, and enables bracketed paste. False when tcsetattr fails
+// (terminal left as-is).
 @(private)
 term_enable_raw :: proc(t: ^Term) -> bool {
 	raw := t.orig
@@ -81,6 +91,8 @@ term_enable_raw :: proc(t: ^Term) -> bool {
 	return true
 }
 
+// term_restore leaves raw mode (disables bracketed paste, restores saved
+// settings). No-op unless raw — safe to call unconditionally at exit.
 @(private)
 term_restore :: proc(t: ^Term) {
 	if t.is_raw {
@@ -90,6 +102,9 @@ term_restore :: proc(t: ^Term) {
 	}
 }
 
+// install_restore_handler wires SIGINT/SIGTERM (restore + re-raise) and
+// SIGWINCH (set the resize flag; the next redraw re-queries). Process-wide
+// state via global_term_ptr — handlers cannot capture closures.
 @(private = "file")
 install_restore_handler :: proc(t: ^Term) {
 	global_term_ptr = t
@@ -103,6 +118,8 @@ install_restore_handler :: proc(t: ^Term) {
 	posix.sigaction(posix.Signal(posix.SIGWINCH), &winch_action, nil)
 }
 
+// restore_and_reraise restores cooked mode, resets the signal to default,
+// and re-raises it (so the process still dies with the expected status).
 @(private = "file")
 restore_and_reraise :: proc "c" (sig: posix.Signal) {
 	if global_term_ptr != nil && global_term_ptr.is_raw {
@@ -114,6 +131,8 @@ restore_and_reraise :: proc "c" (sig: posix.Signal) {
 	posix.raise(sig)
 }
 
+// sigwinch_handler marks the size stale; redraw re-queries lazily (no
+// ioctl in the handler itself — async-signal safety).
 @(private = "file")
 sigwinch_handler :: proc "c" (sig: posix.Signal) {
 	global_term_ptr.window_resized = true

@@ -39,6 +39,8 @@ hash_values :: proc(values: []types.Value, indices: []int = nil) -> u64 {
 	return h
 }
 
+// fnv_mix is one FNV-1a mix step (xor-fold then prime multiply), the
+// primitive behind hash_value_into and the fingerprint paths.
 @(private = "file")
 fnv_mix :: proc(h, w: u64) -> u64 {
 	return (h ~ w) * FNV_PRIME
@@ -154,6 +156,12 @@ where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition
 	return root.cond, true
 }
 
+// try_pk_lookup resolves WHERE <pk> = <int> into a direct rowid: single
+// COND clause, equality operator, column naming the pk (bare or qualified
+// by this table/alias), literal i64 rhs. Anything else bails (ok=false)
+// and the caller scans. Sound without re-checking the filter because stored
+// pk values are always ints: inserts coerce a non-int pk value to an
+// auto-assigned rowid (see the rowid-assignment path in dml.odin).
 @(private)
 try_pk_lookup :: proc(
 	table: types.Table,
@@ -211,6 +219,9 @@ split_qualifier :: proc(name: string) -> (qual: string, col: string, has: bool) 
 	return "", name, false
 }
 
+// values_equal compares two value slices element-wise (length + each
+// element via value_compare). The row-equality behind DISTINCT and set-op
+// dedup.
 @(private)
 values_equal :: proc(a, b: []types.Value) -> bool {
 	if len(a) != len(b) {
@@ -258,6 +269,9 @@ Fp_Buckets :: struct {
 	allocator: mem.Allocator,
 }
 
+// fp_buckets_make sizes an empty bucket index for ~n entries (min 16
+// slots, power of two for the mask). n is a hint — the table grows by
+// doubling past 3/4 load regardless.
 @(private)
 fp_buckets_make :: proc(n: int, allocator: mem.Allocator) -> Fp_Buckets {
 	cap := max(16, math.next_power_of_two(2 * (n + 1)))
@@ -320,6 +334,10 @@ fp_buckets_grow :: proc(b: ^Fp_Buckets) {
 	delete(old_head, b.allocator)
 }
 
+// fp_buckets_add inserts (fp, pos): same-fingerprint entries chain through
+// next (walk from head, -1 ends); collisions probe forward. Grows first
+// past 3/4 load so a slot always exists. Positions may repeat (multiset) —
+// callers dedup or count as needed.
 @(private)
 fp_buckets_add :: proc(b: ^Fp_Buckets, fp: u64, pos: int) {
 	if len(b.rows) >= (3 * len(b.slots)) / 4 {
@@ -360,6 +378,9 @@ fp_buckets_probe :: proc(b: ^Fp_Buckets, fp: u64) -> (int, bool) {
 	}
 }
 
+// fp_buckets_destroy frees the slot/head arrays (allocator) and the
+// parallel chains. Fingerprints are values, not pointers — nothing else to
+// release.
 @(private)
 fp_buckets_destroy :: proc(b: ^Fp_Buckets) {
 	delete(b.slots, b.allocator)
@@ -369,6 +390,9 @@ fp_buckets_destroy :: proc(b: ^Fp_Buckets) {
 	delete(b.next)
 }
 
+// deep_copy_values clones a row into temp memory (TEXT/BLOB cloned,
+// others copied by value). Unclonable values become NULL rather than
+// failing the row — the clone path is best-effort by design.
 @(private)
 deep_copy_values :: proc(values: []types.Value) -> []types.Value {
 	new_values := make([]types.Value, len(values), context.temp_allocator)
@@ -421,6 +445,9 @@ parse_check_predicate :: proc(chk: string) -> (Parsed_Check, bool) {
 }
 
 @(private = "file")
+// check_op_from_token maps a CHECK operator spelling to its Check_Op.
+// Both not-equals spellings (!= and <>) are accepted; anything else fails
+// (CHECK supports exactly these six comparisons).
 check_op_from_token :: proc(tok: string) -> (Check_Op, bool) {
 	switch tok {
 	case ">":
@@ -440,6 +467,8 @@ check_op_from_token :: proc(tok: string) -> (Check_Op, bool) {
 }
 
 @(private = "file")
+// check_op_eval applies a CHECK comparison to two ints. Total (every op
+// returns, no fallthrough) — the trailing false is unreachable.
 check_op_eval :: proc(op: Check_Op, left, right: i64) -> bool {
 	switch op {
 	case .GT:

@@ -7,6 +7,8 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// join_emit_combined appends one joined row (left values + right values,
+// temp-allocated, rowid 0 — joined rows have no source rowid).
 @(private = "file")
 join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[dynamic]Row_Entry) {
 	combined := make([]types.Value, len(outer.values) + len(inner), context.temp_allocator)
@@ -15,6 +17,8 @@ join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[d
 	append(new_rows, Row_Entry{0, combined})
 }
 
+// join_emit_null_row appends one LEFT-outer row: left values + right_width
+// NULLs (unmatched left side survives the join).
 @(private = "file")
 join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[dynamic]Row_Entry) {
 	null_row := make([]types.Value, len(outer.values) + right_col_count, context.temp_allocator)
@@ -23,6 +27,8 @@ join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[d
 	append(new_rows, Row_Entry{0, null_row})
 }
 
+// join_emit_null_left_row appends one RIGHT-outer row: left_width NULLs +
+// right values (unmatched right side survives the join).
 @(private = "file")
 join_emit_null_left_row :: proc(
 	right_row: Row_Entry,
@@ -73,9 +79,9 @@ Join_Outer :: struct {
 	right: bool,
 }
 
-// join_key_i64 fingerprints an integer join key (bijective, so hits need no
-// verification). Non-i64 values — including NULLs — report false and never
-// match, mirroring the old dedicated i64 path.
+// join_key_i64 fingerprints an integer join key with the identity map
+// (bijective, so hits need no verification). Non-i64 values — including
+// NULLs — report false and never match (NULL never joins).
 @(private = "file")
 join_key_i64 :: proc(v: types.Value) -> (u64, bool) {
 	key, ok := v.(i64)
@@ -95,18 +101,24 @@ join_key_fingerprint :: proc(v: types.Value) -> (u64, bool) {
 	return hash_value(v), true
 }
 
+// join_match_any accepts every pair (CROSS JOIN and ON-less arms —
+// filtering, if any, happens in a later WHERE). Paired with the identity
+// fingerprint so hash probing still partitions by key.
 @(private = "file")
 join_match_any :: proc(a, b: types.Value) -> bool { return true }
 
+// join_match_compare accepts pairs the executor's value order calls equal
+// (equi-join verification after a fingerprint hit).
 @(private = "file")
 join_match_compare :: proc(a, b: types.Value) -> bool {
 	return types.value_compare(a, b)
 }
 
-// join_hash_probe is the shared hash-join engine behind the former
-// join_hash_i64 / join_hash_string twins. key_of fingerprints one key value
-// (false = skip); verify confirms a fingerprint hit. The smaller side is built
-// into the bucket table; the other probes it.
+// join_hash_probe is the shared hash-join engine: key_of fingerprints one
+// key value (false = skip this row); verify confirms a fingerprint hit.
+// The smaller side is built into the bucket table; the other probes it.
+// Integer keys use the identity fingerprint (no verification); all other
+// types hash with value_compare verification on hits.
 @(private = "file")
 join_hash_probe :: proc(
 	left, right: Join_Side,
@@ -191,6 +203,10 @@ join_hash_probe :: proc(
 	delete(matched_probe)
 }
 
+// resolve_from_source resolves the FROM arm into a Table_Context: physical
+// tables via the catalog (tree opened on their root), subqueries by
+// executing them into a Virtual_Table. FROM-less statements never reach
+// here (literal path). False on unknown tables or failed subqueries.
 @(private = "file")
 resolve_from_source :: proc(
 	t: ^btree.Tree,
@@ -215,8 +231,8 @@ resolve_from_source :: proc(
 		}
 		return true
 	} else if vt, is_vt := stmt.from.(^parser.Select_Stmt); is_vt {
-		inner_rows, inner_cols := exec_subquery(t, vt^, cache)
-		if inner_rows == nil {
+		inner_rows, inner_cols, inner_ok := exec_subquery(t, vt^, cache)
+		if !inner_ok {
 			return false
 		}
 
@@ -229,6 +245,9 @@ resolve_from_source :: proc(
 	return false
 }
 
+// resolve_join_source resolves one JOIN arm like resolve_from_source, with
+// its column range placed after prev_range (combined-row layout). Same
+// false conditions.
 @(private = "file")
 resolve_join_source :: proc(
 	t: ^btree.Tree,
@@ -255,8 +274,8 @@ resolve_join_source :: proc(
 		}
 		return true
 	} else if subq, is_subquery := join.source.(^parser.Select_Stmt); is_subquery {
-		inner_rows, inner_cols := exec_subquery(t, subq^, cache)
-		if inner_rows == nil {
+		inner_rows, inner_cols, inner_ok := exec_subquery(t, subq^, cache)
+		if !inner_ok {
 			return false
 		}
 
@@ -393,7 +412,7 @@ try_hash_join :: proc(
 // init_join_filter resolves the ON clause once (not per pair). Absent ON
 // matches everything (nil filter); unresolvable ON matches nothing —
 // signalled by ok=false so the caller can null-extend every outer row
-// (mirrors evaluate_where).
+// (same fail-closed convention as evaluate_where).
 @(private = "file")
 init_join_filter :: proc(
 	jb: ^Join_Build,
@@ -493,7 +512,8 @@ nested_loop_join :: proc(
 	left_col_count := jb.ctxs[info_idx - 1].range.start_col + jb.ctxs[info_idx - 1].range.col_count
 	right_col_count := jb.ctxs[info_idx].range.col_count
 	// Resolve the ON filter once, not per pair. Unresolvable ON matches
-	// nothing (mirrors evaluate_where); absent ON matches everything.
+	// nothing (same fail-closed convention as evaluate_where); absent ON
+	// matches everything.
 	filter, filter_ok := init_join_filter(jb, jc)
 	if !filter_ok {
 		emit_unmatched_outer(
@@ -640,6 +660,11 @@ run_join_chain :: proc(
 	return out
 }
 
+// build_join_result assembles and runs a FROM+JOINs query: resolve every
+// source, push single-table WHERE conjuncts down to the scans
+// (split_where_for_join), scan the first table, then chain the joins arm
+// by arm. The post-join WHERE (unpushed conjuncts) applies to the combined
+// rows. ok=false when any source or scan fails.
 @(private)
 build_join_result :: proc(
 	t: ^btree.Tree,
@@ -701,6 +726,10 @@ exec_select_join_data :: proc(
 	return finish_select(stmt, rows, combined_cols, table_ranges)
 }
 
+// try_join_match tests one pair against the arm's ON filter (nil filter =
+// match) and emits the combined row on success, setting matched (the
+// outer-join tail uses it to decide null-extension). Non-matches emit
+// nothing.
 @(private = "file")
 try_join_match :: proc(
 	outer_row: Row_Entry,

@@ -17,6 +17,12 @@ import "src:schema"
 PROMPT      :: "magni> "
 CONT_PROMPT :: "   ...> "
 
+// Interactive REPL: line-edited input (history file ~/.magnidb_history,
+// schema-aware completion), ;-terminated statements buffered across lines
+// (continuation prompt), dot-commands dispatched immediately. Falls back to
+// plain stdin lines when the terminal won't initialize. An
+// exit-requesting dot-command breaks the loop; EOF prints a newline and
+// returns.
 @(private)
 repl :: proc(database: ^db.Database) {
 	history_path := filepath_join_home(".magnidb_history")
@@ -122,6 +128,9 @@ repl_submit :: proc(
 	}
 }
 
+// repl_fallback is the no-TTY input loop: same ;-buffering and
+// dot-command dispatch as repl, without line editing, completion, or
+// history. EOF ends the session.
 @(private = "file")
 repl_fallback :: proc(database: ^db.Database) {
 	reader: bufio.Reader
@@ -171,6 +180,11 @@ repl_fallback :: proc(database: ^db.Database) {
 	}
 }
 
+// Dot_Handler is one dot-command's implementation: receives the full input
+// line (args) and its table entry (for usage). Returns exit=true only for
+// session-ending commands (.exit/.quit) — every other command returns
+// false after printing its output or error. Convention: bad args print
+// cmd.usage; backend errors log through db_error_string or report_result.
 @(private = "file")
 Dot_Handler :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool)
 
@@ -193,24 +207,28 @@ Dot_Command :: struct {
 	usage  : string,
 }
 
+// .exit/.quit: the only handler returning exit=true.
 @(private = "file")
 dot_cmd_exit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	fmt.println("Goodbye.")
 	return true
 }
 
+// .help: prints the print_help reference.
 @(private = "file")
 dot_cmd_help :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	print_help()
 	return false
 }
 
+// .version: prints APP_VERSION.
 @(private = "file")
 dot_cmd_version :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	fmt.printf("MagniDB v%s\n", APP_VERSION)
 	return false
 }
 
+// .tables: lists catalog tables via admin.
 @(private = "file")
 dot_cmd_tables :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if err := admin.list_tables(database); err != .None {
@@ -219,6 +237,8 @@ dot_cmd_tables :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 	return false
 }
 
+// report_result logs a backend error or prints the success message
+// (skipped when empty). The shared tail for delegating dot-commands.
 @(private = "file")
 report_result :: proc(err: db.DB_Error, success_msg: string = "") {
 	if err != .None {
@@ -228,12 +248,14 @@ report_result :: proc(err: db.DB_Error, success_msg: string = "") {
 	}
 }
 
+// .schema: prints CREATE statements via admin.
 @(private = "file")
 dot_cmd_schema :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	report_result(admin.print_schema(database))
 	return false
 }
 
+// .debug_schema: admin schema dump with internals.
 @(private = "file")
 dot_cmd_debug_schema :: proc(
 	database: ^db.Database,
@@ -265,6 +287,8 @@ dot_uint_arg :: proc(parts: []string, idx: int) -> (u64, bool) {
 	return v, ok
 }
 
+// .tree_page <n>: prints one B-tree page's structure via admin; usage on
+// missing/bad page number.
 @(private = "file")
 dot_cmd_tree_page :: proc(
 	database: ^db.Database,
@@ -287,6 +311,7 @@ dot_cmd_tree_page :: proc(
 	return false
 }
 
+// .snapshot_debug: verbose snapshot chain dump via admin.
 @(private = "file")
 dot_cmd_snapshot_debug :: proc(
 	database: ^db.Database,
@@ -299,12 +324,14 @@ dot_cmd_snapshot_debug :: proc(
 	return false
 }
 
+// .stats: database statistics via admin.
 @(private = "file")
 dot_cmd_stats :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	report_result(admin.stats(database))
 	return false
 }
 
+// .begin: opens an explicit transaction.
 @(private = "file")
 dot_cmd_begin :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.begin(database) == .None {
@@ -313,6 +340,7 @@ dot_cmd_begin :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -
 	return false
 }
 
+// .commit: commits the explicit transaction.
 @(private = "file")
 dot_cmd_commit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.commit(database) == .None {
@@ -321,6 +349,7 @@ dot_cmd_commit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 	return false
 }
 
+// .rollback: rolls back the explicit transaction.
 @(private = "file")
 dot_cmd_rollback :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	if db.rollback(database) == .None {
@@ -329,6 +358,7 @@ dot_cmd_rollback :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command
 	return false
 }
 
+// .snapshots: lists the snapshot chain via admin.
 @(private = "file")
 dot_cmd_snapshots :: proc(
 	database: ^db.Database,
@@ -341,6 +371,8 @@ dot_cmd_snapshots :: proc(
 	return false
 }
 
+// .snapdiff <a> <b>: diffs two snapshots' manifests; usage unless exactly
+// two numeric ids parse.
 @(private = "file")
 dot_cmd_snapdiff :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
@@ -357,6 +389,7 @@ dot_cmd_snapdiff :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command
 	return false
 }
 
+// .checkpoint: WAL checkpoint + GC via admin.
 @(private = "file")
 dot_cmd_checkpoint :: proc(
 	database: ^db.Database,
@@ -369,12 +402,14 @@ dot_cmd_checkpoint :: proc(
 	return false
 }
 
+// .vacuum: rebuild into packed pages via admin.
 @(private = "file")
 dot_cmd_vacuum :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	report_result(admin.vacuum(database), "Database rebuilt into packed pages.")
 	return false
 }
 
+// .integrity: B-tree verification via admin ("OK" on success).
 @(private = "file")
 dot_cmd_integrity :: proc(
 	database: ^db.Database,
@@ -387,6 +422,7 @@ dot_cmd_integrity :: proc(
 	return false
 }
 
+// .pager_stats: prints the pager's hot-path counters.
 dot_cmd_pager_stats :: proc(
 	database: ^db.Database,
 	args: string,
@@ -398,6 +434,7 @@ dot_cmd_pager_stats :: proc(
 	return false
 }
 
+// .pager_layout: prints pager struct sizes/alignments (no database state).
 dot_cmd_pager_layout :: proc(
 	database: ^db.Database,
 	args: string,
@@ -409,6 +446,8 @@ dot_cmd_pager_layout :: proc(
 	return false
 }
 
+// .snapshot tag <id> <label...>: tags a snapshot; the label is the joined
+// remainder (spaces allowed). Usage unless id parses and a label follows.
 @(private = "file")
 dot_cmd_snapshot_tag :: proc(
 	database: ^db.Database,
@@ -435,6 +474,9 @@ dot_cmd_snapshot_tag :: proc(
 	return false
 }
 
+// .snapshot restore <id>: repoints the database at a snapshot (pushes the
+// displaced MAIN onto the undo log for .rollforward). Usage unless exactly
+// one numeric id parses.
 @(private = "file")
 dot_cmd_snapshot_restore :: proc(
 	database: ^db.Database,
@@ -458,6 +500,9 @@ dot_cmd_snapshot_restore :: proc(
 	return false
 }
 
+// .expire [keep]: reclaims snapshots older than the newest keep (default
+// 100). keep parses as SIGNED (negatives reach the clamp in
+// expire_snapshots_impl); unparsable input keeps the default silently.
 @(private = "file")
 dot_cmd_expire :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := dot_parts(args)
@@ -472,6 +517,7 @@ dot_cmd_expire :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) 
 	return false
 }
 
+// .rollforward: undo a restore via the refs undo log.
 @(private = "file")
 dot_cmd_rollforward :: proc(
 	database: ^db.Database,
@@ -486,6 +532,7 @@ dot_cmd_rollforward :: proc(
 	return false
 }
 
+// .dump <table>: prints all rows via admin; usage unless exactly one arg.
 @(private = "file")
 dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := strings.split(args, " ", context.temp_allocator)
@@ -499,6 +546,8 @@ dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) ->
 	return false
 }
 
+// .desc <table>: prints column definitions via admin; usage unless exactly
+// one arg.
 @(private = "file")
 dot_cmd_desc :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
 	parts := strings.split(args, " ", context.temp_allocator)
@@ -543,10 +592,15 @@ DOT_COMMANDS := []Dot_Command {
 	{".desc ", .Prefix, dot_cmd_desc, "Usage: .desc <table_name>"},
 }
 
+// handle_dot_command dispatches one dot-command line: exact entries match
+// the first word (so ".tree_page"/".snapdiff" take args while matching
+// exactly), prefix entries match the leading prefix. First hit wins — the
+// table lists exact entries before prefix ones, so ".snapshot ..." never
+// loses to a shorter prefix. Unknown commands log and return false
+// (keep reading); only .exit/.quit handlers return true.
 handle_dot_command :: proc(database: ^db.Database, trimmed: string) -> bool {
 	// ".tree_page" and ".snapdiff" take args but match exactly on the command
-	// word; split it off once for the exact entries. Table order decides
-	// precedence: exact entries precede prefix entries, as before.
+	// word; split it off once for the exact entries.
 	cmd_word := trimmed
 	if sp := strings.index_byte(trimmed, ' '); sp >= 0 {
 		cmd_word = trimmed[:sp]

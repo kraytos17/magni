@@ -191,6 +191,7 @@ from promoted_seeds import EXEC_PROMOTED
 
 
 def main():
+    """Rewrite the exec corpus deterministically (hand + promoted scripts)."""
     names = seedgen.managed_names(EXEC_SEEDS) | seedgen.managed_names(EXEC_PROMOTED)
     seedgen.clear_managed(CORPUS, names)
 

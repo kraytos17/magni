@@ -165,8 +165,9 @@ dense_child_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u32, 
 // dense_lower_bound_u64 is the branchless lower bound over an in-memory
 // biased-key slice: no data-dependent early exit, cmov-friendly shape
 // (backend lowers the if/else to predicated moves at -o:aggressive).
-// Pure/static so tests hammer it without page scaffolding; the page search
-// below mirrors its probe order exactly.
+// Pure/static so tests hammer it without page scaffolding (correctness
+// pinned against a linear oracle in btree_v3_test); the page search below
+// implements the same lower-bound contract over page bytes.
 // force_inline: melts into the probe loop at each call site.
 dense_lower_bound_u64 :: #force_inline proc "contextless" (keys: []u64, target: u64) -> int {
 	pos := 0

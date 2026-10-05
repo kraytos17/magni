@@ -8,6 +8,9 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// find_existing_group locates a row's GROUP BY bucket: fingerprint probe,
+// then exact key compare down the chain (hash collisions never merge
+// groups). Returns the group index, or (-1, false) for a new key.
 @(private)
 find_existing_group :: proc(
 	buckets: ^Fp_Buckets,
@@ -207,8 +210,8 @@ synthesize_display_cols :: proc(stmt: parser.Select_Stmt) -> []types.Column {
 // try_stream_int_groups fast-paths single-integer-key grouping (the common
 // case): keys extracted once — any NULL or non-int key bails to the general
 // path — row indices sorted by key, then boundary runs emitted through the
-// shared tail. Mirrors sort_rows_int_fast. Returns done=false when the
-// general path must run instead.
+// shared tail (same extract-once/sort/runs shape as the integer sort path).
+// Returns done=false when the general path must run instead.
 @(private = "file")
 try_stream_int_groups :: proc(
 	stmt: parser.Select_Stmt,
@@ -335,6 +338,10 @@ exec_stream_groups :: proc(
 	return result[:], synthesize_display_cols(stmt), true
 }
 
+// exec_select_aggregate_data runs the aggregate tail: wide GROUP BY inputs
+// (≥ GROUP_STREAM_THRESHOLD rows) stream (sort + boundary runs, no full
+// materialization); everything else hashes into groups. Each group emits
+// one row through emit_aggregate_group (which also evaluates HAVING).
 exec_select_aggregate_data :: proc(
 	stmt: parser.Select_Stmt,
 	rows: []Row_Entry,
@@ -382,8 +389,9 @@ Group_Proj_Cursor :: struct {
 // LITERAL slots read their literal (borrowed header, same as group keys and
 // MIN/MAX — the statement outlives execution), AGGREGATE slots consume agg_vals
 // in order (select-list aggregates first; HAVING-only aggregates appended
-// after), COLUMN slots take the next group key. Hand-built statements without
-// kinds fall back to the legacy positional path (first N slots are group keys).
+// after), COLUMN slots take the next group key. Statements without kind
+// arrays (hand-built, kinds absent) fall back to the positional path: the
+// first group_key_count slots are group keys, the rest are aggregates.
 @(private = "file")
 project_group_row :: proc(
 	stmt: parser.Select_Stmt,
@@ -472,6 +480,12 @@ group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
 	return hash_values(values, indices)
 }
 
+// compare_values orders two values for sorting/grouping/dedup: NULLs
+// compare below everything (null-vs-null is 0); numerics compare by value
+// across int/float; text and blobs compare byte-wise. Cross-type pairs
+// fall back to the deterministic tag order below (not SQL semantics).
+// NULL *placement* (first/last) is the sort wrapper's job, not this
+// comparator's.
 @(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
 @(private)
 compare_values :: proc(a: types.Value, b: types.Value) -> int {
@@ -561,6 +575,10 @@ value_rank :: proc(v: types.Value) -> int {
 	return 3
 }
 
+// build_display_indices maps projected column names to absolute row
+// indices (empty list = all columns in order). False on the first unknown
+// column (logged). Shared by single-table, join, and subquery display
+// paths so projection resolution cannot diverge.
 @(private)
 build_display_indices :: proc(
 	columns: []string,
@@ -613,8 +631,9 @@ resolve_agg_input :: proc(
 	return {rows, idx}
 }
 
-// sum_count folds the numeric non-NULL values of one column into a total and
-// count. Shared by SUM and AVG.
+// sum_count folds the numeric non-NULL values of one column into a total
+// and count. Shared by SUM and AVG (AVG divides, yielding NULL on an empty
+// group). TEXT/BLOB values are skipped, not coerced.
 @(fast_math = {
 	.Allow_Reassoc,
 	.No_NaNs,
@@ -664,6 +683,10 @@ extremum :: proc(ai: Agg_Input, dir: Extremum_Dir) -> types.Value {
 	return best
 }
 
+// compute_aggregates evaluates every aggregate in the select list over one
+// row set: COUNT(*) counts rows, COUNT(col) counts non-NULL, SUM/AVG fold
+// numerics (AVG of nothing is NULL), MIN/MAX take the extremum (NULL when
+// empty or unresolvable). Results parallel the aggregates list.
 @(fast_math = {
 	.Allow_Reassoc,
 	.No_NaNs,
@@ -711,6 +734,9 @@ compute_aggregates :: proc(
 	return results
 }
 
+// evaluate_where_having tests one group against HAVING (nil root =
+// keep). Group keys, aggregate results, and their column names form the
+// evaluation scope — plain row filters cannot see aggregates.
 @(private)
 evaluate_where_having :: proc(
 	clause: parser.Where_Clause,
@@ -785,6 +811,10 @@ resolve_having_value :: proc(
 	return find_having_aggregate(cond.column, aggregates, agg_values)
 }
 
+// evaluate_having_node tests one group against one HAVING tree node
+// (recursive): AND/OR short-circuit, NOT negates its single child — the
+// same shape as evaluate_node, but over group keys + aggregate values
+// instead of row values.
 @(private = "file")
 evaluate_having_node :: proc(
 	node: ^parser.Where_Node,
@@ -819,6 +849,10 @@ evaluate_having_node :: proc(
 	return false
 }
 
+// evaluate_having_condition tests one group against one HAVING predicate:
+// IS [NOT] NULL checks the resolved value's nullness (IS carries no rhs),
+// otherwise the column names a group key (compared to the literal) or an
+// aggregate (compared to its computed value). Unknown names match nothing.
 @(private = "file")
 evaluate_having_condition :: proc(
 	cond: parser.Condition,

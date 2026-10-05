@@ -530,11 +530,11 @@ index_use_name :: proc(use: Index_Use) -> string {
 }
 
 // explain_plan_text renders the access decision for EXPLAIN <select>: PK
-// SEEK, INDEX SCAN (shape + covering/fetch), or FULL SCAN — mirroring the
-// fetch procs' decision order (PK, covering, fetch, scan) so the output can
-// never disagree with execution. Anything that isn't a single-table SELECT
-// (joins, other statements, unparseable text, unknown tables) keeps the
-// legacy echo of the inner SQL: no value to add, no behavior to change.
+// SEEK, INDEX SCAN (shape + covering/fetch), or FULL SCAN — in the same
+// order the fetch path tries them (PK, covering, fetch, scan), so the
+// output cannot disagree with execution. Anything that isn't a single-table
+// SELECT (joins, other statements, unparseable text, unknown tables)
+// echoes the inner SQL unchanged: no plan to render, nothing to decide.
 @(private)
 explain_plan_text :: proc(
 	schema_tree: ^btree.Tree,
@@ -846,12 +846,12 @@ fetch_covering_col :: proc(
 
 // fetch_index_rows resolves a fetch plan's candidates through the data tree
 // and rechecks the FULL WHERE filter per row (mandatory: the index only
-// promises the usable conjunct). Misses are tolerated-and-skipped (mirrors
-// delete's stale-entry stance); btree errors fail loudly. Ownership mirrors
-// the scan loop: values transfer to the entry, the deferred destroy is
-// disarmed. No LIMIT pushdown: all candidates materialize and the caller's
-// tails slice — candidates arrive in rowid order, so the slice matches the
-// scan path exactly.
+// promises the usable conjunct). Stale misses are tolerated-and-skipped
+// (same stance as delete's missing-entry tolerance); btree errors fail
+// loudly. Ownership follows the scan loop: values transfer to the entry
+// and the deferred destroy is disarmed. No LIMIT pushdown: all candidates
+// materialize and the caller's tails slice — candidates arrive in rowid
+// order, so the slice matches the scan path exactly.
 @(private)
 fetch_index_rows :: proc(
 	t: ^btree.Tree,

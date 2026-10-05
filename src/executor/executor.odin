@@ -1,3 +1,12 @@
+// Package executor runs parsed statements against the storage layer.
+//
+// Dispatch (execute, below) routes each statement variant to its exec_*
+// implementation and reports (ok, new_schema_root, mutated-table info).
+// All writes are copy-on-write: the new schema root is returned for the
+// caller (db/execute.odin) to publish or stage — never published here.
+// Reads fill a Result (rows + columns) for rendering or the query API.
+// Txn_Stmt never reaches execution meaningfully (db dispatches transactions
+// before this layer); it returns false.
 package executor
 
 import "src:btree"
@@ -5,6 +14,12 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// execute runs one parsed statement: DDL/DML return the new schema root
+// and what they mutated; SELECT/compound fill out (when non-nil) and report
+// the unchanged root. pending carries in-txn staged roots (nil outside a
+// txn); DDL re-overlays them after publishing so later statements in the
+// same txn resolve the new structure. Txn_Stmt returns false — transactions
+// dispatch in db, never here.
 execute :: proc(
 	schema_tree: ^btree.Tree,
 	stmt: parser.Statement,

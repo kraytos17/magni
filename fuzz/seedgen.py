@@ -14,7 +14,7 @@ def managed_names(entries):
 
 
 def clear_managed(corpus_dir, names):
-    """Remove previously managed seeds (keeps stale seeds from lingering)."""
+    """Remove managed-name seeds on disk so deleted/renamed generator entries don't linger."""
     for fn in os.listdir(corpus_dir):
         if fn in names:
             os.remove(os.path.join(corpus_dir, fn))

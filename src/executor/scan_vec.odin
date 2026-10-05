@@ -24,8 +24,8 @@
 // (types.value_clone) before cursor_advance. Non-survivors cost zero
 // allocations by construction. Never retain a borrow across pages.
 //
-// Rollout: gated by vec_scan_enabled (MAGNI_VECTOR=1). Default off until
-// the benchmark gate passes; the scalar scan_table stays the default path.
+// Rollout: gated by vec_scan_enabled (MAGNI_VECTOR=0 forces the scalar
+// path). Default on; the scalar scan_table stays as the fallback route.
 package executor
 
 import "core:mem"
@@ -291,9 +291,9 @@ scan_table_vec :: proc(
 
 	// Needed mask: filter columns from the resolved plan plus sort keys
 	// (ORDER BY sorts full rows before projection, so sort keys must
-	// decode even when unprojected) plus the projection itself (T2a
-	// materializes full-width survivors for the shared finish_select tail,
-	// so every column finish_select might read must decode).
+	// decode even when unprojected) plus the projection itself (survivors
+	// stay full-width for the shared finish_select tail, so every column
+	// finish_select might read must decode).
 	total_cols := len(table.columns)
 	resolver := build_column_resolver(table.columns, table_ranges)
 	sort_indices, proj_indices, has_order, widths_ok := resolve_vec_widths(
@@ -404,10 +404,11 @@ scan_table_vec :: proc(
 	return r[:], proj_cols, fused, false
 }
 
-// fetch_single_rows_vec mirrors fetch_single_rows (PK-seek bypass, shared
-// limit_pushable rule, same range descriptor) but scans through
-// scan_table_vec. Same returns plus the projected flag: true when rows are
-// already at projected width (caller must use finish_projected, never
+// fetch_single_rows_vec is the vector twin of fetch_single_rows (PK-seek
+// bypass, shared limit_pushable rule, same range descriptor) but scans
+// through scan_table_vec. Same returns plus the projected flag: true when
+// rows are already at projected width (caller must use finish_projected,
+// never
 // finish_select). The PK-seek bypass returns full-width rows exactly like
 // the scalar path, so projected is false there.
 fetch_single_rows_vec :: proc(

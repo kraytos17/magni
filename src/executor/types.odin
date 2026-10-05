@@ -6,18 +6,24 @@ import "src:btree"
 import "src:parser"
 import "src:types"
 
+// Table_Info is one FROM/JOIN arm's resolved source: physical table +
+// its data tree, or a Virtual_Table when the source is a subquery.
 Table_Info :: struct {
 	table  : types.Table, // physical table metadata (for FROM table sources)
 	tree   : btree.Tree, // data b-tree for this table
 	virtual: Maybe(Virtual_Table), // set when FROM source is a subquery instead of a physical table
 }
 
+// Table_Col_Range locates one table's columns inside the combined
+// (join-wide) column/values arrays.
 Table_Col_Range :: struct {
 	table_name: string,
 	start_col : int, // first column index in the combined columns array
 	col_count : int,
 }
 
+// Table_Context pairs a resolved source with its column range for
+// qualifier resolution ("t.col" → table t, column offset).
 Table_Context :: struct {
 	info : Table_Info,
 	range: Table_Col_Range,
@@ -36,21 +42,31 @@ Join_Build :: struct {
 	ok        : bool,
 }
 
+// Row_Entry is one result row: its source rowid plus the projected values.
+// Survivor rows own their values (text/blob cloned at materialization —
+// see scan_vec's header); filter scratch buffers may borrow, but never
+// across a page move.
 Row_Entry :: struct {
 	rowid : types.Row_ID,
 	values: []types.Value,
 }
 
+// Virtual_Table is a materialized subquery result used as a FROM source:
+// its own columns + rows, scanned like a table with no btree behind it.
 Virtual_Table :: struct {
 	columns: []types.Column,
 	rows   : []Row_Entry,
 }
 
+// Sort_Ctx carries an ORDER BY through sorting: the clause plus the
+// resolved column indices it sorts by (sort_indices parallels order_clause).
 Sort_Ctx :: struct {
 	order_clause: []parser.Order_By_Column,
 	sort_indices: []int,
 }
 
+// Group is one GROUP BY bucket: the key values plus member rows (hash path
+// materializes all members; the streaming path emits boundaries instead).
 Group :: struct {
 	key_values: []types.Value,
 	rows      : [dynamic]Row_Entry,
@@ -62,6 +78,8 @@ Group :: struct {
 // line hashing avoids the sort. Emission order differs per path.
 GROUP_STREAM_THRESHOLD :: 32768
 
+// Mutated_Table_Info names the table a write touched plus its new root —
+// the caller's publish/stage payload. #all_or_none: empty means no write.
 Mutated_Table_Info :: struct #all_or_none {
 	name: string,
 	root: u32,
@@ -80,6 +98,8 @@ Index_Stage :: struct {
 	root: u32, // pending index root
 }
 
+// Pending_Roots stages unpublished roots inside an explicit txn (see the
+// header above): data roots by table, secondary-index roots beside them.
 Pending_Roots :: struct {
 	roots      : map[string]u32, // table name → pending data root
 	// Secondary text index roots ride beside data roots through
@@ -223,6 +243,12 @@ Result :: struct {
 	new_root : u32,
 }
 
+// Resolved_Condition is a WHERE predicate with column names resolved to
+// value-array indices: col_idx for the left side, right_idx when comparing
+// to another column (has_right_col), or a resolved IN membership (has_in).
+// negated marks NOT IN / NOT LIKE / IS NOT. in_subquery keeps the
+// unresolved subquery AST for the per-row fallback when materialization
+// was skipped.
 Resolved_Condition :: struct {
 	col_idx      : int, // column index in the row's values array
 	operator     : parser.Token_Type,
@@ -252,6 +278,9 @@ In_Membership :: struct {
 	fps   : []u64,
 }
 
+// Where_Eval_Ctx is a statement filter ready to evaluate: the resolved
+// tree (nil root = no filter, every row matches) plus the schema tree for
+// subquery fallback reads.
 Where_Eval_Ctx :: struct {
 	root       : ^Resolved_Node, // nil = no filter (always true)
 	schema_tree: ^btree.Tree,
@@ -276,6 +305,8 @@ Scan_Plan :: struct {
 	max_rows  : Maybe(u64),
 }
 
+// Resolved_Node_Kind tags a Resolved_Node: leaf predicate (COND), n-ary
+// conjunction/disjunction (AND/OR), or single-child negation (NOT).
 Resolved_Node_Kind :: enum u8 {
 	COND,
 	AND,
@@ -283,6 +314,9 @@ Resolved_Node_Kind :: enum u8 {
 	NOT,
 }
 
+// Resolved_Node is one node of the executable filter tree (the resolved
+// twin of parser.Where_Node): cond for COND leaves, children for AND/OR.
+// Built once per statement, evaluated per row.
 Resolved_Node :: struct {
 	kind    : Resolved_Node_Kind,
 	cond    : Resolved_Condition, // valid when kind == .COND

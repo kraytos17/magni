@@ -1,3 +1,7 @@
+// Command magni: open (or create) a database and run SQL — one --eval
+// statement, one --file script, an interactive REPL on a TTY, or a stdin
+// script pipe otherwise. Exit status is 1 on open failure or (with
+// --stop-on-error semantics per mode) on script failure; close always runs.
 package main
 
 import "core:flags"
@@ -10,6 +14,9 @@ import "src:db"
 APP_VERSION     :: "1.0"
 DEFAULT_DB_PATH :: "test.db"
 
+// CLI is the command-line surface (core:flags annotations carry the
+// --help text). snapshot_batch/wal_size_threshold of 0 keep db.open's
+// compiled defaults (only positive values override).
 CLI :: struct {
 	database          : string `args:"pos=0,usage=Database file path (default: test.db)"`,
 	file              : string `args:"name=file,usage=Execute SQL from file and exit"`,
@@ -23,6 +30,10 @@ CLI :: struct {
 	wal_size_threshold: int `args:"name=wal-size-threshold,usage=Auto-checkpoint the WAL after N frames (0 = disabled)"`,
 }
 
+// main parses flags, opens the database (fatal + exit 1 on failure),
+// dispatches to file/eval/REPL/pipe modes, closes, and exits nonzero when
+// the mode reported failure. The REPL quiets logging to errors (interactive
+// output must stay clean); script modes keep the resolved level.
 main :: proc() {
 	cli := CLI {
 		database = DEFAULT_DB_PATH,
@@ -80,6 +91,10 @@ main :: proc() {
 	}
 }
 
+// resolve_log_level picks the log level: --verbose/-v wins, then
+// --log-level (case-insensitive, unknown strings fall through), then the
+// MAGNI_LOG_LEVEL env (exact uppercase match), then info. Unknown inputs
+// never fail — they silently keep the default.
 @(private = "file")
 resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Level {
 	if verbose || v {
@@ -115,6 +130,9 @@ resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Leve
 	return .Info
 }
 
+// print_help prints the REPL dot-command reference. It duplicates the
+// command list dispatched in repl.odin by hand — adding a dot-command
+// requires updating both (no shared table; see repl.odin).
 @(private)
 print_help :: proc() {
 	fmt.println("Commands:")

@@ -120,9 +120,9 @@ text_prefix :: proc "contextless" (data: []u8, id: Page_Id) -> ([]u8, Error) {
 	return data[off0 + TEXT_LEAF_FIXED:off0 + TEXT_LEAF_FIXED + plen], .None
 }
 
-// text_entry_at reads entry i: borrowed suffix + rowid. Layout mirrors
-// slot_at: header/type/index checks, then count-derived span checks (corrupt
-// counts trap here, never slice out of bounds).
+// text_entry_at reads entry i: borrowed suffix + rowid. Same check order
+// as slot_at: header/type/index checks, then count-derived span checks
+// (corrupt counts trap here, never slice out of bounds).
 @(require_results)
 text_entry_at :: proc "contextless" (
 	data: []u8,
@@ -502,9 +502,9 @@ text_interior_sep_at :: proc "contextless" (
 }
 
 // text_interior_find_upper routes a target codec key: first separator
-// strictly greater than target (exclusive separators — mirrors
+// strictly greater than target (exclusive separators — same conventions as
 // node_find_child_data, including the equality skip and the -1 rightmost
-// conventions). Corrupt pages fail to (0,-1): loud at the caller, which
+// marker). Corrupt pages fail to (0,-1): loud at the caller, which
 // treats child 0 as an error, never a descent.
 @(private = "file")
 text_interior_find_upper :: #force_inline proc "contextless" (
@@ -564,8 +564,8 @@ text_interior_find_child :: proc "contextless" (
 // text_interior_build_from_sorted builds a text interior from full codec
 // keys + children. Same atomic contract as the dense builder: measured
 // first (.Page_Full leaves the page untouched), per-key well-formedness
-// guard (mirrors the dense FOR guard), trailing validator (unsorted input
-// fails closed, never half-built).
+// guard (same role as the dense FOR guard), trailing validator (unsorted
+// input fails closed, never half-built).
 @(require_results)
 text_interior_build_from_sorted :: proc "contextless" (
 	data: []u8,

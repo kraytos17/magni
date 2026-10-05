@@ -115,7 +115,7 @@ cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, er
 
 // cursor_start_at_page positions a cursor at the first cell of the leaf page
 // `page_id`, building the full root→leaf path so traversal can continue past
-// the leaf. Used to start a scan at a skip-index lower bound.
+// the leaf. Entry point for scans starting at a skip-index lower bound.
 @(private = "file")
 cursor_start_at_page :: proc(
 	t: ^Tree,

@@ -4,6 +4,9 @@ package linedit
 import "core:sys/posix"
 import "core:unicode/utf8"
 
+// Key is the decoded input alphabet: editing keys, navigation, control
+// chords, completion, and bracketed-paste markers. Char carries a rune in
+// Key_Event; the rest are rune-less.
 Key :: enum {
 	Paste_Start,
 	Paste_End,
@@ -34,11 +37,13 @@ Key :: enum {
 	Escape,
 }
 
+// Key_Event is one decoded keypress: the key plus the rune for .Char.
 Key_Event :: struct {
 	key : Key,
 	char: rune,
 }
 
+// read_byte reads one byte (blocking). ok=false on EOF/error.
 @(private)
 read_byte :: proc(fd: posix.FD) -> (b: u8, ok: bool) {
 	buf: [1]u8
@@ -46,6 +51,9 @@ read_byte :: proc(fd: posix.FD) -> (b: u8, ok: bool) {
 	return buf[0], n == 1
 }
 
+// read_key decodes one keypress: escape sequences, control bytes
+// (Backspace/Enter/Tab/Ctrl_*), other sub-0x20 bytes as .None, and
+// printable bytes as UTF-8 chars. ok=false only when the fd gives nothing.
 read_key :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	b, bok := read_byte(fd)
 	if !bok {
@@ -91,6 +99,10 @@ read_key :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	}
 }
 
+// read_escape_sequence decodes CSI/SS3 sequences (arrows, Home/End/Delete,
+// bracketed-paste markers). A lone ESC (no follow-up within 80ms) reads as
+// .Escape; anything unrecognized also falls back to .Escape (extra bytes
+// already consumed are dropped, not re-parsed).
 @(private = "file")
 read_escape_sequence :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	pfd := posix.pollfd {
@@ -156,6 +168,9 @@ read_escape_sequence :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	return Key_Event{key = .Escape}, true
 }
 
+// utf8_continuation_count maps a lead byte to its continuation count
+// (0 for ASCII and invalid leads — overlong/invalid sequences decode
+// best-effort downstream).
 @(private = "file")
 utf8_continuation_count :: proc(first: u8) -> int {
 	if first < 0xC0 {
@@ -170,6 +185,9 @@ utf8_continuation_count :: proc(first: u8) -> int {
 	return 0
 }
 
+// decode_utf8 reads a full rune starting with lead byte first (already
+// consumed). Short reads decode what's there (best-effort, never blocks
+// for the missing tail).
 @(private = "file")
 decode_utf8 :: proc(fd: posix.FD, first: u8) -> (ev: Key_Event, ok: bool) {
 	n := utf8_continuation_count(first)

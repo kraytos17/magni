@@ -94,6 +94,11 @@ conjunct_table_index :: proc(
 	return ti, true
 }
 
+// conjunct_collect walks a filter tree checking every column reference
+// resolves to one table (ti) — the worker behind conjunct_table_index.
+// Sets ok=false on any qualified, ambiguous, unresolvable, or cross-table
+// reference; both sides of column-column comparisons must land in that
+// table.
 @(private)
 conjunct_collect :: proc(
 	n: ^parser.Where_Node,
@@ -123,6 +128,10 @@ conjunct_collect :: proc(
 	}
 }
 
+// col_in_table checks one column name resolves into the conjunct's table
+// (recording it on first contact): qualified names always fail here (the
+// pushdown splitter only attributes bare names); a name landing in a
+// different table than the recorded one fails the attribution.
 @(private)
 col_in_table :: proc(
 	name: string,
@@ -181,6 +190,10 @@ column_table_index :: proc(
 	return found, true
 }
 
+// filter_rows applies a WHERE clause to materialized rows, returning the
+// survivors (same backing entries, filtered slice). Unresolvable filters
+// match nothing (empty result); a nil-root clause returns the input
+// unchanged. Temp-allocated; caller consumes immediately.
 @(private)
 filter_rows :: proc(
 	rows: []Row_Entry,
@@ -204,6 +217,10 @@ filter_rows :: proc(
 	return filtered[:]
 }
 
+// init_where_ctx resolves a WHERE clause into an executable filter context
+// (column names → indices, IN memberships). Nil/nil-root clauses yield an
+// empty context (match-all); unresolvable clauses yield nil (match-none).
+// schema_tree + cache serve IN-subquery materialization.
 @(private)
 init_where_ctx :: proc(
 	clause: ^parser.Where_Clause,
@@ -225,6 +242,9 @@ init_where_ctx :: proc(
 	return Where_Eval_Ctx{root = root, schema_tree = schema_tree}
 }
 
+// build_resolved_node compiles one filter-tree node (recursive): COND
+// leaves resolve names/IN lists; AND/OR/NOT compile children. Failure
+// frees everything built so far (siblings + self) — no partial trees leak.
 @(private = "file")
 build_resolved_node :: proc(
 	node: ^parser.Where_Node,
@@ -268,6 +288,8 @@ build_resolved_node :: proc(
 	return rn, true
 }
 
+// free_resolved_node releases a resolved tree (ownership rules are noted
+// at the free sites inside). Nil-safe.
 @(private = "file")
 free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	if n == nil {
@@ -291,6 +313,10 @@ free_resolved_node :: proc(n: ^Resolved_Node, allocator: mem.Allocator) {
 	free(n, allocator)
 }
 
+// resolve_condition compiles one predicate: column → index, rhs → value or
+// right-column index, IN lists → membership (with fingerprint prefilter),
+// IN subqueries → materialized results when a schema tree is available
+// (else deferred to the per-row fallback). False when a name won't resolve.
 @(private = "file")
 resolve_condition :: proc(
 	cond: parser.Condition,
@@ -337,7 +363,7 @@ resolve_condition :: proc(
 		rc.in_subquery = cond.in_subquery
 		if schema_tree != nil {
 			subq_rows: []Row_Entry
-			subq_rows, _ = exec_subquery(schema_tree, cond.in_subquery^, cache)
+			subq_rows, _, _ = exec_subquery(schema_tree, cond.in_subquery^, cache)
 			rc.in_mem.kind = .Subquery
 			rc.in_mem.values = make([]types.Value, len(subq_rows), allocator)
 			for ri in 0 ..< len(subq_rows) {
@@ -350,6 +376,9 @@ resolve_condition :: proc(
 	return rc, true
 }
 
+// evaluate_where_ctx tests one row against a resolved filter (nil root =
+// match-all). Pure per-row predicate; no I/O except the IN-subquery
+// fallback inside membership_test.
 @(private)
 evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 	if ctx.root == nil {
@@ -358,6 +387,10 @@ evaluate_where_ctx :: proc(ctx: Where_Eval_Ctx, row: []types.Value) -> bool {
 	return evaluate_node(ctx, ctx.root, row)
 }
 
+// evaluate_node tests one row against one resolved tree node (recursive):
+// AND short-circuits on false, OR on true, NOT negates its single child.
+// A NOT with no children matches nothing (defensive; the parser always
+// builds exactly one).
 @(private = "file")
 evaluate_node :: proc(ctx: Where_Eval_Ctx, node: ^Resolved_Node, row: []types.Value) -> bool {
 	switch node.kind {
@@ -414,7 +447,7 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 		return false
 	}
 	if rc.in_subquery != nil {
-		subq_rows, _ := exec_subquery(schema_tree, rc.in_subquery^)
+		subq_rows, _, _ := exec_subquery(schema_tree, rc.in_subquery^)
 		for sr in subq_rows {
 			if !types.is_null(v) && len(sr.values) > 0 && compare_values(v, sr.values[0]) == 0 {
 				return true
@@ -424,6 +457,11 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 	return false
 }
 
+// evaluate_resolved_condition tests one row against one compiled predicate:
+// IS checks nullness; column-column compares two row slots; otherwise the
+// left slot compares against the literal. has_in replaces the comparison
+// with the membership test; negated flips the outcome last (so NOT IN /
+// NOT LIKE / IS NOT all compose).
 @(private = "file")
 evaluate_resolved_condition :: proc(
 	ctx: Where_Eval_Ctx,
@@ -449,6 +487,10 @@ evaluate_resolved_condition :: proc(
 	return cond_result
 }
 
+// evaluate_where is the one-shot filter: resolve + test + drop (temp
+// context, freed with the caller's temp scope). Unresolvable filters match
+// nothing. For hot loops, hoist init_where_ctx out and call
+// evaluate_where_ctx directly.
 @(private)
 evaluate_where :: proc(
 	clause: ^parser.Where_Clause,
@@ -463,6 +505,8 @@ evaluate_where :: proc(
 	return evaluate_where_ctx(ctx, row)
 }
 
+// compare_condition compares two values under op (LIKE needs two strings;
+// NULL semantics are noted inline below).
 @(private)
 compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types.Value) -> bool {
 	if op == .LIKE {
@@ -499,6 +543,10 @@ compare_condition :: proc(val: types.Value, op: parser.Token_Type, target: types
 	return false
 }
 
+// like_match reports whether text matches a SQL LIKE pattern (% = any run,
+// _ = one char): a prefix fast path for 'stem%' without '_', else the
+// classic backtracking scan. Byte-wise (BINARY collation); callers ensure
+// both sides are strings.
 @(private = "file")
 like_match :: proc(pattern: string, text: string) -> bool {
 	if len(pattern) > 1 && strings.has_suffix(pattern, "%") {

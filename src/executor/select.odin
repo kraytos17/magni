@@ -19,6 +19,9 @@ Select_Plan :: struct {
 	single_table   : bool,
 }
 
+// plan_select classifies a SELECT into routing flags (literal-only,
+// subquery source, join, aggregate/group, single-table) without touching
+// storage. The fetch path branches on these — shapes the plan explains.
 plan_select :: proc(stmt: parser.Select_Stmt) -> Select_Plan {
 	if _, is_nf := stmt.from.(parser.No_From); is_nf {
 		return Select_Plan{is_literal_only = true}
@@ -40,6 +43,10 @@ plan_select :: proc(stmt: parser.Select_Stmt) -> Select_Plan {
 	}
 }
 
+// exec_select_literals evaluates a FROM-less SELECT as its single literal
+// row (rowid 1, INTEGER-typed display columns). A bare column reference
+// with no literal value is a clean "Unknown column" error — never a short
+// row (renderers index values[i] unconditionally).
 @(private)
 exec_select_literals :: proc(
 	t: ^btree.Tree,
@@ -80,12 +87,12 @@ exec_select_literals :: proc(
 	return rows, cols, true
 }
 
-@(private)
 // limit_pushable reports whether LIMIT may be pushed into the scan: only for
 // plain row-returning scans. ORDER BY and DISTINCT need the full row set,
 // and aggregates/GROUP BY/HAVING change cardinality — pushing LIMIT into
 // those scans silently truncates the aggregation input. Shared by
 // fetch_single_rows and the vector fetch path so the rule cannot diverge.
+@(private)
 limit_pushable :: proc(stmt: parser.Select_Stmt, has_order: bool) -> bool {
 	_, has_lim := stmt.limit.?
 	return(
@@ -98,11 +105,11 @@ limit_pushable :: proc(stmt: parser.Select_Stmt, has_order: bool) -> bool {
 	)
 }
 
-@(private)
 // fetch_single_rows scans a single-table SELECT (no joins), applying the WHERE
 // filter with LIMIT pushdown, and returns the rows, the table's columns, and
 // the single table-range descriptor. Aggregate routing, sort/dedup, projection,
 // and display are left to the caller.
+@(private)
 fetch_single_rows :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
@@ -183,8 +190,8 @@ fetch_single_rows :: proc(
 
 // seek_single_row fetches one row by Row_ID for the PK-seek fast path.
 // A miss yields zero rows with success=true (same shape as a scan miss).
-// Cell ownership mirrors the scan loop: values transfer to the entry and the
-// deferred destroy is disarmed, so neither a double free nor a leak.
+// Cell ownership follows the scan loop: values transfer to the entry and
+// the deferred destroy is disarmed, so neither a double free nor a leak.
 @(private)
 seek_single_row :: proc(
 	table_tree: ^btree.Tree,
@@ -273,10 +280,11 @@ exec_count_star :: proc(
 	return rows_mat, cols_mat, true
 }
 
-// vec_route_eligible gates the vector scan route (MAGNI_VECTOR=1): same
-// fetch contract via fetch_single_rows_vec. Excluded exactly where the
-// aggregate tail takes over (aggregates/GROUP BY/HAVING change cardinality
-// and resolve their own columns). Joins/subqueries/setops never reach here.
+// vec_route_eligible gates the vector scan route (disabled only with
+// MAGNI_VECTOR=0): same fetch contract via fetch_single_rows_vec. Excluded
+// exactly where the aggregate tail takes over (aggregates/GROUP BY/HAVING
+// change cardinality and resolve their own columns). Joins/subqueries/setops
+// never reach here.
 @(private = "file")
 vec_route_eligible :: proc(stmt: parser.Select_Stmt) -> bool {
 	return(
@@ -319,6 +327,10 @@ exec_vec_route :: proc(
 	return finish_select(stmt, vrows, vcols, vranges)
 }
 
+// exec_select_single_data runs a single-table SELECT: COUNT(*) fast path,
+// vector route, or scalar fetch — then aggregates (when present), then the
+// shared finish_select tail (sort/dedup/project/limit). Physical-table
+// sources only; subqueries and joins route elsewhere (see exec_query).
 exec_select_single_data :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -349,9 +361,9 @@ exec_select_single_data :: proc(
 	if is_count_star_query(stmt, has_order) {
 		return exec_count_star(&table_tree, stmt)
 	}
-	// Vector scan route (MAGNI_VECTOR=1); see vec_route_eligible. All error
-	// paths log canonically through the shared helpers, identical to the
-	// scalar route.
+	// Vector scan route (opt-out via MAGNI_VECTOR=0); see vec_route_eligible.
+	// All error paths log canonically through the shared helpers, identical
+	// to the scalar route.
 	if vec_route_eligible(stmt) {
 		return exec_vec_route(t, table^, tbl_name, stmt, cache)
 	}
@@ -483,6 +495,8 @@ apply_limit_offset :: proc(stmt: parser.Select_Stmt, out: []Row_Entry) -> []Row_
 	return out[start:end]
 }
 
+// exec_query runs a SELECT by plan shape: literal-only, subquery source,
+// single table, or join. The db query path and compound operands share it.
 exec_query :: proc(
 	t: ^btree.Tree,
 	stmt: parser.Select_Stmt,
@@ -505,6 +519,9 @@ exec_query :: proc(
 	return exec_select_join_data(t, stmt, cache)
 }
 
+// skip_op_from_token maps a comparison token to its skip-index bound op.
+// Only range-answerable operators map (equality + ordering); LIKE/IS/IN
+// and friends fail (false) and the scan runs unpruned.
 @(private)
 skip_op_from_token :: proc(op: parser.Token_Type) -> (btree.Skip_Op, bool) {
 	#partial switch op {
@@ -522,6 +539,11 @@ skip_op_from_token :: proc(op: parser.Token_Type) -> (btree.Skip_Op, bool) {
 	return .EQ, false
 }
 
+// scan_table runs one full table scan: build the plan once (filter +
+// skip bounds), walk the cursor in key order, keep filter survivors up to
+// max_rows. Unreadable cells are skipped (destroy + advance, never fail
+// the scan). A failed seek restarts from the first page rather than
+// failing. err=true only on plan/cursor setup failure.
 @(private)
 scan_table :: proc(
 	tree: ^btree.Tree,
@@ -701,6 +723,10 @@ skip_chain_conditions :: proc(root: ^Resolved_Node) -> []Resolved_Condition {
 	return chain[:]
 }
 
+// collect_skip_chain gathers one AND level's leaf CONDitions. Only a flat
+// top-level conjunction qualifies: a nested AND/OR/NOT anywhere clears the
+// whole chain (no flattening, no partial bounds — safer to scan wide than
+// to mis-apply a bound under negation/disjunction). Nil-safe.
 @(private = "file")
 collect_skip_chain :: proc(node: ^Resolved_Node, out: ^[dynamic]Resolved_Condition) {
 	if node == nil {

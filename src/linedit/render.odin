@@ -4,6 +4,9 @@ package linedit
 import "core:fmt"
 import "core:os"
 
+// rune_width reports a rune's terminal cell width (East-Asian wide ranges
+// + emoji = 2, everything else 1). Approximation, not wcwidth: combining
+// marks and zero-width joiners count 1.
 rune_width :: proc(r: rune) -> int {
 	if r < 0x1100 {
 		return 1
@@ -40,6 +43,10 @@ rune_width :: proc(r: rune) -> int {
 	return 1
 }
 
+// redraw repaints the prompt + buffer and repositions the hardware cursor:
+// move up past the previous render, clear down, wrap-aware print, then
+// cursor back to (row, col) from visual widths. Unknown width falls back
+// to 80 columns.
 @(private)
 redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	t := &ed.term
@@ -110,6 +117,10 @@ redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	ed.prev_render_rows = total_rows
 }
 
+// render_search_overlay paints the two-line reverse-search UI (prompt +
+// match preview, truncated to width) and parks the cursor at the prompt
+// end. Tracks its own row count (prev_search_rows) since it replaces, not
+// extends, the main render.
 @(private)
 render_search_overlay :: proc(ed: ^Editor, search_prompt: string, matched: string) {
 	t := &ed.term

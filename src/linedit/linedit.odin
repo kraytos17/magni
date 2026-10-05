@@ -9,12 +9,18 @@ import "core:sys/posix"
 
 SEARCH_PROMPT :: "(reverse-i-search)`%s': "
 
+// Tab_Complete_Callback completes one word: candidates owned by the
+// callback's allocator choice. user_data is the registrant's context
+// (the database for schema completion).
 Tab_Complete_Callback :: #type proc(
 	word: string,
 	user_data: rawptr,
 	allocator: mem.Allocator,
 ) -> []string
 
+// Editor is one line-editing session: terminal, history, completion
+// callback + context, and repaint bookkeeping. Single active instance per
+// process (see term.odin's global handler note).
 Editor :: struct {
 	term            : Term,
 	history         : History,
@@ -24,6 +30,9 @@ Editor :: struct {
 	prev_search_rows: int,
 }
 
+// init claims the terminal (raw mode; false when not a tty) and loads
+// history. Partial failure leaves history loaded but the terminal
+// untouched — destroy is still safe to call.
 init :: proc(fd: posix.FD, history_path: string) -> (ed: Editor, ok: bool) {
 	ed.term.fd = fd
 	t, tok := term_init(fd)
@@ -41,11 +50,18 @@ init :: proc(fd: posix.FD, history_path: string) -> (ed: Editor, ok: bool) {
 	return ed, true
 }
 
+// destroy persists history and restores the terminal (both idempotent —
+// safe after a failed init).
 destroy :: proc(ed: ^Editor) {
 	history_destroy(&ed.history)
 	term_restore(&ed.term)
 }
 
+// read_line reads one edited line: dispatches every key (editing,
+// history, completion, search, paste) and repaints after each. Enter
+// returns the heap-owned line; Ctrl-D on an empty buffer and read errors
+// return ("", false) (EOF); Ctrl-C discards the buffer but returns
+// ("", true) (keep reading). History nav resets per line.
 read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 	lb: Line_Buffer
 	defer lb_destroy(&lb)
@@ -167,6 +183,10 @@ query_pop_rune :: proc(query: ^strings.Builder) {
 	strings.write_string(query, q[:last])
 }
 
+// run_reverse_search runs one Ctrl-R session over history: type to narrow
+// (failed/wrapped shown in the prompt), Enter accepts the match into the
+// buffer, Esc/Ctrl-C aborts (buffer untouched). Ctrl-R with a non-empty
+// query steps to the next older hit, wrapping once (wrapped flag).
 @(private = "file")
 run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	query := strings.builder_make()
@@ -233,6 +253,9 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	}
 }
 
+// dot_commands lists dot-commands for Tab completion (prefix-matched).
+// Third copy of the list (print_help, repl DOT_COMMANDS) — adding a
+// dot-command requires updating all three.
 dot_commands :: []string {
 	".begin",
 	".checkpoint",
@@ -310,6 +333,11 @@ sql_keywords :: []string {
 	"OF",
 }
 
+// run_tab_complete completes the current word: dot-command prefixes on
+// dot-lines, else the registered callback (schema names), else SQL
+// keywords (uppercase-prefix fallback). One candidate completes in place;
+// several list below the line; none is a no-op. Empty line completes
+// nothing.
 run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 	line := lb_to_string(lb, context.temp_allocator)
 	if len(line) == 0 {
@@ -365,6 +393,9 @@ run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 	fmt.fprint(os.stdout, "\r\n")
 }
 
+// read_pasted_text consumes a bracketed paste through its end marker,
+// inserting the bytes verbatim (no key decoding — pasted escape sequences
+// must not act as editing keys). Unterminated pastes insert what's there.
 @(private = "file")
 read_pasted_text :: proc(fd: posix.FD, lb: ^Line_Buffer) {
 	buf: [dynamic]u8

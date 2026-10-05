@@ -239,11 +239,10 @@ exec_compound_data :: proc(
 		return nil, nil, false
 	}
 	// Precedence: INTERSECT binds tighter than UNION/EXCEPT; all are
-	// left-associative. Reduce in two phases:
-	//   Phase 1: evaluate each maximal run of consecutive INTERSECT ops into a
-	//            single segment (segment result = first SELECT, then left-assoc
-	//            INTERSECT within the run).
-	//   Phase 2: fold the segment results left-to-right with UNION/EXCEPT.
+	// left-associative. Reduce in two stages: first evaluate each maximal
+	// run of consecutive INTERSECT ops into a single segment (segment
+	// result = first SELECT, then left-assoc INTERSECT within the run),
+	// then fold the segment results left-to-right with UNION/EXCEPT.
 	// Example: A UNION B INTERSECT C EXCEPT D
 	//   segments = [A], [B INTERSECT C], [D]
 	//   reduce   = ((A UNION (B INTERSECT C)) EXCEPT D)
@@ -297,7 +296,8 @@ exec_compound_data :: proc(
 		i += 1
 	}
 
-	// Phase 2: fold segments left-to-right with UNION/EXCEPT ops.
+	// Fold segments left-to-right with UNION/EXCEPT ops (the second stage —
+	// INTERSECT runs above already collapsed into segments).
 	acc := segments[0]
 	for si := 1; si < len(segments); si += 1 {
 		apply_set_op(&acc, segment_ops[si - 1], segments[si][:])
