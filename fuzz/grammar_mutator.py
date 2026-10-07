@@ -13,7 +13,8 @@ Strategies (weighted, one per fuzz() call):
                         boundaries (string-literal aware). Falls back to
                         token_insert when either side has no ';'.
   literal_tweak (15%) — mutate an int/float/hex/string literal in place.
-  wrap_struct   (10%) — wrap in a subquery or append WHERE/UNION/LIMIT clause.
+  wrap_struct   (10%) — wrap in a subquery, txn, DDL/index lifecycle, or
+                        aggregate-over-join; else append WHERE/UNION/LIMIT.
 
 Also exposes havoc_mutation() so the same strategies stack inside AFL++'s
 havoc stage (6% default probability via havoc_mutation_probability()).
@@ -46,6 +47,8 @@ SWAP_CLASSES = [
     [b"COUNT", b"SUM", b"AVG", b"MIN", b"MAX"],
     [b"INT", b"INTEGER", b"TEXT", b"REAL", b"BLOB"],
     [b"COMMIT", b"ROLLBACK"],
+    [b"CREATE", b"DROP"],
+    [b"SELECT", b"EXPLAIN"],
 ]
 
 # Tokens worth inserting: the sql.dict entries plus extras the dict can't
@@ -106,6 +109,11 @@ WRAP_TEMPLATES = [
     b"%s UNION ALL %s;",
     b"%s ORDER BY 1 LIMIT 2;",
     b"EXPLAIN %s;",
+    b"BEGIN; %s; COMMIT;",
+    b"BEGIN; %s; ROLLBACK;",
+    b"CREATE TABLE _fz (id INTEGER PRIMARY KEY, v TEXT); %s;",
+    b"CREATE INDEX _fzi ON _fz (v); %s; DROP INDEX _fzi;",
+    b"SELECT a.id, COUNT(*) FROM (%s) AS a JOIN (%s) AS b ON a.id = b.id GROUP BY a.id;",
 ]
 
 

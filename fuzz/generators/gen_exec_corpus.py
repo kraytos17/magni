@@ -185,6 +185,137 @@ SELECT rowid FROM t WHERE body = 'b';
 .frobnicate
 SELECT * FROM t;
 """),
+    ("script_index_backfill", """\
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);
+INSERT INTO docs VALUES (1, 'alpha', 10), (2, 'bb', 20), (3, 'alpha', 30), (4, '', 40), (5, NULL, 50);
+CREATE INDEX i_body ON docs (body);
+SELECT rowid FROM docs WHERE body = 'alpha' ORDER BY rowid;
+SELECT rowid FROM docs WHERE body LIKE 'al%' ORDER BY rowid;
+SELECT rowid FROM docs WHERE body IN ('alpha', 'bb', 'missing') ORDER BY rowid;
+EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';
+UPDATE docs SET body = 'gamma' WHERE id = 1;
+SELECT rowid FROM docs WHERE body = 'alpha' ORDER BY rowid;
+SELECT rowid FROM docs WHERE body = 'gamma' ORDER BY rowid;
+DELETE FROM docs WHERE body = 'alpha';
+SELECT rowid FROM docs WHERE body = 'alpha' ORDER BY rowid;
+DROP INDEX i_body;
+SELECT id FROM docs WHERE body = 'gamma' ORDER BY id;
+CREATE INDEX i_body ON docs (body);
+SELECT rowid FROM docs WHERE body LIKE '%mm%' ORDER BY rowid;
+SELECT rowid FROM docs WHERE body LIKE 'b_b' ORDER BY rowid;
+SELECT rowid FROM docs WHERE body LIKE '%' ORDER BY rowid;
+"""),
+    ("script_joins_multi", """\
+CREATE TABLE a (id INT, v TEXT);
+CREATE TABLE b (id INT, w TEXT);
+CREATE TABLE c (id INT, z INT);
+INSERT INTO a VALUES (1, 'x'), (2, 'y'), (3, 'w');
+INSERT INTO b VALUES (1, 'p'), (2, 'q');
+INSERT INTO c VALUES (1, 10), (3, 30);
+SELECT * FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id ORDER BY a.id;
+SELECT * FROM a CROSS JOIN b ORDER BY a.id LIMIT 3;
+SELECT * FROM a RIGHT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id ORDER BY a.id;
+SELECT * FROM (SELECT id FROM a WHERE id > 1) AS s JOIN b ON s.id = b.id ORDER BY s.id;
+SELECT * FROM a AS x JOIN a AS y ON x.id = y.id ORDER BY x.id LIMIT 2;
+SELECT b.id, COUNT(*) FROM a JOIN b ON a.id = b.id GROUP BY b.id HAVING COUNT(*) > 0 ORDER BY b.id;
+SELECT * FROM a JOIN b ON a.id = b.id WHERE c.id > 0;
+"""),
+    ("script_constraints", """\
+CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
+INSERT INTO t (id, s, c) VALUES (1, 'a', 5);
+INSERT INTO t VALUES (2, 99, 'b', 3);
+INSERT INTO t VALUES (1, 0, 'dup', 1);
+INSERT INTO t VALUES (3, 0, NULL, 1);
+INSERT INTO t VALUES (4, 0, 'neg', -2);
+SELECT * FROM t ORDER BY id;
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE k (id INT, pid INT, FOREIGN KEY (pid) REFERENCES p(id));
+INSERT INTO p VALUES (1), (2);
+INSERT INTO k VALUES (10, 1), (20, 9);
+SELECT * FROM k ORDER BY id;
+DROP TABLE k;
+DROP TABLE p;
+DROP TABLE t;
+SELECT * FROM t;
+"""),
+    ("script_snapshot_ops", """\
+CREATE TABLE t (x INT, y TEXT);
+INSERT INTO t VALUES (1, 'a');
+INSERT INTO t VALUES (2, 'b');
+.snapshots
+.snapshot tag 2 second
+SELECT * FROM t AS OF SNAPSHOT 1;
+INSERT INTO t VALUES (3, 'c');
+.snapshot restore 2
+SELECT * FROM t;
+INSERT INTO t VALUES (4, 'd');
+.rollforward
+SELECT * FROM t;
+.snapshot restore 99
+.snapdiff 1 2
+.expire 1
+.snapshots
+SELECT * FROM t AS OF SNAPSHOT 1;
+"""),
+    ("script_agg_join", """\
+CREATE TABLE o (oid INT, cid INT, amt INT);
+CREATE TABLE c (cid INT, name TEXT);
+INSERT INTO o VALUES (1, 1, 100), (2, 1, 200), (3, 2, 50);
+INSERT INTO c VALUES (1, 'acme'), (2, 'globex');
+SELECT c.name, COUNT(*), SUM(o.amt) FROM o JOIN c ON o.cid = c.cid GROUP BY c.name HAVING SUM(o.amt) > 100 ORDER BY c.name;
+SELECT cid, COUNT(*) FROM o GROUP BY cid, amt HAVING COUNT(*) >= 1 ORDER BY cid LIMIT 2;
+SELECT * FROM (SELECT cid, SUM(amt) AS total FROM o GROUP BY cid HAVING SUM(amt) > 60) AS s ORDER BY total DESC;
+SELECT DISTINCT cid FROM o ORDER BY cid;
+"""),
+    ("script_admin_introspect", """\
+CREATE TABLE t (id INT PRIMARY KEY, v TEXT);
+INSERT INTO t VALUES (1, 'a'), (2, 'b');
+.tables
+.schema
+.desc t
+.desc missing
+.dump t
+.dump missing
+.stats
+.tree_page 1
+.tree_page 999999
+.tree_page abc
+.integrity
+SELECT * FROM t;
+"""),
+    ("script_txn_mixed", """\
+CREATE TABLE t (id INT PRIMARY KEY, v INT);
+INSERT INTO t VALUES (1, 10);
+BEGIN;
+INSERT INTO t VALUES (2, 20);
+CREATE TABLE u (id INT);
+INSERT INTO u VALUES (1);
+SELECT * FROM t ORDER BY id;
+SELECT * FROM u;
+ROLLBACK;
+SELECT * FROM t ORDER BY id;
+SELECT * FROM u;
+BEGIN;
+UPDATE t SET v = 99 WHERE id = 1;
+DELETE FROM t WHERE id = 99;
+COMMIT;
+SELECT * FROM t ORDER BY id;
+BEGIN;
+COMMIT;
+ROLLBACK;
+"""),
+    ("script_asof_series", """\
+CREATE TABLE t (id INT, v TEXT);
+INSERT INTO t VALUES (1, 'a');
+SELECT * FROM t AS OF TIMESTAMP 1;
+INSERT INTO t VALUES (2, 'b');
+SELECT * FROM t AS OF SNAPSHOT 1;
+SELECT * FROM t AS OF SNAPSHOT 2;
+SELECT * FROM t AS OF SNAPSHOT 99;
+DELETE FROM t WHERE id = 1;
+SELECT * FROM t AS OF SNAPSHOT 2;
+SELECT * FROM t;
+"""),
 ]
 
 from promoted_seeds import EXEC_PROMOTED

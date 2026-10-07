@@ -83,5 +83,66 @@ exec_admin_cmd :: proc(database: ^db.Database, line: string) {
 			}
 		}
 		db.expire_snapshots(database, keep)
+	case ".snapshots":
+		admin.print_snapshots(database)
+	case ".snapshot":
+		exec_snapshot_cmd(database, args)
+	case ".rollforward":
+		db.rollforward(database)
+	case ".snapdiff":
+		parts := strings.split(args, " ", context.temp_allocator)
+		if len(parts) == 2 {
+			if older, ook := strconv.parse_u64(parts[0]); ook {
+				if newer, nok := strconv.parse_u64(parts[1]); nok {
+					db.snapshot_diff(database, older, newer)
+				}
+			}
+		}
+	case ".tables":
+		admin.list_tables(database)
+	case ".schema":
+		admin.print_schema(database)
+	case ".stats":
+		admin.stats(database)
+	case ".integrity":
+		admin.integrity_check(database)
+	case ".dump":
+		if len(args) > 0 {
+			admin.dump_table(database, args)
+		}
+	case ".desc":
+		if len(args) > 0 {
+			admin.describe_table(database, args)
+		}
+	case ".tree_page":
+		if n, ok := strconv.parse_u64(args); ok {
+			admin.print_tree_page(database, u32(n))
+		}
+	}
+}
+
+// exec_snapshot_cmd runs the `.snapshot <subcommand>` family: tag/restore
+// take a numeric id (tag consumes the joined remainder as the label).
+// Malformed lines are ignored, like unknown dot-commands.
+exec_snapshot_cmd :: proc(database: ^db.Database, args: string) {
+	space := strings.index_byte(args, ' ')
+	sub := args if space < 0 else args[:space]
+	rest := "" if space < 0 else strings.trim_space(args[space + 1:])
+	switch sub {
+	case "tag":
+		rspace := strings.index_byte(rest, ' ')
+		if rspace < 0 {
+			return
+		}
+		if id, ok := strconv.parse_u64(strings.trim_space(rest[:rspace])); ok {
+			label := strings.trim_space(rest[rspace + 1:])
+			if len(label) > 0 {
+				db.snapshot_tag(database, id, label)
+			}
+		}
+	case "restore":
+		if id, ok := strconv.parse_u64(rest); ok {
+			db.snapshot_restore(database, id)
+		}
 	}
 }
