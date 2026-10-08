@@ -99,6 +99,17 @@ value_blob :: proc(v: []u8) -> Value {
 	return v
 }
 
+// value constructs a Value from a typed argument: overload resolution
+// picks the constructor by argument type, so call sites name the payload
+// once (types.value(x)) instead of repeating the storage class.
+value :: proc {
+	value_null,
+	value_int,
+	value_real,
+	value_text,
+	value_blob,
+}
+
 // is_null reports whether v is SQL NULL.
 is_null :: proc(v: Value) -> bool {
 	_, ok := v.(Null)
@@ -116,13 +127,13 @@ value_clone :: proc(v: Value, allocator := context.allocator) -> (Value, mem.All
 		if err != nil {
 			return {}, err
 		}
-		return value_text(str_copy), nil
+		return value(str_copy), nil
 	case []u8:
 		blob_copy, err := slice.clone(val, allocator)
 		if err != nil {
 			return {}, err
 		}
-		return value_blob(blob_copy), nil
+		return value(blob_copy), nil
 	case:
 		return val, nil
 	}
@@ -240,6 +251,80 @@ Column :: struct {
 // sign bit cleared, so catalog keys stay in the positive rowid space.
 hash_string :: proc(s: string) -> u64 {
 	return hash.fnv64a(transmute([]u8)s) & 0x7FFFFFFFFFFFFFFF
+}
+
+// FNV-1a constants shared by hash_values.
+@(private = "file")
+FNV_OFFSET_BASIS :: u64(0xcbf29ce484222325)
+
+@(private = "file")
+FNV_PRIME :: u64(0x100000001b3)
+
+// hash_values computes a single FNV-1a hash over a row's values (or a subset
+// via indices; nil indices hashes all values). Each value is prefixed with a
+// fixed tag byte so that e.g. integer 1 and string "1" hash differently and
+// column boundaries are unambiguous. Used for DISTINCT dedup, set-operation
+// membership, GROUP BY keys, and hash-join keys. Collisions fall back to
+// value_compare at every call site — this is a hash-map key, not a digest.
+hash_values :: proc(values: []Value, indices: []int = nil) -> u64 {
+	h := FNV_OFFSET_BASIS
+	if indices == nil {
+		for v in values {
+			h = hash_value_into(h, v)
+		}
+	} else {
+		for col_idx in indices {
+			h = hash_value_into(h, values[col_idx])
+		}
+	}
+	return h
+}
+
+// fnv_mix is one FNV-1a mix step (xor-fold then prime multiply), the
+// primitive behind hash_value_into and the fingerprint paths.
+@(private = "file")
+fnv_mix :: proc(h, w: u64) -> u64 {
+	return (h ~ w) * FNV_PRIME
+}
+
+// hash_value_into mixes one value into a running FNV-1a hash. Single source
+// for the per-type tag mapping shared by hash_value and hash_values.
+@(private = "file")
+hash_value_into :: proc(h: u64, v: Value) -> u64 {
+	acc := h
+	switch val in v {
+	case Null:
+		acc = fnv_mix(acc, 0)
+	case i64:
+		acc = fnv_mix(acc, 1)
+		acc = fnv_mix(acc, u64(val))
+	case f64:
+		acc = fnv_mix(acc, 2)
+		acc = fnv_mix(acc, transmute(u64)val)
+	case string:
+		acc = fnv_mix(acc, 3)
+		acc = hash.fnv64a(transmute([]u8)val, acc)
+	case []u8:
+		acc = fnv_mix(acc, 4)
+		acc = hash.fnv64a(val, acc)
+	}
+	return acc
+}
+
+// hash_value computes the FNV-1a hash of a single value, using the same
+// per-type tags as hash_values. Used for hash-join keys.
+hash_value :: proc(v: Value) -> u64 {
+	return hash_value_into(FNV_OFFSET_BASIS, v)
+}
+
+// hash hashes by argument type: strings hash as catalog rowids (sign bit
+// cleared, see hash_string); single values and value slices hash as
+// fingerprint keys (tagged FNV-1a, see hash_value/hash_values). The type at
+// each call site selects the domain, so the two never mix.
+hash :: proc {
+	hash_string,
+	hash_value,
+	hash_values,
 }
 
 // Index_Def is one secondary text index: covering text->rowid over a

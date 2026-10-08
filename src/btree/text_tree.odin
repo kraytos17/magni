@@ -75,7 +75,7 @@ text_split_mid :: proc "contextless" (sizes: []int, total: int) -> int {
 @(private, require_results)
 text_make_key :: proc(text: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
 	buf := make([]u8, 5 + len(text) + 8, context.temp_allocator)
-	n, ok := cell.text_index_encode(types.value_text(string(text)), rowid, buf)
+	n, ok := cell.text_index_encode(types.value(string(text)), rowid, buf)
 	if !ok {
 		return nil, .Serialization_Failed
 	}

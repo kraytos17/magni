@@ -175,36 +175,36 @@ decode_row_values :: proc(
 			return next_pos, false
 		}
 		if type_code == .ZERO {
-			result_values[st_idx] = types.value_int(0)
+			result_values[st_idx] = types.value(0)
 		} else if type_code == .ONE {
-			result_values[st_idx] = types.value_int(1)
+			result_values[st_idx] = types.value(1)
 		} else if st == u64(types.Serial_Type.NULL) {
-			result_values[st_idx] = types.value_null()
+			result_values[st_idx] = types.value()
 		} else if st >= u64(types.Serial_Type.INT8) && st <= u64(types.Serial_Type.INT64) {
 			int_val, _ := read_int_by_size(src, next_pos, content_size)
-			result_values[st_idx] = types.value_int(int_val)
+			result_values[st_idx] = types.value(int_val)
 			next_pos += content_size
 		} else if type_code == .FLOAT64 {
 			float_val, _ := endian.get_f64(src[next_pos:], .Big)
-			result_values[st_idx] = types.value_real(float_val)
+			result_values[st_idx] = types.value(float_val)
 			next_pos += 8
 		} else if is_text_serial(st) {
 			text_bytes := src[next_pos:next_pos + content_size]
 			if config.zero_copy {
-				result_values[st_idx] = types.value_text(string(text_bytes))
+				result_values[st_idx] = types.value(string(text_bytes))
 			} else {
 				str := strings.clone_from(text_bytes, alloc)
-				result_values[st_idx] = types.value_text(str)
+				result_values[st_idx] = types.value(str)
 			}
 			next_pos += content_size
 		} else if is_blob_serial(st) {
 			blob_bytes := src[next_pos:next_pos + content_size]
 			if config.zero_copy {
-				result_values[st_idx] = types.value_blob(blob_bytes)
+				result_values[st_idx] = types.value(blob_bytes)
 			} else {
 				blob_copy := make([]u8, content_size, alloc)
 				copy(blob_copy, blob_bytes)
-				result_values[st_idx] = types.value_blob(blob_copy)
+				result_values[st_idx] = types.value(blob_copy)
 			}
 			next_pos += content_size
 		} else {
@@ -389,30 +389,30 @@ deserialize_needed :: proc(
 		want := st_idx < len(needed) && needed[st_idx]
 		if !want {
 			pos += content_size
-			out_values[st_idx] = types.value_null()
+			out_values[st_idx] = types.value()
 			continue
 		}
 		if type_code == .ZERO {
-			out_values[st_idx] = types.value_int(0)
+			out_values[st_idx] = types.value(0)
 		} else if type_code == .ONE {
-			out_values[st_idx] = types.value_int(1)
+			out_values[st_idx] = types.value(1)
 		} else if st == u64(types.Serial_Type.NULL) {
-			out_values[st_idx] = types.value_null()
+			out_values[st_idx] = types.value()
 		} else if st >= u64(types.Serial_Type.INT8) && st <= u64(types.Serial_Type.INT64) {
 			int_val, _ := read_int_by_size(src, pos, content_size)
-			out_values[st_idx] = types.value_int(int_val)
+			out_values[st_idx] = types.value(int_val)
 			pos += content_size
 		} else if type_code == .FLOAT64 {
 			float_val, _ := endian.get_f64(src[pos:], .Big)
-			out_values[st_idx] = types.value_real(float_val)
+			out_values[st_idx] = types.value(float_val)
 			pos += 8
 		} else if is_text_serial(st) {
 			text_bytes := src[pos:pos + content_size]
-			out_values[st_idx] = types.value_text(string(text_bytes))
+			out_values[st_idx] = types.value(string(text_bytes))
 			pos += content_size
 		} else if is_blob_serial(st) {
 			blob_bytes := src[pos:pos + content_size]
-			out_values[st_idx] = types.value_blob(blob_bytes)
+			out_values[st_idx] = types.value(blob_bytes)
 			pos += content_size
 		} else {
 			return 0, 0, false

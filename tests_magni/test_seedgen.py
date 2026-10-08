@@ -83,7 +83,9 @@ class TestAppendToPromoted(unittest.TestCase):
     def test_generator_layout(self):
         # Generators live in fuzz/generators/ (never among the seeds they
         # write); corpus dirs hold only seed files + promoted_seeds.py.
-        # Fuzz binaries build into fuzz/build/.
+        # Fuzz binaries build into target/fuzz/ (parser) and
+        # target/fuzz-exec/ (exec) — separate dirs so the two builds
+        # never clobber each other.
         from magni import config
 
         self.assertTrue(config.GEN_CORPUS.is_file())
@@ -92,8 +94,9 @@ class TestAppendToPromoted(unittest.TestCase):
         for corpus in (config.CORPUS_DIR, config.EXEC_CORPUS_DIR):
             pys = sorted(f.name for f in corpus.iterdir() if f.is_file() and f.suffix == ".py")
             self.assertEqual(pys, ["promoted_seeds.py"])
-        for target in (config.FUZZ_TARGET, config.FUZZ_TARGET_COV, config.FUZZ_EXEC_TARGET):
+        for target in (config.FUZZ_TARGET, config.FUZZ_TARGET_COV):
             self.assertEqual(target.parent, config.TARGET_FUZZ)
+        self.assertEqual(config.FUZZ_EXEC_TARGET.parent, config.TARGET_FUZZ_EXEC)
 
 
 if __name__ == "__main__":

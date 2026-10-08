@@ -64,7 +64,7 @@ union_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 		is_dup := false
 		if h, has := fp_buckets_probe(&index, fp); has {
 			for n := h; n != -1; n = index.next[n] {
-				if values_equal(r.values, a^[index.rows[n]].values) {
+				if values_equal_full(r.values, a^[index.rows[n]].values) {
 					is_dup = true
 					break
 				}
@@ -93,7 +93,7 @@ intersect :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 		fp := row_fingerprint(ra.values)
 		if h, has := fp_buckets_probe(&index, fp); has {
 			for n := h; n != -1; n = index.next[n] {
-				if values_equal(ra.values, b[index.rows[n]].values) {
+				if values_equal_full(ra.values, b[index.rows[n]].values) {
 					append(&out, ra)
 					break
 				}
@@ -128,7 +128,7 @@ intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 			if consumed[bi] {
 				continue
 			}
-			if values_equal(ra.values, b[bi].values) {
+			if values_equal_full(ra.values, b[bi].values) {
 				consumed[bi] = true
 				append(&out, ra)
 				break
@@ -153,7 +153,7 @@ except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 		found := false
 		if h, has := fp_buckets_probe(&index, fp); has {
 			for n := h; n != -1; n = index.next[n] {
-				if values_equal(ra.values, b[index.rows[n]].values) {
+				if values_equal_full(ra.values, b[index.rows[n]].values) {
 					found = true
 					break
 				}
@@ -188,7 +188,7 @@ except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 				if consumed[bi] {
 					continue
 				}
-				if values_equal(ra.values, b[bi].values) {
+				if values_equal_full(ra.values, b[bi].values) {
 					consumed[bi] = true
 					skipped = true
 					break

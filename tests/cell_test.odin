@@ -9,9 +9,9 @@ T :: ^testing.T
 @(test)
 test_lifecycle_create_destroy :: proc(t: T) {
 	values := []types.Value {
-		types.value_int(101),
-		types.value_text("Odin Lang"),
-		types.value_real(1.618),
+		types.value(101),
+		types.value("Odin Lang"),
+		types.value(1.618),
 	}
 
 	c, err := cell.create(1, values)
@@ -30,7 +30,7 @@ test_lifecycle_create_destroy :: proc(t: T) {
 @(test)
 test_blob_handling :: proc(t: T) {
 	blob_data := []u8{0xDE, 0xAD, 0xBE, 0xEF}
-	values := []types.Value{types.value_int(1), types.value_blob(blob_data)}
+	values := []types.Value{types.value(1), types.value(blob_data)}
 
 	c, _ := cell.create(1, values)
 	defer cell.destroy(&c)
@@ -44,10 +44,10 @@ test_blob_handling :: proc(t: T) {
 @(test)
 test_serialization_roundtrip :: proc(t: T) {
 	original_values := []types.Value {
-		types.value_int(999999),
-		types.value_text("Hello Serialization"),
-		types.value_null(),
-		types.value_real(3.14159),
+		types.value(999999),
+		types.value("Hello Serialization"),
+		types.value(),
+		types.value(3.14159),
 	}
 
 	buffer := make([]u8, 1024)
@@ -73,7 +73,7 @@ test_serialization_roundtrip :: proc(t: T) {
 
 @(test)
 test_zero_copy_mechanics :: proc(t: T) {
-	values := []types.Value{types.value_text("PersistentData")}
+	values := []types.Value{types.value("PersistentData")}
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 
@@ -120,8 +120,8 @@ test_buffer_boundaries :: proc(t: T) {
 
 @(test)
 test_multiple_cells_in_buffer :: proc(t: T) {
-	values_a := []types.Value{types.value_int(1)}
-	values_b := []types.Value{types.value_int(2)}
+	values_a := []types.Value{types.value(1)}
+	values_b := []types.Value{types.value(2)}
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 
@@ -144,19 +144,19 @@ test_schema_validation :: proc(t: T) {
 		{name = "name", type = .TEXT, not_null = false},
 	}
 
-	v1 := []types.Value{types.value_int(1), types.value_text("Alice")}
+	v1 := []types.Value{types.value(1), types.value("Alice")}
 	testing.expect(t, cell.validate(v1, cols), "Valid row validation failed")
 
-	v2 := []types.Value{types.value_int(2), types.value_null()}
+	v2 := []types.Value{types.value(2), types.value()}
 	testing.expect(t, cell.validate(v2, cols), "Nullable validation failed")
 
-	v3 := []types.Value{types.value_text("NaN"), types.value_text("Bob")}
+	v3 := []types.Value{types.value("NaN"), types.value("Bob")}
 	testing.expect(t, !cell.validate(v3, cols), "Type mismatch validation failed")
 
-	v4 := []types.Value{types.value_null(), types.value_text("Bob")}
+	v4 := []types.Value{types.value(), types.value("Bob")}
 	testing.expect(t, !cell.validate(v4, cols), "Not-Null constraint validation failed")
 
-	v5 := []types.Value{types.value_int(1)}
+	v5 := []types.Value{types.value(1)}
 	testing.expect(t, !cell.validate(v5, cols), "Column count validation failed")
 }
 
@@ -171,7 +171,7 @@ test_empty_value_list :: proc(t: T) {
 
 @(test)
 test_all_null_values :: proc(t: T) {
-	vals := []types.Value{types.value_null(), types.value_null(), types.value_null()}
+	vals := []types.Value{types.value(), types.value(), types.value()}
 	c, err := cell.create(7, vals)
 	testing.expect(t, err == nil, "create with all null values should succeed")
 	defer cell.destroy(&c)
@@ -192,7 +192,7 @@ test_get_rowid_on_invalid_buffer :: proc(t: T) {
 
 @(test)
 test_utilities :: proc(t: T) {
-	values := []types.Value{types.value_int(42), types.value_text("SizeTest")}
+	values := []types.Value{types.value(42), types.value("SizeTest")}
 	cinfo := cell.compute_info(1, values)
 	calc_size := cell.compute_info(1, values).total_size
 	buffer := make([]u8, 256)
@@ -209,13 +209,13 @@ test_utilities :: proc(t: T) {
 @(test)
 test_deserialize_needed_all_parity :: proc(t: T) {
 	original_values := []types.Value {
-		types.value_int(0),
-		types.value_int(1),
-		types.value_int(-999999),
-		types.value_real(2.5),
-		types.value_text("Hello Needed"),
-		types.value_blob([]u8{0x01, 0x02, 0x03}),
-		types.value_null(),
+		types.value(0),
+		types.value(1),
+		types.value(-999999),
+		types.value(2.5),
+		types.value("Hello Needed"),
+		types.value([]u8{0x01, 0x02, 0x03}),
+		types.value(),
 	}
 	buffer := make([]u8, 1024)
 	defer delete(buffer)
@@ -252,10 +252,10 @@ test_deserialize_needed_all_parity :: proc(t: T) {
 @(test)
 test_deserialize_needed_subset :: proc(t: T) {
 	original_values := []types.Value {
-		types.value_int(42),
-		types.value_text("SkipMe"),
-		types.value_real(1.5),
-		types.value_text("KeepMe"),
+		types.value(42),
+		types.value("SkipMe"),
+		types.value(1.5),
+		types.value("KeepMe"),
 	}
 	buffer := make([]u8, 1024)
 	defer delete(buffer)
@@ -285,7 +285,7 @@ test_deserialize_needed_subset :: proc(t: T) {
 
 @(test)
 test_deserialize_needed_none_and_malformed :: proc(t: T) {
-	original_values := []types.Value{types.value_int(5), types.value_text("x")}
+	original_values := []types.Value{types.value(5), types.value("x")}
 	buffer := make([]u8, 256)
 	defer delete(buffer)
 

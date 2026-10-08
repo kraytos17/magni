@@ -41,7 +41,7 @@ execute :: proc(
 		}
 		return ok, new_root, mutated
 	case parser.Insert_Stmt:
-		ok, new_root, mutated = exec_insert_cow(schema_tree, s, cache, pending)
+		ok, new_root, mutated = exec_cow(schema_tree, s, cache, pending)
 		schema_tree.root = new_root
 		return ok, new_root, mutated
 	case parser.Select_Stmt:
@@ -63,11 +63,11 @@ execute :: proc(
 		}
 		return q_ok, schema_tree.root, {}
 	case parser.Update_Stmt:
-		ok, new_root, mutated = exec_update_cow(schema_tree, s, cache, pending)
+		ok, new_root, mutated = exec_cow(schema_tree, s, cache, pending)
 		schema_tree.root = new_root
 		return ok, new_root, mutated
 	case parser.Delete_Stmt:
-		ok, new_root, mutated = exec_delete_cow(schema_tree, s, cache, pending)
+		ok, new_root, mutated = exec_cow(schema_tree, s, cache, pending)
 		schema_tree.root = new_root
 		return ok, new_root, mutated
 	case parser.Drop_Stmt:
@@ -99,7 +99,7 @@ execute :: proc(
 		if out != nil {
 			plan_text := explain_plan_text(schema_tree, s, cache)
 			vals := make([]types.Value, 1, context.temp_allocator)
-			vals[0] = types.value_text(plan_text)
+			vals[0] = types.value(plan_text)
 			rows := make([]Row_Entry, 1, context.temp_allocator)
 			rows[0] = Row_Entry {
 				rowid  = 1,

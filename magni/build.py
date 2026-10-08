@@ -83,16 +83,17 @@ COV_TARGETS = {
 }
 
 
-def llvm_ir_sources(harness: str) -> list[str]:
+def llvm_ir_sources(harness: str, out_dir: Path) -> list[str]:
     """Build a harness to LLVM IR, return the .ll file(s) to link.
 
     -o:speed emits a single merged module named ".ll"; the default emits one
-    .ll per package. Clears TARGET_FUZZ first.
+    .ll per package. Clears out_dir first (each harness owns its dir, so
+    parser and exec builds never clobber each other's IR or binaries).
     """
     require_tool("afl-clang-fast")
-    if config.TARGET_FUZZ.exists():
-        shutil.rmtree(config.TARGET_FUZZ)
-    config.TARGET_FUZZ.mkdir(parents=True, exist_ok=True)
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     run(
         [
             config.ODIN,
@@ -101,13 +102,13 @@ def llvm_ir_sources(harness: str) -> list[str]:
             "-build-mode:llvm-ir",
             *config.COLLECTIONS,
             "-o:speed",
-            f"-out:{config.TARGET_FUZZ}",
+            f"-out:{out_dir}",
         ]
     )
-    single = config.TARGET_FUZZ / ".ll"
-    ll_files = [single] if single.is_file() else sorted(config.TARGET_FUZZ.glob("*.ll"))
+    single = out_dir / ".ll"
+    ll_files = [single] if single.is_file() else sorted(out_dir.glob("*.ll"))
     if not ll_files:
-        die(f"Error: no LLVM IR files in {config.TARGET_FUZZ}")
+        die(f"Error: no LLVM IR files in {out_dir}")
     return [str(f) for f in ll_files]
 
 
@@ -120,7 +121,7 @@ def build_cov(flavor: str = "cov") -> None:
     if flavor not in COV_TARGETS:
         die(f"Error: unknown cov flavor '{flavor}' (cov|cmplog|laf)")
     out, extra_env = COV_TARGETS[flavor]
-    ll_files = llvm_ir_sources("fuzz")
+    ll_files = llvm_ir_sources("fuzz", config.TARGET_FUZZ)
     e = dict(extra_env)
     run(["afl-clang-fast", *ll_files, "-o", str(out)], env=e)
     log(f"Built {out} (AFL++ {flavor}-instrumented)")
@@ -133,7 +134,7 @@ def build_exec() -> None:
     AddressSanitizer — there is no sanitizer-free variant. NATIVE
     instrumentation, same rationale as COV_TARGETS.
     """
-    ll_files = llvm_ir_sources("fuzz_exec")
+    ll_files = llvm_ir_sources("fuzz_exec", config.TARGET_FUZZ_EXEC)
     run(
         ["afl-clang-fast", "-fsanitize=address", *ll_files, "-o", str(config.FUZZ_EXEC_TARGET)],
         env={"AFL_LLVM_INSTRUMENT": "NATIVE"},

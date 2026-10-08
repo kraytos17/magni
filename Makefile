@@ -108,7 +108,7 @@ fuzz-cov: ## build coverage-instrumented target → target/fuzz/fuzz_target_cov
 fuzz-test: ## run every corpus seed under ASan (regression gate; target auto-rebuilds if stale)
 	@python3 magni.py corpus test
 
-fuzz-exec-build: ## build executor/storage target (coverage + ASan) → target/fuzz/fuzz_exec_target
+fuzz-exec-build: ## build executor/storage target (coverage + ASan) → target/fuzz-exec/fuzz_exec_target
 	@python3 magni.py build --exec
 
 fuzz-exec-test: ## run every exec seed under ASan (regression gate; target auto-rebuilds if stale)
@@ -139,7 +139,7 @@ fuzz-one: fuzz-build ## repro one crash: make fuzz-one FILE=fuzz/afl-output/.../
 
 fuzz-one-exec: fuzz-exec-build ## repro one exec crash: make fuzz-one-exec FILE=fuzz/afl-exec-output/.../id:000000
 	@test -n "$(FILE)" || { echo "usage: make fuzz-one-exec FILE=<path>" >&2; exit 2; }
-	@ASAN_OPTIONS=abort_on_error=1:symbolize=0 ./target/fuzz/fuzz_exec_target "$(FILE)"
+	@ASAN_OPTIONS=abort_on_error=1:symbolize=0 ./target/fuzz-exec/fuzz_exec_target "$(FILE)"
 
 fuzz-grammar-test: ## selftest the SQL-aware Python mutator (no AFL++ needed)
 	@python3 fuzz/grammar_mutator.py --selftest

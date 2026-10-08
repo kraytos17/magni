@@ -649,7 +649,7 @@ fetch_covering_index :: proc(
 	rows := make([dynamic]Row_Entry, 0, len(cands), allocator)
 	for rid in cands {
 		vals := make([]types.Value, 1, allocator)
-		vals[0] = types.value_int(i64(rid))
+		vals[0] = types.value(i64(rid))
 		append(&rows, Row_Entry{rowid = rid, values = vals})
 	}
 
@@ -825,7 +825,7 @@ fetch_covering_col :: proc(
 	rows := make([dynamic]Row_Entry, 0, len(pairs), allocator)
 	for p in pairs {
 		vals := make([]types.Value, 1, allocator)
-		vals[0] = types.value_text(strings.clone(p.val, allocator))
+		vals[0] = types.value(strings.clone(p.val, allocator))
 		append(&rows, Row_Entry{rowid = p.rid, values = vals})
 	}
 

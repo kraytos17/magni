@@ -75,7 +75,7 @@ create_manifest :: proc(p: ^pager.Pager, tables: []types.Table) -> u32 {
 	offset += size_of(count)
 	for tbl in tables {
 		entry := Manifest_Entry {
-			name_hash = u64(types.hash_string(tbl.name)),
+			name_hash = u64(types.hash(tbl.name)),
 			root_page = tbl.root_page,
 			name_len  = u16(len(tbl.name)),
 		}
@@ -119,7 +119,7 @@ find_in_manifest :: proc(
 
 	offset := len(MANIFEST_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += size_of(u32)
-	target_hash := u64(types.hash_string(table_name))
+	target_hash := u64(types.hash(table_name))
 	for _ in 0 ..< count {
 		entry := (^Manifest_Entry)(raw_data(data[offset:]))^
 		offset += size_of(Manifest_Entry)

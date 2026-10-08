@@ -23,7 +23,7 @@ join_emit_combined :: proc(outer: Row_Entry, inner: []types.Value, new_rows: ^[d
 join_emit_null_row :: proc(outer: Row_Entry, right_col_count: int, new_rows: ^[dynamic]Row_Entry) {
 	null_row := make([]types.Value, len(outer.values) + right_col_count, context.temp_allocator)
 	copy(null_row[:len(outer.values)], outer.values)
-	slice.fill(null_row[len(outer.values):], types.value_null())
+	slice.fill(null_row[len(outer.values):], types.value())
 	append(new_rows, Row_Entry{0, null_row})
 }
 
@@ -37,7 +37,7 @@ join_emit_null_left_row :: proc(
 ) {
 	null_row := make([]types.Value, left_col_count + len(right_row.values), context.temp_allocator)
 
-	slice.fill(null_row[:left_col_count], types.value_null())
+	slice.fill(null_row[:left_col_count], types.value())
 	copy(null_row[left_col_count:], right_row.values)
 	append(new_rows, Row_Entry{0, null_row})
 }
@@ -98,7 +98,7 @@ join_key_fingerprint :: proc(v: types.Value) -> (u64, bool) {
 	if types.is_null(v) {
 		return 0, false
 	}
-	return hash_value(v), true
+	return types.hash(v), true
 }
 
 // join_match_any accepts every pair (CROSS JOIN and ON-less arms —

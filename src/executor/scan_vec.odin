@@ -362,7 +362,7 @@ scan_table_vec :: proc(
 		// into a filter position. Ten stores per row; negligible next to
 		// varint decode, kills the stale-slot bug class entirely.
 		for i in 0 ..< len(row_buf) {
-			row_buf[i] = types.value_null()
+			row_buf[i] = types.value()
 		}
 
 		rowid, get_err := btree.cursor_get_cell_needed(&cursor, ext, row_buf[:])

@@ -257,7 +257,7 @@ exec_count_star :: proc(
 	}
 
 	vals := make([]types.Value, 1, context.temp_allocator)
-	vals[0] = types.value_int(i64(count))
+	vals[0] = types.value(i64(count))
 	rows_mat := make([]Row_Entry, 1, context.temp_allocator)
 	rows_mat[0] = Row_Entry {
 		rowid  = 1,

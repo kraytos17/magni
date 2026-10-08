@@ -92,11 +92,11 @@ test_basic_operations :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "basic_ops")
 	defer teardown_tree(&ctx)
 
-	val1 := []types.Value{types.value_int(100), types.value_text("Row One")}
+	val1 := []types.Value{types.value(100), types.value("Row One")}
 	err := btree.tree_insert(&ctx.tree, 1, val1)
 	testing.expect_value(t, err, btree.Error.None)
 
-	val2 := []types.Value{types.value_int(200), types.value_text("Row Two")}
+	val2 := []types.Value{types.value(200), types.value("Row Two")}
 	err = btree.tree_insert(&ctx.tree, 2, val2)
 	testing.expect_value(t, err, btree.Error.None)
 
@@ -122,7 +122,7 @@ test_basic_operations :: proc(t: ^testing.T) {
 test_persistence :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "persistence")
-	vals := []types.Value{types.value_int(999)}
+	vals := []types.Value{types.value(999)}
 	testing.expect(t, btree.tree_insert(&ctx.tree, 42, vals) == .None, "seed insert succeeds")
 
 	_ = pager.close(ctx.pager)
@@ -155,7 +155,7 @@ test_heavy_split_logic :: proc(t: ^testing.T) {
 	payload := make_large_text(context.temp_allocator, 100)
 	item_count := 200
 	for i in 1 ..= item_count {
-		vals := []types.Value{types.value_int(i64(i)), types.value_text(payload)}
+		vals := []types.Value{types.value(i64(i)), types.value(payload)}
 		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
 		if err != .None {
 			testing.fail_now(t, fmt.tprintf("Insert failed at index %d with error: %v", i, err))
@@ -186,7 +186,7 @@ test_duplicates :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "duplicates")
 	defer teardown_tree(&ctx)
 
-	vals := []types.Value{types.value_int(1)}
+	vals := []types.Value{types.value(1)}
 	testing.expect(t, btree.tree_insert(&ctx.tree, 10, vals) == .None, "first insert succeeds")
 	err := btree.tree_insert(&ctx.tree, 10, vals)
 	testing.expect_value(t, err, btree.Error.Duplicate_Rowid)
@@ -204,7 +204,7 @@ test_cursor :: proc(t: ^testing.T) {
 
 	keys := []types.Row_ID{50, 10, 30, 40, 20}
 	for k in keys {
-		vals := []types.Value{types.value_int(i64(k))}
+		vals := []types.Value{types.value(i64(k))}
 		testing.expect(t, btree.tree_insert(&ctx.tree, k, vals) == .None, "seed insert succeeds")
 	}
 
@@ -249,17 +249,17 @@ test_deletion :: proc(t: ^testing.T) {
 
 	testing.expect(
 		t,
-		btree.tree_insert(&ctx.tree, 1, []types.Value{types.value_int(1)}) == .None,
+		btree.tree_insert(&ctx.tree, 1, []types.Value{types.value(1)}) == .None,
 		"seed insert succeeds",
 	)
 	testing.expect(
 		t,
-		btree.tree_insert(&ctx.tree, 2, []types.Value{types.value_int(2)}) == .None,
+		btree.tree_insert(&ctx.tree, 2, []types.Value{types.value(2)}) == .None,
 		"seed insert succeeds",
 	)
 	testing.expect(
 		t,
-		btree.tree_insert(&ctx.tree, 3, []types.Value{types.value_int(3)}) == .None,
+		btree.tree_insert(&ctx.tree, 3, []types.Value{types.value(3)}) == .None,
 		"seed insert succeeds",
 	)
 
@@ -312,7 +312,7 @@ test_tree_verify :: proc(t: ^testing.T) {
 			btree.tree_insert(
 				&ctx.tree,
 				types.Row_ID(i),
-				[]types.Value{types.value_int(i64(i))},
+				[]types.Value{types.value(i64(i))},
 			) ==
 			.None,
 			"seed insert succeeds",
@@ -332,7 +332,7 @@ test_delete_non_existent :: proc(t: ^testing.T) {
 
 	testing.expect(
 		t,
-		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(10)}) == .None,
+		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value(10)}) == .None,
 		"seed insert succeeds",
 	)
 	err := btree.tree_delete(&ctx.tree, 99)
@@ -353,7 +353,7 @@ test_delete_first_last_key :: proc(t: ^testing.T) {
 			btree.tree_insert(
 				&ctx.tree,
 				types.Row_ID(i),
-				[]types.Value{types.value_int(i64(i))},
+				[]types.Value{types.value(i64(i))},
 			) ==
 			.None,
 			"seed insert succeeds",
@@ -389,7 +389,7 @@ test_consecutive_deletes :: proc(t: ^testing.T) {
 			btree.tree_insert(
 				&ctx.tree,
 				types.Row_ID(i),
-				[]types.Value{types.value_int(i64(i))},
+				[]types.Value{types.value(i64(i))},
 			) ==
 			.None,
 			"seed insert succeeds",
@@ -414,12 +414,12 @@ test_reinsert_after_delete :: proc(t: ^testing.T) {
 
 	testing.expect(
 		t,
-		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value_int(1)}) == .None,
+		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value(1)}) == .None,
 		"seed insert succeeds",
 	)
 	testing.expect(t, btree.tree_delete(&ctx.tree, 10) == .None, "delete existing succeeds")
 
-	vals := []types.Value{types.value_int(999)}
+	vals := []types.Value{types.value(999)}
 	err := btree.tree_insert(&ctx.tree, 10, vals)
 	testing.expect_value(t, err, btree.Error.None)
 
@@ -449,7 +449,7 @@ test_max_fit_value :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	payload := make_large_text(context.temp_allocator, 3000)
-	vals := []types.Value{types.value_int(1), types.value_text(payload)}
+	vals := []types.Value{types.value(1), types.value(payload)}
 	err := btree.tree_insert(&ctx.tree, 1, vals)
 	testing.expect_value(t, err, btree.Error.None)
 
@@ -465,7 +465,7 @@ test_overflow_value :: proc(t: ^testing.T) {
 	defer teardown_tree(&ctx)
 
 	payload := make_large_text(context.temp_allocator, 4096)
-	vals := []types.Value{types.value_int(1), types.value_text(payload)}
+	vals := []types.Value{types.value(1), types.value(payload)}
 	err := btree.tree_insert(&ctx.tree, 1, vals)
 	testing.expect(t, err != .None, "Oversized value should have failed")
 }
@@ -498,12 +498,12 @@ test_tree_update_cow :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "tree_update_cow")
 	defer teardown_tree(&ctx)
 
-	vals := []types.Value{types.value_text("initial")}
+	vals := []types.Value{types.value("initial")}
 	root, ins_err := btree.tree_insert_cow(&ctx.tree, 10, vals)
 	testing.expect(t, ins_err == .None, "cow insert 10")
 	ctx.tree.root = root
 
-	new_vals := []types.Value{types.value_text("updated")}
+	new_vals := []types.Value{types.value("updated")}
 	root2, upd_err := btree.tree_update_cow(&ctx.tree, 10, new_vals)
 	testing.expect(t, upd_err == .None, "cow update 10")
 	ctx.tree.root = root2
@@ -545,7 +545,7 @@ test_tree_collect_pages :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "collect_pg")
 	defer teardown_tree(&ctx)
 
-	val := []types.Value{types.value_int(10)}
+	val := []types.Value{types.value(10)}
 	testing.expect(t, btree.tree_insert(&ctx.tree, 1, val) == .None, "seed insert succeeds")
 	testing.expect(t, btree.tree_insert(&ctx.tree, 2, val) == .None, "seed insert succeeds")
 	testing.expect(t, btree.tree_insert(&ctx.tree, 3, val) == .None, "seed insert succeeds")
@@ -568,7 +568,7 @@ test_foreach_callback :: proc(t: ^testing.T) {
 	ctx := setup_tree(t, "foreach")
 	defer teardown_tree(&ctx)
 
-	val := []types.Value{types.value_int(100)}
+	val := []types.Value{types.value(100)}
 	testing.expect(t, btree.tree_insert(&ctx.tree, 1, val) == .None, "seed insert succeeds")
 	testing.expect(t, btree.tree_insert(&ctx.tree, 2, val) == .None, "seed insert succeeds")
 
@@ -617,7 +617,7 @@ test_page_accessor_move :: proc(t: ^testing.T) {
 	}
 
 	// Create 2 entries in src
-	vals := [][]types.Value{{types.value_int(1)}, {types.value_int(2)}}
+	vals := [][]types.Value{{types.value(1)}, {types.value(2)}}
 	rids := []types.Row_ID{10, 20}
 	off := int(types.PAGE_SIZE)
 	for i in 0 ..< 2 {

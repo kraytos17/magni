@@ -28,7 +28,7 @@ find_existing_group :: proc(
 	}
 	for n := h; n != -1; n = buckets.next[n] {
 		gi := buckets.rows[n]
-		if values_equal_by_indices(row_entry.values, groups[gi].key_values, group_by_indices) {
+		if values_equal(row_entry.values, groups[gi].key_values, group_by_indices) {
 			return gi, true
 		}
 	}
@@ -252,7 +252,7 @@ try_stream_int_groups :: proc(
 			j += 1
 		}
 
-		key_vals := []types.Value{types.value_int(keys[order[i]])}
+		key_vals := []types.Value{types.value(keys[order[i]])}
 		gr := make([]Row_Entry, j - i, context.temp_allocator)
 		for k in i ..< j {
 			gr[k - i] = rows[order[k]]
@@ -477,7 +477,7 @@ literal_column_type :: proc(v: types.Value) -> types.Column_Type {
 // hash_values (single FNV-1a with per-type tags); collisions fall back to
 // value_compare at the call site.
 group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
-	return hash_values(values, indices)
+	return types.hash(values, indices)
 }
 
 // compare_values orders two values for sorting/grouping/dedup: NULLs
@@ -668,7 +668,7 @@ Extremum_Dir :: enum u8 {
 @(private = "file")
 extremum :: proc(ai: Agg_Input, dir: Extremum_Dir) -> types.Value {
 	if len(ai.rows) == 0 || ai.col_idx < 0 {
-		return types.value_null()
+		return types.value()
 	}
 
 	best := ai.rows[0][ai.col_idx]
@@ -709,7 +709,7 @@ compute_aggregates :: proc(
 		switch agg.func {
 		case .COUNT:
 			if agg.column == "" {
-				results[i] = types.value_int(i64(len(ai.rows)))
+				results[i] = types.value(i64(len(ai.rows)))
 			} else {
 				count := 0
 				for row_vals in ai.rows {
@@ -717,14 +717,14 @@ compute_aggregates :: proc(
 						count += 1
 					}
 				}
-				results[i] = types.value_int(i64(count))
+				results[i] = types.value(i64(count))
 			}
 		case .SUM:
 			sum, _ := sum_count(ai)
-			results[i] = types.value_real(sum)
+			results[i] = types.value(sum)
 		case .AVG:
 			sum, count := sum_count(ai)
-			results[i] = types.value_real(sum / f64(count)) if count > 0 else types.value_null()
+			results[i] = types.value(sum / f64(count)) if count > 0 else types.value()
 		case .MIN:
 			results[i] = extremum(ai, .Min)
 		case .MAX:

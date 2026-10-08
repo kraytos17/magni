@@ -18,8 +18,9 @@ def cmd_clean(args: argparse.Namespace) -> None:
         out = fuzz_out_dir()
         if out.exists():
             shutil.rmtree(out)
-        if config.TARGET_FUZZ.exists():
-            shutil.rmtree(config.TARGET_FUZZ)
+        for d in (config.TARGET_FUZZ, config.TARGET_FUZZ_EXEC):
+            if d.exists():
+                shutil.rmtree(d)
         pycache = config.CORPUS_DIR / "__pycache__"
         if pycache.exists():
             shutil.rmtree(pycache)

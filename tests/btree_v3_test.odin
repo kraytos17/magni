@@ -273,7 +273,7 @@ test_v3_for_rule :: proc(t: ^testing.T) {
 	// Single source of truth: bias pair agrees with the rowid codec bytes.
 	kb := make([]u8, 16, context.temp_allocator)
 	for v in sweep {
-		n, ok := btree.key_encode(.Rowid, types.value_int(i64(v)), 0, kb)
+		n, ok := btree.key_encode(.Rowid, types.value(i64(v)), 0, kb)
 		testing.expect(t, ok && n == 9, "codec encodes")
 		// Payload bytes [1:9] equal the bias word big-endian.
 		wire: u64 = 0
@@ -662,7 +662,7 @@ test_v3_slot_table_ops :: proc(t: ^testing.T) {
 	testing.expect(t, hdr != nil, "slot header readable")
 	off := int(types.PAGE_SIZE)
 	for i in 1 ..= 4 {
-		vals := []types.Value{types.value_int(i64(i * 10))}
+		vals := []types.Value{types.value(i64(i * 10))}
 		info := cell.compute_info(types.Row_ID(i), vals)
 		off -= info.total_size
 		_, ser_ok := cell.serialize(page[off:], types.Row_ID(i), vals, info)
@@ -757,7 +757,7 @@ test_v3_split_produces_slotdir :: proc(t: ^testing.T) {
 	// Enough wide rows to force leaf splits (and a root split).
 	payload := make_large_text(context.temp_allocator, 100)
 	for i in 1 ..= 200 {
-		vals := []types.Value{types.value_int(i64(i)), types.value_text(payload)}
+		vals := []types.Value{types.value(i64(i)), types.value(payload)}
 		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
 		if err != .None {
 			testing.fail_now(t, "insert failed before split coverage")
@@ -836,7 +836,7 @@ test_separator_boundary_routing :: proc(t: ^testing.T) {
 
 	payload := make_large_text(context.temp_allocator, 100)
 	for i in 1 ..= 200 {
-		vals := []types.Value{types.value_int(i64(i)), types.value_text(payload)}
+		vals := []types.Value{types.value(i64(i)), types.value(payload)}
 		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
 		if err != .None {
 			testing.fail_now(t, "seed insert failed before routing coverage")

@@ -75,7 +75,7 @@ sort_rows_by_key_indices :: proc(rows: []Row_Entry, key_indices: []int) -> bool 
 // FNV-1a with per-type tags); collisions fall back to value_compare.
 @(private)
 row_fingerprint :: proc(values: []types.Value) -> u64 {
-	return hash_values(values)
+	return types.hash(values)
 }
 
 // build_fp_index returns the sorted fingerprints of vals for binary-search
@@ -89,7 +89,7 @@ build_fp_index :: proc(vals: []types.Value, allocator := context.temp_allocator)
 
 	fps := make([]u64, len(vals), allocator)
 	for v, i in vals {
-		fps[i] = hash_value(v)
+		fps[i] = types.hash(v)
 	}
 
 	slice.sort(fps)
@@ -124,7 +124,7 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 		is_dup := false
 		if h, ok := fp_buckets_probe(&seen, fp); ok {
 			for n := h; n != -1; n = seen.next[n] {
-				if values_equal(r.values, result[seen.rows[n]].values) {
+				if values_equal_full(r.values, result[seen.rows[n]].values) {
 					is_dup = true
 					break
 				}

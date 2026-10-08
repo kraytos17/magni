@@ -398,7 +398,7 @@ reorder_insert_values :: proc(
 				cloned, _ := types.value_clone(def, context.temp_allocator)
 				reordered[i] = cloned
 			} else {
-				reordered[i] = types.value_null()
+				reordered[i] = types.value()
 			}
 		}
 		for col_name, i in columns {
@@ -449,7 +449,7 @@ assign_insert_rowid :: proc(
 		next_id^ += 1
 		id := next_id^
 		if has_pk {
-			values[pk_idx] = types.value_int(i64(id))
+			values[pk_idx] = types.value(i64(id))
 		}
 		return id
 	}
@@ -463,7 +463,7 @@ assign_insert_rowid :: proc(
 
 		id, id_err := btree.tree_next_rowid(&table_tree)
 		next := id if id_err == .None else 1
-		values[pk_idx] = types.value_int(i64(next))
+		values[pk_idx] = types.value(i64(next))
 		return next
 	}
 
@@ -950,7 +950,7 @@ apply_update :: proc(
 		}
 		return nil, true // true = had an error
 	}
-	if values_equal(c.values, new_row) {
+	if values_equal_full(c.values, new_row) {
 		return nil, false // false = no change, not an error
 	}
 	return new_row, false
@@ -1727,6 +1727,16 @@ exec_delete_cow :: proc(
 		return false, t.root, {}
 	}
 	return exec_delete_impl(t, table^, stmt, cache, pending)
+}
+
+// exec_cow resolves the table and hands off to the mutation impl matching
+// the statement type: overload resolution picks the arm by stmt struct, so
+// the union dispatch in executor.odin names one entry point.
+@(private)
+exec_cow :: proc {
+	exec_insert_cow,
+	exec_update_cow,
+	exec_delete_cow,
 }
 
 // One entry point per mutation kind, each threading the index root the

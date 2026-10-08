@@ -33,31 +33,31 @@ parse_value :: proc(p: ^Parser, allocator := context.allocator) -> (val: types.V
 		advance(p)
 		if strings.contains(token.lexeme, ".") {
 			v := strconv.parse_f64(token.lexeme) or_return
-			return types.value_real(v), true
+			return types.value(v), true
 		} else {
 			v := strconv.parse_i64(token.lexeme) or_return
-			return types.value_int(v), true
+			return types.value(v), true
 		}
 	case .STRING:
 		advance(p)
-		return types.value_text(unescape_sql_string(token.lexeme, allocator)), true
+		return types.value(unescape_sql_string(token.lexeme, allocator)), true
 	case .BLOB_LITERAL:
 		advance(p)
 		bytes, decode_ok := hex.decode(transmute([]u8)token.lexeme, allocator)
 		if !decode_ok {
 			return {}, false
 		}
-		return types.value_blob(bytes), true
+		return types.value(bytes), true
 	case .NULL:
-		advance(p); return types.value_null(), true
+		advance(p); return types.value(), true
 	case .IDENTIFIER:
 		advance(p)
 		if match(p, .DOT) {
 			second := parse_identifier(p, allocator) or_return
 			qualified := strings.concatenate({token.lexeme, ".", second}, allocator)
-			delete(second, allocator); return types.value_text(qualified), true
+			delete(second, allocator); return types.value(qualified), true
 		}
-		return types.value_text(strings.clone(token.lexeme, allocator)), true
+		return types.value(strings.clone(token.lexeme, allocator)), true
 	}
 	return {}, false
 }

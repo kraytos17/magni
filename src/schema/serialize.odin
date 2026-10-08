@@ -211,7 +211,7 @@ deserialize_value_from_blob :: proc(
 	offset^ += 1
 	switch type_byte {
 	case 0:
-		return types.value_null(), true
+		return types.value(), true
 	case 1:
 		if offset^ + 8 > len(src) {
 			return {}, false
@@ -219,7 +219,7 @@ deserialize_value_from_blob :: proc(
 
 		val, _ := endian.get_u64(src[offset^:], .Little)
 		offset^ += 8
-		return types.value_int(i64(val)), true
+		return types.value(i64(val)), true
 	case 2:
 		if offset^ + 8 > len(src) {
 			return {}, false
@@ -227,7 +227,7 @@ deserialize_value_from_blob :: proc(
 
 		val, _ := endian.get_f64(src[offset^:], .Big)
 		offset^ += 8
-		return types.value_real(val), true
+		return types.value(val), true
 	case 3:
 		if offset^ + 4 > len(src) {
 			return {}, false
@@ -241,7 +241,7 @@ deserialize_value_from_blob :: proc(
 
 		str_val := string(src[offset^:offset^ + int(len_val)])
 		offset^ += int(len_val)
-		return types.value_text(strings.clone(str_val, allocator)), true
+		return types.value(strings.clone(str_val, allocator)), true
 	case 4:
 		if offset^ + 4 > len(src) {
 			return {}, false
@@ -256,7 +256,7 @@ deserialize_value_from_blob :: proc(
 		blob := make([]u8, int(len_val), allocator)
 		copy(blob, src[offset^:offset^ + int(len_val)])
 		offset^ += int(len_val)
-		return types.value_blob(blob), true
+		return types.value(blob), true
 	}
 	return {}, false
 }

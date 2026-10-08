@@ -18,7 +18,10 @@ All flows go through `magni.py` (or `make` wrappers) from the repo root.
 | `target/fuzz/fuzz_target` | `make fuzz-build` (`build --asan`) | regression gate, crash confirmation |
 | `target/fuzz/fuzz_target_cov` | `make fuzz-cov` (`build --cov`, AFL++ PCGUARD, no ASan) | fast parser campaigns |
 | `target/fuzz/fuzz_target_cmplog` / `_laf` | `build --cov --cmplog` / `--laf` | RedQueen / LAF-INTEL secondaries |
-| `target/fuzz/fuzz_exec_target` | `make fuzz-exec-build` (`build --exec`, coverage + ASan combined) | exec gate + campaigns (storage bugs are memory bugs: no sanitizer-free variant) |
+| `target/fuzz-exec/fuzz_exec_target` | `make fuzz-exec-build` (`build --exec`, coverage + ASan combined) | exec gate + campaigns (storage bugs are memory bugs: no sanitizer-free variant) |
+
+Parser (`target/fuzz/`) and exec (`target/fuzz-exec/`) builds use separate
+dirs, so neither clobbers the other's IR or binary.
 
 All binaries and `target/` are gitignored build artifacts.
 
@@ -113,7 +116,7 @@ own havoc. See `make fuzz-grammar-test`.
    FILE=fuzz/afl-output/.../id:000000,*` (ASan gate). Exec crash:
    `make fuzz-one-exec FILE=fuzz/afl-exec-output/.../id:000000,*`
    (equivalent to `ASAN_OPTIONS=abort_on_error=1:symbolize=0
-   ./target/fuzz/fuzz_exec_target FILE`). In dumb-mode runs, ASan
+   ./target/fuzz-exec/fuzz_exec_target FILE`). In dumb-mode runs, ASan
    can emit non-reproducible `SIGILL` fork artifacts — unreproducible under
    the gate means not real.
 2. **Minimize** with `afl-tmin -i crash -o small.sql -- <target> @@`.

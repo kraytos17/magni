@@ -8,14 +8,15 @@ All binaries land under `target/` (Rust-style; gitignored):
 | `target/release/magni_release` | `build --release` (aggressive, LTO, no checks) | Benchmarks, perf A/B |
 | `target/fuzz/fuzz_target` | `build --asan` | Parser ASan gate |
 | `target/fuzz/fuzz_target_cov` | `build --cov` (+ `--cmplog` / `--laf` variants) | Campaigns, `showmap` |
-| `target/fuzz/fuzz_exec_target` | `build --exec` (coverage + ASan) | Exec ASan gate + campaigns |
+| `target/fuzz-exec/fuzz_exec_target` | `build --exec` (coverage + ASan) | Exec ASan gate + campaigns |
 
 `magni.py` owns every invocation and flag (`magni/config.py` is the single
 source of truth — `DEBUG_FLAGS`/`TEST_FLAGS` live there, not in the
 Makefile). `make` is a thin wrapper: `build`, `release`, `test`,
 `test-single NAME=`, `vet`/`vet-all`, `perf`, `census`, `test-cli[-full]`,
 `test-py`, `fuzz-*`, `clean` (removes `target/debug` + `target/release`;
-`--all`/`--fuzz-only` additionally clear `target/fuzz` and AFL outputs).
+`--all`/`--fuzz-only` additionally clear `target/fuzz`, `target/fuzz-exec`,
+and AFL outputs).
 
 ## Fuzz targets and corpora
 

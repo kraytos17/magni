@@ -51,18 +51,18 @@ schema_row_to_values :: proc(r: Schema_Row, allocator := context.temp_allocator)
 
 	n += 3 * k
 	result := make([]types.Value, n, allocator)
-	result[0] = types.value_int(0) // 0 = table
-	result[1] = types.value_text(r.name)
-	result[2] = types.value_int(i64(r.root_page))
-	result[3] = types.value_text(r.sql)
-	result[4] = types.value_blob(r.columns_blob)
+	result[0] = types.value(0) // 0 = table
+	result[1] = types.value(r.name)
+	result[2] = types.value(i64(r.root_page))
+	result[3] = types.value(r.sql)
+	result[4] = types.value(r.columns_blob)
 	if n >= 6 {
-		result[5] = types.value_int(i64(r.skip_root))
+		result[5] = types.value(i64(r.skip_root))
 	}
 	for i in 0 ..< k {
-		result[6 + 3 * i] = types.value_int(i64(r.indexes[i].root))
-		result[6 + 3 * i + 1] = types.value_text(r.indexes[i].column)
-		result[6 + 3 * i + 2] = types.value_text(r.indexes[i].name)
+		result[6 + 3 * i] = types.value(i64(r.indexes[i].root))
+		result[6 + 3 * i + 1] = types.value(r.indexes[i].column)
+		result[6 + 3 * i + 2] = types.value(r.indexes[i].name)
 	}
 	return result
 }
@@ -162,7 +162,7 @@ add_table :: proc(
 	root_page: u32,
 	sql_stmt: string,
 ) -> bool {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
 		defer cell.destroy(&c, context.temp_allocator)
 		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
@@ -210,7 +210,7 @@ add_table_cow :: proc(
 	u32,
 	bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
 		defer cell.destroy(&c, context.temp_allocator)
 		if existing_name, ok := c.values[1].(string); ok && existing_name == table_name {
@@ -257,7 +257,7 @@ find_table :: proc(
 	types.Table,
 	bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
 		return {}, false
@@ -357,7 +357,7 @@ find_table_cached :: proc(
 		return tbl, true
 	}
 
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
 		return nil, false
@@ -420,14 +420,14 @@ list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.T
 // drop_table_cow. Data pages are never freed here (snapshots may still
 // reference them); GC reclaims them later.
 drop_table :: proc(t: ^btree.Tree, table_name: string) -> bool {
-	return btree.tree_delete(t, types.Row_ID(types.hash_string(table_name))) == .None
+	return btree.tree_delete(t, types.Row_ID(types.hash(table_name))) == .None
 }
 
 // drop_table_cow is drop_table's transactional form: returns the new root
 // for the caller to stage, or (current root, false) when the delete failed
 // so no partial state is published.
 drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
-	new_root, err := btree.tree_delete_cow(t, types.Row_ID(types.hash_string(table_name)))
+	new_root, err := btree.tree_delete_cow(t, types.Row_ID(types.hash(table_name)))
 	if err != .None {
 		log.errorf("[Schema] drop_table_cow failed: %v", err)
 		return t.root, false
@@ -442,7 +442,7 @@ drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
 table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
 	c, err := btree.tree_find(
 		t,
-		types.Row_ID(types.hash_string(table_name)),
+		types.Row_ID(types.hash(table_name)),
 		context.temp_allocator,
 	)
 	if err == .None {
@@ -576,7 +576,7 @@ update_schema_root_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
 		log.errorf(
@@ -644,7 +644,7 @@ schema_row_for_update :: proc(
 	c: cell.Cell,
 	ok: bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	found, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
 		log.errorf("[schema] %s: tree_find failed for '%s'", op, table_name)
@@ -697,7 +697,7 @@ update_index_def_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	sr, c, sr_ok := schema_row_for_update(t, table_name, "update_index_def_cow")
 	if !sr_ok {
 		return t.root, false
@@ -741,7 +741,7 @@ clear_index_def_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	c, err := btree.tree_find(t, rowid, context.temp_allocator)
 	if err != .None {
 		log.errorf("[schema] clear_index_def_cow: tree_find failed for '%s'", table_name)
@@ -811,7 +811,7 @@ update_index_root_cow :: proc(
 	new_schema_root: u32,
 	ok: bool,
 ) {
-	rowid := types.Row_ID(types.hash_string(table_name))
+	rowid := types.Row_ID(types.hash(table_name))
 	sr, c, sr_ok := schema_row_for_update(t, table_name, "update_index_root_cow")
 	if !sr_ok {
 		return t.root, false

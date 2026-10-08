@@ -236,14 +236,14 @@ test_schema_hash_collision :: proc(t: ^testing.T) {
 
 	// Force a hash collision: manually insert a row at "mytable"'s hash with a different name.
 	// This simulates what happens if two different table names hash to the same value.
-	target_hash := types.Row_ID(types.hash_string("mytable"))
+	target_hash := types.Row_ID(types.hash("mytable"))
 	collision_vals := []types.Value {
-		types.value_int(0),
-		types.value_text("intruder"),
-		types.value_int(999),
-		types.value_text(""),
-		types.value_blob({}),
-		types.value_int(0),
+		types.value(0),
+		types.value("intruder"),
+		types.value(999),
+		types.value(""),
+		types.value([]u8{}),
+		types.value(0),
 	}
 
 	testing.expect(
@@ -317,18 +317,18 @@ test_schema_row_roundtrip :: proc(t: ^testing.T) {
 
 	// Invalid: too few values
 	_, bad := schema.schema_row_from_values(
-		[]types.Value{types.value_int(0), types.value_text("x")},
+		[]types.Value{types.value(0), types.value("x")},
 	)
 	testing.expect(t, !bad, "<5 values rejected")
 
 	// Invalid: wrong type at values[0]
 	_, bad2 := schema.schema_row_from_values(
 		[]types.Value {
-			types.value_text("table"),
-			types.value_text("x"),
-			types.value_int(1),
-			types.value_text(""),
-			types.value_blob({}),
+			types.value("table"),
+			types.value("x"),
+			types.value(1),
+			types.value(""),
+			types.value([]u8{}),
 		},
 	)
 	testing.expect(t, !bad2, "string at values[0] rejected")
@@ -358,11 +358,11 @@ test_schema_unknown_kind :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	// A row with kind=5 (unknown, not 0=table) should be rejected
 	vals := []types.Value {
-		types.value_int(5),
-		types.value_text("weird"),
-		types.value_int(1),
-		types.value_text(""),
-		types.value_blob({}),
+		types.value(5),
+		types.value("weird"),
+		types.value(1),
+		types.value(""),
+		types.value([]u8{}),
 	}
 	_, ok := schema.schema_row_from_values(vals)
 	testing.expect(t, !ok, "unknown kind rejected")
@@ -389,11 +389,11 @@ test_schema_row_kind_as_string :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	// kind must be an int, not a string
 	vals := []types.Value {
-		types.value_text("table"),
-		types.value_text("x"),
-		types.value_int(1),
-		types.value_text(""),
-		types.value_blob({}),
+		types.value("table"),
+		types.value("x"),
+		types.value(1),
+		types.value(""),
+		types.value([]u8{}),
 	}
 	_, ok := schema.schema_row_from_values(vals)
 	testing.expect(t, !ok, "string kind rejected")
@@ -451,12 +451,12 @@ test_schema_row_index_roundtrip :: proc(t: ^testing.T) {
 
 	// 7-value input: paired leniency leaves indexes empty.
 	seven := []types.Value {
-		types.value_int(0),
-		types.value_text("t"),
-		types.value_int(2),
-		types.value_text(""),
-		types.value_blob({}),
-		types.value_int(11),
+		types.value(0),
+		types.value("t"),
+		types.value(2),
+		types.value(""),
+		types.value([]u8{}),
+		types.value(11),
 	}
 	seven_back, seven_ok := schema.schema_row_from_values(seven)
 	testing.expect(t, seven_ok, "7-value format accepted")
@@ -464,14 +464,14 @@ test_schema_row_index_roundtrip :: proc(t: ^testing.T) {
 
 	// 8-value rows (pre-name format) parse one unnamed triple.
 	eight := []types.Value {
-		types.value_int(0),
-		types.value_text("t"),
-		types.value_int(2),
-		types.value_text(""),
-		types.value_blob({}),
-		types.value_int(0),
-		types.value_int(77),
-		types.value_text("body"),
+		types.value(0),
+		types.value("t"),
+		types.value(2),
+		types.value(""),
+		types.value([]u8{}),
+		types.value(0),
+		types.value(77),
+		types.value("body"),
 	}
 	eight_back, eight_ok := schema.schema_row_from_values(eight)
 	testing.expect(t, eight_ok, "8-value format accepted")

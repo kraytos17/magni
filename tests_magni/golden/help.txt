@@ -7,7 +7,7 @@ MagniDB — magni.py help
     magni.py build --cov        coverage target → target/fuzz/fuzz_target_cov
     magni.py build --cov --cmplog  RedQueen binary → target/fuzz/fuzz_target_cmplog
     magni.py build --cov --laf     LAF-INTEL binary → target/fuzz/fuzz_target_laf
-    magni.py build --exec         executor/storage target (coverage + ASan)
+    magni.py build --exec         executor/storage target (coverage + ASan) → target/fuzz-exec/fuzz_exec_target
     magni.py build --check-only parse + type check (no vet)
 
   TEST

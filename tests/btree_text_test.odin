@@ -273,7 +273,7 @@ test_text_search_vs_oracle :: proc(t: ^testing.T) {
 	// a negative rowid through the bias codec.
 	enc := proc(s: string, r: i64) -> []u8 {
 		b := make([]u8, 64, context.temp_allocator)
-		n, ok := cell.text_index_encode(types.value_text(s), types.Row_ID(r), b)
+		n, ok := cell.text_index_encode(types.value(s), types.Row_ID(r), b)
 		assert(ok)
 		return b[:n]
 	}
@@ -526,7 +526,7 @@ test_text_interior_build_roundtrip :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	enc := proc(s: string, r: i64) -> []u8 {
 		b := make([]u8, 64, context.temp_allocator)
-		n, ok := cell.text_index_encode(types.value_text(s), types.Row_ID(r), b)
+		n, ok := cell.text_index_encode(types.value(s), types.Row_ID(r), b)
 		assert(ok)
 		return b[:n]
 	}
@@ -600,7 +600,7 @@ test_text_interior_find_vs_oracle :: proc(t: ^testing.T) {
 	// target (equality skips right); none → rightmost with idx -1.
 	enc := proc(s: string, r: i64) -> []u8 {
 		b := make([]u8, 64, context.temp_allocator)
-		n, ok := cell.text_index_encode(types.value_text(s), types.Row_ID(r), b)
+		n, ok := cell.text_index_encode(types.value(s), types.Row_ID(r), b)
 		assert(ok)
 		return b[:n]
 	}
@@ -665,7 +665,7 @@ test_text_interior_table_ops :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	enc := proc(s: string, r: i64) -> []u8 {
 		b := make([]u8, 64, context.temp_allocator)
-		n, ok := cell.text_index_encode(types.value_text(s), types.Row_ID(r), b)
+		n, ok := cell.text_index_encode(types.value(s), types.Row_ID(r), b)
 		assert(ok)
 		return b[:n]
 	}
@@ -722,7 +722,7 @@ test_text_interior_corruption_loud :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	enc := proc(s: string, r: i64) -> []u8 {
 		b := make([]u8, 64, context.temp_allocator)
-		n, ok := cell.text_index_encode(types.value_text(s), types.Row_ID(r), b)
+		n, ok := cell.text_index_encode(types.value(s), types.Row_ID(r), b)
 		assert(ok)
 		return b[:n]
 	}
@@ -907,7 +907,7 @@ test_text_boundary_routing :: proc(t: ^testing.T) {
 
 	enc := proc(s: string, r: i64) -> []u8 {
 		b := make([]u8, 64, context.temp_allocator)
-		n, ok := cell.text_index_encode(types.value_text(s), types.Row_ID(r), b)
+		n, ok := cell.text_index_encode(types.value(s), types.Row_ID(r), b)
 		assert(ok)
 		return b[:n]
 	}
@@ -1035,7 +1035,7 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	for i in 0 ..< N {
 		b := make([]u8, 32, context.temp_allocator)
 		s := fmt.tprintf("k-%04d", i)
-		n, ok := cell.text_index_encode(types.value_text(s), types.Row_ID(i64(i)), b)
+		n, ok := cell.text_index_encode(types.value(s), types.Row_ID(i64(i)), b)
 		assert(ok)
 		seps[i] = b[:n]
 	}
@@ -1100,7 +1100,7 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	defer pager.unpin_page(ctx.pager, rp.page_num)
 	testing.expect(t, btree.init_text_leaf_page(rp.data, rp.page_num), "init right")
 	nb := make([]u8, 32, context.temp_allocator)
-	nn, _ := cell.text_index_encode(types.value_text("k-0074a"), types.Row_ID(999), nb)
+	nn, _ := cell.text_index_encode(types.value("k-0074a"), types.Row_ID(999), nb)
 	child_result := btree.Text_Insert_Result {
 		new_page   = lp.page_num,
 		did_split  = true,

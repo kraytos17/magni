@@ -1,6 +1,5 @@
 package executor
 
-import "core:hash"
 import "core:log"
 import "core:math"
 import "core:mem"
@@ -10,72 +9,6 @@ import "core:strings"
 import "src:parser"
 import "src:schema"
 import "src:types"
-
-// FNV-1a constants shared by hash_values.
-@(private = "file")
-FNV_OFFSET_BASIS :: u64(0xcbf29ce484222325)
-
-@(private = "file")
-FNV_PRIME :: u64(0x100000001b3)
-
-// hash_values computes a single FNV-1a hash over a row's values (or a subset
-// via indices; nil indices hashes all values). Each value is prefixed with a
-// fixed tag byte so that e.g. integer 1 and string "1" hash differently and
-// column boundaries are unambiguous. Used for DISTINCT dedup, set-operation
-// membership, GROUP BY keys, and hash-join keys. Collisions fall back to
-// types.value_compare at every call site — this is a hash-map key, not a digest.
-@(private)
-hash_values :: proc(values: []types.Value, indices: []int = nil) -> u64 {
-	h := FNV_OFFSET_BASIS
-	if indices == nil {
-		for v in values {
-			h = hash_value_into(h, v)
-		}
-	} else {
-		for col_idx in indices {
-			h = hash_value_into(h, values[col_idx])
-		}
-	}
-	return h
-}
-
-// fnv_mix is one FNV-1a mix step (xor-fold then prime multiply), the
-// primitive behind hash_value_into and the fingerprint paths.
-@(private = "file")
-fnv_mix :: proc(h, w: u64) -> u64 {
-	return (h ~ w) * FNV_PRIME
-}
-
-// hash_value_into mixes one value into a running FNV-1a hash. Single source
-// for the per-type tag mapping shared by hash_value and hash_values.
-@(private)
-hash_value_into :: proc(h: u64, v: types.Value) -> u64 {
-	acc := h
-	switch val in v {
-	case types.Null:
-		acc = fnv_mix(acc, 0)
-	case i64:
-		acc = fnv_mix(acc, 1)
-		acc = fnv_mix(acc, u64(val))
-	case f64:
-		acc = fnv_mix(acc, 2)
-		acc = fnv_mix(acc, transmute(u64)val)
-	case string:
-		acc = fnv_mix(acc, 3)
-		acc = hash.fnv64a(transmute([]u8)val, acc)
-	case []u8:
-		acc = fnv_mix(acc, 4)
-		acc = hash.fnv64a(val, acc)
-	}
-	return acc
-}
-
-// hash_value computes the FNV-1a hash of a single value, using the same
-// per-type tags as hash_values. Used for hash-join keys.
-@(private)
-hash_value :: proc(v: types.Value) -> u64 {
-	return hash_value_into(FNV_OFFSET_BASIS, v)
-}
 
 // Column_Resolver resolves column names to absolute indices within a query's
 // combined column array. Build it once per statement (from the combined
@@ -219,11 +152,11 @@ split_qualifier :: proc(name: string) -> (qual: string, col: string, has: bool) 
 	return "", name, false
 }
 
-// values_equal compares two value slices element-wise (length + each
-// element via value_compare). The row-equality behind DISTINCT and set-op
-// dedup.
+// values_equal_full compares two value slices element-wise (length + each
+// element via value_compare): the full-row arm of the values_equal group,
+// behind DISTINCT and set-op dedup.
 @(private)
-values_equal :: proc(a, b: []types.Value) -> bool {
+values_equal_full :: proc(a, b: []types.Value) -> bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -250,6 +183,16 @@ values_equal_by_indices :: proc(
 		}
 	}
 	return true
+}
+
+// values_equal compares two rows: full element-wise equality for two row
+// slices, or projected comparison of key values at column indices.
+// Overload resolution picks the arm by arity (2 vs 3 arguments). The group
+// is public because tests exercise the projected arm directly; the full-row
+// arm stays package-private with the other dedup internals.
+values_equal :: proc {
+	values_equal_full,
+	values_equal_by_indices,
 }
 
 // Fp_Buckets is a linear-probe fingerprint bucket index: the cache-friendly

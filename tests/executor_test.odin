@@ -66,9 +66,9 @@ make_create_stmt :: proc(name: string) -> parser.Statement {
 
 make_insert_stmt :: proc(table: string, id: i64, name: string, score: f64) -> parser.Statement {
 	vals := make([dynamic]types.Value, context.temp_allocator)
-	append(&vals, types.value_int(id))
-	append(&vals, types.value_text(name))
-	append(&vals, types.value_real(score))
+	append(&vals, types.value(id))
+	append(&vals, types.value(name))
+	append(&vals, types.value(score))
 
 	rows := make([dynamic][]types.Value, context.temp_allocator)
 	append(&rows, vals[:])
@@ -446,10 +446,10 @@ test_exec_insert_validation_failure :: proc(t: ^testing.T) {
 
 	executor.execute(&tree, make_create_stmt("strict_table"))
 	vals := make([dynamic]types.Value, context.temp_allocator)
-	append(&vals, types.value_int(1))
-	append(&vals, types.value_text("A"))
-	append(&vals, types.value_real(1.0))
-	append(&vals, types.value_int(999))
+	append(&vals, types.value(1))
+	append(&vals, types.value("A"))
+	append(&vals, types.value(1.0))
+	append(&vals, types.value(999))
 
 	variant := parser.Insert_Stmt {
 		table_name = "strict_table",
@@ -480,14 +480,14 @@ test_exec_update :: proc(t: ^testing.T) {
 	cond := parser.Condition {
 		column   = "id",
 		operator = .EQUALS,
-		rhs      = types.value_int(1),
+		rhs      = types.value(1),
 	}
 
 	where_clause := make_where_clause(cond)
 	variant := parser.Update_Stmt {
 		table_name     = "inventory",
 		update_columns = []string{"score"},
-		update_values  = []types.Value{types.value_real(2.00)},
+		update_values  = []types.Value{types.value(2.00)},
 		where_clause   = where_clause,
 	}
 	stmt := parser.Statement {
@@ -519,7 +519,7 @@ test_exec_delete :: proc(t: ^testing.T) {
 	cond := parser.Condition {
 		column   = "name",
 		operator = .EQUALS,
-		rhs      = types.value_text("Log A"),
+		rhs      = types.value("Log A"),
 	}
 	variant := parser.Delete_Stmt {
 		table_name   = "logs",
@@ -894,8 +894,8 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	executor.execute(&tree, parser.Statement{type = variant2, sql = ""})
 
 	vals2 := make([dynamic]types.Value, context.temp_allocator)
-	append(&vals2, types.value_int(1))
-	append(&vals2, types.value_text("x"))
+	append(&vals2, types.value(1))
+	append(&vals2, types.value("x"))
 	iv1 := parser.Insert_Stmt {
 		table_name = "t2",
 		values     = [][]types.Value{vals2[:]},
@@ -903,8 +903,8 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 	executor.execute(&tree, parser.Statement{type = iv1, sql = ""})
 
 	vals3 := make([dynamic]types.Value, context.temp_allocator)
-	append(&vals3, types.value_int(2))
-	append(&vals3, types.value_text("y"))
+	append(&vals3, types.value(2))
+	append(&vals3, types.value("y"))
 	iv2 := parser.Insert_Stmt {
 		table_name = "t2",
 		values     = [][]types.Value{vals3[:]},
@@ -1060,7 +1060,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {{types.value_int(1), types.value_text("a")}},
+				values = {{types.value(1), types.value("a")}},
 			},
 			sql = "",
 		},
@@ -1070,7 +1070,7 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {{types.value_int(2), types.value_text("x")}},
+				values = {{types.value(2), types.value("x")}},
 			},
 			sql = "",
 		},
@@ -1143,7 +1143,7 @@ test_exec_freeblock_reuse :: proc(t: ^testing.T) {
 		cond := parser.Condition {
 			column   = "id",
 			operator = .EQUALS,
-			rhs      = types.value_int(i64(i)),
+			rhs      = types.value(i64(i)),
 		}
 		del := parser.Delete_Stmt {
 			table_name   = "t",
@@ -1176,8 +1176,8 @@ test_group_key_hash :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	// Float-precision regression: values differing beyond %f's 6 decimal places
 	// must produce different hashes (the old stringification approach collapsed them).
-	v1 := []types.Value{types.value_real(1.0000000001), types.value_int(1)}
-	v2 := []types.Value{types.value_real(1.0000000002), types.value_int(1)}
+	v1 := []types.Value{types.value(1.0000000001), types.value(1)}
+	v2 := []types.Value{types.value(1.0000000002), types.value(1)}
 	indices := []int{0, 1}
 
 	h1 := executor.group_key_hash(v1, indices)
@@ -1185,48 +1185,48 @@ test_group_key_hash :: proc(t: ^testing.T) {
 	testing.expect(t, h1 != h2, "hashes differ for floats differing by 1e-10")
 
 	// Same values → same hash
-	v3 := []types.Value{types.value_real(3.14159), types.value_text("hello")}
-	v4 := []types.Value{types.value_real(3.14159), types.value_text("hello")}
+	v3 := []types.Value{types.value(3.14159), types.value("hello")}
+	v4 := []types.Value{types.value(3.14159), types.value("hello")}
 	h3 := executor.group_key_hash(v3, indices[:1])
 	h4 := executor.group_key_hash(v4, indices[:1])
 	testing.expect_value(t, h3, h4)
 
 	// NULL
-	v5 := []types.Value{types.value_null()}
-	v6 := []types.Value{types.value_null()}
+	v5 := []types.Value{types.value()}
+	v6 := []types.Value{types.value()}
 	h5 := executor.group_key_hash(v5, []int{0})
 	h6 := executor.group_key_hash(v6, []int{0})
 	testing.expect_value(t, h5, h6)
 
 	// i64
-	v7 := []types.Value{types.value_int(42)}
-	v8 := []types.Value{types.value_int(42)}
+	v7 := []types.Value{types.value(42)}
+	v8 := []types.Value{types.value(42)}
 	h7 := executor.group_key_hash(v7, []int{0})
 	h8 := executor.group_key_hash(v8, []int{0})
 	testing.expect_value(t, h7, h8)
 
 	// string
-	v9 := []types.Value{types.value_text("foo")}
-	v10 := []types.Value{types.value_text("foo")}
+	v9 := []types.Value{types.value("foo")}
+	v10 := []types.Value{types.value("foo")}
 	h9 := executor.group_key_hash(v9, []int{0})
 	h10 := executor.group_key_hash(v10, []int{0})
 	testing.expect_value(t, h9, h10)
 
 	// Different values → different hashes
-	v13 := []types.Value{types.value_int(1)}
-	v14 := []types.Value{types.value_int(2)}
+	v13 := []types.Value{types.value(1)}
+	v14 := []types.Value{types.value(2)}
 	h13 := executor.group_key_hash(v13, []int{0})
 	h14 := executor.group_key_hash(v14, []int{0})
 	testing.expect(t, h13 != h14, "different i64 values differ")
 
-	// values_equal_by_indices
-	a1 := []types.Value{types.value_int(10), types.value_text("x")}
-	a2 := []types.Value{types.value_int(10), types.value_text("x")}
-	testing.expect(t, executor.values_equal_by_indices(a1, a2, []int{0, 1}), "same values match")
-	a3 := []types.Value{types.value_int(10), types.value_text("y")}
+	// values_equal
+	a1 := []types.Value{types.value(10), types.value("x")}
+	a2 := []types.Value{types.value(10), types.value("x")}
+	testing.expect(t, executor.values_equal(a1, a2, []int{0, 1}), "same values match")
+	a3 := []types.Value{types.value(10), types.value("y")}
 	testing.expect(
 		t,
-		!executor.values_equal_by_indices(a1, a3, []int{0, 1}),
+		!executor.values_equal(a1, a3, []int{0, 1}),
 		"different values differ",
 	)
 }
@@ -1235,12 +1235,12 @@ test_group_key_hash :: proc(t: ^testing.T) {
 test_dedup_rows :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	rows := []executor.Row_Entry {
-		{1, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
-		{2, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
-		{3, {types.value_int(2), types.value_text("b"), types.value_real(2.0)}},
-		{4, {types.value_int(1), types.value_text("a"), types.value_real(1.0)}},
-		{5, {types.value_int(2), types.value_text("b"), types.value_real(2.0)}},
-		{6, {types.value_int(3), types.value_text("c"), types.value_real(3.0)}},
+		{1, {types.value(1), types.value("a"), types.value(1.0)}},
+		{2, {types.value(1), types.value("a"), types.value(1.0)}},
+		{3, {types.value(2), types.value("b"), types.value(2.0)}},
+		{4, {types.value(1), types.value("a"), types.value(1.0)}},
+		{5, {types.value(2), types.value("b"), types.value(2.0)}},
+		{6, {types.value(3), types.value("c"), types.value(3.0)}},
 	}
 
 	deduped := executor.dedup_rows(rows)
@@ -1262,9 +1262,9 @@ test_dedup_rows :: proc(t: ^testing.T) {
 test_dedup_rows_no_duplicates :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	rows := []executor.Row_Entry {
-		{1, {types.value_int(1), types.value_text("x"), types.value_real(1.0)}},
-		{2, {types.value_int(2), types.value_text("y"), types.value_real(2.0)}},
-		{3, {types.value_int(3), types.value_text("z"), types.value_real(3.0)}},
+		{1, {types.value(1), types.value("x"), types.value(1.0)}},
+		{2, {types.value(2), types.value("y"), types.value(2.0)}},
+		{3, {types.value(3), types.value("z"), types.value(3.0)}},
 	}
 
 	deduped := executor.dedup_rows(rows)
@@ -1278,7 +1278,7 @@ test_dedup_rows_empty_and_single :: proc(t: ^testing.T) {
 	deduped_empty := executor.dedup_rows(empty)
 	testing.expect_value(t, len(deduped_empty), 0)
 
-	single := []executor.Row_Entry{{1, {types.value_int(42)}}}
+	single := []executor.Row_Entry{{1, {types.value(42)}}}
 	deduped_single := executor.dedup_rows(single)
 	testing.expect_value(t, len(deduped_single), 1)
 }
@@ -1309,7 +1309,7 @@ test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
 		ref := i64(1) if i <= 50 else i64(i - 49)
 		v := parser.Insert_Stmt {
 			table_name = "t2",
-			values     = {{types.value_int(ref), types.value_text(fmt.tprintf("v%d", i))}},
+			values     = {{types.value(ref), types.value(fmt.tprintf("v%d", i))}},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
 	}
@@ -1356,7 +1356,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 		v := parser.Insert_Stmt {
 			table_name = "codes",
 			values     = {
-				{types.value_text(name), types.value_text(fmt.tprintf("label_%s", name))},
+				{types.value(name), types.value(fmt.tprintf("label_%s", name))},
 			},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
@@ -1367,7 +1367,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 		v := parser.Insert_Stmt {
 			table_name = "txns",
-			values     = {{types.value_text(r), types.value_int(i64(i + 1))}},
+			values     = {{types.value(r), types.value(i64(i + 1))}},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
 	}
@@ -1386,7 +1386,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 @(test)
 test_dedup_rows_all_duplicates :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
-	vals := []types.Value{types.value_int(1), types.value_text("dup"), types.value_real(1.0)}
+	vals := []types.Value{types.value(1), types.value("dup"), types.value(1.0)}
 	rows := []executor.Row_Entry{{1, vals}, {2, vals}, {3, vals}, {4, vals}, {5, vals}}
 	deduped := executor.dedup_rows(rows)
 	testing.expect_value(t, len(deduped), 1)
@@ -1397,11 +1397,11 @@ test_dedup_rows_all_duplicates :: proc(t: ^testing.T) {
 test_dedup_rows_with_nulls :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	rows := []executor.Row_Entry {
-		{1, {types.value_null(), types.value_text("a")}},
-		{2, {types.value_null(), types.value_text("a")}},
-		{3, {types.value_int(1), types.value_null()}},
-		{4, {types.value_int(1), types.value_null()}},
-		{5, {types.value_null(), types.value_null()}},
+		{1, {types.value(), types.value("a")}},
+		{2, {types.value(), types.value("a")}},
+		{3, {types.value(1), types.value()}},
+		{4, {types.value(1), types.value()}},
+		{5, {types.value(), types.value()}},
 	}
 	deduped := executor.dedup_rows(rows)
 	testing.expect_value(t, len(deduped), 3)
@@ -1432,7 +1432,7 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {{types.value_int(1), types.value_text("match")}},
+				values = {{types.value(1), types.value("match")}},
 			},
 			sql = "",
 		},
@@ -1442,7 +1442,7 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {{types.value_null(), types.value_text("null_key")}},
+				values = {{types.value(), types.value("null_key")}},
 			},
 			sql = "",
 		},
@@ -1478,7 +1478,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "codes",
-				values = {{types.value_text("a"), types.value_text("label_a")}},
+				values = {{types.value("a"), types.value("label_a")}},
 			},
 			sql = "",
 		},
@@ -1499,7 +1499,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "txns",
-				values = {{types.value_text("a"), types.value_int(1)}},
+				values = {{types.value("a"), types.value(1)}},
 			},
 			sql = "",
 		},
@@ -1509,7 +1509,7 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "txns",
-				values = {{types.value_null(), types.value_int(2)}},
+				values = {{types.value(), types.value(2)}},
 			},
 			sql = "",
 		},
@@ -1549,7 +1549,7 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {{types.value_int(1), types.value_text("match")}},
+				values = {{types.value(1), types.value("match")}},
 			},
 			sql = "",
 		},
@@ -1559,7 +1559,7 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {{types.value_null(), types.value_text("null_key")}},
+				values = {{types.value(), types.value("null_key")}},
 			},
 			sql = "",
 		},
@@ -1582,9 +1582,9 @@ test_dedup_rows_stress :: proc(t: ^testing.T) {
 		val := i64(1) if i < 950 else i64(i)
 		name := "common" if i < 950 else fmt.tprintf("u%d", i)
 		vals := make([]types.Value, 3, context.temp_allocator)
-		vals[0] = types.value_int(val)
-		vals[1] = types.value_text(name)
-		vals[2] = types.value_real(1.0)
+		vals[0] = types.value(val)
+		vals[1] = types.value(name)
+		vals[2] = types.value(1.0)
 		rows[i] = executor.Row_Entry {
 			rowid  = types.Row_ID(i + 1),
 			values = vals,
@@ -1618,7 +1618,7 @@ test_exec_join_no_matches :: proc(t: ^testing.T) {
 		parser.Statement {
 			type = parser.Insert_Stmt {
 				table_name = "t2",
-				values = {{types.value_int(99), types.value_text("no_match")}},
+				values = {{types.value(99), types.value("no_match")}},
 			},
 			sql = "",
 		},
@@ -1661,12 +1661,12 @@ test_exec_subquery_order_nonprojected :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(data_rows), 3)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[0].values[0], types.value_text("a")),
+			types.value_compare(data_rows[0].values[0], types.value("a")),
 			"row 0 in id order",
 		)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[2].values[0], types.value_text("c")),
+			types.value_compare(data_rows[2].values[0], types.value("c")),
 			"row 2 in id order",
 		)
 	}
@@ -1719,7 +1719,7 @@ test_exec_count_fast_path :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(data_rows), 1)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[0].values[0], types.value_int(3)),
+			types.value_compare(data_rows[0].values[0], types.value(3)),
 			"count is 3",
 		)
 	}
@@ -1748,7 +1748,7 @@ test_exec_subquery_limit_offset :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(data_rows), 2)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[0].values[0], types.value_int(2)),
+			types.value_compare(data_rows[0].values[0], types.value(2)),
 			"offset row is id 2",
 		)
 	}
@@ -1779,12 +1779,12 @@ test_exec_single_distinct_dedups_projected :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(data_rows), 2)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[0].values[0], types.value_text("a")),
+			types.value_compare(data_rows[0].values[0], types.value("a")),
 			"row 0 is a",
 		)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[1].values[0], types.value_text("b")),
+			types.value_compare(data_rows[1].values[0], types.value("b")),
 			"row 1 is b",
 		)
 	}
@@ -1815,12 +1815,12 @@ test_exec_single_distinct_limit_applies_after_dedup :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(data_rows), 2)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[0].values[0], types.value_text("a")),
+			types.value_compare(data_rows[0].values[0], types.value("a")),
 			"row 0 is a",
 		)
 		testing.expect(
 			t,
-			types.value_compare(data_rows[1].values[0], types.value_text("b")),
+			types.value_compare(data_rows[1].values[0], types.value("b")),
 			"row 1 is b",
 		)
 	}
@@ -1845,12 +1845,12 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 		if len(rows) == 1 {
 			testing.expect(
 				t,
-				types.value_compare(rows[0].values[0], types.value_int(0)),
+				types.value_compare(rows[0].values[0], types.value(0)),
 				"literal repeats",
 			)
 			testing.expect(
 				t,
-				types.value_compare(rows[0].values[1], types.value_int(2)),
+				types.value_compare(rows[0].values[1], types.value(2)),
 				"count is 2",
 			)
 		}
@@ -1861,12 +1861,12 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 	if ok2 && len(rows2) == 1 {
 		testing.expect(
 			t,
-			types.value_compare(rows2[0].values[0], types.value_int(2)),
+			types.value_compare(rows2[0].values[0], types.value(2)),
 			"count is 2",
 		)
 		testing.expect(
 			t,
-			types.value_compare(rows2[0].values[1], types.value_int(0)),
+			types.value_compare(rows2[0].values[1], types.value(0)),
 			"literal repeats",
 		)
 	}
@@ -1879,17 +1879,17 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 	if ok3 && len(rows3) == 1 {
 		testing.expect(
 			t,
-			types.value_compare(rows3[0].values[0], types.value_int(0)),
+			types.value_compare(rows3[0].values[0], types.value(0)),
 			"literal repeats",
 		)
 		testing.expect(
 			t,
-			types.value_compare(rows3[0].values[1], types.value_int(2)),
+			types.value_compare(rows3[0].values[1], types.value(2)),
 			"count is 2",
 		)
 		testing.expect(
 			t,
-			types.value_compare(rows3[0].values[2], types.value_real(3.0)),
+			types.value_compare(rows3[0].values[2], types.value(3.0)),
 			"sum is 3.0",
 		)
 	}
@@ -1903,12 +1903,12 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 	if ok4 && len(rows4) == 1 {
 		testing.expect(
 			t,
-			types.value_compare(rows4[0].values[0], types.value_text("x")),
+			types.value_compare(rows4[0].values[0], types.value("x")),
 			"string literal repeats",
 		)
 		testing.expect(
 			t,
-			types.value_compare(rows4[0].values[1], types.value_int(2)),
+			types.value_compare(rows4[0].values[1], types.value(2)),
 			"count is 2",
 		)
 		if len(cols4) == 2 {
@@ -1927,12 +1927,12 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 		for r in rows5 {
 			testing.expect(
 				t,
-				types.value_compare(r.values[0], types.value_int(0)),
+				types.value_compare(r.values[0], types.value(0)),
 				"literal repeats per group",
 			)
 			testing.expect(
 				t,
-				types.value_compare(r.values[1], types.value_int(1)),
+				types.value_compare(r.values[1], types.value(1)),
 				"per-group count is 1",
 			)
 		}
@@ -1948,12 +1948,12 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 	if ok6 && len(rows6) == 1 {
 		testing.expect(
 			t,
-			types.value_compare(rows6[0].values[0], types.value_int(0)),
+			types.value_compare(rows6[0].values[0], types.value(0)),
 			"literal present on empty table",
 		)
 		testing.expect(
 			t,
-			types.value_compare(rows6[0].values[1], types.value_int(0)),
+			types.value_compare(rows6[0].values[1], types.value(0)),
 			"count is 0",
 		)
 	}
@@ -2014,7 +2014,7 @@ test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
 			testing.expect_value(t, len(rows), 1)
 			testing.expect(
 				t,
-				types.value_compare(rows[0].values[0], types.value_int(1)),
+				types.value_compare(rows[0].values[0], types.value(1)),
 				"count is 1",
 			)
 		}
@@ -2186,7 +2186,7 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 		if len(rows) == 1 {
 			testing.expect(
 				t,
-				types.value_compare(rows[0].values[0], types.value_real(6.0)),
+				types.value_compare(rows[0].values[0], types.value(6.0)),
 				"SUM runs over all rows, not the LIMIT prefix",
 			)
 		}
@@ -2202,7 +2202,7 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 		if len(rows2) == 1 {
 			testing.expect(
 				t,
-				types.value_compare(rows2[0].values[0], types.value_int(3)),
+				types.value_compare(rows2[0].values[0], types.value(3)),
 				"COUNT runs over all rows",
 			)
 		}
@@ -2440,7 +2440,7 @@ test_exec_update_check_enforcement :: proc(t: ^testing.T) {
 		if len(rows) == 1 {
 			testing.expect(
 				t,
-				types.value_compare(rows[0].values[0], types.value_int(10)),
+				types.value_compare(rows[0].values[0], types.value(10)),
 				"row unchanged after rejected UPDATE",
 			)
 		}
@@ -2458,7 +2458,7 @@ test_exec_update_check_enforcement :: proc(t: ^testing.T) {
 		if ok2 && len(rows2) == 1 {
 			testing.expect(
 				t,
-				types.value_compare(rows2[0].values[0], types.value_int(20)),
+				types.value_compare(rows2[0].values[0], types.value(20)),
 				"valid UPDATE applies",
 			)
 		}

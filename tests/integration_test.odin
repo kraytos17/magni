@@ -378,7 +378,7 @@ test_integration_group_by_non_first_column :: proc(t: ^testing.T) {
 		testing.expect_value(t, q2.rows[1][1].(i64), i64(1))
 	}
 
-	// Multi-column GROUP BY exercises values_equal_by_indices.
+	// Multi-column GROUP BY exercises values_equal.
 	q3 := db.query(d, "SELECT a, b, COUNT(*) FROM t GROUP BY a, b;")
 	testing.expect(t, q3.ok, "multi-column GROUP BY should succeed")
 	testing.expect(t, len(q3.rows) == 2, "expected 2 groups (1,x) and (2,y)")

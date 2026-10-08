@@ -430,7 +430,7 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 	case .Values:
 		// Prefilter on the sorted fingerprint index; verify hits exactly.
 		// An empty index (hand-built node) falls back to the linear scan.
-		if fp_index_hit(rc.in_mem.fps, hash_value(v)) {
+		if fp_index_hit(rc.in_mem.fps, types.hash(v)) {
 			for c in rc.in_mem.values {
 				if !types.is_null(v) && compare_values(v, c) == 0 {
 					return true
