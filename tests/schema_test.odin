@@ -56,7 +56,8 @@ test_column_blob_roundtrip :: proc(t: ^testing.T) {
 	blob := schema.serialize_columns_to_blob(cols, context.temp_allocator)
 	testing.expect(t, len(blob) > 4, "Blob too small")
 
-	restored := schema.deserialize_columns(blob, context.temp_allocator)
+	restored, _, rok := schema.deserialize_columns(blob, context.temp_allocator)
+	testing.expect(t, rok, "roundtrip must decode")
 	testing.expect_value(t, len(restored), 3)
 
 	testing.expect_value(t, restored[0].name, "id")
@@ -78,7 +79,8 @@ test_column_blob_unique_bit_roundtrip :: proc(t: ^testing.T) {
 	}
 
 	blob := schema.serialize_columns_to_blob(cols, context.temp_allocator)
-	restored := schema.deserialize_columns(blob, context.temp_allocator)
+	restored, _, rok := schema.deserialize_columns(blob, context.temp_allocator)
+	testing.expect(t, rok, "unique-bit roundtrip must decode")
 	testing.expect_value(t, len(restored), 2)
 	testing.expect_value(t, restored[0].unique, true)
 	testing.expect_value(t, restored[1].unique, false)
@@ -88,9 +90,39 @@ test_column_blob_unique_bit_roundtrip :: proc(t: ^testing.T) {
 		[]types.Column{{name = "code", type = .TEXT}},
 		context.temp_allocator,
 	)
-	legacy_restored := schema.deserialize_columns(legacy, context.temp_allocator)
+	legacy_restored, _, lok := schema.deserialize_columns(legacy, context.temp_allocator)
+	testing.expect(t, lok, "legacy blob must decode")
 	testing.expect_value(t, len(legacy_restored), 1)
 	testing.expect_value(t, legacy_restored[0].unique, false)
+}
+
+@(test)
+test_column_blob_groups_roundtrip :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	cols := []types.Column {
+		{name = "a", type = .INTEGER},
+		{name = "b", type = .TEXT},
+		{name = "c", type = .INTEGER},
+	}
+	// Only grouped tables change versions; group members validate on decode.
+	groups := [][]int{{0, 2}}
+	blob := schema.serialize_columns_to_blob(cols, context.temp_allocator, groups)
+	restored, rgroups, rok := schema.deserialize_columns(blob, context.temp_allocator)
+	testing.expect(t, rok, "grouped blob must decode")
+	testing.expect_value(t, len(restored), 3)
+	testing.expect_value(t, len(rgroups), 1)
+	if len(rgroups) == 1 {
+		testing.expect_value(t, len(rgroups[0]), 2)
+		testing.expect_value(t, rgroups[0][0], 0)
+		testing.expect_value(t, rgroups[0][1], 2)
+	}
+
+	// Group-free tables keep byte-identical version-1 output.
+	plain := schema.serialize_columns_to_blob(cols, context.temp_allocator)
+	testing.expect_value(t, plain[1], u8(1))
+	_, pgroups, pok := schema.deserialize_columns(plain, context.temp_allocator)
+	testing.expect(t, pok, "plain blob must decode")
+	testing.expect_value(t, len(pgroups), 0)
 }
 
 @(test)
@@ -357,8 +389,8 @@ test_column_blob_version :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
 	// A blob with a marker byte but wrong version should be rejected
 	bad_blob := []u8{0xFE, 0xFF, 0x01} // marker=0xFE, version=0xFF, count=1
-	result := schema.deserialize_columns(bad_blob, context.temp_allocator)
-	testing.expect(t, result == nil, "wrong column blob version rejected")
+	_, _, bok := schema.deserialize_columns(bad_blob, context.temp_allocator)
+	testing.expect(t, !bok, "wrong column blob version rejected")
 }
 
 @(test)

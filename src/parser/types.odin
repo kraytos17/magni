@@ -58,11 +58,14 @@ Where_Clause :: struct {
 }
 
 // Create_Stmt is CREATE TABLE: name, column defs (types/defaults/checks),
-// and foreign keys (validated + enforced by the executor, not the parser).
+// foreign keys (validated + enforced by the executor, not the parser), and
+// composite unique groups as resolved column indices (single-column
+// UNIQUEs fold into Column.unique during parse).
 Create_Stmt :: struct {
-	table_name  : string,
-	columns     : []types.Column,
-	foreign_keys: []Foreign_Key,
+	table_name   : string,
+	columns      : []types.Column,
+	foreign_keys : []Foreign_Key,
+	unique_groups: [][]int,
 }
 
 // Create_Index_Stmt is `CREATE INDEX name ON table (column)`: single-column

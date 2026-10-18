@@ -253,6 +253,14 @@ SELECT code, v FROM u ORDER BY v;
 UPDATE u SET code = 'a' WHERE v = 1;
 UPDATE u SET v = 10 WHERE code = 'a';
 SELECT code, v FROM u ORDER BY v;
+CREATE TABLE t (a INT, b TEXT, v INT, UNIQUE (a, b));
+INSERT INTO t VALUES (1, 'x', 10);
+INSERT INTO t VALUES (1, 'x', 20);
+INSERT INTO t VALUES (1, 'y', 30);
+INSERT INTO t VALUES (NULL, 'x', 40);
+SELECT a, b, v FROM t ORDER BY v;
+UPDATE t SET a = 1, b = 'x' WHERE v = 30;
+SELECT a, b, v FROM t ORDER BY v;
 """),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));

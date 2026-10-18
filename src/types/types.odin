@@ -351,16 +351,20 @@ Index_Def :: struct {
 
 // Table is an in-memory table definition as published in the catalog.
 Table :: struct {
-	name        : string,
-	columns     : []Column,
-	root_page   : u32,
-	sql         : string,
-	foreign_keys: []Foreign_Key,
-	skip_root   : u32, // root page of the skip index for this table (0 = none)
+	name         : string,
+	columns      : []Column,
+	root_page    : u32,
+	sql          : string,
+	foreign_keys : []Foreign_Key,
+	skip_root    : u32, // root page of the skip index for this table (0 = none)
 	// Secondary text indexes: covering text->rowid, one Index_Def per
 	// index (empty = none). Wire format is triples from slot [6]
 	// ([root INT][column TEXT][name TEXT] × N); see schema serde.
-	indexes     : []Index_Def,
+	indexes      : []Index_Def,
+	// Composite unique groups as resolved column indices (empty = none).
+	// Single-column UNIQUEs normalize to Column.unique at parse; only
+	// multi-column groups land here. Persisted in the columns blob (v2).
+	unique_groups: [][]int,
 }
 
 // Foreign_Key is a REFERENCES clause: col references ref_table(ref_col).

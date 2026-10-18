@@ -18,13 +18,21 @@ import "src:util/varint"
 
 COL_BLOB_MARKER  :: 0xFE
 COL_BLOB_VERSION :: 1
+// Groups section version: blobs carrying composite unique groups. Version-1
+// output is byte-identical to before (no groups ever encoded), so only
+// grouped tables use this version.
+COL_BLOB_GROUPS_VERSION :: 2
 
 // serialize_columns_to_blob encodes a column list per the layout above.
 // The size estimate and the writes must agree (no length prefix for the
 // blob itself) — caller stores the returned slice into a schema row.
+// unique_groups appends a version-2 section ([varint group count], then per
+// group [varint member count, varint member indices]); empty groups keep
+// byte-identical version-1 output, so only grouped tables change versions.
 serialize_columns_to_blob :: proc(
 	columns: []types.Column,
 	allocator := context.allocator,
+	unique_groups: [][]int = nil,
 ) -> []u8 {
 	// Estimate size: header (2) + count varint + per-column data
 	size := 2
@@ -49,17 +57,26 @@ serialize_columns_to_blob :: proc(
 			size += varint.size(u64(len(chk))) + len(chk)
 		}
 	}
+	if len(unique_groups) > 0 {
+		size += varint.size(u64(len(unique_groups)))
+		for g in unique_groups {
+			size += varint.size(u64(len(g)))
+			for idx in g {
+				size += varint.size(u64(idx))
+			}
+		}
+	}
 
 	blob := make([]u8, size, allocator)
 	offset := 0
 	blob[offset] = COL_BLOB_MARKER; offset += 1
-	blob[offset] = COL_BLOB_VERSION; offset += 1
+	version := u8(COL_BLOB_GROUPS_VERSION) if len(unique_groups) > 0 else u8(COL_BLOB_VERSION)
+	blob[offset] = version; offset += 1
 	offset += varint.encode(blob[offset:], u64(len(columns)))
 	for col in columns {
 		offset += varint.encode(blob[offset:], u64(len(col.name)))
 		copy(blob[offset:], col.name); offset += len(col.name)
-
-		packed: u8 = u8(col.type)
+		packed := u8(col.type)
 		if col.not_null {
 			packed |= 0x08
 		}
@@ -85,39 +102,59 @@ serialize_columns_to_blob :: proc(
 			copy(blob[offset:], chk); offset += len(chk)
 		}
 	}
+	if len(unique_groups) > 0 {
+		offset += varint.encode(blob[offset:], u64(len(unique_groups)))
+		for g in unique_groups {
+			offset += varint.encode(blob[offset:], u64(len(g)))
+			for idx in g {
+				offset += varint.encode(blob[offset:], u64(idx))
+			}
+		}
+	}
 	return blob
 }
 
 // deserialize_columns decodes a blob produced by serialize_columns_to_blob
-// into allocator-owned columns (names/check expressions cloned). Returns
-// nil on any malformed input: wrong marker/version, zero or truncated
-// count, bad name/check length, or an undecodable default — never a
-// partially initialized list.
-deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []types.Column {
+// into allocator-owned columns (names/check expressions cloned) plus the
+// composite unique groups (nil when the blob carries none). ok=false on any
+// malformed input: wrong marker/version, zero or truncated count, bad
+// name/check length, an undecodable default, or a malformed groups section
+// (stale member index, empty group) — never partially initialized outputs.
+// Version-1 blobs decode with nil groups.
+deserialize_columns :: proc(
+	blob: []u8,
+	allocator := context.allocator,
+) -> (
+	cols: []types.Column,
+	groups: [][]int,
+	ok: bool,
+) {
 	if len(blob) < 2 || blob[0] != COL_BLOB_MARKER {
-		return nil
+		return nil, nil, false
 	}
-	if blob[1] != COL_BLOB_VERSION {
-		return nil
+
+	version := blob[1]
+	if version != COL_BLOB_VERSION && version != COL_BLOB_GROUPS_VERSION {
+		return nil, nil, false
 	}
 
 	offset := 2
 	count, _, cnt_ok := varint.decode(blob, offset)
 	if !cnt_ok || count == 0 {
-		return nil
+		return nil, nil, false
 	}
 
 	offset += varint.size(count)
-	cols := make([dynamic]types.Column, 0, int(count), allocator)
+	col_list := make([dynamic]types.Column, 0, int(count), allocator)
 	for _ in 0 ..< count {
 		name_len, _, name_ok := varint.decode(blob, offset)
 		if !name_ok || name_len == 0 {
-			return nil
+			return nil, nil, false
 		}
 
 		offset += varint.size(name_len)
 		if offset + int(name_len) + 1 > len(blob) {
-			return nil
+			return nil, nil, false
 		}
 
 		name_str := string(blob[offset:offset + int(name_len)])
@@ -135,27 +172,57 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 		if (packed & 0x40) != 0 {
 			def_val, def_ok := deserialize_value_from_blob(blob, &offset, allocator)
 			if !def_ok {
-				return nil
+				return nil, nil, false
 			}
 			col.default_value = def_val
 		}
 		if (packed & 0x20) != 0 {
 			chk_len, _, chk_ok := varint.decode(blob, offset)
 			if !chk_ok || chk_len == 0 {
-				return nil
+				return nil, nil, false
 			}
 
 			offset += varint.size(chk_len)
 			if offset + int(chk_len) > len(blob) {
-				return nil
+				return nil, nil, false
 			}
 
 			col.check_expr = strings.clone(string(blob[offset:offset + int(chk_len)]), allocator)
 			offset += int(chk_len)
 		}
-		append(&cols, col)
+		append(&col_list, col)
 	}
-	return cols[:]
+	if version != COL_BLOB_GROUPS_VERSION {
+		return col_list[:], nil, true
+	}
+
+	gc, _, gc_ok := varint.decode(blob, offset)
+	if !gc_ok {
+		return nil, nil, false
+	}
+
+	offset += varint.size(gc)
+	group_list := make([dynamic][]int, 0, int(gc), allocator)
+	for _ in 0 ..< gc {
+		cc, _, cc_ok := varint.decode(blob, offset)
+		if !cc_ok || cc == 0 {
+			return nil, nil, false
+		}
+
+		offset += varint.size(cc)
+		members := make([]int, cc, allocator)
+		for j in 0 ..< cc {
+			mv, _, mv_ok := varint.decode(blob, offset)
+			if !mv_ok || mv >= count {
+				return nil, nil, false
+			}
+
+			offset += varint.size(mv)
+			members[j] = int(mv)
+		}
+		append(&group_list, members)
+	}
+	return col_list[:], group_list[:], true
 }
 
 // Write a Value in a simple binary format:

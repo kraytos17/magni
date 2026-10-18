@@ -66,7 +66,14 @@ exec_create :: proc(
 		}
 	}
 
-	new_root, ok := schema.add_table_cow(t, stmt.table_name, stmt.columns, root_page.page_num, sql)
+	new_root, ok := schema.add_table_cow(
+		t,
+		stmt.table_name,
+		stmt.columns,
+		root_page.page_num,
+		sql,
+		stmt.unique_groups,
+	)
 	if !ok {
 		log.error("Error: Failed to register table in schema")
 		return false, t.root, {}
@@ -476,30 +483,76 @@ assign_insert_rowid :: proc(
 	return id if err == .None else 1
 }
 
-// unique_column_indices collects the indices needing uniqueness checks:
-// UNIQUE columns plus non-INTEGER PKs (which imply UNIQUE but don't alias
-// the rowid). INTEGER PKs enforce structurally via rowid collision and are
-// skipped here.
+// unique_key_lists collects every uniqueness scope as column-index lists:
+// single-column UNIQUEs (and non-INTEGER PKs, which imply UNIQUE but don't
+// alias the rowid) as 1-lists plus composite groups. INTEGER PKs enforce
+// structurally via rowid collision and are skipped here.
 @(private = "file")
-unique_column_indices :: proc(
-	table: types.Table,
-	allocator := context.temp_allocator,
-) -> []int {
-	out := make([dynamic]int, allocator)
+unique_key_lists :: proc(table: types.Table, allocator := context.temp_allocator) -> [][]int {
+	out := make([dynamic][]int, allocator)
 	for col, i in table.columns {
 		if col.unique || (col.pk && col.type != .INTEGER) {
-			append(&out, i)
+			single := make([]int, 1, allocator)
+			single[0] = i
+			append(&out, single)
 		}
+	}
+	for g in table.unique_groups {
+		append(&out, g)
 	}
 	return out[:]
 }
 
+// unique_tuple_full reports whether every key member is present and
+// non-null in values: the precondition for a tuple comparison. A missing
+// or NULL member exempts the key (never a match).
+@(private = "file")
+unique_tuple_full :: proc(values: []types.Value, key: []int) -> bool {
+	if len(key) == 0 {
+		return false
+	}
+	for idx in key {
+		if idx >= len(values) || types.is_null(values[idx]) {
+			return false
+		}
+	}
+	return true
+}
+
+// unique_key_name renders one key list for violation messages: the column
+// name for singles, "(a,b)" for groups.
+@(private = "file")
+unique_key_name :: proc(
+	table: types.Table,
+	key: []int,
+	allocator := context.temp_allocator,
+) -> string {
+	if len(key) == 1 && key[0] < len(table.columns) {
+		return table.columns[key[0]].name
+	}
+
+	sb: strings.Builder
+	strings.builder_init(&sb, allocator)
+	strings.write_string(&sb, "(")
+	for idx, j in key {
+		if j > 0 {
+			strings.write_string(&sb, ",")
+		}
+		if idx < len(table.columns) {
+			strings.write_string(&sb, table.columns[idx].name)
+		}
+	}
+
+	strings.write_string(&sb, ")")
+	return strings.to_string(sb)
+}
+
 // check_unique scans committed rows for a duplicate of the candidate's
-// constrained-column values. NULLs never match (multiple NULLs allowed,
-// like the engine's null-comparison semantics). except_rowid skips one row
-// (the UPDATE self-exclusion: re-setting a row's own key must pass).
-// Fails closed with a logged violation; empty tables scan zero rows
-// and pass.
+// constrained key values. A key matches only when every member is present,
+// non-null, and equal (any NULL member exempts the key, so multiple NULLs
+// coexist). except_rowid skips one row (the UPDATE self-exclusion:
+// re-setting a row's own key must pass). Fails closed with a logged
+// violation; empty tables scan zero rows and pass.
 @(private = "file")
 check_unique :: proc(
 	values: []types.Value,
@@ -508,8 +561,8 @@ check_unique :: proc(
 	root_page: u32,
 	except_rowid: Maybe(types.Row_ID) = nil,
 ) -> bool {
-	indices := unique_column_indices(table, context.temp_allocator)
-	if len(indices) == 0 {
+	keys := unique_key_lists(table, context.temp_allocator)
+	if len(keys) == 0 {
 		return true
 	}
 
@@ -519,6 +572,7 @@ check_unique :: proc(
 		log.errorf("Error: UNIQUE scan failed for '%s'", table.name)
 		return false
 	}
+
 	defer btree.cursor_destroy(&cursor)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
@@ -532,26 +586,29 @@ check_unique :: proc(
 			btree.cursor_advance(&cursor)
 			continue
 		}
-		matched := -1
-		for idx in indices {
-			if idx >= len(c.values) || idx >= len(values) {
+
+		matched := ""
+		for key in keys {
+			if !unique_tuple_full(values, key) {
 				continue
 			}
-			if types.is_null(values[idx]) {
-				continue
+
+			full := true
+			for idx in key {
+				if idx >= len(c.values) || !types.value_compare(c.values[idx], values[idx]) {
+					full = false
+					break
+				}
 			}
-			if types.value_compare(c.values[idx], values[idx]) {
-				matched = idx
+			if full {
+				matched = unique_key_name(table, key, context.temp_allocator)
 				break
 			}
 		}
+
 		cell.destroy(&c, context.temp_allocator)
-		if matched >= 0 {
-			log.errorf(
-				"UNIQUE constraint violation: %s.%s",
-				table.name,
-				table.columns[matched].name,
-			)
+		if matched != "" {
+			log.errorf("UNIQUE constraint violation: %s.%s", table.name, matched)
 			return false
 		}
 		btree.cursor_advance(&cursor)
@@ -616,23 +673,34 @@ prepare_sorted_batch :: proc(
 			return nil, false
 		}
 	}
-	// Unique columns: peers are invisible to the per-row committed scan on
-	// a static tree, so reject intra-batch duplicates pairwise. NULLs never
-	// match (multiple NULLs allowed).
-	for uidx in unique_column_indices(table, context.temp_allocator) {
+	// Unique keys: peers are invisible to the per-row committed scan on
+	// a static tree, so reject intra-batch duplicates pairwise. A key
+	// matches only when every member is present, non-null, and equal.
+	for key in unique_key_lists(table, context.temp_allocator) {
+		if len(key) == 0 {
+			continue
+		}
 		for i in 1 ..< len(infos) {
-			if uidx >= len(infos[i].values) || types.is_null(infos[i].values[uidx]) {
+			if !unique_tuple_full(infos[i].values, key) {
 				continue
 			}
 			for j in 0 ..< i {
-				if uidx >= len(infos[j].values) {
+				if !unique_tuple_full(infos[j].values, key) {
 					continue
 				}
-				if types.value_compare(infos[j].values[uidx], infos[i].values[uidx]) {
+
+				same := true
+				for idx in key {
+					if !types.value_compare(infos[j].values[idx], infos[i].values[idx]) {
+						same = false
+						break
+					}
+				}
+				if same {
 					log.errorf(
 						"UNIQUE constraint violation: %s.%s",
 						table.name,
-						table.columns[uidx].name,
+						unique_key_name(table, key, context.temp_allocator),
 					)
 					return nil, false
 				}

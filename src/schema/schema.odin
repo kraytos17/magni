@@ -161,6 +161,7 @@ add_table :: proc(
 	columns: []types.Column,
 	root_page: u32,
 	sql_stmt: string,
+	unique_groups: [][]int = nil,
 ) -> bool {
 	rowid := types.Row_ID(types.hash(table_name))
 	if c, err := btree.tree_find(t, rowid, context.temp_allocator); err == .None {
@@ -178,7 +179,7 @@ add_table :: proc(
 		return false
 	}
 
-	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
+	col_blob := serialize_columns_to_blob(columns, context.temp_allocator, unique_groups)
 	r := Schema_Row {
 		kind         = "table",
 		name         = table_name,
@@ -206,6 +207,7 @@ add_table_cow :: proc(
 	columns: []types.Column,
 	root_page: u32,
 	sql_stmt: string,
+	unique_groups: [][]int = nil,
 ) -> (
 	u32,
 	bool,
@@ -226,7 +228,7 @@ add_table_cow :: proc(
 		return t.root, false
 	}
 
-	col_blob := serialize_columns_to_blob(columns, context.temp_allocator)
+	col_blob := serialize_columns_to_blob(columns, context.temp_allocator, unique_groups)
 	r := Schema_Row {
 		kind         = "table",
 		name         = table_name,
@@ -440,11 +442,7 @@ drop_table_cow :: proc(t: ^btree.Tree, table_name: string) -> (u32, bool) {
 // post-decode name check, so a hash collision with a different table
 // reports true (the key exists).
 table_exists :: proc(t: ^btree.Tree, table_name: string) -> bool {
-	c, err := btree.tree_find(
-		t,
-		types.Row_ID(types.hash(table_name)),
-		context.temp_allocator,
-	)
+	c, err := btree.tree_find(t, types.Row_ID(types.hash(table_name)), context.temp_allocator)
 	if err == .None {
 		cell.destroy(&c, context.temp_allocator)
 		return true
@@ -473,14 +471,15 @@ table_from_values :: proc(
 	table.name = strings.clone(sr.name, allocator)
 	table.root_page = sr.root_page
 	table.sql = strings.clone(sr.sql, allocator)
-	cols := deserialize_columns(sr.columns_blob, allocator)
-	if cols == nil {
+	cols, groups, cok := deserialize_columns(sr.columns_blob, allocator)
+	if !cok || cols == nil {
 		delete(table.name, allocator)
 		delete(table.sql, allocator)
 		return {}, false
 	}
 
 	table.columns = cols
+	table.unique_groups = groups
 	table.skip_root = sr.skip_root
 	if len(sr.indexes) > 0 {
 		defs := make([]types.Index_Def, len(sr.indexes), allocator)
@@ -520,6 +519,11 @@ table_free :: proc(table: types.Table, allocator := context.allocator) {
 	}
 
 	delete(table.indexes, allocator)
+	for g in table.unique_groups {
+		delete(g, allocator)
+	}
+
+	delete(table.unique_groups, allocator)
 	for col in table.columns {
 		delete(col.name, allocator)
 		if def, ok := col.default_value.?; ok {

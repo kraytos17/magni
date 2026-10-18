@@ -4,9 +4,10 @@ import "core:strings"
 import "src:types"
 
 // parse_create_table parses CREATE TABLE name (defs...) after CREATE: column
-// definitions interleaved with table-level FOREIGN KEY clauses, comma
-// separated. On failure the deferred cleanup frees the partial names/rows
-// (arena abandonment covers the rest).
+// definitions interleaved with table-level FOREIGN KEY and UNIQUE clauses,
+// comma separated. Single-column UNIQUE groups fold into Column.unique;
+// multi-column groups resolve to indices. On failure the deferred cleanup
+// frees the partial names/rows (arena abandonment covers the rest).
 @(private)
 parse_create_table :: proc(
 	p: ^Parser,
@@ -27,6 +28,7 @@ parse_create_table :: proc(
 
 	fks := make([dynamic]Foreign_Key, allocator)
 	columns := make([dynamic]types.Column, allocator)
+	ugroups := make([dynamic][]string, allocator)
 	defer if !ok {
 		for col in columns {
 			delete(col.name, allocator)
@@ -48,6 +50,12 @@ parse_create_table :: proc(
 				return nil, false
 			}
 			append(&fks, fk)
+		} else if match(p, .UNIQUE) {
+			ug, ug_ok := parse_unique_clause(p, allocator)
+			if !ug_ok {
+				return nil, false
+			}
+			append(&ugroups, ug)
 		} else {
 			col, col_ok := parse_column_def(p, &fks, allocator)
 			if !col_ok {
@@ -61,7 +69,18 @@ parse_create_table :: proc(
 			return nil, false
 		}
 	}
-	return Create_Stmt{table_name = table_name, columns = columns[:], foreign_keys = fks[:]}, true
+
+	groups, g_ok := resolve_unique_groups(p, &columns, ugroups, allocator)
+	if !g_ok {
+		return nil, false
+	}
+	return Create_Stmt {
+			table_name = table_name,
+			columns = columns[:],
+			foreign_keys = fks[:],
+			unique_groups = groups,
+		},
+		true
 }
 
 // parse_create_index parses `CREATE INDEX name ON table (column)` —
@@ -139,6 +158,119 @@ parse_foreign_key_clause :: proc(
 		return
 	}
 	return Foreign_Key{col = fk_col, ref_table = fk_table, ref_col = fk_ref_col}, true
+}
+
+// parse_unique_clause parses `(a, b, ...)` after UNIQUE: one or more owned
+// column-name strings. The caller owns the names (and the array) on success;
+// on failure partial names are freed here.
+@(private = "file")
+parse_unique_clause :: proc(p: ^Parser, allocator := context.allocator) -> ([]string, bool) {
+	if !expect_match(p, .LPAREN, "Expected ( after UNIQUE") {
+		return nil, false
+	}
+
+	members := make([dynamic]string, allocator)
+	for {
+		name, n_ok := parse_identifier(p, allocator)
+		if !n_ok {
+			for m in members {
+				delete(m, allocator)
+			}
+
+			delete(members)
+			return nil, false
+		}
+
+		append(&members, name)
+		if match(p, .RPAREN) {
+			break
+		}
+		if !expect_match(p, .COMMA, "Expected , or ) in UNIQUE column list") {
+			for m in members {
+				delete(m, allocator)
+			}
+
+			delete(members)
+			return nil, false
+		}
+	}
+	return members[:], true
+}
+
+// resolve_unique_groups turns parsed UNIQUE name lists into resolved column
+// index lists against the complete columns. Single-column groups fold into
+// Column.unique; the returned lists hold multi-column groups only. Consumes
+// ugroups fully on both paths (names and array freed here); partial index
+// arrays are freed on failure with err set. Unknown members fail the CREATE.
+@(private = "file")
+resolve_unique_groups :: proc(
+	p: ^Parser,
+	columns: ^[dynamic]types.Column,
+	ugroups: [dynamic][]string,
+	allocator := context.allocator,
+) -> (
+	[][]int,
+	bool,
+) {
+	free_names := proc(ugs: [dynamic][]string, allocator := context.allocator) {
+		for g in ugs {
+			for name in g {
+				delete(name, allocator)
+			}
+			delete(g, allocator)
+		}
+		delete(ugs)
+	}
+
+	resolved := make([dynamic][]int, 0, len(ugroups), allocator)
+	for g in ugroups {
+		idxs := make([dynamic]int, 0, len(g), allocator)
+		ok := true
+		for name in g {
+			found := -1
+			for k in 0 ..< len(columns) {
+				if columns[k].name == name {
+					found = k
+					break
+				}
+			}
+			if found < 0 {
+				err(p, "Unknown column in UNIQUE constraint")
+				ok = false
+				break
+			}
+
+			seen := false
+			for e in idxs {
+				if e == found {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				append(&idxs, found)
+			}
+		}
+		if !ok {
+			delete(idxs)
+			for r in resolved {
+				delete(r)
+			}
+
+			delete(resolved)
+			free_names(ugroups, allocator)
+			return nil, false
+		}
+		if len(idxs) == 1 {
+			columns[idxs[0]].unique = true
+			delete(idxs)
+		} else {
+			append(&resolved, idxs[:])
+		}
+	}
+
+	free_names(ugroups, allocator)
+	return resolved[:], true
 }
 
 // parse_column_modifier parses one trailing column modifier (PRIMARY KEY,

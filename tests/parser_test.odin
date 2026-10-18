@@ -82,6 +82,46 @@ test_parse_create_table_unique :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_parse_create_table_unique_group :: proc(t: ^testing.T) {
+	stmt, ok, _ := parser.parse(
+		"CREATE TABLE t (a INT, b TEXT, v INT, UNIQUE (a, b));",
+		context.temp_allocator,
+	)
+	testing.expect(t, ok, "table-level UNIQUE should parse")
+	sel, is_sel := stmt.type.(parser.Create_Stmt)
+	testing.expect(t, is_sel, "Expected Create_Stmt variant")
+	if !is_sel {
+		return
+	}
+	testing.expect_value(t, len(sel.unique_groups), 1)
+	if len(sel.unique_groups) == 1 {
+		testing.expect_value(t, len(sel.unique_groups[0]), 2)
+		testing.expect_value(t, sel.unique_groups[0][0], 0)
+		testing.expect_value(t, sel.unique_groups[0][1], 1)
+	}
+	for col in sel.columns {
+		testing.expect(t, !col.unique, "no column flag set by a group")
+	}
+}
+
+@(test)
+test_parse_create_table_unique_group_errors :: proc(t: ^testing.T) {
+	_, ok, _ := parser.parse("CREATE TABLE t (a INT, UNIQUE (a, nosuch));", context.temp_allocator)
+	testing.expect(t, !ok, "unknown UNIQUE member must fail")
+
+	_, ok2, _ := parser.parse("CREATE TABLE t (a INT, UNIQUE ());", context.temp_allocator)
+	testing.expect(t, !ok2, "empty UNIQUE list must fail")
+
+	// Single-column table-level UNIQUE folds into the column flag.
+	sstmt, sok, _ := parser.parse("CREATE TABLE t (a INT, UNIQUE (a));", context.temp_allocator)
+	testing.expect(t, sok, "single-column UNIQUE should parse")
+	if ssel, is_sel := sstmt.type.(parser.Create_Stmt); is_sel {
+		testing.expect(t, ssel.columns[0].unique, "single folds into the flag")
+		testing.expect_value(t, len(ssel.unique_groups), 0)
+	}
+}
+
+@(test)
 test_parse_create_table :: proc(t: ^testing.T) {
 	sql := "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL);"
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)

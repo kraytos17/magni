@@ -1527,3 +1527,32 @@ test_index_explain :: proc(t: ^testing.T) {
 		"CREATE TABLE x (id INT);",
 	)
 }
+
+@(test)
+test_index_unique_group_persists_across_reopen :: proc(t: ^testing.T) {
+	// Composite groups live in the catalog blob: close/reopen must keep
+	// enforcing them, not just freshly created tables.
+	name := "idxuniqreopen"
+	d := setup_db(t, name)
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT, UNIQUE (a, b));",
+			"INSERT INTO t VALUES (1, 'x', 10);",
+		},
+	)
+	db.close(d)
+
+	d2, open_err := db.open(fmt.tprintf("test_int_%s.db", name))
+	defer teardown_db(d2, name)
+	testing.expect(t, open_err == .None, "Re-open should succeed")
+	if open_err != .None {
+		return
+	}
+	saved, quiet := suppress_expected_errors()
+	context = quiet
+	dup := db.execute(d2, "INSERT INTO t VALUES (1, 'x', 20);")
+	context = restore_logger(saved)
+	testing.expect(t, dup != .None, "reopened table still rejects dup tuples")
+}

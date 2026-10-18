@@ -2335,10 +2335,7 @@ test_exec_unique_rejects_dup :: proc(t: ^testing.T) {
 	run_exec_setup(
 		t,
 		&tree,
-		{
-			"CREATE TABLE u (code TEXT UNIQUE, v INT);",
-			"INSERT INTO u VALUES ('a', 1);",
-		},
+		{"CREATE TABLE u (code TEXT UNIQUE, v INT);", "INSERT INTO u VALUES ('a', 1);"},
 	)
 	stmt := must_parse(t, "INSERT INTO u VALUES ('a', 2);")
 	saved, ctx := suppress_expected_errors()
@@ -2459,6 +2456,201 @@ test_exec_unique_update_rejected_and_self_assign :: proc(t: ^testing.T) {
 	}
 
 	must_execute_sql(t, &tree, "UPDATE u SET code = 'b' WHERE code = 'b';")
+}
+
+// Composite UNIQUE rejects a duplicate full tuple but allows partial
+// matches and NULL members.
+@(test)
+test_exec_unique_composite_tuple :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_comp")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT, UNIQUE (a, b));",
+			"INSERT INTO t VALUES (1, 'x', 10);",
+		},
+	)
+	dup := must_parse(t, "INSERT INTO t VALUES (1, 'x', 20);")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	dok, _, _ := executor.execute(&tree, dup)
+	context = restore_logger(saved)
+	testing.expect(t, !dok, "duplicate tuple must fail")
+
+	// Partial matches and NULL members coexist.
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"INSERT INTO t VALUES (1, 'y', 30);",
+			"INSERT INTO t VALUES (2, 'x', 40);",
+			"INSERT INTO t VALUES (NULL, 'x', 50);",
+			"INSERT INTO t VALUES (NULL, 'x', 60);",
+		},
+	)
+	sel := must_parse_select(t, "SELECT COUNT(*) FROM t;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	if len(rows) > 0 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[0], types.value(5)),
+			"five rows present",
+		)
+	}
+}
+
+// Composite intra-batch duplicates fail atomically.
+@(test)
+test_exec_unique_composite_bulk_atomic :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_comp_bulk")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(t, &tree, {"CREATE TABLE t (a INT, b TEXT, v INT, UNIQUE (a, b));"})
+	stmt := must_parse(t, "INSERT INTO t VALUES (1, 'x', 1), (1, 'x', 2);")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "intra-batch tuple dup must fail")
+
+	table, _ := schema.get_table(&tree, "t", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 0)
+}
+
+// Composite UPDATE creating a duplicate tuple fails; self-assign passes.
+@(test)
+test_exec_unique_composite_update :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_comp_upd")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT, UNIQUE (a, b));",
+			"INSERT INTO t VALUES (1, 'x', 10);",
+			"INSERT INTO t VALUES (2, 'y', 20);",
+		},
+	)
+	dup := must_parse(t, "UPDATE t SET a = 1, b = 'x' WHERE v = 20;")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	dok, _, _ := executor.execute(&tree, dup)
+	context = restore_logger(saved)
+	testing.expect(t, !dok, "UPDATE creating a dup tuple must fail")
+
+	must_execute_sql(t, &tree, "UPDATE t SET b = 'y' WHERE v = 20;")
+}
+
+// INT UNIQUE on a non-PK column rejects duplicates like TEXT does.
+@(test)
+test_exec_int_unique_non_pk_rejects_dup :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "intuniq_dup")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{"CREATE TABLE u (id INT UNIQUE, v TEXT);", "INSERT INTO u VALUES (1, 'x');"},
+	)
+	stmt := must_parse(t, "INSERT INTO u VALUES (1, 'y');")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "duplicate INT UNIQUE must fail")
+
+	table, _ := schema.get_table(&tree, "u", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 1)
+}
+
+// PK-path UPDATE setting a constrained column to a peer's value fails and
+// leaves the table untouched; self-assign passes.
+@(test)
+test_exec_unique_update_pk_path :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_pkupd")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE t (id INT PRIMARY KEY, code TEXT UNIQUE, v INT);",
+			"INSERT INTO t VALUES (1, 'a', 10);",
+			"INSERT INTO t VALUES (2, 'b', 20);",
+		},
+	)
+	dup := must_parse(t, "UPDATE t SET code = 'a' WHERE id = 2;")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	dok, _, _ := executor.execute(&tree, dup)
+	context = restore_logger(saved)
+	testing.expect(t, !dok, "pk-path UPDATE creating a dup must fail")
+
+	sel := must_parse_select(t, "SELECT code, v FROM t ORDER BY v;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 2)
+	if len(rows) == 2 {
+		testing.expect(
+			t,
+			types.value_compare(rows[1].values[0], types.value("b")),
+			"failed UPDATE left the row untouched",
+		)
+	}
+
+	must_execute_sql(t, &tree, "UPDATE t SET code = 'b' WHERE id = 2;")
+}
+
+// DELETE frees a constrained value: re-inserting the same key succeeds.
+@(test)
+test_exec_unique_reinsert_after_delete :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_reins")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{"CREATE TABLE u (code TEXT UNIQUE, v INT);", "INSERT INTO u VALUES ('a', 1);"},
+	)
+	must_execute_sql(t, &tree, "DELETE FROM u WHERE code = 'a';")
+	must_execute_sql(t, &tree, "INSERT INTO u VALUES ('a', 2);")
+
+	sel := must_parse_select(t, "SELECT code, v FROM u;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) > 0 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[1], types.value(2)),
+			"re-inserted row present",
+		)
+	}
+}
+
+// Empty string is a value, unlike NULL: a second '' violates UNIQUE.
+@(test)
+test_exec_unique_empty_string_rejects_dup :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_empty")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{"CREATE TABLE u (code TEXT UNIQUE, v INT);", "INSERT INTO u VALUES ('', 1);"},
+	)
+	stmt := must_parse(t, "INSERT INTO u VALUES ('', 2);")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "duplicate empty string must fail")
 }
 
 // value_to_string renders blobs as size placeholders by default and as

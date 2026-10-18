@@ -385,6 +385,6 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 - Secondary text indexes are single-column TEXT only (BINARY collation, NULLs not indexed, several per table, `DROP INDEX <name> [ON <table>]`); equality, canonical `LIKE 'stem%'`, and literal `IN` (up to 128 members) route, plus flat-OR unions and multi-conjunct AND intersections — everything else scans (see `docs/indexing.md`)
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100, >=, <=, =, !=)
-- `UNIQUE` is column-level only (no composite `UNIQUE(a, b)`); NULLs never match so multiple NULLs coexist; non-`INTEGER` PRIMARY KEYs imply `UNIQUE` but don't alias the rowid
+- `UNIQUE` is single- or multi-column (`UNIQUE (a, b)`); NULLs never match so multiple NULLs coexist; non-`INTEGER` PRIMARY KEYs imply `UNIQUE` but don't alias the rowid
 - Max 10 columns per table
 - REPL line editor: SQL keyword and table/column name completion only (no in-expression or JOIN completion)

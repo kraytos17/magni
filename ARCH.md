@@ -287,7 +287,7 @@ Key subroutines:
 | `sort_rows` | ORDER BY with integer fast path | Single-column int: `[]i64` + index sort |
 | `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | `@(fast_math)` on f64 reduction for auto-vectorization |
 | `check_constraints` | CHECK enforcement on INSERT/UPDATE | Fail-closed: rejects non-integer, unknown col |
-| `check_unique` | UNIQUE + non-INTEGER PK enforcement on INSERT/UPDATE | Pre-insert scan + intra-batch/intra-statement peer checks; NULLs exempt |
+| `check_unique` | UNIQUE (single + composite groups) and non-INTEGER PK enforcement on INSERT/UPDATE | Pre-insert scan + intra-batch/intra-statement peer checks; NULLs exempt |
 | `render_table` | Query/command result rendering | `core:text/table` markdown output; `unicode_width_proc` for CJK-aligned columns |
 | `exec_select_data` | Data-returning SELECT evaluator (operands for set ops) | Returns `(rows, cols)` without printing; covers literals, single-table, subqueries, joins, aggregates |
 | `row_fingerprint` | FNV-1a hash of a row's values | Shared by `dedup_rows` (DISTINCT) and set-op membership |
