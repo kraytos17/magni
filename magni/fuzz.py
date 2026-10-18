@@ -60,11 +60,9 @@ def cmd_fuzz(args: argparse.Namespace) -> None:
         run(["pkill", "afl-fuzz"], check=False)
         log("stopped afl-fuzz (if running)")
     elif args.fuzz_cmd == "showmap":
-        ensure_cov_target()
-        cmd_fuzz_showmap()
+        cmd_fuzz_showmap(exec_pool=args.exec_showmap)
     elif args.fuzz_cmd == "cmin":
-        ensure_cov_target()
-        cmd_fuzz_cmin()
+        cmd_fuzz_cmin(exec_pool=args.exec_cmin)
 
 
 def cmd_fuzz_campaign(

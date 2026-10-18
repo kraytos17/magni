@@ -26,14 +26,16 @@ MagniDB — magni.py help
   FUZZ
     magni.py fuzz run [-- --extra args]   interactive AFL++ campaign
     magni.py fuzz campaign -w N -s SEC [--roles R,...]
-      default roles: master + rotation (cmplog,asan,fast,explore,coe,laf,mopt)
+      default roles: master + rotation (asan,fast,explore,coe,mopt)
       roles: master,explore,fast,coe,seek,cmplog,asan,laf,mopt,oldq,exec,grammar,exec_grammar
         (exec runs full scripts against scratch DBs, own seed pool+timeout)
         (grammar/exec_grammar add the SQL-aware Python mutator on top of havoc)
     magni.py fuzz status                   per-worker fuzzer_stats
     magni.py fuzz stop                     pkill afl-fuzz
     magni.py fuzz showmap                  coverage tuples for current corpus
-    magni.py fuzz cmin                     minimize corpus → /tmp/min
+    magni.py fuzz showmap --exec           coverage tuples for exec scripts
+    magni.py fuzz cmin                     minimize corpus → target/fuzz/min
+    magni.py fuzz cmin --exec              minimize exec scripts
 
   CORPUS
     magni.py corpus generate               regenerate seeds → fuzz/corpus/
@@ -42,6 +44,7 @@ MagniDB — magni.py help
     magni.py corpus test --exec             ASan gate (every exec script)
     magni.py corpus promote [--minimize] [--dry-run] [--test] [--exec]
     magni.py corpus minimize               cmin + purge, rewrite promoted_seeds.py
+    magni.py corpus minimize --exec        cmin + purge exec scripts
 
   CLEAN
     magni.py clean              remove target/debug + target/release only

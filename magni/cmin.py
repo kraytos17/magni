@@ -43,15 +43,30 @@ def afl_cmin(
     return sorted(f.name for f in dst.iterdir() if f.is_file())
 
 
-def cmd_fuzz_cmin() -> None:
-    """Minimize corpus (-i fuzz/corpus -o /tmp/min)."""
-    tmp = stage_corpus_tmp(config.CORPUS_DIR)
-    try:
+def cmd_fuzz_cmin(exec_pool: bool = False) -> None:
+    """Minimize corpus (-i fuzz/corpus -o target/fuzz/min; exec pool with --exec)."""
+    if exec_pool:
+        from .build import ensure_exec_target
+
+        ensure_exec_target()
+        corpus_dir = config.EXEC_CORPUS_DIR
+        out = config.FUZZ_CMIN_EXEC_OUT_DIR
+        timeout_ms = config.EXEC_TIMEOUT_MS
+        target = config.FUZZ_EXEC_TARGET
+    else:
+        from .build import ensure_cov_target
+
+        ensure_cov_target()
+        corpus_dir = config.CORPUS_DIR
         out = config.FUZZ_CMIN_OUT_DIR
+        timeout_ms = "1000"
+        target = config.FUZZ_TARGET_COV
+    tmp = stage_corpus_tmp(corpus_dir)
+    try:
         if out.exists():
             shutil.rmtree(out)
         out.mkdir(parents=True, exist_ok=True)
-        kept = afl_cmin(tmp, out)
+        kept = afl_cmin(tmp, out, timeout_ms, target)
         log(f"minimized: {len(kept)} files in {out}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

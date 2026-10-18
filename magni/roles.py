@@ -84,8 +84,12 @@ ROLES: dict[str, Role] = {
     ),
 }
 
-# Default secondary rotation when roles aren't specified.
-DEFAULT_SECONDARIES = ["cmplog", "asan", "fast", "explore", "coe", "laf", "mopt"]
+# Default secondary rotation when roles aren't specified. cmplog/laf stay
+# defined but excluded: cmplog workers die instantly and the laf target
+# doesn't link (distro LLVM plugins vs LLVM 23) until AFL++ is rebuilt from
+# source. Re-add when ROLES="master,cmplog" / "master,laf" survive a 60s
+# smoke (verified broken 2026-10-18: instant worker death / link failure).
+DEFAULT_SECONDARIES = ["asan", "fast", "explore", "coe", "mopt"]
 
 
 def default_roles(workers: int) -> list[str]:

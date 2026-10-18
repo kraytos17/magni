@@ -59,14 +59,16 @@ def cmd_help(_args: argparse.Namespace) -> None:
   FUZZ
     magni.py fuzz run [-- --extra args]   interactive AFL++ campaign
     magni.py fuzz campaign -w N -s SEC [--roles R,...]
-      default roles: master + rotation (cmplog,asan,fast,explore,coe,laf,mopt)
+      default roles: master + rotation (asan,fast,explore,coe,mopt)
       roles: {role_names()}
         (exec runs full scripts against scratch DBs, own seed pool+timeout)
         (grammar/exec_grammar add the SQL-aware Python mutator on top of havoc)
     magni.py fuzz status                   per-worker fuzzer_stats
     magni.py fuzz stop                     pkill afl-fuzz
     magni.py fuzz showmap                  coverage tuples for current corpus
-    magni.py fuzz cmin                     minimize corpus → /tmp/min
+    magni.py fuzz showmap --exec           coverage tuples for exec scripts
+    magni.py fuzz cmin                     minimize corpus → target/fuzz/min
+    magni.py fuzz cmin --exec              minimize exec scripts
 
   CORPUS
     magni.py corpus generate               regenerate seeds → fuzz/corpus/
@@ -75,6 +77,7 @@ def cmd_help(_args: argparse.Namespace) -> None:
     magni.py corpus test --exec             ASan gate (every exec script)
     magni.py corpus promote [--minimize] [--dry-run] [--test] [--exec]
     magni.py corpus minimize               cmin + purge, rewrite promoted_seeds.py
+    magni.py corpus minimize --exec        cmin + purge exec scripts
 
   CLEAN
     magni.py clean              remove target/debug + target/release only
@@ -156,8 +159,20 @@ def build_parser() -> argparse.ArgumentParser:
     fc.add_argument("extra", nargs=argparse.REMAINDER)
     fsub.add_parser("status", help="per-worker fuzzer_stats")
     fsub.add_parser("stop", help="pkill afl-fuzz")
-    fsub.add_parser("showmap", help="coverage tuples for current corpus")
-    fsub.add_parser("cmin", help="minimize corpus → /tmp/min")
+    shm = fsub.add_parser("showmap", help="coverage tuples for current corpus")
+    shm.add_argument(
+        "--exec",
+        dest="exec_showmap",
+        action="store_true",
+        help="measure exec scripts with the exec target instead",
+    )
+    cmn = fsub.add_parser("cmin", help="minimize corpus → target/fuzz/min")
+    cmn.add_argument(
+        "--exec",
+        dest="exec_cmin",
+        action="store_true",
+        help="minimize exec scripts with the exec target instead",
+    )
     pf.set_defaults(func=cmd_fuzz)
 
     # corpus
@@ -194,7 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pp.set_defaults(func=_corpus_promote)
     cm = csub.add_parser("minimize", help="afl-cmin + monster purge, rewrite promoted_seeds.py")
-    cm.set_defaults(func=lambda _args: corpus_minimize())
+    cm.add_argument(
+        "--exec",
+        dest="exec_minimize",
+        action="store_true",
+        help="minimize exec scripts (corpus_exec/promoted_seeds.py) instead",
+    )
+    cm.set_defaults(func=lambda args: corpus_minimize(exec_pool=args.exec_minimize))
 
     # clean
     pcl = sub.add_parser("clean", help="remove build artifacts")

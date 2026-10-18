@@ -7,7 +7,7 @@ positional arguments:
     status              per-worker fuzzer_stats
     stop                pkill afl-fuzz
     showmap             coverage tuples for current corpus
-    cmin                minimize corpus → /tmp/min
+    cmin                minimize corpus → target/fuzz/min
 
 options:
   -h, --help            show this help message and exit

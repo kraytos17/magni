@@ -1,4 +1,5 @@
-usage: magni.py fuzz cmin [-h]
+usage: magni.py fuzz cmin [-h] [--exec]
 
 options:
   -h, --help  show this help message and exit
+  --exec      minimize exec scripts with the exec target instead

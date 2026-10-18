@@ -65,11 +65,13 @@ Corpus maintenance:
 
 ```bash
 python3 magni.py corpus promote [--minimize] [--dry-run] [--test]
-  # merge grown queue into promoted_seeds.py (parser only; exec promotion
-  # is still manual: append to EXEC_PROMOTED in gen_exec_corpus.py)
+  # merge grown queue into promoted_seeds.py (add --exec for the exec pool)
 python3 magni.py corpus minimize    # cmin + monster-purge, rewrite promoted set
+python3 magni.py corpus minimize --exec  # same for exec scripts
 python3 magni.py fuzz showmap       # coverage tuples for current corpus
-python3 magni.py fuzz cmin          # minimize corpus → /tmp/min
+python3 magni.py fuzz showmap --exec  # coverage tuples for exec scripts
+python3 magni.py fuzz cmin          # minimize corpus → target/fuzz/min
+python3 magni.py fuzz cmin --exec   # minimize exec scripts → target/fuzz-exec/min
 ```
 
 Seed hygiene: campaigns stage clean inputs to `target/fuzz/inputs_*`,
@@ -80,14 +82,15 @@ and feeding Python source as SQL wastes cycles plus produces junk-derived
 ## Roles and campaigns
 
 `make fuzz-campaign ROLES="..."` (default: master + rotation through
-`cmplog,asan,fast,explore,coe,laf,mopt`; workers ≤ cores−1):
+`asan,fast,explore,coe,mopt`; workers ≤ cores−1; `cmplog`/`laf` stay defined
+but out of the defaults — broken until AFL++ is rebuilt from source):
 
 | Role | Binary | Notes |
 |---|---|---|
 | `master`, `explore`, `fast`, `coe`, `seek` | cov | power schedules (`-p`) |
-| `cmplog` | cov + cmplog bin (`-c`, `-l 2AT`) | RedQueen input-to-state |
+| `cmplog` | cov + cmplog bin (`-c`, `-l 2AT`) | RedQueen input-to-state (opt-in only; workers die instantly pre-rebuild) |
 | `asan` | ASan target | crashes are memory errors, not just signals |
-| `laf` / `mopt` / `oldq` | laf / cov (`-L 0` / `-Z`) | comparison splitting / metamorphic |
+| `laf` / `mopt` / `oldq` | laf / cov (`-L 0` / `-Z`) | comparison splitting / metamorphic (`laf` opt-in only: target doesn't link pre-rebuild) |
 | `exec` | exec target, exec corpus, `-t 5000` | full scripts on scratch DBs (~120 exec/s) |
 | `grammar` | cov + Python mutator | SQL-aware mutations (parser) |
 | `exec_grammar` | exec + Python mutator | SQL-aware mutations (scripts) |

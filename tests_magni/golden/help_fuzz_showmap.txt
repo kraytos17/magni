@@ -1,4 +1,5 @@
-usage: magni.py fuzz showmap [-h]
+usage: magni.py fuzz showmap [-h] [--exec]
 
 options:
   -h, --help  show this help message and exit
+  --exec      measure exec scripts with the exec target instead

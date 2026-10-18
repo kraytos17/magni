@@ -139,5 +139,11 @@ EXEC_POOL = CorpusPool(
 )
 
 
-FUZZ_CMIN_MAP_FILE = Path("/tmp/magni.map")
-FUZZ_CMIN_OUT_DIR = Path("/tmp/min")
+# cmin/showmap intermediates live under the build dir (gitignored,
+# reboot-safe), not /tmp: a minimized corpus must survive reboots, and
+# fixed /tmp paths collide across concurrent runs. Exec pool gets its own
+# pair under target/fuzz-exec so parser/exec runs never share state.
+FUZZ_CMIN_MAP_FILE = TARGET_FUZZ / "cmin.map"
+FUZZ_CMIN_OUT_DIR = TARGET_FUZZ / "min"
+FUZZ_CMIN_EXEC_MAP_FILE = TARGET_FUZZ_EXEC / "cmin.map"
+FUZZ_CMIN_EXEC_OUT_DIR = TARGET_FUZZ_EXEC / "min"

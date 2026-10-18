@@ -12,13 +12,15 @@ from .corpus import stage_corpus_tmp
 from .util import die, log
 
 
-def run_showmap(input_dir: Path, map_file: Path) -> int | None:
+def run_showmap(input_dir: Path, map_file: Path, target: Path | None = None) -> int | None:
     """Run afl-showmap, return captured tuple count (None on failure).
 
     Guards against forkserver flakiness: a collapsed run (few dozen startup
     edges instead of real coverage) is retried once, then reported as failure
     rather than silently trusted.
     """
+    if target is None:
+        target = config.FUZZ_TARGET_COV
     for attempt in (1, 2):
         if map_file.exists():
             map_file.unlink()
@@ -30,7 +32,7 @@ def run_showmap(input_dir: Path, map_file: Path) -> int | None:
             "-o",
             str(map_file),
             "--",
-            str(config.FUZZ_TARGET_COV),
+            str(target),
             "@@",
         ]
         e = {"AFL_MAP_SIZE": config.AFL_MAP_SIZE}
@@ -56,31 +58,41 @@ def run_showmap(input_dir: Path, map_file: Path) -> int | None:
     return None
 
 
-def showmap_tuples(input_dir: Path) -> int | None:
+def showmap_tuples(input_dir: Path, target: Path | None = None) -> int | None:
     """Tuple count for an input dir via run_showmap into a temp map file."""
     with tempfile.NamedTemporaryFile(suffix=".map", delete=False) as tf:
         map_file = Path(tf.name)
     try:
-        return run_showmap(input_dir, map_file)
+        return run_showmap(input_dir, map_file, target)
     finally:
         map_file.unlink(missing_ok=True)
 
 
-def cmd_fuzz_showmap() -> None:
-    """Show coverage tuples for current corpus."""
-    tmp = stage_corpus_tmp(config.CORPUS_DIR)
+def cmd_fuzz_showmap(exec_pool: bool = False) -> None:
+    """Show coverage tuples for current corpus (exec scripts with --exec)."""
+    if exec_pool:
+        from .build import ensure_exec_target
+
+        ensure_exec_target()
+        corpus_dir = config.EXEC_CORPUS_DIR
+        target = config.FUZZ_EXEC_TARGET
+        map_file = config.FUZZ_CMIN_EXEC_MAP_FILE
+    else:
+        from .build import ensure_cov_target
+
+        ensure_cov_target()
+        corpus_dir = config.CORPUS_DIR
+        target = config.FUZZ_TARGET_COV
+        map_file = config.FUZZ_CMIN_MAP_FILE
+    tmp = stage_corpus_tmp(corpus_dir)
     try:
-        n = run_showmap(tmp, config.FUZZ_CMIN_MAP_FILE)
+        n = run_showmap(tmp, map_file, target)
         if n is None:
             die("showmap failed or degraded twice; see above")
         try:
-            listed = (
-                sum(1 for _ in config.FUZZ_CMIN_MAP_FILE.read_text().splitlines())
-                if config.FUZZ_CMIN_MAP_FILE.exists()
-                else 0
-            )
+            listed = sum(1 for _ in map_file.read_text().splitlines()) if map_file.exists() else 0
         except OSError:
             listed = 0
-        log(f"map: {listed} tuples listed in {config.FUZZ_CMIN_MAP_FILE}")
+        log(f"map: {listed} tuples listed in {map_file}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

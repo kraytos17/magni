@@ -70,11 +70,11 @@ class TestRoles(unittest.TestCase):
 
     def test_default_rotation(self):
         self.assertEqual(default_roles(1), ["master"])
-        self.assertEqual(default_roles(4), ["master", "cmplog", "asan", "fast"])
+        self.assertEqual(default_roles(4), ["master", "asan", "fast", "explore"])
         # Rotation wraps.
         self.assertEqual(
             default_roles(9)[1:],
-            ["cmplog", "asan", "fast", "explore", "coe", "laf", "mopt", "cmplog"],
+            ["asan", "fast", "explore", "coe", "mopt", "asan", "fast", "explore"],
         )
 
     def test_role_names_single_source(self):

@@ -10,22 +10,21 @@ RELEASE_FLAGS := -o:aggressive -lto:thin -no-bounds-check -no-type-assert \
 
 FUZZ_WORKERS ?= 4
 FUZZ_SECONDS ?= 3600
-FUZZ_OUT     ?= fuzz/afl-output
+export MAGNI_FUZZ_OUT ?= fuzz/afl-output
 # ROLES: comma-separated worker roles (default: master + rotation).
 # Full list is single-sourced in magni/roles.py; see `python3 magni.py help`.
-# Roles: master,explore,fast,coe,seek,cmplog,asan,laf,mopt,oldq,exec,grammar,exec_grammar
-# e.g. make fuzz-campaign ROLES="master,cmplog,asan,explore"
+# e.g. make fuzz-campaign ROLES="master,exec_grammar,grammar,asan"
 ROLES ?=
 
 .DEFAULT_GOAL := help
 
 .PHONY: all build release run rebuild clean clean-all
-.PHONY: test test-verbose test-single test-py test-cli test-cli-full smoke quick ci
+.PHONY: test test-verbose test-single test-matrix test-py test-cli test-cli-full smoke quick ci
 .PHONY: check vet vet-all lint
 .PHONY: perf bench census
 .PHONY: fuzz-build fuzz-test fuzz-exec-build fuzz-exec-test
 .PHONY: fuzz-corpus fuzz-exec-corpus fuzz-cov fuzz-run fuzz-campaign fuzz-status fuzz-stop
-.PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-one-exec fuzz-grammar-test
+.PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-one-exec fuzz-grammar-test fuzz-minimize
 .PHONY: help
 
 all: build ## default: build debug binary
@@ -65,11 +64,15 @@ test-cli: build ## basic CLI smoke checks (needs target/debug/magni)
 test-cli-full: build ## comprehensive CLI integration tests (needs target/debug/magni)
 	@python3 magni.py test-cli --full
 
+test-matrix: ## run full Odin suite in both vector states (vector on, then MAGNI_VECTOR=0)
+	@python3 magni.py test
+	@MAGNI_VECTOR=0 python3 magni.py test
+
 smoke: test test-cli ## quick smoke: unit tests + CLI
 
 quick: check test test-py ## fast gate: check + test + orchestrator unit tests (no vet/fuzz)
 
-ci: vet-all test test-py fuzz-test fuzz-exec-test ## CI gate: vet-all + test + test-py + fuzz parser+exec corpora ASan
+ci: vet-all test-matrix test-py fuzz-test fuzz-exec-test ## CI gate: vet-all + both vector states + test-py + fuzz parser+exec corpora ASan
 	@echo "ci: all gates passed"
 
 check: ## parse + type check (no vet)
@@ -78,7 +81,7 @@ check: ## parse + type check (no vet)
 vet: ## fast vet (odin check, full flags); extra: vet --shadowing|--unused|--style|--cast|--semicolon|--tabs|--do via magni.py vet
 	@python3 magni.py vet
 
-vet-all: ## vet via build+test (LLVM, strict-style, shadowing)
+vet-all: ## full vet via build+test (LLVM, all flags)
 	@python3 magni.py vet --all
 
 lint: ## ruff check + format check on tooling (needs ruff)
@@ -117,9 +120,9 @@ fuzz-exec-test: ## run every exec seed under ASan (regression gate; target auto-
 fuzz-run: fuzz-cov ## launch interactive AFL++ campaign (Ctrl-C to stop, pass ARGS=" -V 60")
 	@python3 magni.py fuzz run -- $(ARGS)
 
-fuzz-campaign: fuzz-cov ## headless parallel campaign (FUZZ_WORKERS=4 FUZZ_SECONDS=3600 ROLES="...")
+fuzz-campaign: ## headless parallel campaign (FUZZ_WORKERS=4 FUZZ_SECONDS=3600 ROLES="...")
 	@python3 magni.py fuzz campaign -w $(FUZZ_WORKERS) -s $(FUZZ_SECONDS) $(if $(ROLES),--roles "$(ROLES)") -- $(ARGS)
-	@echo "campaign: $(FUZZ_WORKERS) workers, $(FUZZ_SECONDS)s, out=$(or $(MAGNI_FUZZ_OUT),$(FUZZ_OUT))"
+	@echo "campaign: $(FUZZ_WORKERS) workers, $(FUZZ_SECONDS)s, out=$(MAGNI_FUZZ_OUT)"
 
 fuzz-status: ## show per-worker fuzzer_stats
 	@python3 magni.py fuzz status
@@ -127,11 +130,14 @@ fuzz-status: ## show per-worker fuzzer_stats
 fuzz-stop: ## pkill afl-fuzz
 	@python3 magni.py fuzz stop
 
-fuzz-clean: ## remove fuzz artifacts (afl-output, build, pycache)
+fuzz-clean: ## remove fuzz artifacts (out dir, target/fuzz*, min, cmin.map, pycache)
 	@python3 magni.py clean --fuzz-only
 
-fuzz-promote: fuzz-cov ## merge grown queue → update gen_corpus.py (MIN=1 to minimize, TEST=1 for full gate, EXEC=1 for exec pool)
+fuzz-promote: ## merge grown queue → update gen_corpus.py (MIN=1 to minimize, TEST=1 for full gate, EXEC=1 for exec pool)
 	@python3 magni.py corpus promote $(if $(filter 1,$(MIN)),--minimize) $(if $(filter 1,$(TEST)),--test) $(if $(filter 1,$(EXEC)),--exec)
+
+fuzz-minimize: ## cmin + monster purge, rewrite promoted set (EXEC=1 for exec pool)
+	@python3 magni.py corpus minimize $(if $(filter 1,$(EXEC)),--exec)
 
 fuzz-one: fuzz-build ## repro one crash: make fuzz-one FILE=fuzz/afl-output/.../id:000000
 	@test -n "$(FILE)" || { echo "usage: make fuzz-one FILE=<path>" >&2; exit 2; }

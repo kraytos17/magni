@@ -17,7 +17,7 @@ numbers.
 | `make fuzz-test` / `make fuzz-exec-test` | Every parser/exec corpus seed under ASan | Parser/executor/storage changes |
 | `make census` | Per-query allocation census (counts/bytes, not timing) | Must stay deterministic across runs |
 | `make perf` | Timing baseline (release) | Perf claims only, on a quiet cool box, on-disk (`/tmp` is tmpfs and flatters I/O) |
-| `make ci` | `vet-all` + `test` + `test-py` + both ASan corpora | Pre-commit gate |
+| `make ci` | `vet-all` + `test-matrix` + `test-py` + both ASan corpora | Pre-commit gate |
 
 `make quick` (`check` + `test` + `test-py`) and `make smoke` (`test` + `test-cli`)
 are the short loops. Commits only happen on explicit request.
