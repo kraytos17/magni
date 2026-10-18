@@ -31,6 +31,38 @@ prune :: proc(p: ^pager.Pager, start_page: u32, max_keep: int) {
 
 GC_MIN_PAGES :: 512
 
+// mark_snapshot_live marks one snapshot's pages live: its own page, its
+// manifest page, its schema tree (rows via collect_pages, secondary
+// indexes via mark_index_roots), and each manifest table root. The shared
+// body behind build_live_set's chain walk.
+@(private)
+mark_snapshot_live :: proc(p: ^pager.Pager, h: Snapshot_Header, page: u32, live: ^map[u32]bool) {
+	live[page] = true
+	if h.manifest_page != 0 {
+		live[h.manifest_page] = true
+	}
+	if h.schema_root == 0 {
+		return
+	}
+
+	t := btree.init(p, h.schema_root)
+	btree.collect_pages(&t, h.schema_root, live)
+	mark_index_roots(p, &t, live)
+	if h.manifest_page == 0 {
+		return
+	}
+
+	_, roots, load_ok := load_manifest_tables(p, h.manifest_page, context.temp_allocator)
+	if !load_ok {
+		return
+	}
+	for i in 0 ..< len(roots) {
+		if roots[i] != 0 {
+			btree.collect_pages(&t, roots[i], live)
+		}
+	}
+}
+
 // build_live_set collects every page the newest keep_count snapshots can
 // still reach: page 1, each snapshot + manifest page, and each manifest's
 // table roots walked through collect_pages (rows) and mark_index_roots
@@ -51,28 +83,7 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 		}
 
 		live[page] = true
-		if h.manifest_page != 0 {
-			live[h.manifest_page] = true
-		}
-		if h.schema_root != 0 {
-			t := btree.init(p, h.schema_root)
-			btree.collect_pages(&t, h.schema_root, live)
-			mark_index_roots(p, &t, live)
-			if h.manifest_page != 0 {
-				_, roots, load_ok := load_manifest_tables(
-					p,
-					h.manifest_page,
-					context.temp_allocator,
-				)
-				if load_ok {
-					for i in 0 ..< len(roots) {
-						if roots[i] != 0 {
-							btree.collect_pages(&t, roots[i], live)
-						}
-					}
-				}
-			}
-		}
+		mark_snapshot_live(p, h, page, live)
 
 		count += 1
 		page = h.prev_snapshot

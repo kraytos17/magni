@@ -2,6 +2,7 @@ package tests
 
 import "core:container/bit_array"
 import "core:fmt"
+import "core:hash"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -804,6 +805,93 @@ test_wal_checksum_corruption :: proc(t: ^testing.T) {
 		"only header page exists (no recovered data)",
 	)
 	pager.close(p2)
+}
+
+// frame_v1 crafts one version-1 WAL frame (FNV-64 generation): header with
+// zeroed checksums hashed first, then the page bytes — the exact v1 layout
+// wal_frame_hash_v1 verifies. Only the legacy-recovery test uses it.
+frame_v1 :: proc(page_num, db_after, salt1, salt2: u32, data: []u8) -> [types.WAL_FRAME_SIZE]u8 {
+	fh := pager.WAL_Frame_Header {
+		page_num      = u32le(page_num),
+		db_size_after = u32le(db_after),
+		salt1         = u32le(salt1),
+		salt2         = u32le(salt2),
+	}
+	hdr := transmute([types.WAL_FRAME_HEADER_SIZE]u8)fh
+	hv := hash.fnv64a(hdr[:])
+	hv = hash.fnv64a(data, hv)
+	fh.checksum1 = u32le(u32(hv))
+	fh.checksum2 = u32le(u32(hv >> 32))
+	frame: [types.WAL_FRAME_SIZE]u8
+	hdr2 := transmute([types.WAL_FRAME_HEADER_SIZE]u8)fh
+	copy(frame[:], hdr2[:])
+	copy(frame[types.WAL_FRAME_HEADER_SIZE:], data)
+	return frame
+}
+
+@(test)
+test_wal_v1_legacy_recovers :: proc(t: ^testing.T) {
+	// A version-1 WAL (FNV-64 checksums) left by a crash must still recover
+	// under the v2 binary: the adopted file version selects the v1 hash, so
+	// recovery verifies instead of breaking at the first frame.
+	context.logger.lowest_level = .Error
+	filename := "test_wal_v1_legacy.db"
+	wal_name := fmt.tprintf("%s-wal", filename)
+	os.remove(filename)
+	os.remove(wal_name)
+	defer os.remove(filename)
+	defer os.remove(wal_name)
+
+	p, err := pager.open(filename)
+	testing.expect(t, err == .None, "open for setup")
+	pager.close(p)
+
+	salt1 := u32(0x12345678)
+	salt2 := u32(0x9ABCDEF0)
+	page_data: [types.PAGE_SIZE]u8
+	for i in 0 ..< len(page_data) {
+		page_data[i] = 0xAB
+	}
+	marker_data: [types.PAGE_SIZE]u8
+
+	wh := pager.WAL_Header{}
+	copy(wh.magic[:], types.WAL_MAGIC)
+	wh.format_version = u32le(1)
+	wh.page_size = u32le(types.PAGE_SIZE)
+	wh.salt1 = u32le(salt1)
+	wh.salt2 = u32le(salt2)
+	whdr := transmute([types.WAL_HEADER_SIZE]u8)wh
+
+	data_frame := frame_v1(2, 0, salt1, salt2, page_data[:])
+	commit_frame := frame_v1(0, 2, salt1, salt2, marker_data[:])
+
+	wal_blob := make([dynamic]u8, 0, len(whdr) + len(data_frame) + len(commit_frame))
+	defer delete(wal_blob)
+	append(&wal_blob, ..whdr[:])
+	append(&wal_blob, ..data_frame[:])
+	append(&wal_blob, ..commit_frame[:])
+
+	wf_err := os.write_entire_file_from_bytes(wal_name, wal_blob[:])
+	testing.expect(t, wf_err == nil, "create v1 WAL")
+
+	p2, err2 := pager.open(filename)
+	testing.expect(t, err2 == .None, "reopen adopts v1 WAL")
+	if err2 == .None {
+		pg, gerr := pager.get_page(p2, 2)
+		testing.expect(t, gerr == .None, "recovered page 2 readable")
+		if gerr == .None {
+			clean := true
+			for i in 0 ..< 64 {
+				if pg.data[i] != 0xAB {
+					clean = false
+					break
+				}
+			}
+			testing.expect(t, clean, "page 2 holds the v1 frame content")
+			pager.unpin_page(p2, 2)
+		}
+		pager.close(p2)
+	}
 }
 
 @(test)

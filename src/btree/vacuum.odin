@@ -251,15 +251,22 @@ build_sorted_tree :: proc(
 	return new_root, .None
 }
 
-// vacuum_empty_root allocates a fresh empty slotdir leaf for vacuuming an
-// empty tree (collection yielded nothing to rebuild).
+// vacuum_empty_root_with allocates a fresh empty leaf with the given page
+// initializer: the shared body behind vacuum_empty_root (slotdir leaves)
+// and vacuum_empty_text_root (text leaves), which differ only in layout.
 @(private = "file")
-vacuum_empty_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
+vacuum_empty_root_with :: proc(
+	t: ^Tree,
+	init_leaf: proc "contextless" (data: []u8, page_id: u32) -> bool,
+) -> (
+	root: u32,
+	err: Error,
+) {
 	page, a_err := pager.allocate_page(t.pager)
 	if a_err != .None {
 		return 0, .Page_Full
 	}
-	if !init_slot_leaf_page(page.data, page.page_num) {
+	if !init_leaf(page.data, page.page_num) {
 		pager.unpin_page(t.pager, page.page_num)
 		return 0, .Invalid_Page_Header
 	}
@@ -267,6 +274,13 @@ vacuum_empty_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
 	root = page.page_num
 	pager.unpin_page(t.pager, root)
 	return root, .None
+}
+
+// vacuum_empty_root allocates a fresh empty slotdir leaf for vacuuming an
+// empty tree (collection yielded nothing to rebuild).
+@(private = "file")
+vacuum_empty_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
+	return vacuum_empty_root_with(t, init_slot_leaf_page)
 }
 
 // vacuum_build_interiors packs handle levels bottom-up into dense interiors
@@ -560,18 +574,7 @@ text_leaf_chunk_bytes :: proc(texts: [][]u8, lo: int, hi: int) -> (total: int, p
 // empty text index (collection yielded nothing to rebuild).
 @(private = "file")
 vacuum_empty_text_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
-	page, a_err := pager.allocate_page(t.pager)
-	if a_err != .None {
-		return 0, .Page_Full
-	}
-	if !init_text_leaf_page(page.data, page.page_num) {
-		pager.unpin_page(t.pager, page.page_num)
-		return 0, .Invalid_Page_Header
-	}
-
-	root = page.page_num
-	pager.unpin_page(t.pager, root)
-	return root, .None
+	return vacuum_empty_root_with(t, init_text_leaf_page)
 }
 
 // vacuum_pack_text_leaves greedily packs collected (text, rowid) runs into
@@ -638,7 +641,10 @@ vacuum_pack_text_leaves :: proc(
 // last child becomes the rightmost); capacity is exact byte arithmetic — no
 // trial builds. A lone child always fits (~16 bytes), so every chunk is
 // non-empty. handles must be non-empty (the caller routes the empty index
-// to vacuum_empty_text_root).
+// to vacuum_empty_text_root). Structural twin of vacuum_build_interiors,
+// deliberately unmerged: the capacity rule (byte sums vs FOR arithmetic),
+// key types ([]u8 vs Row_ID), and build calls differ in nearly every line —
+// only the level-loop scaffolding is shared.
 @(private = "file")
 vacuum_build_text_interiors :: proc(
 	t: ^Tree,
@@ -779,7 +785,10 @@ bulk_pack_text_level :: proc(
 }
 
 // bulk_build_text_interiors packs text node levels bottom-up until one root
-// remains (right-min separators throughout).
+// remains (right-min separators throughout). Twin of bulk_build_interiors
+// above, deliberately unmerged: Bulk_Node keys are Row_ID while
+// Text_Node_Handle keys are []u8, so a parametric merge needs an id-accessor
+// parameter that costs more than the 9-line loop it would share.
 @(private = "file")
 bulk_build_text_interiors :: proc(t: ^Tree, nodes: [dynamic]Text_Node_Handle) -> (u32, Error) {
 	level := nodes

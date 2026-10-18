@@ -294,6 +294,32 @@ write_skip_page :: proc(t: ^Tree, entries: []Skip_Entry, col_index: int) -> (Ski
 	return Skip_Index{root = page.page_num}, .None
 }
 
+// parse_skip_entries validates a skip-index page buffer and returns its
+// zone entries for col_index: magic, column, and size guards in one place.
+// The slice borrows the caller's pinned page (same lifetime rule as the
+// inline guards it replaces — unpin after last use).
+parse_skip_entries :: proc(data: []u8, col_index: int) -> ([]Skip_Entry, bool) {
+	if len(data) < 12 {
+		return nil, false
+	}
+
+	magic := endian.unchecked_get_u32le(data[0:4])
+	if magic != SKIP_FORMAT_MAGIC {
+		return nil, false
+	}
+
+	count := int(endian.unchecked_get_u32le(data[4:8]))
+	if int(endian.unchecked_get_u32le(data[8:12])) != col_index {
+		return nil, false
+	}
+
+	need := 12 + count * size_of(Skip_Entry)
+	if len(data) < need {
+		return nil, false
+	}
+	return transmute([]Skip_Entry)data[12:need], true
+}
+
 // query_skip_index_range returns a conservative page window [start, end] for
 // `col_index <op> val` (start = first leaf to scan, end = last leaf to scan;
 // 0 = unbounded). The window is a superset of every matching row, so applying
@@ -317,30 +343,14 @@ query_skip_index_range :: proc(
 	if err != .None {
 		return 0, 0, false
 	}
-	
+
 	defer pager.unpin_page(p, skip_root)
-	data := pg.data
-	if len(data) < 12 {
+	entries, entries_ok := parse_skip_entries(pg.data, col_index)
+	if !entries_ok {
 		return 0, 0, false
 	}
 
-	magic := endian.unchecked_get_u32le(data[0:4])
-	if magic != SKIP_FORMAT_MAGIC {
-		return 0, 0, false
-	}
-
-	count := int(endian.unchecked_get_u32le(data[4:8]))
-	if int(endian.unchecked_get_u32le(data[8:12])) != col_index {
-		return 0, 0, false
-	}
-
-	need := 12 + count * size_of(Skip_Entry)
-	if len(data) < need {
-		return 0, 0, false
-	}
-
-	entries := transmute([]Skip_Entry)data[12:need]
-	lo, hi := 0, count - 1
+	lo, hi := 0, len(entries) - 1
 	for lo <= hi {
 		mid := (lo + hi) / 2
 		if entries[mid].min_int <= val {
@@ -371,14 +381,14 @@ query_skip_index_range :: proc(
 		}
 		return 0, entries[hi].page_max, true
 	case .GT:
-		for i in 0 ..< count {
+		for i in 0 ..< len(entries) {
 			if entries[i].max_int > val {
 				return entries[i].page_min, 0, true
 			}
 		}
 		return 0, 0, false
 	case .GTE:
-		for i in 0 ..< count {
+		for i in 0 ..< len(entries) {
 			if entries[i].max_int >= val {
 				return entries[i].page_min, 0, true
 			}

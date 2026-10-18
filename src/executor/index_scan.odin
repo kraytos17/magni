@@ -84,6 +84,23 @@ index_cond_column_ok :: proc(
 	return qual == tbl_name || (tbl_alias != "" && qual == tbl_alias)
 }
 
+// cond_text_rhs extracts a condition's TEXT literal rhs: the shared
+// precondition behind the EQUALS and LIKE index arms (non-TEXT and
+// non-literal rhs never route to a text index).
+@(private = "file")
+cond_text_rhs :: proc(cond: parser.Condition) -> (string, bool) {
+	val, is_val := cond.rhs.(types.Value)
+	if !is_val {
+		return "", false
+	}
+
+	s, is_text := val.(string)
+	if !is_text {
+		return "", false
+	}
+	return s, true
+}
+
 // index_use_of_cond classifies one raw COND against the indexed column.
 // Negated, column-comparison (rhs is a column ref, not a Value), NULL and
 // non-TEXT literals all fall through (same result via the full scan, one
@@ -113,23 +130,14 @@ index_use_of_cond :: proc(
 		return {}, false
 	}
 	if cond.operator == .EQUALS {
-		val, is_val := cond.rhs.(types.Value)
-		if !is_val {
-			return {}, false
-		}
-		if s, is_text := val.(string); is_text {
+		if s, is_text := cond_text_rhs(cond); is_text {
 			return Index_Plan{use = .Eq, root = index_root, column = index_column, eq_text = s},
 				true
 		}
 		return {}, false
 	}
 	if cond.operator == .LIKE {
-		val, is_val := cond.rhs.(types.Value)
-		if !is_val {
-			return {}, false
-		}
-
-		pat, is_text := val.(string)
+		pat, is_text := cond_text_rhs(cond)
 		if !is_text {
 			return {}, false
 		}
@@ -435,6 +443,27 @@ index_candidate_multi :: proc(
 	return acc, true
 }
 
+// candidate_lookup_eq appends one key's rowids for Eq/In candidate plans.
+// Lifted from index_candidate_single's nested closure (it captures nothing);
+// the Prefix arm keeps its inline lookup (different btree entry point).
+@(private = "file")
+candidate_lookup_eq :: proc(
+	idx_tree: ^btree.Tree,
+	root: u32,
+	text: string,
+	out: ^[dynamic]types.Row_ID,
+	table_name: string,
+) -> bool {
+	found, find_err := btree.text_find_rowids(idx_tree, root, transmute([]u8)text)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table_name)
+		return false
+	}
+
+	append(out, ..found)
+	return true
+}
+
 // index_candidate_single runs one Eq/Prefix/In plan's btree lookups.
 // Unsorted, may contain duplicates (IN overlap); the caller sorts.
 @(private = "file")
@@ -449,26 +478,9 @@ index_candidate_single :: proc(
 ) {
 	idx_tree := btree.init(t.pager, plan.root)
 	out := make([dynamic]types.Row_ID, 0, 8, allocator)
-	lookup_eq :: proc(
-		idx_tree: ^btree.Tree,
-		root: u32,
-		text: string,
-		out: ^[dynamic]types.Row_ID,
-		table_name: string,
-	) -> bool {
-		found, find_err := btree.text_find_rowids(idx_tree, root, transmute([]u8)text)
-		if find_err != .None {
-			log.errorf("Error: Failed to search index for '%s'", table_name)
-			return false
-		}
-
-		append(out, ..found)
-		return true
-	}
-
 	#partial switch plan.use {
 	case .Eq:
-		if !lookup_eq(&idx_tree, plan.root, plan.eq_text, &out, table.name) {
+		if !candidate_lookup_eq(&idx_tree, plan.root, plan.eq_text, &out, table.name) {
 			delete(out)
 			return nil, false
 		}
@@ -483,7 +495,7 @@ index_candidate_single :: proc(
 		append(&out, ..found)
 	case .In:
 		for s in plan.in_texts {
-			if !lookup_eq(&idx_tree, plan.root, s, &out, table.name) {
+			if !candidate_lookup_eq(&idx_tree, plan.root, s, &out, table.name) {
 				delete(out)
 				return nil, false
 			}
@@ -716,6 +728,55 @@ Covering_Pair :: struct {
 	val: string,
 }
 
+// covering_emit_eq emits the (rowid,text) pairs for one index key lookup.
+@(private = "file")
+covering_emit_eq :: proc(
+	t: ^btree.Tree,
+	table: ^types.Table,
+	root: u32,
+	text: string,
+	out: ^[dynamic]Covering_Pair,
+	allocator := context.allocator,
+) -> bool {
+	idx_tree := btree.init(t.pager, root)
+	found, find_err := btree.text_find_rowids(&idx_tree, root, transmute([]u8)text)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table.name)
+		return false
+	}
+	for rid in found {
+		append(out, Covering_Pair{rid = rid, val = text})
+	}
+	return true
+}
+
+// covering_emit_plan emits the pairs for one Eq/In plan node: single lookup
+// for Eq, one per member for In. False on lookup failure or any other shape
+// (Prefix/And route elsewhere) — the shared arm behind covering_pairs'
+// top level and its Or members.
+@(private = "file")
+covering_emit_plan :: proc(
+	t: ^btree.Tree,
+	table: ^types.Table,
+	sub: Index_Plan,
+	out: ^[dynamic]Covering_Pair,
+	allocator := context.allocator,
+) -> bool {
+	#partial switch sub.use {
+	case .Eq:
+		return covering_emit_eq(t, table, sub.root, sub.eq_text, out, allocator)
+	case .In:
+		for s in sub.in_texts {
+			if !covering_emit_eq(t, table, sub.root, s, out, allocator) {
+				return false
+			}
+		}
+		return true
+	case:
+		return false
+	}
+}
+
 // covering_pairs resolves a known-values covering plan to (rowid, text)
 // pairs, one per matching row. Sorted by rowid (scan emission order),
 // deduplicated (duplicate IN members).
@@ -730,60 +791,14 @@ covering_pairs :: proc(
 	bool,
 ) {
 	out := make([dynamic]Covering_Pair, 0, 8, allocator)
-	emit :: proc(
-		t: ^btree.Tree,
-		table: ^types.Table,
-		root: u32,
-		text: string,
-		out: ^[dynamic]Covering_Pair,
-		allocator := context.allocator,
-	) -> bool {
-		idx_tree := btree.init(t.pager, root)
-		found, find_err := btree.text_find_rowids(&idx_tree, root, transmute([]u8)text)
-		if find_err != .None {
-			log.errorf("Error: Failed to search index for '%s'", table.name)
-			return false
-		}
-		for rid in found {
-			append(out, Covering_Pair{rid = rid, val = text})
-		}
-		return true
-	}
-
-	#partial switch plan.use {
-	case .Eq:
-		if !emit(t, table, plan.root, plan.eq_text, &out, allocator) {
-			delete(out)
-			return nil, false
-		}
-	case .In:
-		for s in plan.in_texts {
-			if !emit(t, table, plan.root, s, &out, allocator) {
-				delete(out)
-				return nil, false
-			}
-		}
-	case .Or:
+	if plan.use == .Or {
 		for sub in plan.subs {
-			#partial switch sub.use {
-			case .Eq:
-				if !emit(t, table, sub.root, sub.eq_text, &out, allocator) {
-					delete(out)
-					return nil, false
-				}
-			case .In:
-				for s in sub.in_texts {
-					if !emit(t, table, sub.root, s, &out, allocator) {
-						delete(out)
-						return nil, false
-					}
-				}
-			case:
+			if !covering_emit_plan(t, table, sub, &out, allocator) {
 				delete(out)
 				return nil, false
 			}
 		}
-	case:
+	} else if !covering_emit_plan(t, table, plan, &out, allocator) {
 		delete(out)
 		return nil, false
 	}

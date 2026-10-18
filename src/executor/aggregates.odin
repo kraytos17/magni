@@ -480,6 +480,29 @@ group_key_hash :: proc(values: []types.Value, indices: []int) -> u64 {
 	return types.hash(values, indices)
 }
 
+@(private = "file")
+cmp_i64 :: #force_inline proc "contextless" (x, y: i64) -> int {
+	if x < y {
+		return -1
+	}
+	if x > y {
+		return 1
+	}
+	return 0
+}
+
+@(private = "file")
+@(fast_math = {.No_NaNs, .No_Infs, .No_Signed_Zeros})
+cmp_f64 :: #force_inline proc "contextless" (x, y: f64) -> int {
+	if x < y {
+		return -1
+	}
+	if x > y {
+		return 1
+	}
+	return 0
+}
+
 // compare_values orders two values for sorting/grouping/dedup: NULLs
 // compare below everything (null-vs-null is 0); numerics compare by value
 // across int/float; text and blobs compare byte-wise. Cross-type pairs
@@ -503,45 +526,20 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 	if ra != rb {
 		return -1 if ra < rb else 1
 	}
-
 	#partial switch va in a {
 	case i64:
 		#partial switch vb in b {
 		case i64:
-			if va < vb {
-				return -1
-			}
-			if va > vb {
-				return 1
-			}
-			return 0
+			return cmp_i64(va, vb)
 		case f64:
-			if f64(va) < vb {
-				return -1
-			}
-			if f64(va) > vb {
-				return 1
-			}
-			return 0
+			return cmp_f64(f64(va), vb)
 		}
 	case f64:
 		#partial switch vb in b {
 		case f64:
-			if va < vb {
-				return -1
-			}
-			if va > vb {
-				return 1
-			}
-			return 0
+			return cmp_f64(va, vb)
 		case i64:
-			if va < f64(vb) {
-				return -1
-			}
-			if va > f64(vb) {
-				return 1
-			}
-			return 0
+			return cmp_f64(va, f64(vb))
 		}
 	case string:
 		if vb, ok := b.(string); ok {

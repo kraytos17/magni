@@ -54,7 +54,7 @@ def cmd_help(_args: argparse.Namespace) -> None:
   VET
     magni.py vet                fast vet (odin check, full flags)
     magni.py vet --all          LLVM vet via build+test (strict, shadowing)
-    magni.py vet --shadowing|--unused|--style|--cast|--semicolon
+    magni.py vet --shadowing|--unused|--style|--cast|--semicolon|--tabs|--do
 
   FUZZ
     magni.py fuzz run [-- --extra args]   interactive AFL++ campaign
@@ -134,6 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--style", dest="flags", action="append_const", const="style")
     pv.add_argument("--cast", dest="flags", action="append_const", const="cast")
     pv.add_argument("--semicolon", dest="flags", action="append_const", const="semicolon")
+    pv.add_argument("--tabs", dest="flags", action="append_const", const="tabs")
+    pv.add_argument("--do", dest="flags", action="append_const", const="do")
     pv.set_defaults(func=cmd_vet)
 
     # fuzz

@@ -912,6 +912,45 @@ text_descend_to_leaf :: proc(
 	return leaf_id, .None
 }
 
+// text_drill_leftmost descends from child to its leftmost leaf, recording
+// the spine in path. The shared drill behind text_advance_path's carry
+// step: every loaded node is unpinned on all paths, so pin discipline is
+// identical to the inline loop it replaces.
+@(private = "file")
+text_drill_leftmost :: proc(
+	t: ^Tree,
+	child: u32,
+	path: ^[dynamic]Text_Path_Item,
+) -> (
+	leaf: u32,
+	ok: bool,
+) {
+	curr := child
+	for {
+		dnode, d_err := load_node(t, curr)
+		if d_err != .None {
+			return 0, false
+		}
+		if is_leaf(dnode) {
+			unpin_node(t, dnode)
+			return curr, true
+		}
+		if dnode.header.page_type != .TEXT_INTERIOR {
+			unpin_node(t, dnode)
+			return 0, false
+		}
+
+		leftmost, dl_err := text_interior_child_at(dnode.data, Page_Id(dnode.id), 0)
+		unpin_node(t, dnode)
+		if dl_err != .None {
+			return 0, false
+		}
+
+		append(path, Text_Path_Item{page_id = curr, child_idx = 0})
+		curr = leftmost
+	}
+}
+
 // text_advance_path moves the recorded path to the next leaf rightward
 // (sibling-or-carry), drilling down its leftmost leaf. Returns 0 past the
 // last leaf.
@@ -934,31 +973,7 @@ text_advance_path :: proc(t: ^Tree, path: ^[dynamic]Text_Path_Item) -> (next: u3
 			}
 
 			unpin_node(t, node)
-			// Drill down the leftmost spine, recording it.
-			curr := child
-			for {
-				dnode, d_err := load_node(t, curr)
-				if d_err != .None {
-					return 0, false
-				}
-				if is_leaf(dnode) {
-					unpin_node(t, dnode)
-					return curr, true
-				}
-				if dnode.header.page_type != .TEXT_INTERIOR {
-					unpin_node(t, dnode)
-					return 0, false
-				}
-
-				leftmost, dl_err := text_interior_child_at(dnode.data, Page_Id(dnode.id), 0)
-				unpin_node(t, dnode)
-				if dl_err != .None {
-					return 0, false
-				}
-
-				append(path, Text_Path_Item{page_id = curr, child_idx = 0})
-				curr = leftmost
-			}
+			return text_drill_leftmost(t, child, path)
 		}
 
 		unpin_node(t, node)

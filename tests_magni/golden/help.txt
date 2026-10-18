@@ -21,7 +21,7 @@ MagniDB — magni.py help
   VET
     magni.py vet                fast vet (odin check, full flags)
     magni.py vet --all          LLVM vet via build+test (strict, shadowing)
-    magni.py vet --shadowing|--unused|--style|--cast|--semicolon
+    magni.py vet --shadowing|--unused|--style|--cast|--semicolon|--tabs|--do
 
   FUZZ
     magni.py fuzz run [-- --extra args]   interactive AFL++ campaign

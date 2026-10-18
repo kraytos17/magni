@@ -35,70 +35,96 @@ checkpoint :: proc(database: ^db.Database) -> db.DB_Error {
 // vacuum rebuilds every table's B-tree into fresh, densely packed pages
 // (COW-safe: old pages stay readable by snapshots and are reclaimed by the next
 // GC pass). This reclaims space lost to deletes that do not merge leaves.
+// vacuum_publish_pending publishes in-txn staged roots before the rebuild
+// reads them: vacuum resolves tables from the committed schema tree and
+// would otherwise rebuild (and clobber) pre-txn roots.
+vacuum_publish_pending :: proc(database: ^db.Database, st: ^btree.Tree) -> db.DB_Error {
+	if len(database.txn_pending.roots) == 0 && len(database.txn_pending.index_roots) == 0 {
+		return .None
+	}
+	for name, root in database.txn_pending.roots {
+		nr, ok := schema.update_root_page_cow(st, name, root)
+		if !ok {
+			return .Corrupted
+		}
+		st.root = nr
+	}
+	for name, stages in database.txn_pending.index_roots {
+		for stg in stages {
+			nr, ok := schema.update_index_root_cow(st, name, stg.name, stg.root)
+			if !ok {
+				return .Corrupted
+			}
+			st.root = nr
+		}
+	}
+
+	database.schema_root_page = st.root
+	executor.pending_clear(&database.txn_pending)
+	return .None
+}
+
+// vacuum_rebuild_table rebuilds one table plus its text indexes into fresh,
+// packed pages and publishes the new roots to the schema tree. Returns the
+// table's latest root for the caller's root threading.
+vacuum_rebuild_table :: proc(
+	database: ^db.Database,
+	st: ^btree.Tree,
+	table: types.Table,
+) -> (
+	new_root: u32,
+	err: db.DB_Error,
+) {
+	table_tree := btree.init(database.pager, table.root_page)
+	vac_root, v_err := btree.tree_vacuum(&table_tree)
+	if v_err != .None {
+		return 0, .Corrupted
+	}
+
+	updated_root, up_ok := schema.update_root_page_cow(st, table.name, vac_root)
+	if !up_ok {
+		return 0, .Corrupted
+	}
+
+	st.root = updated_root
+	for def in table.indexes {
+		if def.root == 0 {
+			continue
+		}
+
+		idx_tree := btree.init(database.pager, def.root)
+		vac_idx, vac_err := btree.text_tree_vacuum(&idx_tree)
+		if vac_err != .None {
+			return 0, .Corrupted
+		}
+
+		updated_idx, idx_ok := schema.update_index_root_cow(st, table.name, def.name, vac_idx)
+		if !idx_ok {
+			return 0, .Corrupted
+		}
+
+		st.root = updated_idx
+		updated_root = updated_idx
+	}
+	return updated_root, .None
+}
+
 vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 	db.db_check(database) or_return
 	sync.lock(&database.mu)
 	defer sync.unlock(&database.mu)
 
 	st := db.Schema_Tree(database)
-	// In-txn staged roots must be published before the rebuild reads them:
-	// vacuum resolves tables from the committed schema tree and would
-	// otherwise rebuild (and clobber) pre-txn roots.
-	if len(database.txn_pending.roots) > 0 || len(database.txn_pending.index_roots) > 0 {
-		for name, root in database.txn_pending.roots {
-			nr, ok := schema.update_root_page_cow(&st, name, root)
-			if !ok {
-				return .Corrupted
-			}
-			st.root = nr
-		}
-		for name, stages in database.txn_pending.index_roots {
-			for stg in stages {
-				nr, ok := schema.update_index_root_cow(&st, name, stg.name, stg.root)
-				if !ok {
-					return .Corrupted
-				}
-				st.root = nr
-			}
-		}
-
-		database.schema_root_page = st.root
-		executor.pending_clear(&database.txn_pending)
+	if perr := vacuum_publish_pending(database, &st); perr != .None {
+		return perr
 	}
 
 	tables := schema.list_tables(&st, context.temp_allocator)
 	new_root := st.root
 	for table in tables {
-		table_tree := btree.init(database.pager, table.root_page)
-		vac_root, v_err := btree.tree_vacuum(&table_tree)
-		if v_err != .None {
-			return .Corrupted
-		}
-
-		updated_root, up_ok := schema.update_root_page_cow(&st, table.name, vac_root)
-		if !up_ok {
-			return .Corrupted
-		}
-
-		st.root = updated_root
-		for def in table.indexes {
-			if def.root == 0 {
-				continue
-			}
-
-			idx_tree := btree.init(database.pager, def.root)
-			vac_idx, vac_err := btree.text_tree_vacuum(&idx_tree)
-			if vac_err != .None {
-				return .Corrupted
-			}
-
-			updated_idx, idx_ok := schema.update_index_root_cow(&st, table.name, def.name, vac_idx)
-			if !idx_ok {
-				return .Corrupted
-			}
-
-			st.root = updated_idx
-			updated_root = updated_idx
+		updated_root, r_err := vacuum_rebuild_table(database, &st, table)
+		if r_err != .None {
+			return r_err
 		}
 		new_root = updated_root
 	}

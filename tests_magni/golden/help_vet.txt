@@ -1,5 +1,5 @@
 usage: magni.py vet [-h] [--all] [--shadowing] [--unused] [--style] [--cast]
-                    [--semicolon]
+                    [--semicolon] [--tabs] [--do]
 
 options:
   -h, --help   show this help message and exit
@@ -9,3 +9,5 @@ options:
   --style
   --cast
   --semicolon
+  --tabs
+  --do

@@ -114,12 +114,39 @@ join_match_compare :: proc(a, b: types.Value) -> bool {
 	return types.value_compare(a, b)
 }
 
+// join_emit_unmatched emits the NULL-extended rows for outer joins: left
+// rows (or right rows) with no hash match during the probe. The matched
+// sets arrive already oriented to left/right by the caller.
+@(private = "file")
+join_emit_unmatched :: proc(
+	left, right: Join_Side,
+	matched_left, matched_right: map[int]bool,
+	outer: Join_Outer,
+	new_rows: ^[dynamic]Row_Entry,
+) {
+	if outer.left {
+		for li in 0 ..< len(left.rows) {
+			if li in matched_left {
+				continue
+			}
+			join_emit_null_row(left.rows[li], right.width, new_rows)
+		}
+	}
+	if outer.right {
+		for ri in 0 ..< len(right.rows) {
+			if ri in matched_right {
+				continue
+			}
+			join_emit_null_left_row(right.rows[ri], left.width, new_rows)
+		}
+	}
+}
+
 // join_hash_probe is the shared hash-join engine: key_of fingerprints one
 // key value (false = skip this row); verify confirms a fingerprint hit.
 // The smaller side is built into the bucket table; the other probes it.
 // Integer keys use the identity fingerprint (no verification); all other
 // types hash with value_compare verification on hits.
-@(private = "file")
 join_hash_probe :: proc(
 	left, right: Join_Side,
 	outer: Join_Outer,
@@ -127,7 +154,6 @@ join_hash_probe :: proc(
 	verify: proc(a, b: types.Value) -> bool,
 	new_rows: ^[dynamic]Row_Entry,
 ) {
-	// Defensive: avoid OOB if a future caller bypasses the try_hash_join guard.
 	if left.col < 0 || left.col >= left.width || right.col < 0 || right.col >= right.width {
 		return
 	}
@@ -182,22 +208,7 @@ join_hash_probe :: proc(
 	delete(ht)
 	matched_left := matched_build if build_left else matched_probe
 	matched_right := matched_probe if build_left else matched_build
-	if outer.left {
-		for li in 0 ..< len(left.rows) {
-			if li in matched_left {
-				continue
-			}
-			join_emit_null_row(left.rows[li], right.width, new_rows)
-		}
-	}
-	if outer.right {
-		for ri in 0 ..< len(right.rows) {
-			if ri in matched_right {
-				continue
-			}
-			join_emit_null_left_row(right.rows[ri], left.width, new_rows)
-		}
-	}
+	join_emit_unmatched(left, right, matched_left, matched_right, outer, new_rows)
 
 	delete(matched_build)
 	delete(matched_probe)

@@ -834,6 +834,19 @@ parse_select :: proc(
 		true
 }
 
+// parse_count_literal parses one `LIMIT n` / `OFFSET m` number token: the
+// shared expect-NUMBER + parse-u64 + error tail behind both arms below.
+@(private = "file")
+parse_count_literal :: proc(p: ^Parser, err_msg: string) -> (v: u64, ok: bool) {
+	tok := expect(p, .NUMBER) or_return
+	nv, nv_ok := strconv.parse_u64(tok.lexeme)
+	if !nv_ok {
+		err(p, err_msg)
+		return 0, false
+	}
+	return nv, true
+}
+
 // parse_order_limit parses a trailing `ORDER BY ... LIMIT n OFFSET m` clause.
 // Used by both single SELECTs and compound (set-operation) statements.
 @(private = "file")
@@ -882,19 +895,15 @@ parse_order_limit :: proc(
 		order_by = order_cols[:]
 	}
 	if match(p, .LIMIT) {
-		limit_token := expect(p, .NUMBER) or_return
-		lv, lu_ok := strconv.parse_u64(limit_token.lexeme)
+		lv, lu_ok := parse_count_literal(p, "LIMIT must be a non-negative integer")
 		if !lu_ok {
-			err(p, "LIMIT must be a non-negative integer")
 			return {}, {}, {}, false
 		}
 
 		limit = lv
 		if match(p, .OFFSET) {
-			offset_token := expect(p, .NUMBER) or_return
-			ov, ou_ok := strconv.parse_u64(offset_token.lexeme)
+			ov, ou_ok := parse_count_literal(p, "OFFSET must be a non-negative integer")
 			if !ou_ok {
-				err(p, "OFFSET must be a non-negative integer")
 				return {}, {}, {}, false
 			}
 			offset = ov

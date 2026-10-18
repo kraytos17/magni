@@ -331,31 +331,38 @@ dot_cmd_stats :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -
 	return false
 }
 
+// dot_txn runs one transactional dot-command (begin/commit/rollback):
+// the shared "announce on success" tail behind the three one-line wrappers.
+@(private = "file")
+dot_txn :: proc(
+	database: ^db.Database,
+	op: proc(_: ^db.Database) -> db.DB_Error,
+	done_msg: string,
+) -> (
+	exit: bool,
+) {
+	if op(database) == .None {
+		fmt.println(done_msg)
+	}
+	return false
+}
+
 // .begin: opens an explicit transaction.
 @(private = "file")
 dot_cmd_begin :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if db.begin(database) == .None {
-		fmt.println("Transaction started.")
-	}
-	return false
+	return dot_txn(database, db.begin, "Transaction started.")
 }
 
 // .commit: commits the explicit transaction.
 @(private = "file")
 dot_cmd_commit :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if db.commit(database) == .None {
-		fmt.println("Transaction committed.")
-	}
-	return false
+	return dot_txn(database, db.commit, "Transaction committed.")
 }
 
 // .rollback: rolls back the explicit transaction.
 @(private = "file")
 dot_cmd_rollback :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if db.rollback(database) == .None {
-		fmt.println("Transaction rolled back.")
-	}
-	return false
+	return dot_txn(database, db.rollback, "Transaction rolled back.")
 }
 
 // .snapshots: lists the snapshot chain via admin.
@@ -532,12 +539,19 @@ dot_cmd_rollforward :: proc(
 	return false
 }
 
-// .dump <table>: prints all rows via admin; usage unless exactly one arg.
+// dot_table_arg runs a dot-command taking one table-name argument
 @(private = "file")
-dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+dot_table_arg :: proc(
+	database: ^db.Database,
+	args: string,
+	cmd: ^Dot_Command,
+	op: proc(_: ^db.Database, _: string) -> db.DB_Error,
+) -> (
+	exit: bool,
+) {
 	parts := strings.split(args, " ", context.temp_allocator)
 	if len(parts) == 2 {
-		if err := admin.dump_table(database, parts[1]); err != .None {
+		if err := op(database, parts[1]); err != .None {
 			log.errorf("%s", db.db_error_string(err))
 		}
 	} else {
@@ -546,19 +560,17 @@ dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) ->
 	return false
 }
 
+// .dump <table>: prints all rows via admin; usage unless exactly one arg.
+@(private = "file")
+dot_cmd_dump :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+	return dot_table_arg(database, args, cmd, admin.dump_table)
+}
+
 // .desc <table>: prints column definitions via admin; usage unless exactly
 // one arg.
 @(private = "file")
 dot_cmd_desc :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	parts := strings.split(args, " ", context.temp_allocator)
-	if len(parts) == 2 {
-		if err := admin.describe_table(database, parts[1]); err != .None {
-			log.errorf("%s", db.db_error_string(err))
-		}
-	} else {
-		fmt.println(cmd.usage)
-	}
-	return false
+	return dot_table_arg(database, args, cmd, admin.describe_table)
 }
 
 // Exact-match commands (full input line must equal name).

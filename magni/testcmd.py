@@ -52,6 +52,8 @@ VET_FLAG_MAP = {
     "style": "-vet-style",
     "cast": "-vet-cast",
     "semicolon": "-vet-semicolon",
+    "tabs": "-vet-tabs",
+    "do": "-disallow-do",
 }
 
 
@@ -66,6 +68,8 @@ def cmd_vet(args: argparse.Namespace) -> None:
                 *config.COLLECTIONS,
                 "-vet",
                 "-vet-shadowing",
+                "-vet-tabs",
+                "-disallow-do",
                 "-warnings-as-errors",
                 "-strict-style",
                 "-out:/dev/null",
@@ -79,6 +83,8 @@ def cmd_vet(args: argparse.Namespace) -> None:
                 *config.COLLECTIONS,
                 "-vet",
                 "-vet-shadowing",
+                "-vet-tabs",
+                "-disallow-do",
                 "-warnings-as-errors",
                 "-strict-style",
                 "-define:ODIN_TEST_THREADS=1",
@@ -87,8 +93,8 @@ def cmd_vet(args: argparse.Namespace) -> None:
     else:
         flags = [VET_FLAG_MAP[f] for f in (args.flags or []) if f in VET_FLAG_MAP]
         if not flags:
-            flags = ["-vet", "-vet-shadowing"]
-        extra = ["-strict-style"] if not args.flags else []
+            flags = ["-vet", "-vet-shadowing", "-vet-tabs"]
+        extra = ["-strict-style", "-disallow-do"] if not args.flags else []
         run(
             [
                 config.ODIN,

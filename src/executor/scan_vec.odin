@@ -241,6 +241,59 @@ clone_full_row :: proc(
 	return vals, true
 }
 
+// vec_needed_mask resolves the decode mask for the vector scan: filter
+// columns from the resolved plan plus sort keys plus the projection (see
+// scan_table_vec), extended to MAX_COLS with true so over-wide rows decode
+// exactly like the scalar path instead of Null-filling the excess.
+vec_needed_mask :: proc(
+	filter_root: ^Resolved_Node,
+	proj_indices: []int,
+	sort_indices: []int,
+	total_cols: int,
+	allocator := context.allocator,
+) -> []bool {
+	needed := collect_needed_cols(filter_root, proj_indices, sort_indices, total_cols, allocator)
+	ext := make([]bool, types.MAX_COLS, allocator)
+	for i in 0 ..< total_cols {
+		ext[i] = needed[i]
+	}
+	for i in total_cols ..< types.MAX_COLS {
+		ext[i] = true
+	}
+	return ext
+}
+
+// vec_projection resolves the vector scan's output shape. Fused projection
+// is valid only without ORDER BY (finish_select sorts full rows before
+// projecting, so out-of-projection sort keys must survive the scan).
+vec_projection :: proc(
+	stmt: parser.Select_Stmt,
+	columns: []types.Column,
+	proj_indices: []int,
+	has_order: bool,
+	total_cols: int,
+	allocator := context.allocator,
+) -> (
+	proj_cols: []types.Column,
+	fused: bool,
+	out_width: int,
+) {
+	fused = !has_order && len(stmt.columns) > 0
+	out_width = total_cols if !fused else len(proj_indices)
+	if fused {
+		proj_cols = make([]types.Column, len(proj_indices), allocator)
+		for idx, i in proj_indices {
+			proj_cols[i] = columns[idx]
+			if i < len(stmt.aliases) && stmt.aliases[i] != "" {
+				proj_cols[i].name = stmt.aliases[i]
+			}
+		}
+	} else {
+		proj_cols = columns
+	}
+	return proj_cols, fused, out_width
+}
+
 // scan_table_vec is the vector counterpart of scan_table: same plan
 // construction (shared build_scan_plan, so skip bounds, LIMIT pushdown
 // counting, and filter resolution cannot diverge), same row order, same
@@ -311,18 +364,7 @@ scan_table_vec :: proc(
 		filter_root = f.root
 	}
 
-	needed := collect_needed_cols(filter_root, proj_indices, sort_indices, total_cols, allocator)
-	// Extend to MAX_COLS with true: a row whose serial count exceeds the
-	// table width (schema drift, impossible mid-statement) then decodes
-	// exactly like the scalar path instead of Null-filling the excess.
-	ext := make([]bool, types.MAX_COLS, allocator)
-	for i in 0 ..< total_cols {
-		ext[i] = needed[i]
-	}
-	for i in total_cols ..< types.MAX_COLS {
-		ext[i] = true
-	}
-
+	ext := vec_needed_mask(filter_root, proj_indices, sort_indices, total_cols, allocator)
 	r := make([dynamic]Row_Entry, allocator)
 	cursor, cursor_ok := vec_seek_cursor(tree, plan, allocator)
 	if !cursor_ok {
@@ -330,24 +372,14 @@ scan_table_vec :: proc(
 	}
 
 	defer btree.cursor_destroy(&cursor)
-	// Fused projection: valid only without ORDER BY. finish_select sorts
-	// full rows before projecting (so out-of-projection sort keys
-	// resolve); projecting first would silently drop them. With ORDER BY
-	// the scan stays full-width and finish_select runs unchanged.
-	fused := !has_order && len(stmt.columns) > 0
-	out_width := total_cols if !fused else len(proj_indices)
-	proj_cols: []types.Column
-	if fused {
-		proj_cols = make([]types.Column, len(proj_indices), allocator)
-		for idx, i in proj_indices {
-			proj_cols[i] = table.columns[idx]
-			if i < len(stmt.aliases) && stmt.aliases[i] != "" {
-				proj_cols[i].name = stmt.aliases[i]
-			}
-		}
-	} else {
-		proj_cols = table.columns
-	}
+	proj_cols, fused, out_width := vec_projection(
+		stmt,
+		table.columns,
+		proj_indices,
+		has_order,
+		total_cols,
+		allocator,
+	)
 
 	row_buf: [types.MAX_COLS]types.Value
 	for cursor.is_valid {
