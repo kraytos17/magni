@@ -423,9 +423,11 @@ reorder_insert_values :: proc(
 }
 
 // assign_insert_rowid resolves a row's rowid: explicit integer PKs win;
-// otherwise max+1. next_id threads a running maximum across a multi-row
-// batch on a static tree, reproducing the sequential assignment the row
-// loop gets from re-reading the advancing tree.
+// otherwise max+1. Only an INTEGER PK aliases the rowid — other PK types
+// store verbatim with an auto rowid (never overwritten). next_id threads
+// a running maximum across a multi-row batch on a static tree, reproducing
+// the sequential assignment the row loop gets from re-reading the
+// advancing tree.
 @(private = "file")
 assign_insert_rowid :: proc(
 	table: types.Table,
@@ -434,9 +436,10 @@ assign_insert_rowid :: proc(
 	root_page: u32,
 	next_id: ^types.Row_ID = nil,
 ) -> types.Row_ID {
+	pk_idx, has_pk := schema.get_pk_column(table.columns)
+	pk_is_int := has_pk && table.columns[pk_idx].type == .INTEGER
 	if next_id != nil {
-		pk_idx, has_pk := schema.get_pk_column(table.columns)
-		if has_pk {
+		if pk_is_int {
 			if val, is_int := values[pk_idx].(i64); is_int {
 				id := types.Row_ID(val)
 				if id > next_id^ {
@@ -448,15 +451,14 @@ assign_insert_rowid :: proc(
 
 		next_id^ += 1
 		id := next_id^
-		if has_pk {
+		if pk_is_int {
 			values[pk_idx] = types.value(i64(id))
 		}
 		return id
 	}
 
 	table_tree := btree.init(t.pager, root_page)
-	pk_idx, has_pk := schema.get_pk_column(table.columns)
-	if has_pk {
+	if pk_is_int {
 		if val, is_int := values[pk_idx].(i64); is_int {
 			return types.Row_ID(val)
 		}

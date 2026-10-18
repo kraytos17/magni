@@ -1,9 +1,11 @@
+// Slotdir btree tests: CRUD, splits, cursors, COW persistence, and page
+// accessor moves over a real pager. File-backed (test_*.db); contexts
+// come from setup_tree and must go through teardown_tree.
 package tests
 
 import "core:fmt"
 import "core:mem"
 import "core:os"
-import "core:strings"
 import "core:testing"
 import "src:btree"
 import "src:cell"
@@ -27,15 +29,11 @@ setup_tree_with :: proc(
 	page_kind: string,
 	init_root: proc "contextless" (data: []u8, page_id: u32) -> bool,
 ) -> Test_Context {
-	context.logger.lowest_level = .Error
-	// Owned (heap) filename: tests free_all(temp) mid-run, so a temp string
-	// stashed in ctx would dangle by teardown (this left test_text_*.db
-	// behind). teardown_tree deletes it — same contract as
-	// setup_schema_env / setup_executor_env.
-	filename, _ := strings.clone(fmt.tprintf("%s%s.db", file_prefix, name), context.allocator)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
+	mute_test_logging()
+	// Owned filename via the shared core (temp would dangle across the
+	// mid-run free_all(temp) calls below); teardown_tree drops it.
+	filename := mint_db_filename(file_prefix, name)
+	clean_db_files(filename)
 
 	p, err := pager.open(filename)
 	if err != nil {
@@ -64,20 +62,18 @@ setup_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 	return setup_tree_with(t, name, "test_", "slotdir", btree.init_slot_leaf_page)
 }
 
+// teardown_tree closes the pager (tolerating a nil pager from a failed
+// setup), removes the database and its WAL sidecar, and frees the owned
+// filename.
 teardown_tree :: proc(ctx: ^Test_Context) {
 	if ctx.pager != nil {
 		_ = pager.close(ctx.pager)
 	}
-	if os.exists(ctx.filename) {
-		os.remove(ctx.filename)
-	}
-	wal_name := fmt.tprintf("%s-wal", ctx.filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
-	delete(ctx.filename)
+	drop_db_files(ctx.filename)
 }
 
+// make_large_text builds a wrapping A-Z string of exactly size bytes for
+// overflow and multi-leaf tests.
 make_large_text :: proc(allocator: mem.Allocator, size: int) -> string {
 	data := make([]u8, size, allocator)
 	for i in 0 ..< size {
@@ -88,7 +84,6 @@ make_large_text :: proc(allocator: mem.Allocator, size: int) -> string {
 
 @(test)
 test_basic_operations :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "basic_ops")
 	defer teardown_tree(&ctx)
 
@@ -120,10 +115,9 @@ test_basic_operations :: proc(t: ^testing.T) {
 
 @(test)
 test_persistence :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "persistence")
 	vals := []types.Value{types.value(999)}
-	testing.expect(t, btree.tree_insert(&ctx.tree, 42, vals) == .None, "seed insert succeeds")
+	must_tree_insert(t, &ctx.tree, 42, vals)
 
 	_ = pager.close(ctx.pager)
 	ctx.pager = nil
@@ -148,7 +142,6 @@ test_persistence :: proc(t: ^testing.T) {
 
 @(test)
 test_heavy_split_logic :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "splits")
 	defer teardown_tree(&ctx)
 
@@ -182,7 +175,6 @@ test_heavy_split_logic :: proc(t: ^testing.T) {
 
 @(test)
 test_duplicates :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "duplicates")
 	defer teardown_tree(&ctx)
 
@@ -198,14 +190,13 @@ test_duplicates :: proc(t: ^testing.T) {
 
 @(test)
 test_cursor :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "cursor")
 	defer teardown_tree(&ctx)
 
 	keys := []types.Row_ID{50, 10, 30, 40, 20}
 	for k in keys {
 		vals := []types.Value{types.value(i64(k))}
-		testing.expect(t, btree.tree_insert(&ctx.tree, k, vals) == .None, "seed insert succeeds")
+		must_tree_insert(t, &ctx.tree, k, vals)
 	}
 
 	cursor, err := btree.cursor_start(&ctx.tree)
@@ -243,25 +234,12 @@ test_cursor :: proc(t: ^testing.T) {
 
 @(test)
 test_deletion :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "deletion")
 	defer teardown_tree(&ctx)
 
-	testing.expect(
-		t,
-		btree.tree_insert(&ctx.tree, 1, []types.Value{types.value(1)}) == .None,
-		"seed insert succeeds",
-	)
-	testing.expect(
-		t,
-		btree.tree_insert(&ctx.tree, 2, []types.Value{types.value(2)}) == .None,
-		"seed insert succeeds",
-	)
-	testing.expect(
-		t,
-		btree.tree_insert(&ctx.tree, 3, []types.Value{types.value(3)}) == .None,
-		"seed insert succeeds",
-	)
+	must_tree_insert(t, &ctx.tree, 1, []types.Value{types.value(1)})
+	must_tree_insert(t, &ctx.tree, 2, []types.Value{types.value(2)})
+	must_tree_insert(t, &ctx.tree, 3, []types.Value{types.value(3)})
 
 	err := btree.tree_delete(&ctx.tree, 2)
 	testing.expect_value(t, err, btree.Error.None)
@@ -281,7 +259,6 @@ test_deletion :: proc(t: ^testing.T) {
 
 @(test)
 test_auto_increment :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "autoincrement")
 	defer teardown_tree(&ctx)
 
@@ -289,11 +266,7 @@ test_auto_increment :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, btree.Error.None)
 	testing.expect_value(t, next, 1)
 
-	testing.expect(
-		t,
-		btree.tree_insert(&ctx.tree, 10, []types.Value{}) == .None,
-		"seed insert succeeds",
-	)
+	must_tree_insert(t, &ctx.tree, 10, []types.Value{})
 
 	next2, _ := btree.tree_next_rowid(&ctx.tree)
 	testing.expect_value(t, next2, 11)
@@ -301,22 +274,12 @@ test_auto_increment :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_verify :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "verify")
 	defer teardown_tree(&ctx)
 
 	items := 50
 	for i in 1 ..= items {
-		testing.expect(
-			t,
-			btree.tree_insert(
-				&ctx.tree,
-				types.Row_ID(i),
-				[]types.Value{types.value(i64(i))},
-			) ==
-			.None,
-			"seed insert succeeds",
-		)
+		must_tree_insert(t, &ctx.tree, types.Row_ID(i), []types.Value{types.value(i64(i))})
 	}
 	testing.expect(t, btree.tree_verify(&ctx.tree), "Tree verification failed after inserts")
 
@@ -326,15 +289,10 @@ test_tree_verify :: proc(t: ^testing.T) {
 
 @(test)
 test_delete_non_existent :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "del_miss")
 	defer teardown_tree(&ctx)
 
-	testing.expect(
-		t,
-		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value(10)}) == .None,
-		"seed insert succeeds",
-	)
+	must_tree_insert(t, &ctx.tree, 10, []types.Value{types.value(10)})
 	err := btree.tree_delete(&ctx.tree, 99)
 	testing.expect_value(t, err, btree.Error.Cell_Not_Found)
 	cnt, _ := btree.tree_count_rows(&ctx.tree)
@@ -343,21 +301,11 @@ test_delete_non_existent :: proc(t: ^testing.T) {
 
 @(test)
 test_delete_first_last_key :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "del_first_last")
 	defer teardown_tree(&ctx)
 
 	for i in 1 ..= 5 {
-		testing.expect(
-			t,
-			btree.tree_insert(
-				&ctx.tree,
-				types.Row_ID(i),
-				[]types.Value{types.value(i64(i))},
-			) ==
-			.None,
-			"seed insert succeeds",
-		)
+		must_tree_insert(t, &ctx.tree, types.Row_ID(i), []types.Value{types.value(i64(i))})
 	}
 
 	err := btree.tree_delete(&ctx.tree, 1)
@@ -379,21 +327,11 @@ test_delete_first_last_key :: proc(t: ^testing.T) {
 
 @(test)
 test_consecutive_deletes :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "consec_del")
 	defer teardown_tree(&ctx)
 
 	for i in 1 ..= 5 {
-		testing.expect(
-			t,
-			btree.tree_insert(
-				&ctx.tree,
-				types.Row_ID(i),
-				[]types.Value{types.value(i64(i))},
-			) ==
-			.None,
-			"seed insert succeeds",
-		)
+		must_tree_insert(t, &ctx.tree, types.Row_ID(i), []types.Value{types.value(i64(i))})
 	}
 
 	for i in 1 ..= 5 {
@@ -408,15 +346,10 @@ test_consecutive_deletes :: proc(t: ^testing.T) {
 
 @(test)
 test_reinsert_after_delete :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "reinsert")
 	defer teardown_tree(&ctx)
 
-	testing.expect(
-		t,
-		btree.tree_insert(&ctx.tree, 10, []types.Value{types.value(1)}) == .None,
-		"seed insert succeeds",
-	)
+	must_tree_insert(t, &ctx.tree, 10, []types.Value{types.value(1)})
 	testing.expect(t, btree.tree_delete(&ctx.tree, 10) == .None, "delete existing succeeds")
 
 	vals := []types.Value{types.value(999)}
@@ -431,7 +364,6 @@ test_reinsert_after_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_empty_tree_cursor :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "empty_cursor")
 	defer teardown_tree(&ctx)
 
@@ -444,7 +376,6 @@ test_empty_tree_cursor :: proc(t: ^testing.T) {
 
 @(test)
 test_max_fit_value :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "max_fit")
 	defer teardown_tree(&ctx)
 
@@ -460,7 +391,6 @@ test_max_fit_value :: proc(t: ^testing.T) {
 
 @(test)
 test_overflow_value :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "overflow")
 	defer teardown_tree(&ctx)
 
@@ -472,7 +402,6 @@ test_overflow_value :: proc(t: ^testing.T) {
 
 @(test)
 test_load_node_page_zero :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "page0_tree")
 	defer teardown_tree(&ctx)
 
@@ -494,7 +423,6 @@ test_page_one_header_offset :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_update_cow :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "tree_update_cow")
 	defer teardown_tree(&ctx)
 
@@ -516,7 +444,6 @@ test_tree_update_cow :: proc(t: ^testing.T) {
 
 @(test)
 test_find_on_empty_tree :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "empty_find")
 	defer teardown_tree(&ctx)
 
@@ -526,7 +453,6 @@ test_find_on_empty_tree :: proc(t: ^testing.T) {
 
 @(test)
 test_delete_on_empty_tree :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "empty_del")
 	defer teardown_tree(&ctx)
 
@@ -541,14 +467,13 @@ test_delete_on_empty_tree :: proc(t: ^testing.T) {
 
 @(test)
 test_tree_collect_pages :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "collect_pg")
 	defer teardown_tree(&ctx)
 
 	val := []types.Value{types.value(10)}
-	testing.expect(t, btree.tree_insert(&ctx.tree, 1, val) == .None, "seed insert succeeds")
-	testing.expect(t, btree.tree_insert(&ctx.tree, 2, val) == .None, "seed insert succeeds")
-	testing.expect(t, btree.tree_insert(&ctx.tree, 3, val) == .None, "seed insert succeeds")
+	must_tree_insert(t, &ctx.tree, 1, val)
+	must_tree_insert(t, &ctx.tree, 2, val)
+	must_tree_insert(t, &ctx.tree, 3, val)
 
 	pages := make(map[u32]bool, context.temp_allocator)
 	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
@@ -564,13 +489,12 @@ test_tree_collect_pages :: proc(t: ^testing.T) {
 
 @(test)
 test_foreach_callback :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "foreach")
 	defer teardown_tree(&ctx)
 
 	val := []types.Value{types.value(100)}
-	testing.expect(t, btree.tree_insert(&ctx.tree, 1, val) == .None, "seed insert succeeds")
-	testing.expect(t, btree.tree_insert(&ctx.tree, 2, val) == .None, "seed insert succeeds")
+	must_tree_insert(t, &ctx.tree, 1, val)
+	must_tree_insert(t, &ctx.tree, 2, val)
 
 	count := 0
 	testing.expect(
@@ -662,8 +586,8 @@ test_page_accessor_move :: proc(t: ^testing.T) {
 	k, k_err := dst_layout.vtable.key_at(dst_pg.data, btree.Page_Id(dst_pg.page_num), 0)
 	testing.expect(t, k_err == .None, "dst key_at succeeds")
 	testing.expect_value(t, k, types.Row_ID(20))
-	// entry_area_end stays covered (moved here from the retired conformance
-	// test): the entry area of a 1-slot page is positive.
+	// entry_area_end must stay covered: the entry area of a 1-slot page
+	// is positive.
 	eae := btree.entry_area_end(dst_pg.data, dst_pg.page_num, size_of(btree.Slot))
 	testing.expect(t, eae > 0, "entry_area_end > 0")
 }

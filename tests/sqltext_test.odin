@@ -1,3 +1,5 @@
+// SQL text splitter tests: statement boundaries, quoted semicolons, and
+// edge shapes (unterminated fragments pass through).
 package tests
 
 import "core:testing"

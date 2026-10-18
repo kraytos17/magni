@@ -1,3 +1,6 @@
+// Parser tests: tokenizer shapes, statement ASTs, and fail-closed guards
+// (nesting limits, unterminated input, malformed DDL) that must error,
+// never crash or hang.
 package tests
 
 import "core:fmt"
@@ -1243,8 +1246,8 @@ test_parse_literal_union :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_deep_nesting_guard :: proc(t: ^testing.T) {
-	// Regression (fuzzing): deeply nested subqueries must return a parse error
-	// rather than exhaust the native stack. MAX_PARSE_NESTING is 512; 600 nested
+	// Deeply nested subqueries must return a parse error rather than
+	// exhaust the native stack. MAX_PARSE_NESTING is 512; 600 nested
 	// levels exceed it.
 	build := proc(t: ^testing.T, levels: int) -> string {
 		// Wrap inward: "SELECT * FROM (" * levels + body + ") AS s0 .. ) AS s{levels-1}".
@@ -1270,10 +1273,9 @@ test_parse_deep_nesting_guard :: proc(t: ^testing.T) {
 
 @(test)
 test_parse_deep_paren_where_guard :: proc(t: ^testing.T) {
-	// Regression (fuzzing): deeply nested parentheses in a WHERE expression
-	// used to recurse parse_primary <-> parse_or_expr <-> parse_and_expr
-	// until the native stack overflowed. MAX_PARSE_NESTING is 512; 600 nested
-	// parens exceed it and must produce a parse error, not a crash.
+	// Deeply nested parentheses in a WHERE expression must produce a parse
+	// error, not exhaust the native stack. MAX_PARSE_NESTING is 512; 600
+	// nested parens exceed it.
 	build := proc(t: ^testing.T, levels: int) -> string {
 		sb: strings.Builder
 		strings.builder_init(&sb, context.temp_allocator)
@@ -1298,9 +1300,8 @@ test_parse_deep_paren_where_guard :: proc(t: ^testing.T) {
 
 @(test)
 test_tokenizer_keyword_length_guard :: proc(t: ^testing.T) {
-	// Regression (fuzzing): an identifier longer than the longest keyword
-	// ("references", 10 chars) used to hit keyword_bucket_offsets[9] = 58, which
-	// exposed "references" to 11-char identifiers and indexed kw.word[10] OOB.
+	// An identifier longer than the longest keyword ("references", 10 chars)
+	// must not index past the keyword bucket table (kw.word[10] is OOB).
 	_, _, _ = parser.parse("SELECT id FROM t AS REFERENCEST 5;", context.temp_allocator)
 	testing.expect(t, true, "over-long identifier must not crash the tokenizer")
 
@@ -1314,9 +1315,9 @@ test_tokenizer_keyword_length_guard :: proc(t: ^testing.T) {
 
 @(test)
 test_create_table_fk_error_cleanup :: proc(t: ^testing.T) {
-	// Regression (fuzzing): when CREATE TABLE parses a FOREIGN KEY but the
-	// statement then fails, the error cleanup freed the FK strings with
-	// context.allocator instead of the passed allocator -> bad free under ASan.
+	// When CREATE TABLE parses a FOREIGN KEY but the statement then fails,
+	// error cleanup must free the FK strings with the passed allocator, not
+	// context.allocator (an allocator mismatch is a bad free under ASan).
 	_, ok, _ := parser.parse(
 		"CREATE TABLE products (price INT CHECK (price > 0), FOREIGN KEY (cat) REFERENCES c(idI);",
 		context.temp_allocator,
@@ -1326,9 +1327,9 @@ test_create_table_fk_error_cleanup :: proc(t: ^testing.T) {
 
 @(test)
 test_create_table_unbalanced_check_parens :: proc(t: ^testing.T) {
-	// Regression (fuzzing): an unbalanced `(` inside a CHECK(...) constraint used
-	// to make the CHECK scan loop spin forever on EOF (peek/advance return EOF
-	// without advancing), hanging the parser. It must return a parse error.
+	// An unbalanced `(` inside a CHECK(...) constraint must return a parse
+	// error: the scan loop must terminate at EOF (peek/advance return EOF
+	// without advancing — spinning there hangs the parser).
 	build := proc(levels: int) -> string {
 		sb: strings.Builder
 		strings.builder_init(&sb, context.temp_allocator)
@@ -1354,8 +1355,8 @@ test_create_table_unbalanced_check_parens :: proc(t: ^testing.T) {
 
 @(test)
 test_create_table_check_eof_no_paren :: proc(t: ^testing.T) {
-	// Regression (fuzzing): `CHECK` with no closing paren at all (or no opening
-	// content) must terminate, not spin at EOF.
+	// `CHECK` with no closing paren at all (or no opening content) must
+	// terminate at EOF, not spin.
 	_, ok, _ := parser.parse("CREATE TABLE t (a INT CHECK (a > 0", context.temp_allocator)
 	testing.expect(t, !ok, "CHECK with unterminated paren returns an error, not a hang")
 
@@ -1365,8 +1366,8 @@ test_create_table_check_eof_no_paren :: proc(t: ^testing.T) {
 
 @(test)
 test_tokenize_block_comment_unterminated :: proc(t: ^testing.T) {
-	// Bug #1: `/*x` (3 chars) used to pass `i+1 < len` check at i=2 then
-	// `i += 2` past EOF, returning success. Must reject.
+	// `/*x` (3 chars) must reject: the `i+1 < len` check at i=2 followed by
+	// `i += 2` steps past EOF and must fail, not return success.
 	_, ok := parser.tokenize("/*x", context.temp_allocator)
 	testing.expect(t, !ok, "unterminated block comment '/*x' must fail")
 
@@ -1388,8 +1389,8 @@ test_tokenize_block_comment_unterminated :: proc(t: ^testing.T) {
 
 @(test)
 test_tokenize_hex_no_digits :: proc(t: ^testing.T) {
-	// Bug #2-3: `0x` alone or `0xG` used to tokenize as NUMBER "0x" / "0x",
-	// leaving `G` as a separate identifier. Must reject bare `0x`.
+	// `0x` alone or `0xG` must reject bare `0x` (not tokenize NUMBER "0x"
+	// and leave `G` as a separate identifier).
 	_, ok := parser.tokenize("0x", context.temp_allocator)
 	testing.expect(t, !ok, "bare '0x' must fail")
 
@@ -1408,7 +1409,7 @@ test_tokenize_hex_no_digits :: proc(t: ^testing.T) {
 
 @(test)
 test_tokenize_scientific_no_digits :: proc(t: ^testing.T) {
-	// Bug #4-5: `1e`, `1e+` must NOT be tokenized as a single NUMBER.
+	// `1e`, `1e+` must NOT be tokenized as a single NUMBER.
 	// `1e` → NUMBER "1" + IDENTIFIER "e" (e is not part of the number).
 	// `1e+` / `1e-` fail tokenization because +/- aren't standalone tokens in MagniDB.
 	// `1e` → NUMBER "1" + IDENTIFIER "e" (3 tokens with EOF)
@@ -1445,7 +1446,7 @@ test_tokenize_scientific_no_digits :: proc(t: ^testing.T) {
 
 @(test)
 test_tokenize_blob_invalid :: proc(t: ^testing.T) {
-	// Bug #6: blob with non-hex content or odd length must be rejected.
+	// Blob literals with non-hex content or odd length must be rejected.
 	_, ok := parser.tokenize("X'ZZ'", context.temp_allocator)
 	testing.expect(t, !ok, "X'ZZ' (non-hex) must fail")
 
@@ -1474,7 +1475,7 @@ test_tokenize_blob_invalid :: proc(t: ^testing.T) {
 
 @(test)
 test_tokenize_multiline_comment_line :: proc(t: ^testing.T) {
-	// Bug #7: multiline comments/strings/blobs didn't track line numbers.
+	// Multiline comments/strings/blobs must track line numbers.
 	sql := "SELECT 1\n/* comment\nspanning lines */\nSELECT 2;"
 	tokens, ok := parser.tokenize(sql, context.temp_allocator)
 	testing.expect(t, ok, "multiline comment must succeed")
@@ -1509,8 +1510,8 @@ test_tokenize_negative_hex :: proc(t: ^testing.T) {
 
 @(test)
 test_commit_keyword :: proc(t: ^testing.T) {
-	// COMMIT was missing from keyword_table (Token_Type.COMMIT existed but the
-	// lexer could never produce it). Regression test for the bucket fix.
+	// COMMIT must tokenize: every token type needs a keyword-table entry,
+	// or the lexer can never produce it.
 	tokens, ok := parser.tokenize("COMMIT;", context.temp_allocator)
 	testing.expect(t, ok, "COMMIT must tokenize")
 	testing.expect(t, tokens[0].type == .COMMIT, "Expected COMMIT token")
@@ -1635,7 +1636,12 @@ test_parse_create_index :: proc(t: ^testing.T) {
 	testing.expect(t, cok_tbl, "still Create_Stmt")
 
 	// Error cases fail closed (variant unusable).
-	bad_cases := []string{"CREATE INDEX i t (c);", "CREATE INDEX i ON t c);", "CREATE INDEX i ON t (c;", "CREATE INDEX ON t (c);"}
+	bad_cases := []string {
+		"CREATE INDEX i t (c);",
+		"CREATE INDEX i ON t c);",
+		"CREATE INDEX i ON t (c;",
+		"CREATE INDEX ON t (c);",
+	}
 	for bad in bad_cases {
 		_, bok, _ := parser.parse(bad, context.temp_allocator)
 		testing.expect(t, !bok, "bad DDL rejected")

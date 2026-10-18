@@ -1,3 +1,7 @@
+// Executor tests: DML, SELECT paths (scan/vector/join/subquery), aggregates,
+// sorting, and error/crash regressions over a booted schema tree.
+// File-backed (test_exec_*.db); environments come from setup_executor_env
+// and must go through teardown_executor_env.
 package tests
 
 import "core:fmt"
@@ -21,10 +25,11 @@ make_where_clause :: proc(cond: parser.Condition) -> parser.Where_Clause {
 	return parser.Where_Clause{root = node}
 }
 
+// setup_executor_env opens a pager, initializes a slotdir schema root, and
+// boots the schema catalog. Pair with teardown_executor_env.
 setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
-	context.logger.lowest_level = .Error
-	temp_name := fmt.tprintf("test_exec_%s.db", test_name)
-	filename := strings.clone(temp_name, context.allocator)
+	mute_test_logging()
+	filename := mint_db_filename("test_exec_", test_name)
 	clean_db_files(filename)
 
 	p, err := pager.open(filename)
@@ -32,7 +37,7 @@ setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, str
 
 	schema_page, alloc_err := pager.allocate_page(p)
 	testing.expect(t, alloc_err == .None, "Failed to allocate schema page")
-	// Schema roots are slotdir post-flip (mirrors production creators).
+	// Schema roots are slotdir post-flip, matching what production creators write.
 	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
 		testing.fail_now(t, "Failed to init slotdir schema page")
 	}
@@ -45,12 +50,15 @@ setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, str
 	return tree, filename
 }
 
+// teardown_executor_env closes the pager and removes the database, its WAL
+// sidecar, and the owned filename.
 teardown_executor_env :: proc(tree: btree.Tree, filename: string) {
 	pager.close(tree.pager)
-	clean_db_files(filename)
-	delete(filename)
+	drop_db_files(filename)
 }
 
+// make_create_stmt builds a canned users-like CREATE (id/name/score) for
+// tests that need a table without caring about its shape.
 make_create_stmt :: proc(name: string) -> parser.Statement {
 	cols := make([dynamic]types.Column, context.temp_allocator)
 	append(&cols, types.Column{name = "id", type = .INTEGER, pk = true, not_null = true})
@@ -64,6 +72,8 @@ make_create_stmt :: proc(name: string) -> parser.Statement {
 	return parser.Statement{type = variant, sql = "CREATE TABLE ... (MOCKED)"}
 }
 
+// make_insert_stmt builds a single-row INSERT into a make_create_stmt
+// table. Values are typed positionally (id/name/score).
 make_insert_stmt :: proc(table: string, id: i64, name: string, score: f64) -> parser.Statement {
 	vals := make([dynamic]types.Value, context.temp_allocator)
 	append(&vals, types.value(id))
@@ -82,7 +92,6 @@ make_insert_stmt :: proc(table: string, id: i64, name: string, score: f64) -> pa
 
 @(test)
 test_exec_create_table :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "create")
 	defer teardown_executor_env(tree, file)
 
@@ -101,7 +110,6 @@ test_exec_create_table :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_select :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "insert")
 	defer teardown_executor_env(tree, file)
 
@@ -125,19 +133,15 @@ test_exec_insert_select :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_bulk_multirow :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_multi")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("players"))
-	stmt, parse_ok, _ := parser.parse(
+	must_execute_sql(
+		t,
+		&tree,
 		"INSERT INTO players VALUES (3, 'C', 3.0), (1, 'A', 1.0), (2, 'B', 2.0);",
-		context.temp_allocator,
 	)
-
-	testing.expect(t, parse_ok, "multi-row INSERT should parse")
-	success, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, success, "bulk INSERT should succeed")
 
 	table, _ := schema.get_table(&tree, "players", context.temp_allocator)
 	table_tree := btree.init(tree.pager, table.root_page)
@@ -157,22 +161,13 @@ test_exec_insert_bulk_multirow :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_bulk_auto_ids :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_auto")
 	defer teardown_executor_env(tree, file)
 
 	// No-PK table: every row takes the auto path (max+1). The running-max
 	// hint must reproduce the row loop's 1, 2, 3 — not 1, 1, 1.
-	stmt_c, _, _ := parser.parse("CREATE TABLE t (name TEXT);", context.temp_allocator)
-	executor.execute(&tree, stmt_c)
-	stmt, parse_ok, _ := parser.parse(
-		"INSERT INTO t VALUES ('A'), ('B'), ('C');",
-		context.temp_allocator,
-	)
-
-	testing.expect(t, parse_ok, "auto-id multi-row INSERT should parse")
-	success, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, success, "bulk auto-id INSERT should succeed")
+	run_exec_setup(t, &tree, {"CREATE TABLE t (name TEXT);"})
+	must_execute_sql(t, &tree, "INSERT INTO t VALUES ('A'), ('B'), ('C');")
 
 	table, _ := schema.get_table(&tree, "t", context.temp_allocator)
 	table_tree := btree.init(tree.pager, table.root_page)
@@ -192,24 +187,13 @@ test_exec_insert_bulk_auto_ids :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_bulk_auto_explicit_mix :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_mix")
 	defer teardown_executor_env(tree, file)
 
 	// Nullable PK: NULL takes auto, integers are explicit. Running max
 	// reproduces the loop: auto → 1, explicit 5, auto → 6.
-	stmt_c, _, _ := parser.parse(
-		"CREATE TABLE m (id INT PRIMARY KEY, name TEXT);",
-		context.temp_allocator,
-	)
-	executor.execute(&tree, stmt_c)
-	stmt, parse_ok, _ := parser.parse(
-		"INSERT INTO m VALUES (NULL, 'A'), (5, 'E'), (NULL, 'F');",
-		context.temp_allocator,
-	)
-	testing.expect(t, parse_ok, "mixed multi-row INSERT should parse")
-	success, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, success, "bulk mixed INSERT should succeed")
+	run_exec_setup(t, &tree, {"CREATE TABLE m (id INT PRIMARY KEY, name TEXT);"})
+	must_execute_sql(t, &tree, "INSERT INTO m VALUES (NULL, 'A'), (5, 'E'), (NULL, 'F');")
 
 	table, _ := schema.get_table(&tree, "m", context.temp_allocator)
 	table_tree := btree.init(tree.pager, table.root_page)
@@ -226,16 +210,11 @@ test_exec_insert_bulk_auto_explicit_mix :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_bulk_dup_fails_atomic :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_dup")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("players"))
-	stmt, parse_ok, _ := parser.parse(
-		"INSERT INTO players VALUES (1, 'A', 1.0), (1, 'DUP', 9.0);",
-		context.temp_allocator,
-	)
-	testing.expect(t, parse_ok, "dup multi-row INSERT should parse")
+	stmt := must_parse(t, "INSERT INTO players VALUES (1, 'A', 1.0), (1, 'DUP', 9.0);")
 
 	saved, ctx := suppress_expected_errors()
 	context = ctx
@@ -251,20 +230,11 @@ test_exec_insert_bulk_dup_fails_atomic :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_bulk_check_fail_atomic :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_check")
 	defer teardown_executor_env(tree, file)
 
-	stmt_c, _, _ := parser.parse(
-		"CREATE TABLE t (age INT CHECK (age > 0));",
-		context.temp_allocator,
-	)
-	executor.execute(&tree, stmt_c)
-	stmt, parse_ok, _ := parser.parse(
-		"INSERT INTO t VALUES (1), (2), (-3);",
-		context.temp_allocator,
-	)
-	testing.expect(t, parse_ok, "multi-row CHECK INSERT should parse")
+	run_exec_setup(t, &tree, {"CREATE TABLE t (age INT CHECK (age > 0));"})
+	stmt := must_parse(t, "INSERT INTO t VALUES (1), (2), (-3);")
 
 	saved, ctx := suppress_expected_errors()
 	context = ctx
@@ -280,7 +250,6 @@ test_exec_insert_bulk_check_fail_atomic :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_bulk_matches_loop :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree_bulk, file_bulk := setup_executor_env(t, "bulk_diff_b")
 	defer teardown_executor_env(tree_bulk, file_bulk)
 	tree_loop, file_loop := setup_executor_env(t, "bulk_diff_l")
@@ -289,13 +258,11 @@ test_exec_insert_bulk_matches_loop :: proc(t: ^testing.T) {
 	executor.execute(&tree_bulk, make_create_stmt("players"))
 	executor.execute(&tree_loop, make_create_stmt("players"))
 
-	stmt, parse_ok, _ := parser.parse(
+	must_execute_sql(
+		t,
+		&tree_bulk,
 		"INSERT INTO players VALUES (4, 'D', 4.0), (2, 'B', 2.0), (5, 'E', 5.0), (1, 'A', 1.0), (3, 'C', 3.0);",
-		context.temp_allocator,
 	)
-	testing.expect(t, parse_ok, "bulk statement should parse")
-	success, _, _ := executor.execute(&tree_bulk, stmt)
-	testing.expect(t, success, "bulk path should succeed")
 	loop_ids := []i64{4, 2, 5, 1, 3}
 	loop_names := []string{"D", "B", "E", "A", "C"}
 	for i in 0 ..< len(loop_ids) {
@@ -330,7 +297,6 @@ test_exec_insert_bulk_matches_loop :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_bulk_multileaf_boundaries :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_bounds")
 	defer teardown_executor_env(tree, file)
 
@@ -371,7 +337,6 @@ test_exec_insert_bulk_multileaf_boundaries :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_append_graft :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_append")
 	defer teardown_executor_env(tree, file)
 
@@ -409,7 +374,6 @@ test_exec_insert_append_graft :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_append_overlap_falls_back :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "bulk_overlap")
 	defer teardown_executor_env(tree, file)
 
@@ -440,7 +404,6 @@ test_exec_insert_append_overlap_falls_back :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_insert_validation_failure :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "insert_fail")
 	defer teardown_executor_env(tree, file)
 
@@ -469,7 +432,6 @@ test_exec_insert_validation_failure :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_update :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "update")
 	defer teardown_executor_env(tree, file)
 
@@ -508,7 +470,6 @@ test_exec_update :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_delete :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "delete")
 	defer teardown_executor_env(tree, file)
 
@@ -541,7 +502,6 @@ test_exec_delete :: proc(t: ^testing.T) {
 
 @(test)
 test_page_splitting_stress :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "stress_split")
 	defer teardown_executor_env(tree, file)
 
@@ -585,20 +545,18 @@ test_page_splitting_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_select_empty_table :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "empty_sel")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("empty_tbl"))
-	sel_sql := "SELECT * FROM empty_tbl;"
-	sel_stmt, _, _ := parser.parse(sel_sql, context.temp_allocator)
-	ok, _, _ := executor.execute(&tree, sel_stmt)
-	testing.expect(t, ok, "SELECT on empty table should succeed (not crash)")
+	sel := must_parse_select(t, "SELECT * FROM empty_tbl;")
+	// Empty table selects nothing but must not crash.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 0)
 }
 
 @(test)
 test_exec_time_travel_via_schema_root :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "time_travel")
 	defer teardown_executor_env(tree, file)
 
@@ -633,7 +591,6 @@ test_exec_time_travel_via_schema_root :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "as_of")
 	defer teardown_executor_env(tree, file)
 
@@ -642,21 +599,16 @@ test_exec_as_of_snapshot_parse_and_exec :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("snap_tbl", 20, "Y", 2.0))
 
 	sql := "SELECT * FROM snap_tbl AS OF SNAPSHOT 42;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "AS OF SNAPSHOT should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "Expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 	snap_id, has_snap := sel.as_of_snapshot.?
 	testing.expect(t, has_snap, "Expected as_of_snapshot field")
 	testing.expect_value(t, snap_id, u64(42))
 
-	ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, ok, "SELECT AS OF SNAPSHOT should execute")
+	must_execute(t, &tree, parser.Statement{type = sel, sql = sql})
 }
 
 @(test)
 test_exec_distinct :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "distinct")
 	defer teardown_executor_env(tree, file)
 
@@ -666,18 +618,15 @@ test_exec_distinct :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 3, "a", 1.0))
 
 	sql := "SELECT DISTINCT name FROM t;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "Expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 	testing.expect(t, sel.is_distinct, "Expected is_distinct = true")
-	ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, ok, "SELECT DISTINCT should execute")
+	// Names {a, b, a} collapse to two rows regardless of order.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 2)
 }
 
 @(test)
 test_exec_nulls_first_last :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "nulls_order")
 	defer teardown_executor_env(tree, file)
 
@@ -729,20 +678,15 @@ test_exec_nulls_first_last :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "explain")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
-	stmt, parse_ok, _ := parser.parse("EXPLAIN SELECT * FROM t;", context.temp_allocator)
-	testing.expect(t, parse_ok, "EXPLAIN SELECT should parse")
-	ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, ok, "EXPLAIN SELECT should execute")
+	must_execute_sql(t, &tree, "EXPLAIN SELECT * FROM t;")
 }
 
 @(test)
 test_exec_check_constraint :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "check_c")
 	defer teardown_executor_env(tree, file)
 
@@ -765,7 +709,6 @@ test_exec_check_constraint :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_in_literal :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "in_lit")
 	defer teardown_executor_env(tree, file)
 
@@ -774,48 +717,31 @@ test_exec_in_literal :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "b", 2.0))
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
-	_, parse_ok, _ := parser.parse("SELECT * FROM t WHERE id = 1;", context.temp_allocator)
-	testing.expect(t, parse_ok, "basic WHERE should parse")
+	_ = must_parse_select(t, "SELECT * FROM t WHERE id = 1;")
 }
 
 @(test)
 test_exec_in_subquery :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "in_subq")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 
-	_, parse_ok, _ := parser.parse(
-		"SELECT * FROM (SELECT * FROM t) AS sub;",
-		context.temp_allocator,
-	)
-	testing.expect(t, parse_ok, "FROM subquery should parse")
+	_ = must_parse_select(t, "SELECT * FROM (SELECT * FROM t) AS sub;")
 }
 
 @(test)
 test_exec_foreign_key :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "fk")
 	defer teardown_executor_env(tree, file)
 
-	stmt_p, _, _ := parser.parse(
-		"CREATE TABLE parent (id INT PRIMARY KEY);",
-		context.temp_allocator,
-	)
-
-	executor.execute(&tree, stmt_p)
-	_, parse_ok, _ := parser.parse(
-		"CREATE TABLE child (id INT PRIMARY KEY);",
-		context.temp_allocator,
-	)
-	testing.expect(t, parse_ok, "CREATE TABLE should parse")
+	run_exec_setup(t, &tree, {"CREATE TABLE parent (id INT PRIMARY KEY);"})
+	must_parse(t, "CREATE TABLE child (id INT PRIMARY KEY);")
 }
 
 @(test)
 test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "distinct_na")
 	defer teardown_executor_env(tree, file)
 
@@ -827,15 +753,14 @@ test_exec_distinct_non_adjacent :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 5, "b", 5.0))
 
 	sel_sql := "SELECT DISTINCT name FROM t;"
-	stmt, parse_ok, _ := parser.parse(sel_sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "SELECT DISTINCT should parse")
-	ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, ok, "SELECT DISTINCT should execute")
+	sel := must_parse_select(t, sel_sql)
+	// Names {a, b, a, c, b} collapse to three rows regardless of order.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 3)
 }
 
 @(test)
 test_exec_check_enforcement :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "check_enforce")
 	defer teardown_executor_env(tree, file)
 
@@ -854,7 +779,6 @@ test_exec_check_enforcement :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_subquery_projection :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "subq_proj")
 	defer teardown_executor_env(tree, file)
 
@@ -863,19 +787,18 @@ test_exec_subquery_projection :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 2, "Bob", 200.0))
 
 	sql := "SELECT name FROM (SELECT * FROM t) AS sub;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "subquery SELECT should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 	testing.expect(t, len(sel.columns) == 1, "expected 1 projected column")
-
-	ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, ok, "subquery SELECT should execute")
+	// Two source rows project to two single-column rows.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 2)
+	if len(rows) > 0 {
+		testing.expect_value(t, len(rows[0].values), 1)
+	}
 }
 
 @(test)
 test_exec_hash_left_join :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "hash_lj")
 	defer teardown_executor_env(tree, file)
 
@@ -912,15 +835,22 @@ test_exec_hash_left_join :: proc(t: ^testing.T) {
 
 	executor.execute(&tree, parser.Statement{type = iv2, sql = ""})
 	sql := "SELECT t1.id, t2.val FROM t1 LEFT JOIN t2 ON t1.id = t2.ref;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "LEFT JOIN should parse")
-	ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, ok, "LEFT JOIN should execute")
+	sel := must_parse_select(t, sql)
+	// ids 1,2 match; id=3 null-extends. Null counting keeps this
+	// independent of join order.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 3)
+	nulls := 0
+	for r in rows {
+		if len(r.values) > 1 && types.is_null(r.values[1]) {
+			nulls += 1
+		}
+	}
+	testing.expect_value(t, nulls, 1)
 }
 
 @(test)
 test_exec_cow_split_stress :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "cow_split")
 	defer teardown_executor_env(tree, file)
 
@@ -959,38 +889,28 @@ test_exec_cow_split_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_explain_where :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "explain_where")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t"))
 	executor.execute(&tree, make_insert_stmt("t", 1, "a", 1.0))
 
-	stmt, ok, _ := parser.parse("EXPLAIN SELECT * FROM t WHERE id = 1;", context.temp_allocator)
-	testing.expect(t, ok, "EXPLAIN WHERE should parse")
-	exec_ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, exec_ok, "EXPLAIN WHERE should execute")
+	must_execute_sql(t, &tree, "EXPLAIN SELECT * FROM t WHERE id = 1;")
 }
 
 @(test)
 test_exec_explain_join :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "explain_join")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("t1"))
 	executor.execute(&tree, make_create_stmt("t2"))
 
-	sql := "EXPLAIN SELECT * FROM t1 INNER JOIN t2 ON t1.id = t2.id;"
-	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, ok, "EXPLAIN JOIN should parse")
-	exec_ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, exec_ok, "EXPLAIN JOIN should execute")
+	must_execute_sql(t, &tree, "EXPLAIN SELECT * FROM t1 INNER JOIN t2 ON t1.id = t2.id;")
 }
 
 @(test)
 test_exec_in_literal_list :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "in_list")
 	defer teardown_executor_env(tree, file)
 
@@ -1011,7 +931,6 @@ test_exec_in_literal_list :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "check_persist")
 	defer teardown_executor_env(tree, file)
 
@@ -1038,7 +957,6 @@ test_exec_check_enforcement_persisted :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_non_equi :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_nequi")
 	defer teardown_executor_env(tree, file)
 
@@ -1085,23 +1003,20 @@ test_exec_join_non_equi :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_cross_fallback :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_cross")
 	defer teardown_executor_env(tree, file)
 
 	executor.execute(&tree, make_create_stmt("a"))
 	executor.execute(&tree, make_create_stmt("b"))
 
-	sql := "SELECT * FROM a CROSS JOIN b;"
-	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, ok, "CROSS JOIN should parse")
-	exec_ok, _, _ := executor.execute(&tree, stmt)
-	testing.expect(t, exec_ok, "CROSS JOIN should execute")
+	// Both tables are empty: the cross product is empty, not a crash.
+	sel := must_parse_select(t, "SELECT * FROM a CROSS JOIN b;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 0)
 }
 
 @(test)
 test_exec_order_by_int :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "order_int")
 	defer teardown_executor_env(tree, file)
 
@@ -1127,7 +1042,6 @@ test_exec_order_by_int :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_freeblock_reuse :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "freeblock")
 	defer teardown_executor_env(tree, file)
 
@@ -1224,11 +1138,7 @@ test_group_key_hash :: proc(t: ^testing.T) {
 	a2 := []types.Value{types.value(10), types.value("x")}
 	testing.expect(t, executor.values_equal(a1, a2, []int{0, 1}), "same values match")
 	a3 := []types.Value{types.value(10), types.value("y")}
-	testing.expect(
-		t,
-		!executor.values_equal(a1, a3, []int{0, 1}),
-		"different values differ",
-	)
+	testing.expect(t, !executor.values_equal(a1, a3, []int{0, 1}), "different values differ")
 }
 
 @(test)
@@ -1285,7 +1195,6 @@ test_dedup_rows_empty_and_single :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_skewed")
 	defer teardown_executor_env(tree, file)
 
@@ -1315,24 +1224,20 @@ test_exec_join_skewed_int_keys :: proc(t: ^testing.T) {
 	}
 
 	sql := "SELECT t1.id, t2.val FROM t1 INNER JOIN t2 ON t1.id = t2.ref;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "JOIN should parse")
-
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
-
-	_, _, ok := executor.exec_query(&tree, sel)
-	testing.expect(t, ok, "skewed-key INNER JOIN should execute")
+	sel := must_parse_select(t, sql)
+	// id=1 fans out to 50 rows; ids 2..6 match once each: 55 rows total.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 55)
 }
 
 @(test)
 test_exec_join_string_keys :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_str")
 	defer teardown_executor_env(tree, file)
 
 	cols1 := make([dynamic]types.Column, context.temp_allocator)
-	append(&cols1, types.Column{name = "code", type = .TEXT, pk = true})
+	// Plain TEXT join key, not a PK: the join needs no key constraint.
+	append(&cols1, types.Column{name = "code", type = .TEXT})
 	append(&cols1, types.Column{name = "label", type = .TEXT})
 	variant1 := parser.Create_Stmt {
 		table_name = "codes",
@@ -1355,9 +1260,7 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 		v := parser.Insert_Stmt {
 			table_name = "codes",
-			values     = {
-				{types.value(name), types.value(fmt.tprintf("label_%s", name))},
-			},
+			values     = {{types.value(name), types.value(fmt.tprintf("label_%s", name))}},
 		}
 		executor.execute(&tree, parser.Statement{type = v, sql = ""})
 	}
@@ -1373,14 +1276,10 @@ test_exec_join_string_keys :: proc(t: ^testing.T) {
 	}
 
 	sql := "SELECT codes.label, txns.amount FROM codes INNER JOIN txns ON codes.code = txns.ref_code;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "string-key JOIN should parse")
-
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
-
-	_, _, ok := executor.exec_query(&tree, sel)
-	testing.expect(t, ok, "string-key INNER JOIN should execute")
+	sel := must_parse_select(t, sql)
+	// refs a×3, b×2, c×1 match; x matches nothing: 6 rows.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 6)
 }
 
 @(test)
@@ -1409,7 +1308,6 @@ test_dedup_rows_with_nulls :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_null_int_keys :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_null_int")
 	defer teardown_executor_env(tree, file)
 
@@ -1449,22 +1347,29 @@ test_exec_join_null_int_keys :: proc(t: ^testing.T) {
 	)
 
 	sql := "SELECT t1.id, t2.val FROM t1 INNER JOIN t2 ON t1.id = t2.ref;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "INNER JOIN with NULL key should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
-	_, _, ok := executor.exec_query(&tree, sel)
-	testing.expect(t, ok, "INNER JOIN with NULL key should not crash")
+	sel := must_parse_select(t, sql)
+	// Only id=1 matches; the NULL key never joins and must not crash.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) > 0 {
+		testing.expect_value(t, len(rows[0].values), 2)
+		testing.expect(t, types.value_compare(rows[0].values[0], types.value(1)), "match id is 1")
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[1], types.value("match")),
+			"match val is 'match'",
+		)
+	}
 }
 
 @(test)
 test_exec_join_null_string_keys :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_null_str")
 	defer teardown_executor_env(tree, file)
 
 	cols1 := make([dynamic]types.Column, context.temp_allocator)
-	append(&cols1, types.Column{name = "code", type = .TEXT, pk = true})
+	// Plain TEXT join key, not a PK: the join needs no key constraint.
+	append(&cols1, types.Column{name = "code", type = .TEXT})
 	append(&cols1, types.Column{name = "label", type = .TEXT})
 	executor.execute(
 		&tree,
@@ -1516,17 +1421,26 @@ test_exec_join_null_string_keys :: proc(t: ^testing.T) {
 	)
 
 	sql := "SELECT codes.label, txns.amount FROM codes INNER JOIN txns ON codes.code = txns.ref_code;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "string-key INNER JOIN with NULL key should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
-	_, _, ok := executor.exec_query(&tree, sel)
-	testing.expect(t, ok, "string-key INNER JOIN with NULL key should not crash")
+	sel := must_parse_select(t, sql)
+	// Only code='a' matches; the NULL key never joins and must not crash.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) > 0 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[0], types.value("label_a")),
+			"match label",
+		)
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[1], types.value(1)),
+			"match amount is 1",
+		)
+	}
 }
 
 @(test)
 test_exec_left_join_null_keys :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "left_join_null")
 	defer teardown_executor_env(tree, file)
 
@@ -1566,12 +1480,18 @@ test_exec_left_join_null_keys :: proc(t: ^testing.T) {
 	)
 
 	sql := "SELECT t1.id, t2.val FROM t1 LEFT JOIN t2 ON t1.id = t2.ref;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "LEFT JOIN with NULL key should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
-	_, _, ok := executor.exec_query(&tree, sel)
-	testing.expect(t, ok, "LEFT JOIN with NULL key should not crash")
+	sel := must_parse_select(t, sql)
+	// id=1 matches, id=2 null-extends; the NULL key must not crash.
+	// Null counting (not positions) keeps this independent of join order.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 2)
+	nulls := 0
+	for r in rows {
+		if len(r.values) > 1 && types.is_null(r.values[1]) {
+			nulls += 1
+		}
+	}
+	testing.expect_value(t, nulls, 1)
 }
 
 @(test)
@@ -1596,7 +1516,6 @@ test_dedup_rows_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_join_no_matches :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_nomatch")
 	defer teardown_executor_env(tree, file)
 
@@ -1625,19 +1544,16 @@ test_exec_join_no_matches :: proc(t: ^testing.T) {
 	)
 
 	sql := "SELECT t1.id, t2.val FROM t1 INNER JOIN t2 ON t1.id = t2.ref;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "INNER JOIN no matches should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
-	_, _, ok := executor.exec_query(&tree, sel)
-	testing.expect(t, ok, "INNER JOIN no matches should not crash")
+	sel := must_parse_select(t, sql)
+	// ref=99 matches nothing: empty, not a crash.
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 0)
 }
 
 // Canonical SELECT evaluation order (sort-full-rows → dedup → limit →
-// project) after the print-path/data-path collapse (R1).
+// project).
 @(test)
 test_exec_subquery_order_nonprojected :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "path_equiv_order")
 	defer teardown_executor_env(tree, file)
 
@@ -1647,18 +1563,13 @@ test_exec_subquery_order_nonprojected :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
 	sql := "SELECT name FROM (SELECT * FROM t) AS s ORDER BY id;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "subquery ORDER BY should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 
-	// Regression (R1): the data path used to project before sorting, so ORDER
-	// BY a non-projected column failed where the (now deleted) print path
-	// succeeded. Canonical order is sort-full-rows before projection.
-	data_rows, _, data_ok := executor.exec_query(&tree, sel)
-	testing.expect(t, data_ok, "ORDER BY non-projected column must succeed")
-	if data_ok {
-		testing.expect_value(t, len(data_rows), 3)
+	// ORDER BY a non-projected column must sort full rows before
+	// projection; projecting first would drop the sort key.
+	data_rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(data_rows), 3)
+	if len(data_rows) == 3 {
 		testing.expect(
 			t,
 			types.value_compare(data_rows[0].values[0], types.value("a")),
@@ -1674,7 +1585,6 @@ test_exec_subquery_order_nonprojected :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_subquery_distinct :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "path_equiv_distinct")
 	defer teardown_executor_env(tree, file)
 
@@ -1684,21 +1594,14 @@ test_exec_subquery_distinct :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 3, "b", 3.0))
 
 	sql := "SELECT DISTINCT name FROM (SELECT * FROM t) AS s;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "subquery DISTINCT should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 
-	data_rows, _, data_ok := executor.exec_query(&tree, sel)
-	testing.expect(t, data_ok, "DISTINCT subquery should succeed")
-	if data_ok {
-		testing.expect_value(t, len(data_rows), 2)
-	}
+	data_rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(data_rows), 2)
 }
 
 @(test)
 test_exec_count_fast_path :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "path_equiv_count")
 	defer teardown_executor_env(tree, file)
 
@@ -1708,15 +1611,11 @@ test_exec_count_fast_path :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 3, "c", 3.0))
 
 	sql := "SELECT COUNT(*) FROM t;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "COUNT(*) should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 
-	data_rows, _, data_ok := executor.exec_query(&tree, sel)
-	testing.expect(t, data_ok, "COUNT(*) fast path should succeed")
-	if data_ok {
-		testing.expect_value(t, len(data_rows), 1)
+	data_rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(data_rows), 1)
+	if len(data_rows) > 0 {
 		testing.expect(
 			t,
 			types.value_compare(data_rows[0].values[0], types.value(3)),
@@ -1727,7 +1626,6 @@ test_exec_count_fast_path :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_subquery_limit_offset :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "path_equiv_join")
 	defer teardown_executor_env(tree, file)
 
@@ -1737,15 +1635,11 @@ test_exec_subquery_limit_offset :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t1", 3, "c", 3.0))
 
 	sql := "SELECT id FROM (SELECT * FROM t1) AS s ORDER BY id LIMIT 2 OFFSET 1;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "subquery LIMIT should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 
-	data_rows, _, data_ok := executor.exec_query(&tree, sel)
-	testing.expect(t, data_ok, "subquery LIMIT/OFFSET should succeed")
-	if data_ok {
-		testing.expect_value(t, len(data_rows), 2)
+	data_rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(data_rows), 2)
+	if len(data_rows) > 0 {
 		testing.expect(
 			t,
 			types.value_compare(data_rows[0].values[0], types.value(2)),
@@ -1758,7 +1652,6 @@ test_exec_subquery_limit_offset :: proc(t: ^testing.T) {
 // (1,a) and (3,a) differ in id but project to the same name.
 @(test)
 test_exec_single_distinct_dedups_projected :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "single_distinct")
 	defer teardown_executor_env(tree, file)
 
@@ -1768,20 +1661,18 @@ test_exec_single_distinct_dedups_projected :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 3, "a", 3.0))
 
 	sql := "SELECT DISTINCT name FROM t;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "DISTINCT should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 
-	data_rows, _, data_ok := executor.exec_query(&tree, sel)
-	testing.expect(t, data_ok, "DISTINCT should succeed")
-	if data_ok {
-		testing.expect_value(t, len(data_rows), 2)
+	data_rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(data_rows), 2)
+	if len(data_rows) > 0 {
 		testing.expect(
 			t,
 			types.value_compare(data_rows[0].values[0], types.value("a")),
 			"row 0 is a",
 		)
+	}
+	if len(data_rows) > 1 {
 		testing.expect(
 			t,
 			types.value_compare(data_rows[1].values[0], types.value("b")),
@@ -1794,7 +1685,6 @@ test_exec_single_distinct_dedups_projected :: proc(t: ^testing.T) {
 // both — not [a,a] from slicing pre-dedup rows.
 @(test)
 test_exec_single_distinct_limit_applies_after_dedup :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "single_distinct_limit")
 	defer teardown_executor_env(tree, file)
 
@@ -1804,20 +1694,18 @@ test_exec_single_distinct_limit_applies_after_dedup :: proc(t: ^testing.T) {
 	executor.execute(&tree, make_insert_stmt("t", 3, "b", 3.0))
 
 	sql := "SELECT DISTINCT name FROM t LIMIT 2;"
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, parse_ok, "DISTINCT LIMIT should parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
+	sel := must_parse_select(t, sql)
 
-	data_rows, _, data_ok := executor.exec_query(&tree, sel)
-	testing.expect(t, data_ok, "DISTINCT LIMIT should succeed")
-	if data_ok {
-		testing.expect_value(t, len(data_rows), 2)
+	data_rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(data_rows), 2)
+	if len(data_rows) > 0 {
 		testing.expect(
 			t,
 			types.value_compare(data_rows[0].values[0], types.value("a")),
 			"row 0 is a",
 		)
+	}
+	if len(data_rows) > 1 {
 		testing.expect(
 			t,
 			types.value_compare(data_rows[1].values[0], types.value("b")),
@@ -1831,7 +1719,6 @@ test_exec_single_distinct_limit_applies_after_dedup :: proc(t: ^testing.T) {
 // Bare columns beside aggregates remain a clean error.
 @(test)
 test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "agg_lit_mix")
 	defer teardown_executor_env(tree, file)
 
@@ -1848,22 +1735,14 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 				types.value_compare(rows[0].values[0], types.value(0)),
 				"literal repeats",
 			)
-			testing.expect(
-				t,
-				types.value_compare(rows[0].values[1], types.value(2)),
-				"count is 2",
-			)
+			testing.expect(t, types.value_compare(rows[0].values[1], types.value(2)), "count is 2")
 		}
 	}
 
 	rows2, _, ok2 := executor.exec_query(&tree, must_parse_select(t, "SELECT COUNT(*), 0 FROM t;"))
 	testing.expect(t, ok2, "literal-second aggregate must succeed")
 	if ok2 && len(rows2) == 1 {
-		testing.expect(
-			t,
-			types.value_compare(rows2[0].values[0], types.value(2)),
-			"count is 2",
-		)
+		testing.expect(t, types.value_compare(rows2[0].values[0], types.value(2)), "count is 2")
 		testing.expect(
 			t,
 			types.value_compare(rows2[0].values[1], types.value(0)),
@@ -1882,16 +1761,8 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 			types.value_compare(rows3[0].values[0], types.value(0)),
 			"literal repeats",
 		)
-		testing.expect(
-			t,
-			types.value_compare(rows3[0].values[1], types.value(2)),
-			"count is 2",
-		)
-		testing.expect(
-			t,
-			types.value_compare(rows3[0].values[2], types.value(3.0)),
-			"sum is 3.0",
-		)
+		testing.expect(t, types.value_compare(rows3[0].values[1], types.value(2)), "count is 2")
+		testing.expect(t, types.value_compare(rows3[0].values[2], types.value(3.0)), "sum is 3.0")
 	}
 
 	// String literal keeps its value and TEXT typing beside aggregates.
@@ -1906,11 +1777,7 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 			types.value_compare(rows4[0].values[0], types.value("x")),
 			"string literal repeats",
 		)
-		testing.expect(
-			t,
-			types.value_compare(rows4[0].values[1], types.value(2)),
-			"count is 2",
-		)
+		testing.expect(t, types.value_compare(rows4[0].values[1], types.value(2)), "count is 2")
 		if len(cols4) == 2 {
 			testing.expect(t, cols4[0].type == .TEXT, "literal column types as TEXT")
 		}
@@ -1951,11 +1818,7 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 			types.value_compare(rows6[0].values[0], types.value(0)),
 			"literal present on empty table",
 		)
-		testing.expect(
-			t,
-			types.value_compare(rows6[0].values[1], types.value(0)),
-			"count is 0",
-		)
+		testing.expect(t, types.value_compare(rows6[0].values[1], types.value(0)), "count is 0")
 	}
 
 	// A bare column beside aggregates is still a clean error, not a crash.
@@ -1969,13 +1832,11 @@ test_exec_aggregate_literal_mix_evaluates :: proc(t: ^testing.T) {
 	testing.expect(t, !bare_ok, "bare column beside aggregates must error cleanly")
 }
 
-// Regression (exec fuzzing): aggregates over unknown columns used to
-// silently yield NULL/0 (and MIN/MAX panicked outright before the R1
-// follow-up guards). Unknown columns are a clean error everywhere else
-// (WHERE, GROUP BY, bare SELECT), so aggregates resolve the same way.
+// Aggregates over unknown columns are a clean error: silently yielding
+// NULL/0 (or panicking, for MIN/MAX) would contradict WHERE, GROUP BY, and
+// bare SELECT, which all resolve unknown columns the same way.
 @(test)
 test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "agg_unknown_col")
 	defer teardown_executor_env(tree, file)
 
@@ -1988,13 +1849,7 @@ test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
 		"SELECT COUNT(nosuchcol) FROM t;",
 	}
 	for sql in queries {
-		stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-		testing.expect(t, parse_ok, "aggregate over unknown column should parse")
-		sel, is_sel := stmt.type.(parser.Select_Stmt)
-		testing.expect(t, is_sel, "expected Select_Stmt")
-		if !is_sel {
-			continue
-		}
+		sel := must_parse_select(t, sql)
 
 		saved, ctx := suppress_expected_errors()
 		context = ctx
@@ -2012,11 +1867,7 @@ test_exec_aggregate_unknown_column_errors_cleanly :: proc(t: ^testing.T) {
 		testing.expect(t, ok, "COUNT(*) must still succeed")
 		if ok {
 			testing.expect_value(t, len(rows), 1)
-			testing.expect(
-				t,
-				types.value_compare(rows[0].values[0], types.value(1)),
-				"count is 1",
-			)
+			testing.expect(t, types.value_compare(rows[0].values[0], types.value(1)), "count is 1")
 		}
 	}
 }
@@ -2050,7 +1901,6 @@ ids_of_query :: proc(t: ^testing.T, tree: ^btree.Tree, sql: string) -> ([]i64, b
 // with AND/OR/NOT, and a column literally named `is`.
 @(test)
 test_exec_is_null_filtering :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "is_null")
 	defer teardown_executor_env(tree, file)
 
@@ -2117,7 +1967,6 @@ test_exec_is_null_filtering :: proc(t: ^testing.T) {
 
 @(test)
 test_exec_is_null_keyword_column :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "is_col")
 	defer teardown_executor_env(tree, file)
 
@@ -2155,7 +2004,6 @@ test_exec_is_null_keyword_column :: proc(t: ^testing.T) {
 // the full filtered set, with LIMIT applying to the (single) result row.
 @(test)
 test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "agg_limit")
 	defer teardown_executor_env(tree, file)
 
@@ -2213,7 +2061,6 @@ test_exec_aggregate_limit_no_pushdown :: proc(t: ^testing.T) {
 // aggregate value (the separate having evaluator predates IS support).
 @(test)
 test_exec_having_is_null :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "having_is_null")
 	defer teardown_executor_env(tree, file)
 
@@ -2276,7 +2123,6 @@ test_exec_having_is_null :: proc(t: ^testing.T) {
 // columns rather than passing them to the scan.
 @(test)
 test_exec_join_on_index_oob_crashers :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "join_oob")
 	defer teardown_executor_env(tree, file)
 
@@ -2338,7 +2184,6 @@ test_exec_join_on_index_oob_crashers :: proc(t: ^testing.T) {
 // panicked the projection with Index OOB).
 @(test)
 test_exec_chained_right_join_width :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "right_chain")
 	defer teardown_executor_env(tree, file)
 
@@ -2389,21 +2234,101 @@ test_exec_chained_right_join_width :: proc(t: ^testing.T) {
 	}
 }
 
-// must_parse_select parses a SELECT or fails the test outright.
-@(private = "file")
-must_parse_select :: proc(t: ^testing.T, sql: string) -> parser.Select_Stmt {
-	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
-	testing.expect(t, ok, "query must parse")
-	sel, is_sel := stmt.type.(parser.Select_Stmt)
-	testing.expect(t, is_sel, "expected Select_Stmt")
-	return sel
+// JOIN ON naming a table later in the chain resolves against the full
+// combined width but evaluates over pairwise rows; the out-of-range read
+// fails closed to no-match instead of trapping (minimized AFL exec-crasher
+// shape: first ON references c, which only joins in the second pair).
+@(test)
+test_exec_join_on_forward_ref_no_oob :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "join_fwd_ref")
+	defer teardown_executor_env(tree, file)
+
+	setup := [6]string {
+		"CREATE TABLE a (id INT, v TEXT);",
+		"CREATE TABLE b (id INT, w TEXT);",
+		"CREATE TABLE c (id INT, z INT);",
+		"INSERT INTO a VALUES (1,'x'),(2,'y');",
+		"INSERT INTO b VALUES (1,'p'),(2,'q');",
+		"INSERT INTO c VALUES (1,10),(3,30);",
+	}
+	for sql in setup {
+		stmt, pok, _ := parser.parse(sql, context.temp_allocator)
+		testing.expect(t, pok, "setup SQL must parse")
+		if !pok {
+			continue
+		}
+		sok, _, _ := executor.execute(&tree, stmt)
+		testing.expect(t, sok, "setup SQL must execute")
+	}
+
+	fwd := must_parse_select(t, "SELECT * FROM a JOIN b ON a.id = c.id JOIN c ON b.id = c.id;")
+	rows, _, q_ok := executor.exec_query(&tree, fwd)
+	testing.expect(t, q_ok, "forward-ref ON must succeed")
+	if q_ok {
+		testing.expect_value(t, len(rows), 0)
+	}
+
+	// WHERE naming a table outside the join fails closed the same way.
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	w := must_parse_select(t, "SELECT * FROM a JOIN b ON a.id = b.id WHERE c.id > 0;")
+	wrows, _, wok := executor.exec_query(&tree, w)
+	context = restore_logger(saved)
+	testing.expect(t, wok, "unjoined-table WHERE must succeed")
+	if wok {
+		testing.expect_value(t, len(wrows), 0)
+	}
+}
+
+// TEXT PRIMARY KEY stores text verbatim: only an INTEGER PK aliases the
+// rowid, so text keys must survive the round trip and stay usable in reads.
+@(test)
+test_exec_text_pk_stores_verbatim :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "text_pk")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE tpk (code TEXT PRIMARY KEY, label TEXT);",
+			"INSERT INTO tpk VALUES ('a', 'x');",
+			"INSERT INTO tpk VALUES ('b', 'y');",
+		},
+	)
+
+	sel := must_parse_select(t, "SELECT code, label FROM tpk ORDER BY label;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 2)
+	if len(rows) == 2 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[0], types.value("a")),
+			"code 'a' stored",
+		)
+		testing.expect(
+			t,
+			types.value_compare(rows[1].values[0], types.value("b")),
+			"code 'b' stored",
+		)
+	}
+
+	jsel := must_parse_select(t, "SELECT label FROM tpk WHERE code = 'a';")
+	jrows, _ := must_exec_query(t, &tree, jsel)
+	testing.expect_value(t, len(jrows), 1)
+	if len(jrows) > 0 {
+		testing.expect(
+			t,
+			types.value_compare(jrows[0].values[0], types.value("x")),
+			"lookup by text pk",
+		)
+	}
 }
 
 // CHECK constraints apply to UPDATE, not just INSERT: a violating UPDATE
 // fails cleanly and leaves the row untouched, like a type violation.
 @(test)
 test_exec_update_check_enforcement :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_executor_env(t, "update_check")
 	defer teardown_executor_env(tree, file)
 

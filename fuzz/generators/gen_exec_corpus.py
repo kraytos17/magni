@@ -220,6 +220,29 @@ SELECT * FROM a AS x JOIN a AS y ON x.id = y.id ORDER BY x.id LIMIT 2;
 SELECT b.id, COUNT(*) FROM a JOIN b ON a.id = b.id GROUP BY b.id HAVING COUNT(*) > 0 ORDER BY b.id;
 SELECT * FROM a JOIN b ON a.id = b.id WHERE c.id > 0;
 """),
+    ("script_joins_forward_ref", """\
+CREATE TABLE a (id INT, v TEXT);
+CREATE TABLE b (id INT, w TEXT);
+CREATE TABLE c (id INT, z INT);
+INSERT INTO a VALUES (1, 'x'), (2, 'y');
+INSERT INTO b VALUES (1, 'p'), (2, 'q');
+INSERT INTO c VALUES (1, 10), (3, 30);
+SELECT * FROM a JOIN b ON a.id = c.id JOIN c ON b.id = c.id;
+SELECT * FROM a JOIN b ON a.id = b.id WHERE c.id > 0;
+"""),
+    ("script_text_pk", """\
+CREATE TABLE tpk (code TEXT PRIMARY KEY, label TEXT);
+INSERT INTO tpk VALUES ('a', 'x');
+INSERT INTO tpk VALUES ('b', 'y');
+SELECT code, label FROM tpk ORDER BY label;
+SELECT label FROM tpk WHERE code = 'a';
+CREATE TABLE docs (code TEXT, label TEXT);
+CREATE TABLE txns (ref_code TEXT, amount INT);
+INSERT INTO docs VALUES ('a', 'label_a');
+INSERT INTO txns VALUES ('a', 1);
+INSERT INTO txns VALUES (NULL, 2);
+SELECT docs.label, txns.amount FROM docs INNER JOIN txns ON docs.code = txns.ref_code;
+"""),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
 INSERT INTO t (id, s, c) VALUES (1, 'a', 5);

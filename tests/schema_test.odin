@@ -1,6 +1,8 @@
+// Schema catalog tests: column blob round-trips, table add/find, index
+// roots, and persistence across reopen. File-backed; environments come
+// from setup_schema_env and must go through teardown_schema_env.
 package tests
 
-import "core:fmt"
 import "core:strings"
 import "core:testing"
 import "src:btree"
@@ -9,10 +11,11 @@ import "src:pager"
 import "src:schema"
 import "src:types"
 
+// setup_schema_env opens a pager, initializes a slotdir schema root, and
+// boots the schema catalog on it. Pair with teardown_schema_env.
 setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
-	context.logger.lowest_level = .Error
-	filename := fmt.tprintf("test_schema_%s.db", test_name)
-	safe_filename, _ := strings.clone(filename, context.allocator)
+	mute_test_logging()
+	safe_filename := mint_db_filename("test_schema_", test_name)
 	clean_db_files(safe_filename)
 
 	p, err := pager.open(safe_filename)
@@ -20,10 +23,11 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 
 	schema_page, aerr := pager.allocate_page(p)
 	testing.expect(t, aerr == .None, "Failed to allocate schema page")
-	// Schema roots are slotdir post-flip (mirrors production creators).
+	// Schema roots are slotdir post-flip, matching what production creators write.
 	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
 		testing.fail_now(t, "Failed to init slotdir schema page")
 	}
+
 	pager.mark_dirty(p, schema_page.page_num)
 	pager.unpin_page(p, schema_page.page_num)
 
@@ -33,10 +37,11 @@ setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, strin
 	return tree, safe_filename
 }
 
+// teardown_schema_env closes the pager and removes the database, its WAL
+// sidecar, and the owned filename.
 teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
 	_ = pager.close(tree.pager)
-	clean_db_files(filename)
-	delete(filename, context.allocator)
+	drop_db_files(filename)
 }
 
 @(test)
@@ -66,7 +71,6 @@ test_column_blob_roundtrip :: proc(t: ^testing.T) {
 
 @(test)
 test_add_and_find_table :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "basic_ops")
 	defer teardown_schema_env(tree, file)
 
@@ -88,7 +92,6 @@ test_add_and_find_table :: proc(t: ^testing.T) {
 
 @(test)
 test_table_persistence :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "persistence")
 	schema_root := tree.root
 	cols := []types.Column{{name = "x", type = .INTEGER}}
@@ -107,7 +110,6 @@ test_table_persistence :: proc(t: ^testing.T) {
 
 @(test)
 test_list_tables :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "list")
 	defer teardown_schema_env(tree, file)
 
@@ -129,7 +131,6 @@ test_list_tables :: proc(t: ^testing.T) {
 
 @(test)
 test_drop_table :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "drop")
 	defer teardown_schema_env(tree, file)
 
@@ -162,7 +163,6 @@ test_column_validation :: proc(t: ^testing.T) {
 
 @(test)
 test_get_table_deep_copy :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "deep_copy")
 	defer teardown_schema_env(tree, file)
 
@@ -180,7 +180,6 @@ test_get_table_deep_copy :: proc(t: ^testing.T) {
 
 @(test)
 test_find_nonexistent_table :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "find_nonexist")
 	defer teardown_schema_env(tree, file)
 
@@ -190,7 +189,6 @@ test_find_nonexistent_table :: proc(t: ^testing.T) {
 
 @(test)
 test_drop_nonexistent_table :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "drop_nonexist")
 	defer teardown_schema_env(tree, file)
 
@@ -200,7 +198,6 @@ test_drop_nonexistent_table :: proc(t: ^testing.T) {
 
 @(test)
 test_duplicate_table_name :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "dup_name")
 	defer teardown_schema_env(tree, file)
 
@@ -217,7 +214,6 @@ test_duplicate_table_name :: proc(t: ^testing.T) {
 
 @(test)
 test_schema_hash_collision :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "hashcol")
 	defer teardown_schema_env(tree, file)
 
@@ -316,9 +312,7 @@ test_schema_row_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, is_int && v0 == 0, "values[0] is i64(0)")
 
 	// Invalid: too few values
-	_, bad := schema.schema_row_from_values(
-		[]types.Value{types.value(0), types.value("x")},
-	)
+	_, bad := schema.schema_row_from_values([]types.Value{types.value(0), types.value("x")})
 	testing.expect(t, !bad, "<5 values rejected")
 
 	// Invalid: wrong type at values[0]
@@ -345,7 +339,6 @@ test_column_blob_version :: proc(t: ^testing.T) {
 
 @(test)
 test_list_tables_empty :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "list_empty")
 	defer teardown_schema_env(tree, file)
 
@@ -370,7 +363,6 @@ test_schema_unknown_kind :: proc(t: ^testing.T) {
 
 @(test)
 test_schema_special_char_names :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	tree, file := setup_schema_env(t, "spec_names")
 	defer teardown_schema_env(tree, file)
 
@@ -487,11 +479,14 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	// other with two triples). Built on setup_db (full DB init): bare
 	// setup_schema_env trees reject tree_update_cow (pre-existing harness
 	// gap, not D2).
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "index_root")
 	defer teardown_db(d, "index_root")
 
-	testing.expect(t, db.execute(d, "CREATE TABLE docs (id INT, body TEXT, v INT);") == .None, "create")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE docs (id INT, body TEXT, v INT);") == .None,
+		"create",
+	)
 
 	st := db.Schema_Tree(d)
 	def_root, def_ok := schema.update_index_def_cow(&st, "docs", 50, "body", "i_body")

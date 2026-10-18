@@ -1,3 +1,5 @@
+// Btree interface tests: dispatcher parity between vtable and free
+// functions, fail-closed stubs, and rowid/text codec round-trips.
 package tests
 
 import "core:testing"
@@ -8,17 +10,12 @@ import "src:types"
 
 @(test)
 test_iface_dispatcher_parity :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "ifacecompat")
 	defer teardown_tree(&ctx)
 
 	for i in 1 ..= 5 {
 		vals := []types.Value{types.value(i64(i * 10))}
-		err := btree.tree_insert(&ctx.tree, types.Row_ID(i), vals)
-		testing.expect(t, err == .None, "seed insert succeeds")
-		if err != .None {
-			return
-		}
+		must_tree_insert(t, &ctx.tree, types.Row_ID(i), vals)
 	}
 
 	pg, pg_err := pager.get_page(ctx.pager, 1)

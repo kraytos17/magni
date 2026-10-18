@@ -1,6 +1,6 @@
 // Phase C1 tests: text leaf layout, builders, search-vs-oracle, and
 // fail-closed corruption. Buffer-level only (no DB): pages are raw PAGE_SIZE
-// buffers, mirroring tests/btree_v3_test.odin.
+// buffers.
 package tests
 
 import "core:encoding/endian"
@@ -784,7 +784,6 @@ test_text_insert_e2e :: proc(t: ^testing.T) {
 	// Online inserts through text_insert_cow: 600 unique keys, every key
 	// found with its exact rowid, total count exact. Exercises leaf inserts,
 	// leaf splits, absorbs, and root growth end to end.
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "e2e")
 	defer teardown_tree(&ctx)
 
@@ -829,8 +828,7 @@ test_text_insert_e2e :: proc(t: ^testing.T) {
 test_text_split_census :: proc(t: ^testing.T) {
 	// 1500 rows over 150 texts: splits fire, an interior level forms.
 	// Census: every reachable page is text-typed and validates; the count
-	// is exact. Mirrors test_v3_split_produces_slotdir.
-	context.logger.lowest_level = .Error
+	// is exact.
 	ctx := setup_text_tree(t, "census")
 	defer teardown_tree(&ctx)
 
@@ -900,8 +898,6 @@ test_text_split_census :: proc(t: ^testing.T) {
 test_text_boundary_routing :: proc(t: ^testing.T) {
 	// Separator-equality routing on text keys: a key equal to a separator
 	// descends RIGHT (exclusive separators); below goes left, above right.
-	// Mirrors test_separator_boundary_routing — the B4b1 bug class.
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "boundary")
 	defer teardown_tree(&ctx)
 
@@ -984,7 +980,6 @@ test_text_dup_texts :: proc(t: ^testing.T) {
 	// Duplicate texts, distinct rowids: all returned in index order.
 	// Single leaf (no splits) — cross-leaf duplicates are a documented
 	// C3 limit, owned by D's full-range scans.
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "dups")
 	defer teardown_tree(&ctx)
 
@@ -1023,7 +1018,6 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	// Absorb into a full interior forces the overflow split directly
 	// (no deep tree needed): halves validate, all 301 separators present
 	// in order across the halves.
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "absorb")
 	defer teardown_tree(&ctx)
 
@@ -1171,8 +1165,8 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	free_all(context.temp_allocator)
 }
 
-// setup_text_tree mirrors setup_tree with a LEAF_TEXT root: the harness
-// for C3b chain tests (D wires real index trees through the catalog).
+// setup_text_tree is setup_tree with a LEAF_TEXT root: the harness for
+// chain tests that wire real index trees through the catalog.
 // Shared body lives in setup_tree_with (tests/btree_test.odin).
 setup_text_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 	return setup_tree_with(t, name, "test_text_", "text", btree.init_text_leaf_page)
@@ -1181,10 +1175,9 @@ setup_text_tree :: proc(t: ^testing.T, name: string) -> Test_Context {
 @(test)
 test_text_dup_across_leaves :: proc(t: ^testing.T) {
 	// 500 identical texts MUST span leaves (leaf capacity ~300 for tiny
-	// entries): find returns all 500 in order. Regression test for the
-	// rightmost-sentinel advance bug (revisit loop) and the leaf-local
-	// scan limit it replaced — separators routinely equal run members.
-	context.logger.lowest_level = .Error
+	// entries): find returns all 500 in order. Separators routinely equal
+	// run members, so the advance must cross leaves instead of stopping
+	// at a sentinel or a leaf-local limit.
 	ctx := setup_text_tree(t, "dupspan")
 	defer teardown_tree(&ctx)
 
@@ -1232,7 +1225,6 @@ test_text_dup_across_leaves :: proc(t: ^testing.T) {
 test_text_delete_basic :: proc(t: ^testing.T) {
 	// Delete half of 60 unique keys (Direct mode, in place): the deleted
 	// vanish, the kept resolve, the count is exact, every page validates.
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "delbasic")
 	defer teardown_tree(&ctx)
 
@@ -1314,7 +1306,6 @@ test_text_delete_basic :: proc(t: ^testing.T) {
 test_text_delete_missing :: proc(t: ^testing.T) {
 	// Absent keys fail closed without touching the tree: unknown text,
 	// and — the exact-match rule — known text with another rowid.
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "delmiss")
 	defer teardown_tree(&ctx)
 
@@ -1356,8 +1347,7 @@ test_text_delete_missing :: proc(t: ^testing.T) {
 @(test)
 test_text_delete_cow :: proc(t: ^testing.T) {
 	// COW delete forks the root: the new tree misses the row, the old
-	// tree keeps it. Mirrors test_tree_update_cow.
-	context.logger.lowest_level = .Error
+	// tree keeps it.
 	ctx := setup_text_tree(t, "delcow")
 	defer teardown_tree(&ctx)
 
@@ -1398,7 +1388,6 @@ test_text_delete_cow :: proc(t: ^testing.T) {
 test_text_delete_dup_texts :: proc(t: ^testing.T) {
 	// Delete one member of a duplicate run: siblings survive in order
 	// (exact (text,rowid) match — never a text wipe).
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "deldup")
 	defer teardown_tree(&ctx)
 
@@ -1435,7 +1424,6 @@ test_text_insert_direct :: proc(t: ^testing.T) {
 	// every key found with its exact rowid. Covers text_insert, the only
 	// non-COW text writer (dml Direct fan-out is dormant, but the entry
 	// itself is live API and must not rot).
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "insertdirect")
 	defer teardown_tree(&ctx)
 
@@ -1473,7 +1461,6 @@ test_text_find_prefix_vs_oracle :: proc(t: ^testing.T) {
 	// volume) plus boundary neighbors. Every prefix query matches an
 	// independent linear filter over the inserted pairs, in (text,rowid)
 	// order — the index's own sort order.
-	context.logger.lowest_level = .Error
 	ctx := setup_text_tree(t, "prefixscan")
 	defer teardown_tree(&ctx)
 

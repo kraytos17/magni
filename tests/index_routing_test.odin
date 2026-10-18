@@ -1,3 +1,6 @@
+// Index routing tests: each query runs against indexed docs and unindexed
+// docs2 (table name swapped) and must return identical output. Twin setup
+// and comparison live in routing_twin_setup/routing_twin below.
 package tests
 
 import "core:fmt"
@@ -6,6 +9,7 @@ import "core:testing"
 import "src:db"
 
 // Routing twin setup: indexed docs vs unindexed docs2, identical rows.
+// Builds on setup_db, then creates both tables, one index, and 60 rows.
 routing_twin_setup :: proc(t: ^testing.T, name: string) -> ^db.Database {
 	d := setup_db(t, name)
 	testing.expect(
@@ -76,7 +80,6 @@ test_index_or_union :: proc(t: ^testing.T) {
 	// Flat OR of usable same-column disjuncts unions candidate sets
 	// (covering when the projection is rowid-only); any unusable
 	// disjunct falls back to the full scan with identical results.
-	context.logger.lowest_level = .Error
 	d := routing_twin_setup(t, "idxor")
 	defer teardown_db(d, "idxor")
 
@@ -87,7 +90,11 @@ test_index_or_union :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha' OR body IN ('bb', 'gamma');"),
+		drop_index_plan(
+			t,
+			d,
+			"EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha' OR body IN ('bb', 'gamma');",
+		),
 		"INDEX SCAN ON docs USING body (or, covering)",
 	)
 	// Covering OR is rowid-exact (union of exact sets) but has no
@@ -126,13 +133,16 @@ test_index_or_union :: proc(t: ^testing.T) {
 test_index_and_intersect :: proc(t: ^testing.T) {
 	// Flat AND with 2+ usable conjuncts intersects (narrower candidates);
 	// one usable conjunct behaves exactly as before.
-	context.logger.lowest_level = .Error
 	d := routing_twin_setup(t, "idxand")
 	defer teardown_db(d, "idxand")
 
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE body LIKE 'a%' AND body IN ('alpha', 'bb');"),
+		drop_index_plan(
+			t,
+			d,
+			"EXPLAIN SELECT id FROM docs WHERE body LIKE 'a%' AND body IN ('alpha', 'bb');",
+		),
 		"INDEX SCAN ON docs USING body (and, fetch)",
 	)
 	testing.expect_value(
@@ -158,7 +168,6 @@ test_index_and_intersect :: proc(t: ^testing.T) {
 test_index_in_cap :: proc(t: ^testing.T) {
 	// Literal IN past MAX_INDEX_IN_MEMBERS falls back to the full scan
 	// (identical rows); at the cap it still routes.
-	context.logger.lowest_level = .Error
 	d := routing_twin_setup(t, "idxincap")
 	defer teardown_db(d, "idxincap")
 
@@ -189,11 +198,7 @@ test_index_in_cap :: proc(t: ^testing.T) {
 	// NOTE: no delete — fmt.tprintf's backing must not be heap-freed
 	// (tracker flags it); temp reclaims at scope end.
 	over_explain := fmt.tprintf("EXPLAIN %s", over)
-	testing.expect_value(
-		t,
-		drop_index_plan(t, d, over_explain),
-		"FULL SCAN ON docs",
-	)
+	testing.expect_value(t, drop_index_plan(t, d, over_explain), "FULL SCAN ON docs")
 	routing_twin(t, d, []string{over, q128})
 }
 
@@ -201,7 +206,6 @@ test_index_in_cap :: proc(t: ^testing.T) {
 test_index_covering_col :: proc(t: ^testing.T) {
 	// `SELECT <indexed-col>` with Eq/In (or Or thereof) answers from the
 	// index alone; Prefix stays on fetch (keys unknown per row).
-	context.logger.lowest_level = .Error
 	d := routing_twin_setup(t, "idxcovcol")
 	defer teardown_db(d, "idxcovcol")
 
@@ -240,7 +244,6 @@ test_index_covering_col :: proc(t: ^testing.T) {
 test_multi_index :: proc(t: ^testing.T) {
 	// Two indexes on one table: per-column routing, cross-column AND
 	// intersection, drop-one-keeps-other, and fan-out maintaining both.
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "idxmulti")
 	defer teardown_db(d, "idxmulti")
 
@@ -251,7 +254,11 @@ test_multi_index :: proc(t: ^testing.T) {
 	)
 	testing.expect(
 		t,
-		db.execute(d, "INSERT INTO docs VALUES (1, 't1', 'alpha'), (2, 't2', 'beta'), (3, 't1', 'beta');") == .None,
+		db.execute(
+			d,
+			"INSERT INTO docs VALUES (1, 't1', 'alpha'), (2, 't2', 'beta'), (3, 't1', 'beta');",
+		) ==
+		.None,
 		"insert",
 	)
 	testing.expect(
@@ -259,11 +266,7 @@ test_multi_index :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_title ON docs (title);") == .None,
 		"index title",
 	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
-		"index body",
-	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None, "index body")
 
 	// Both route independently.
 	testing.expect_value(
@@ -322,7 +325,6 @@ test_multi_index :: proc(t: ^testing.T) {
 
 @(test)
 test_index_bulk_text_boundaries :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "bulk_text_bounds")
 	defer teardown_db(d, "bulk_text_bounds")
 
@@ -372,7 +374,6 @@ test_index_bulk_text_boundaries :: proc(t: ^testing.T) {
 
 @(test)
 test_index_bulk_text_matches_loop :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "bulk_text_twin")
 	defer teardown_db(d, "bulk_text_twin")
 
@@ -413,10 +414,7 @@ test_index_bulk_text_matches_loop :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 		testing.expect(
 			t,
-			db.execute(
-				d,
-				fmt.tprintf("INSERT INTO docs2 VALUES (%d, '%s');", i, bodies[i - 1]),
-			) ==
+			db.execute(d, fmt.tprintf("INSERT INTO docs2 VALUES (%d, '%s');", i, bodies[i - 1])) ==
 			.None,
 			"loop insert docs2",
 		)
@@ -425,7 +423,7 @@ test_index_bulk_text_matches_loop :: proc(t: ^testing.T) {
 
 	// Same rows through both index paths: identical answers, including the
 	// duplicate body, the empty body, and prefix scans across boundaries.
-	queries := []string{
+	queries := []string {
 		"SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;",
 		"SELECT id FROM docs WHERE body = 'bb';",
 		"SELECT id FROM docs WHERE body = '';",
@@ -438,7 +436,6 @@ test_index_bulk_text_matches_loop :: proc(t: ^testing.T) {
 
 @(test)
 test_index_bulk_text_rollback :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "bulk_text_rb")
 	defer teardown_db(d, "bulk_text_rb")
 

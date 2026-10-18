@@ -1,3 +1,6 @@
+// DROP INDEX tests: definition clearing, DML fan-out after drops, vacuum
+// and reopen behavior, and index GC. Runners below (plan/ids/workload)
+// pin routing and rowids before and after each drop.
 package tests
 
 import "core:fmt"
@@ -71,19 +74,16 @@ test_drop_index :: proc(t: ^testing.T) {
 	// DROP INDEX <name>: the definition clears atomically, data stays,
 	// routed shapes fall back to full scan with identical results, and
 	// EXPLAIN stops routing.
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "dropidx")
 	defer teardown_db(d, "dropidx")
 
-	testing.expect(
+	run_db_setup(
 		t,
-		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);") == .None,
-		"create",
-	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
-		"create index",
+		d,
+		{
+			"CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);",
+			"CREATE INDEX i_body ON docs (body);",
+		},
 	)
 	expect := make(map[string][dynamic]i64, context.allocator)
 	defer destroy_expect(&expect)
@@ -97,9 +97,13 @@ test_drop_index :: proc(t: ^testing.T) {
 	before := drop_index_ids(t, d, "SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;")
 	testing.expect_value(t, len(before), len(expect["alpha"]))
 	before_prefix := drop_index_ids(t, d, "SELECT id FROM docs WHERE body LIKE 'al%' ORDER BY id;")
-	before_in := drop_index_ids(t, d, "SELECT id FROM docs WHERE body IN ('alpha', 'bb') ORDER BY id;")
+	before_in := drop_index_ids(
+		t,
+		d,
+		"SELECT id FROM docs WHERE body IN ('alpha', 'bb') ORDER BY id;",
+	)
 
-	testing.expect(t, db.execute(d, "DROP INDEX i_body;") == .None, "drop succeeds")
+	must_db_execute(t, d, "DROP INDEX i_body;")
 
 	// Definition cleared atomically (root + column + name).
 	st := db.Schema_Tree(d)
@@ -144,19 +148,16 @@ test_drop_index :: proc(t: ^testing.T) {
 test_drop_index_errors :: proc(t: ^testing.T) {
 	// Unknown names and double drops fail cleanly; the definition is
 	// unchanged by a failed drop.
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "dropidxerr")
 	defer teardown_db(d, "dropidxerr")
 
-	testing.expect(
+	run_db_setup(
 		t,
-		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
-		"create",
-	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
-		"create index",
+		d,
+		{
+			"CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);",
+			"CREATE INDEX i_body ON docs (body);",
+		},
 	)
 
 	saved, quiet := suppress_expected_errors()
@@ -167,7 +168,7 @@ test_drop_index_errors :: proc(t: ^testing.T) {
 	testing.expect(t, neg_missing != .None, "unknown index rejected")
 	testing.expect(t, neg_bare != .None, "bare DROP INDEX rejected")
 
-	testing.expect(t, db.execute(d, "DROP INDEX i_body;") == .None, "drop succeeds")
+	must_db_execute(t, d, "DROP INDEX i_body;")
 	saved2, quiet2 := suppress_expected_errors()
 	context = quiet2
 	neg_twice := db.execute(d, "DROP INDEX i_body;")
@@ -186,7 +187,6 @@ test_drop_index_errors :: proc(t: ^testing.T) {
 test_drop_index_name_uniqueness :: proc(t: ^testing.T) {
 	// Index names are global: a second CREATE with a live name fails even
 	// on another table; DROP frees the name for reuse.
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "dropidxuniq")
 	defer teardown_db(d, "dropidxuniq")
 
@@ -200,11 +200,7 @@ test_drop_index_name_uniqueness :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE TABLE b (id INT PRIMARY KEY, body TEXT);") == .None,
 		"create b",
 	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i ON a (body);") == .None,
-		"index on a",
-	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i ON a (body);") == .None, "index on a")
 
 	// Same name on another table is fine now (per-table uniqueness).
 	testing.expect(
@@ -243,30 +239,20 @@ test_drop_index_name_uniqueness :: proc(t: ^testing.T) {
 test_drop_index_recreate :: proc(t: ^testing.T) {
 	// Drop then re-CREATE (same name, other column): routing resumes on
 	// the new column, old column falls back.
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "dropidxrecr")
 	defer teardown_db(d, "dropidxrecr")
 
 	testing.expect(
 		t,
-		db.execute(
-			d,
-			"CREATE TABLE docs (id INT PRIMARY KEY, title TEXT, body TEXT);",
-		) ==
-		.None,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, title TEXT, body TEXT);") == .None,
 		"create",
 	)
 	testing.expect(
 		t,
-		db.execute(d, "INSERT INTO docs VALUES (1, 't1', 'alpha'), (2, 't2', 'beta');") ==
-		.None,
+		db.execute(d, "INSERT INTO docs VALUES (1, 't1', 'alpha'), (2, 't2', 'beta');") == .None,
 		"insert",
 	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i ON docs (body);") == .None,
-		"create index",
-	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i ON docs (body);") == .None, "create index")
 	testing.expect(t, db.execute(d, "DROP INDEX i;") == .None, "drop succeeds")
 	testing.expect(
 		t,
@@ -307,33 +293,22 @@ test_drop_index_in_txn :: proc(t: ^testing.T) {
 	// drop is visible to later statements; staged index writes for the
 	// table are discarded with the definition; COMMIT keeps the drop.
 	// Inserts after the drop fan out nowhere (no index to maintain).
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "dropidxtxn")
 	defer teardown_db(d, "dropidxtxn")
 
-	testing.expect(
+	run_db_setup(
 		t,
-		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
-		"create",
-	)
-	testing.expect(
-		t,
-		db.execute(d, "INSERT INTO docs VALUES (1, 'alpha');") == .None,
-		"insert",
-	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
-		"create index",
+		d,
+		{
+			"CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);",
+			"INSERT INTO docs VALUES (1, 'alpha');",
+			"CREATE INDEX i_body ON docs (body);",
+		},
 	)
 
-	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
-	testing.expect(
-		t,
-		db.execute(d, "INSERT INTO docs VALUES (2, 'beta');") == .None,
-		"staged insert fans out",
-	)
-	testing.expect(t, db.execute(d, "DROP INDEX i_body;") == .None, "drop in txn")
+	must_db_execute(t, d, "BEGIN;")
+	must_db_execute(t, d, "INSERT INTO docs VALUES (2, 'beta');")
+	must_db_execute(t, d, "DROP INDEX i_body;")
 	testing.expect_value(
 		t,
 		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
@@ -366,26 +341,19 @@ test_drop_index_in_txn :: proc(t: ^testing.T) {
 test_drop_index_vacuum :: proc(t: ^testing.T) {
 	// Vacuum after a drop rebuilds data only; queries stay correct and
 	// the definition stays cleared.
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "dropidxvac")
 	defer teardown_db(d, "dropidxvac")
 
-	testing.expect(
+	run_db_setup(
 		t,
-		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
-		"create",
+		d,
+		{
+			"CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);",
+			"INSERT INTO docs VALUES (1, 'alpha'), (2, 'beta');",
+			"CREATE INDEX i_body ON docs (body);",
+		},
 	)
-	testing.expect(
-		t,
-		db.execute(d, "INSERT INTO docs VALUES (1, 'alpha'), (2, 'beta');") == .None,
-		"insert",
-	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
-		"create index",
-	)
-	testing.expect(t, db.execute(d, "DROP INDEX i_body;") == .None, "drop succeeds")
+	must_db_execute(t, d, "DROP INDEX i_body;")
 	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
 
 	got := drop_index_ids(t, d, "SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;")
@@ -399,22 +367,16 @@ test_drop_index_vacuum :: proc(t: ^testing.T) {
 test_drop_index_reopen :: proc(t: ^testing.T) {
 	// The cleared definition persists across close/reopen.
 	d := setup_db(t, "dropidxreopen")
-	testing.expect(
+	run_db_setup(
 		t,
-		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
-		"create",
+		d,
+		{
+			"CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);",
+			"INSERT INTO docs VALUES (1, 'alpha');",
+			"CREATE INDEX i_body ON docs (body);",
+		},
 	)
-	testing.expect(
-		t,
-		db.execute(d, "INSERT INTO docs VALUES (1, 'alpha');") == .None,
-		"insert",
-	)
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
-		"create index",
-	)
-	testing.expect(t, db.execute(d, "DROP INDEX i_body;") == .None, "drop succeeds")
+	must_db_execute(t, d, "DROP INDEX i_body;")
 	db.close(d)
 
 	d2, open_err := db.open("test_int_dropidxreopen.db")
@@ -439,7 +401,6 @@ test_index_gc_expire :: proc(t: ^testing.T) {
 	// routing intact. Twin of test_gc_reclaims_cow_waste with a TEXT
 	// column + index; the second batch forces reuse of anything wrongly
 	// freed, so corruption can't hide behind intact-but-dead pages.
-	context.logger.lowest_level = .Error
 	d := setup_db(t, "idxgc")
 	defer teardown_db(d, "idxgc")
 
@@ -452,17 +413,12 @@ test_index_gc_expire :: proc(t: ^testing.T) {
 	for i in 1 ..= 700 {
 		testing.expect(
 			t,
-			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'n%d');", i, i % 50)) ==
-			.None,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'n%d');", i, i % 50)) == .None,
 			"insert",
 		)
 	}
 	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
-	testing.expect(
-		t,
-		db.execute(d, "CREATE INDEX i_body ON t (body);") == .None,
-		"create index",
-	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i_body ON t (body);") == .None, "create index")
 
 	before := pager.page_count(d.pager)
 	testing.expect(t, int(before) > snapshot.GC_MIN_PAGES, "fixture must engage GC")
@@ -482,8 +438,7 @@ test_index_gc_expire :: proc(t: ^testing.T) {
 	for i in 701 ..= 1400 {
 		testing.expect(
 			t,
-			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'm%d');", i, i % 50)) ==
-			.None,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, 'm%d');", i, i % 50)) == .None,
 			"insert2",
 		)
 	}

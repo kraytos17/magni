@@ -1,3 +1,6 @@
+// Cell codec tests: create/destroy lifecycle, serialization round-trips,
+// zero-copy borrow mechanics, and malformed-input fail-closed behavior.
+// Buffer-level only (no DB).
 package tests
 
 import "core:testing"
@@ -8,11 +11,7 @@ T :: ^testing.T
 
 @(test)
 test_lifecycle_create_destroy :: proc(t: T) {
-	values := []types.Value {
-		types.value(101),
-		types.value("Odin Lang"),
-		types.value(1.618),
-	}
+	values := []types.Value{types.value(101), types.value("Odin Lang"), types.value(1.618)}
 
 	c, err := cell.create(1, values)
 	testing.expect(t, err == nil, "Cell creation failed")
@@ -321,4 +320,3 @@ test_deserialize_needed_none_and_malformed :: proc(t: T) {
 	_, _, ok4 := cell.deserialize_needed(buffer, 999, needed, big_out)
 	testing.expect(t, !ok4, "OOB offset must fail")
 }
-

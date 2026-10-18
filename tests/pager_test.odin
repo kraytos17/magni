@@ -1,27 +1,22 @@
+// Pager and WAL tests: page lifecycle, cache/eviction, WAL commit/abort
+// recovery, checksums, and bitmap allocation. File-backed; environments
+// come from the create_* helpers and must go through the matching destroy.
 package tests
 
 import "core:container/bit_array"
 import "core:fmt"
 import "core:hash"
 import "core:os"
-import "core:strings"
 import "core:testing"
 import "src:pager"
 import "src:types"
 
+// create_test_pager_env opens a pager on an owned file and asserts it is
+// usable. Pair with destroy_test_pager_env.
 create_test_pager_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
-	context.logger.lowest_level = .Error
-	// Owned filename (see setup_tree): returned across the test body, where
-	// free_all(temp) would dangle a temp string. destroy owns the delete.
-	filename, _ := strings.clone(fmt.tprintf("test_pager_%s.db", test_name), context.allocator)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
+	mute_test_logging()
+	filename := mint_db_filename("test_pager_", test_name)
+	clean_db_files(filename)
 
 	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "Failed to open pager")
@@ -29,22 +24,15 @@ create_test_pager_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager
 	return p, filename
 }
 
+// destroy_test_pager_env closes the pager and removes the database, its
+// WAL sidecar, and the owned filename.
 destroy_test_pager_env :: proc(p: ^pager.Pager, filename: string) {
 	_ = pager.close(p)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
-	delete(filename)
+	drop_db_files(filename)
 }
 
 @(test)
 test_pager_open_close :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "open_close")
 	defer destroy_test_pager_env(p, file)
 
@@ -54,7 +42,6 @@ test_pager_open_close :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_allocate_page :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "allocate")
 	defer destroy_test_pager_env(p, file)
 
@@ -73,7 +60,6 @@ test_pager_allocate_page :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_write_and_flush :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "write_flush")
 
 	page, _ := pager.allocate_page(p)
@@ -100,7 +86,6 @@ test_pager_write_and_flush :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_caching_behavior :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "caching")
 	defer destroy_test_pager_env(p, file)
 
@@ -116,7 +101,6 @@ test_pager_caching_behavior :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_get_or_allocate :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "get_alloc")
 	defer destroy_test_pager_env(p, file)
 
@@ -140,7 +124,6 @@ test_pager_get_or_allocate :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_pinning_logic :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "pinning")
 	defer destroy_test_pager_env(p, file)
 
@@ -156,7 +139,6 @@ test_pager_pinning_logic :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_max_cache_eviction :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "eviction")
 	defer destroy_test_pager_env(p, file)
 
@@ -185,7 +167,6 @@ test_pager_max_cache_eviction :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_get_non_existent :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "noexist")
 	defer destroy_test_pager_env(p, file)
 
@@ -195,7 +176,6 @@ test_pager_get_non_existent :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_double_unpin :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "unpin2")
 	defer destroy_test_pager_env(p, file)
 
@@ -211,7 +191,6 @@ test_pager_double_unpin :: proc(t: ^testing.T) {
 
 @(test)
 test_pager_file_len_after_write :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "filelen")
 
 	pager.allocate_page(p)
@@ -230,7 +209,6 @@ test_pager_file_len_after_write :: proc(t: ^testing.T) {
 
 @(test)
 test_page_zero_invalid :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "page_zero")
 	defer destroy_test_pager_env(p, file)
 
@@ -240,7 +218,6 @@ test_page_zero_invalid :: proc(t: ^testing.T) {
 
 @(test)
 test_allocate_page_zero_fails :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "alloc_zero")
 	defer destroy_test_pager_env(p, file)
 
@@ -248,16 +225,12 @@ test_allocate_page_zero_fails :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, pager.Error.Page_Not_Found)
 }
 
+// create_test_wal_env is create_test_pager_env with WAL-sidecar naming
+// ("test_wal_"). Pair with destroy_test_wal_env.
 create_test_wal_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
-	// Owned filename, same contract as create_test_pager_env.
-	filename, _ := strings.clone(fmt.tprintf("test_wal_%s.db", test_name), context.allocator)
-	wal_filename := fmt.tprintf("%s-wal", filename)
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-	if os.exists(wal_filename) {
-		os.remove(wal_filename)
-	}
+	mute_test_logging()
+	filename := mint_db_filename("test_wal_", test_name)
+	clean_db_files(filename)
 
 	p, err := pager.open(filename)
 	testing.expect(t, err == .None, "WAL: Failed to open pager with WAL")
@@ -265,25 +238,15 @@ create_test_wal_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, 
 	return p, filename
 }
 
-remove_wal_files :: proc(filename: string) {
-	if os.exists(filename) {
-		os.remove(filename)
-	}
-	wal_name := fmt.tprintf("%s-wal", filename)
-	if os.exists(wal_name) {
-		os.remove(wal_name)
-	}
-}
-
+// destroy_test_wal_env closes the pager and removes the database, its
+// WAL sidecar, and the owned filename.
 destroy_test_wal_env :: proc(p: ^pager.Pager, filename: string) {
 	_ = pager.close(p)
-	remove_wal_files(filename)
-	delete(filename)
+	drop_db_files(filename)
 }
 
 @(test)
 test_wal_open_close :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "open_close")
 	defer destroy_test_wal_env(p, file)
 
@@ -296,7 +259,6 @@ test_wal_open_close :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_allocate_and_read_back :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "alloc_read")
 	defer destroy_test_wal_env(p, file)
 
@@ -317,7 +279,6 @@ test_wal_allocate_and_read_back :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_uncommitted_discarded_on_close :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "uncommitted")
 
 	pg, err := pager.allocate_page(p)
@@ -339,7 +300,6 @@ test_wal_uncommitted_discarded_on_close :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_commit_survives_reopen :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "commit_survive")
 
 	pg, _ := pager.allocate_page(p)
@@ -371,7 +331,9 @@ test_wal_commit_survives_reopen :: proc(t: ^testing.T) {
 @(test)
 test_wal_recovery_from_crash :: proc(t: ^testing.T) {
 	context.logger.lowest_level = .Error
-	file := fmt.tprintf("test_wal_crash.db")
+	// Heap-owned: destroy_test_wal_env frees it via drop_db_files, and a
+	// temp string would be a bad free there.
+	file := mint_db_filename("test_wal_", "crash")
 	wal_file := fmt.tprintf("%s-wal", file)
 	if os.exists(file) {
 		os.remove(file)
@@ -417,7 +379,6 @@ test_wal_recovery_from_crash :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_checkpoint_resets_wal :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "checkpoint")
 	defer destroy_test_wal_env(p, file)
 
@@ -467,7 +428,6 @@ test_wal_checkpoint_resets_wal :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_multi_txn_read_your_writes :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "read_writes")
 
 	pg, _ := pager.allocate_page(p)
@@ -507,7 +467,6 @@ test_wal_multi_txn_read_your_writes :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_begin_commit_rollback_stress :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "txn_stress")
 
 	for i in 0 ..< 50 {
@@ -547,7 +506,6 @@ test_wal_begin_commit_rollback_stress :: proc(t: ^testing.T) {
 
 @(test)
 test_wal_rollback_does_not_leak_pages :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "ro_noleak")
 
 	before_page_count := pager.page_count(p)
@@ -628,7 +586,6 @@ test_bitmap_basic_ops :: proc(t: ^testing.T) {
 
 @(test)
 test_bitmap_allocate_sets_bit :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "bmap_alloc")
 	defer destroy_test_pager_env(p, file)
 
@@ -648,7 +605,6 @@ test_bitmap_allocate_sets_bit :: proc(t: ^testing.T) {
 
 @(test)
 test_bitmap_free_clears_bit :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "bmap_free")
 	defer destroy_test_pager_env(p, file)
 
@@ -898,7 +854,6 @@ test_wal_v1_legacy_recovers :: proc(t: ^testing.T) {
 test_wal_abort_evicts_dirty_pages :: proc(t: ^testing.T) {
 	// Aborted-txn content must not linger in cache as clean: evict it
 	// without writeback (unreachable by construction once roots restore).
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "abort_evict")
 	defer destroy_test_wal_env(p, file)
 
@@ -921,7 +876,6 @@ test_wal_abort_evicts_dirty_pages :: proc(t: ^testing.T) {
 test_wal_abort_skips_pinned_pages :: proc(t: ^testing.T) {
 	// Fail-open: a pinned page survives abort for the next GC instead of
 	// being destroyed under its holder.
-	context.logger.lowest_level = .Error
 	p, file := create_test_wal_env(t, "abort_pinned")
 	defer destroy_test_wal_env(p, file)
 
@@ -945,7 +899,6 @@ test_free_page_slot_reusable_tracks_dirty :: proc(t: ^testing.T) {
 	// dirty=true on the pooled slot, so the next mark_slot_dirty saw it as
 	// already-dirty and skipped dirty_pages tracking — the reused page
 	// would never commit its image to WAL.
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "free_reuse_dirty")
 	defer destroy_test_pager_env(p, file)
 
@@ -982,7 +935,6 @@ test_pager_bloom_no_false_negative :: proc(t: ^testing.T) {
 	// through the cache (evictions decrement, inserts increment), every page
 	// still reported cached by the table must also pass the bloom. A mismatch
 	// would be a false negative — a cache miss for a live page (double-cache).
-	context.logger.lowest_level = .Error
 	p, file := create_test_pager_env(t, "bloom_no_fneg")
 	defer destroy_test_pager_env(p, file)
 

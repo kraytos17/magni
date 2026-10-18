@@ -1,3 +1,6 @@
+// V3 page-format tests: dense interior layout, header dispatch, and the
+// V2→dense migration census over real pagers. Uses setup_tree from
+// tests/btree_test.odin.
 package tests
 
 import "core:encoding/endian"
@@ -7,6 +10,7 @@ import "src:cell"
 import "src:pager"
 import "src:types"
 
+// W3 is the v3 page-id width used across these tests.
 W3 :: btree.Page_Id
 
 // v3_build_dense assembles a dense interior page body (after the 24-byte
@@ -750,7 +754,6 @@ test_v3_slot_table_ops :: proc(t: ^testing.T) {
 
 @(test)
 test_v3_split_produces_slotdir :: proc(t: ^testing.T) {
-	context.logger.lowest_level = .Error
 	ctx := setup_tree(t, "v3split")
 	defer teardown_tree(&ctx)
 
@@ -765,9 +768,9 @@ test_v3_split_produces_slotdir :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, btree.tree_verify(&ctx.tree), "tree verifies after splits")
 
-	// Every leaf is slotdir (split output, B4a); every interior is
-	// dense (split output, B4b) — the full-migration census: no V2 of
-	// any kind may remain in a fresh tree.
+	// Every leaf is slotdir and every interior is dense (both split
+	// output) — the full-migration census: no V2 of any kind may remain
+	// in a fresh tree.
 	pages := make(map[u32]bool, context.temp_allocator)
 	defer delete(pages)
 	btree.collect_pages(&ctx.tree, ctx.tree.root, &pages)
@@ -824,13 +827,12 @@ test_v3_split_produces_slotdir :: proc(t: ^testing.T) {
 test_separator_boundary_routing :: proc(t: ^testing.T) {
 	// Separator-equality routing: a key equal to an interior separator
 	// must descend to the RIGHT sibling (separators are exclusive upper
-	// bounds of the left child). A lower-bound-only port once misrouted
-	// every split-boundary key to the left leaf (missed finds/deletes);
-	// this test finds every row incl. all separators, then deletes a
-	// strided subset incl. boundaries and recounts. Encoding-agnostic
-	// (vtable-routed): covers V2 interiors today, dense interiors after
-	// B4b with zero changes.
-	context.logger.lowest_level = .Error
+	// bounds of the left child). Split-boundary keys must route on both
+	// bounds: lower-bound-only routing would send every boundary key to
+	// the left leaf (missed finds/deletes); this test finds every row
+	// incl. all separators, then deletes a strided subset incl.
+	// boundaries and recounts. Encoding-agnostic (vtable-routed): covers
+	// V2 and dense interiors unchanged.
 	ctx := setup_tree(t, "seproute")
 	defer teardown_tree(&ctx)
 

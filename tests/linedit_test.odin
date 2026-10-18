@@ -1,3 +1,6 @@
+// Line-editor tests: buffer ops, undo levels, history persistence, unicode
+// widths, and terminal probing fallbacks. In-memory except history-file
+// tests, which clean up after themselves.
 package tests
 
 import "core:fmt"
