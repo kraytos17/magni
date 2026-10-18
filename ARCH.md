@@ -538,8 +538,10 @@ Pager:
 - **Free-list**: `free_slots: [dynamic]^Page_Slot` provides O(1) slot allocation.
 - **Freelist**: Linked list stored in-page. `first_free_page` persisted in database header.
 - **Concurrency**: `RW_Mutex` — reads use shared locks; writes use exclusive locks.
-- **WAL**: All writes go to a `-wal` sidecar file. Each frame carries a 64-bit FNV checksum
-  (split across `checksum1`/`checksum2` in `WAL_Frame_Header`). `wal_recover` verifies
+- **WAL**: All writes go to a `-wal` sidecar file. Each frame carries a 64-bit XXH64 checksum
+  (format version 2, split across `checksum1`/`checksum2` in `WAL_Frame_Header`; version-1
+  WALs adopted after a crash verify with the legacy FNV-64 instead, so recovery never
+  misreads a previous generation). `wal_recover` verifies
   checksums — a mismatched frame stops collection at that point; earlier frames are still
   replayed. `wal_abort_txn` discards uncommitted frames. `wal_checkpoint` writes WAL frames
   back to the main file and truncates the WAL. Checksums computed incrementally (no temp buffer).

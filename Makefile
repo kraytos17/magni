@@ -75,7 +75,7 @@ ci: vet-all test test-py fuzz-test fuzz-exec-test ## CI gate: vet-all + test + t
 check: ## parse + type check (no vet)
 	@python3 magni.py build --check-only
 
-vet: ## fast vet (odin check, full flags); extra: vet --shadowing|--unused|--style|--cast|--semicolon via magni.py vet
+vet: ## fast vet (odin check, full flags); extra: vet --shadowing|--unused|--style|--cast|--semicolon|--tabs|--do via magni.py vet
 	@python3 magni.py vet
 
 vet-all: ## vet via build+test (LLVM, strict-style, shadowing)
