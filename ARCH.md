@@ -264,6 +264,9 @@ directories, re-run the private-marking pass to tighten further.
   threading the data root between rows and applying a single `update_root_page_cow` at the end.
   When a column list omits the primary-key column (or provides NULL), the auto-increment rowid is
   written back into the stored PK value (SQLite `INTEGER PRIMARY KEY` semantics).
+  Rowid aliasing applies to `INTEGER` PKs only: other PK types (e.g. `TEXT PRIMARY KEY`)
+  store verbatim with an auto rowid, and imply `UNIQUE` (duplicates rejected on
+  INSERT/UPDATE, NULLs exempt).
 - `SELECT` column lists support `AS <alias>` and bare-identifier aliases; aliases are stored
   parallel to `columns` (base names kept for resolution) and used for output headers.
 - GROUP BY/HAVING are honored even when the SELECT list carries no aggregates: the parser registers
@@ -284,6 +287,7 @@ Key subroutines:
 | `sort_rows` | ORDER BY with integer fast path | Single-column int: `[]i64` + index sort |
 | `compute_aggregates` | COUNT/SUM/AVG/MIN/MAX | `@(fast_math)` on f64 reduction for auto-vectorization |
 | `check_constraints` | CHECK enforcement on INSERT/UPDATE | Fail-closed: rejects non-integer, unknown col |
+| `check_unique` | UNIQUE + non-INTEGER PK enforcement on INSERT/UPDATE | Pre-insert scan + intra-batch/intra-statement peer checks; NULLs exempt |
 | `render_table` | Query/command result rendering | `core:text/table` markdown output; `unicode_width_proc` for CJK-aligned columns |
 | `exec_select_data` | Data-returning SELECT evaluator (operands for set ops) | Returns `(rows, cols)` without printing; covers literals, single-table, subqueries, joins, aggregates |
 | `row_fingerprint` | FNV-1a hash of a row's values | Shared by `dedup_rows` (DISTINCT) and set-op membership |
@@ -1195,6 +1199,7 @@ context.allocator)`).
 | `.debug_schema` | Show verbose schema dump | `admin.print_schema(debug)` → `schema.debug_print_all()` |
 | `.tree_page <n>` | Print B-tree page structure | `admin.print_tree_page()` (debug dump) |
 | `.dump <table>` | Dump rows | `admin.dump_table()` |
+| `.blob hex|size` | BLOB hex-literal vs size display | `executor.blob_display_hex` |
 | `.desc <table>` | Describe columns | `admin.describe_table()` |
 | `.stats` | DB statistics | `admin.stats()` |
 | `.integrity` | Verify B-trees | `admin.integrity_check()` |

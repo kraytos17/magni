@@ -115,6 +115,7 @@ Token_Type :: enum u8 {
 	USING,
 	IS,
 	INDEX,
+	UNIQUE,
 }
 
 // parse tokenizes and parses one SQL statement. The AST is arena-owned by

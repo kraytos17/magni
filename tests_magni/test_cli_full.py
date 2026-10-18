@@ -560,6 +560,29 @@ class TestDotCommands(MagniCLITestCase):
         p = self.run_eval(".help", self._t_db())
         self.assertHas(p, "Commands:")
 
+    def test_blob_hex_size_modes(self):
+        # One process (dot-command display flags are per-process), with
+        # dot-commands on their own lines: hex default, size after
+        # `.blob size`, usage on bad args, back to hex.
+        d = self.db()
+        p = self.run_eval(
+            "CREATE TABLE t (b BLOB);\n"
+            "INSERT INTO t VALUES (X'DEADBEEF');\n"
+            "SELECT b FROM t;\n"
+            ".blob size\n"
+            "SELECT b FROM t;\n"
+            ".blob\n"
+            ".blob bogus\n"
+            ".blob hex\n"
+            "SELECT b FROM t;",
+            d,
+        )
+        self.assertNoErr(p)
+        self.assertHas(p, "X'DEADBEEF'")
+        self.assertHas(p, "<BLOB 4 bytes>")
+        self.assertHas(p, "BLOB display: size")
+        self.assertHas(p, "Usage: .blob")
+
     def test_desc_describes_table(self):
         p = self.run_eval(".desc t", self._t_db())
         self.assertNoErr(p)

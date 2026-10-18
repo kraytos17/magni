@@ -76,12 +76,18 @@ row_of :: proc(allocator := context.allocator, cells: ..string) -> []string {
 	return row
 }
 
+// blob_display_hex selects BLOB cell rendering for result tables: true
+// (default) shows X'DEADBEEF' literals, false shows "<BLOB N bytes>"
+// placeholders. Toggled at runtime by the REPL `.blob` dot-command; dump
+// output follows it so hex dumps stay re-importable.
+blob_display_hex := true
+
 // stringify_row renders one result row's values to strings. Shared by the
 // SELECT, compound, and dump row loops.
 stringify_row :: proc(values: []types.Value, allocator := context.allocator) -> []string {
 	row := make([]string, len(values), allocator)
 	for v, i in values {
-		row[i] = types.value_to_string(v, allocator)
+		row[i] = types.value_to_string(v, allocator, blob_display_hex)
 	}
 	return row
 }

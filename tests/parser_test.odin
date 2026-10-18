@@ -66,6 +66,22 @@ test_tokenize_literals :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_parse_create_table_unique :: proc(t: ^testing.T) {
+	sql := "CREATE TABLE u (code TEXT UNIQUE, id INT);"
+	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
+	testing.expect(t, ok, "UNIQUE modifier should parse")
+
+	create_stmt, is_create := stmt.type.(parser.Create_Stmt)
+	testing.expect(t, is_create, "Expected Create_Stmt variant")
+	if !is_create || len(create_stmt.columns) != 2 {
+		return
+	}
+	testing.expect(t, create_stmt.columns[0].unique, "code should be unique")
+	testing.expect(t, !create_stmt.columns[1].unique, "id should not be unique")
+	testing.expect(t, !create_stmt.columns[0].pk, "UNIQUE must not imply PK")
+}
+
+@(test)
 test_parse_create_table :: proc(t: ^testing.T) {
 	sql := "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL);"
 	stmt, ok, _ := parser.parse(sql, context.temp_allocator)
@@ -1585,6 +1601,7 @@ test_keyword_bucket_offsets :: proc(t: ^testing.T) {
 		{"where", "WHERE"},
 		{"begin", "BEGIN"},
 		{"commit", "COMMIT"},
+		{"unique", "UNIQUE"},
 		{"select", "SELECT"},
 		{"except", "EXCEPT"},
 		{"default", "DEFAULT"},

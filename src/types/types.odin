@@ -5,6 +5,7 @@
 // Row_ID, serial-type codes, and on-disk format constants.
 package types
 
+import "core:encoding/hex"
 import "core:fmt"
 import "core:hash"
 import "core:mem"
@@ -184,8 +185,14 @@ value_compare :: proc(a, b: Value) -> bool {
 
 // value_to_string renders v as display text. The result is allocated from
 // allocator: temp (default) results live until arena reset; a persistent
-// allocator returns an owned copy the caller must free.
-value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string {
+// allocator returns an owned copy the caller must free. Binary values render
+// as "<BLOB N bytes>" unless hex_blob requests SQLite-style X'DEADBEEF'
+// literals (empty blob renders X'').
+value_to_string :: proc(
+	v: Value,
+	allocator := context.temp_allocator,
+	hex_blob := false,
+) -> string {
 	switch val in v {
 	case Null:
 		return strings.clone("NULL", allocator)
@@ -196,6 +203,11 @@ value_to_string :: proc(v: Value, allocator := context.temp_allocator) -> string
 	case string:
 		return strings.clone(val, allocator)
 	case []u8:
+		if hex_blob {
+			digits, _ := hex.encode_upper(val, allocator)
+			defer delete(digits, allocator)
+			return fmt.aprintf("X'%s'", digits, allocator = allocator)
+		}
 		return fmt.aprintf("<BLOB %d bytes>", len(val), allocator = allocator)
 	case:
 		return strings.clone("<?>", allocator)
@@ -243,6 +255,7 @@ Column :: struct {
 	type         : Column_Type,
 	not_null     : bool,
 	pk           : bool,
+	unique       : bool,
 	default_value: Maybe(Value),
 	check_expr   : Maybe(string),
 }

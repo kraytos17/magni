@@ -23,6 +23,7 @@ import "core:strconv"
 import "core:strings"
 import "src:admin"
 import "src:db"
+import "src:executor"
 import "src:sqltext"
 
 main :: proc() {
@@ -113,6 +114,12 @@ exec_admin_cmd :: proc(database: ^db.Database, line: string) {
 	case ".desc":
 		if len(args) > 0 {
 			admin.describe_table(database, args)
+		}
+	case ".blob":
+		if args == "hex" {
+			executor.blob_display_hex = true
+		} else if args == "size" {
+			executor.blob_display_hex = false
 		}
 	case ".tree_page":
 		if n, ok := strconv.parse_u64(args); ok {

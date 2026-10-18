@@ -2325,6 +2325,152 @@ test_exec_text_pk_stores_verbatim :: proc(t: ^testing.T) {
 	}
 }
 
+// UNIQUE columns reject duplicate values: the second insert fails and the
+// table keeps its single row.
+@(test)
+test_exec_unique_rejects_dup :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_dup")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE u (code TEXT UNIQUE, v INT);",
+			"INSERT INTO u VALUES ('a', 1);",
+		},
+	)
+	stmt := must_parse(t, "INSERT INTO u VALUES ('a', 2);")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "duplicate UNIQUE value must fail")
+
+	table, _ := schema.get_table(&tree, "u", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 1)
+}
+
+// TEXT PRIMARY KEY implies UNIQUE: a duplicate text key fails.
+@(test)
+test_exec_text_pk_rejects_dup :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "textpk_dup")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE tpk (code TEXT PRIMARY KEY, label TEXT);",
+			"INSERT INTO tpk VALUES ('a', 'x');",
+		},
+	)
+	stmt := must_parse(t, "INSERT INTO tpk VALUES ('a', 'y');")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "duplicate TEXT PK must fail")
+}
+
+// NULLs never match: multiple NULLs coexist in a UNIQUE column.
+@(test)
+test_exec_unique_allows_multi_null :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_null")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE u (code TEXT UNIQUE, v INT);",
+			"INSERT INTO u VALUES ('a', 1);",
+			"INSERT INTO u VALUES (NULL, 2);",
+			"INSERT INTO u VALUES (NULL, 3);",
+		},
+	)
+	sel := must_parse_select(t, "SELECT COUNT(*) FROM u;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) > 0 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[0], types.value(3)),
+			"all three rows present",
+		)
+	}
+}
+
+// Intra-batch duplicates fail atomically: a multi-row INSERT with two new
+// peers sharing a UNIQUE value inserts nothing.
+@(test)
+test_exec_unique_bulk_atomic :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_bulk")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(t, &tree, {"CREATE TABLE u (code TEXT UNIQUE, v INT);"})
+	stmt := must_parse(t, "INSERT INTO u VALUES ('a', 1), ('a', 2);")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	success, _, _ := executor.execute(&tree, stmt)
+	context = restore_logger(saved)
+	testing.expect(t, !success, "intra-batch UNIQUE dup must fail")
+
+	table, _ := schema.get_table(&tree, "u", context.temp_allocator)
+	table_tree := btree.init(tree.pager, table.root_page)
+	count, _ := btree.tree_count_rows(&table_tree)
+	testing.expect_value(t, count, 0)
+}
+
+// UPDATE creating a duplicate fails and leaves the table untouched;
+// self-assigning the same key passes.
+@(test)
+test_exec_unique_update_rejected_and_self_assign :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "uniq_upd")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE u (code TEXT UNIQUE, v INT);",
+			"INSERT INTO u VALUES ('a', 1);",
+			"INSERT INTO u VALUES ('b', 2);",
+		},
+	)
+	dup := must_parse(t, "UPDATE u SET code = 'a' WHERE v = 2;")
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	dok, _, _ := executor.execute(&tree, dup)
+	context = restore_logger(saved)
+	testing.expect(t, !dok, "UPDATE creating a dup must fail")
+
+	sel := must_parse_select(t, "SELECT code, v FROM u ORDER BY v;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 2)
+	if len(rows) == 2 {
+		testing.expect(
+			t,
+			types.value_compare(rows[1].values[0], types.value("b")),
+			"failed UPDATE left the row untouched",
+		)
+	}
+
+	must_execute_sql(t, &tree, "UPDATE u SET code = 'b' WHERE code = 'b';")
+}
+
+// value_to_string renders blobs as size placeholders by default and as
+// SQLite-style hex literals with hex_blob (empty blob renders X'').
+@(test)
+test_value_to_string_blob_modes :: proc(t: ^testing.T) {
+	b := types.value([]u8{0xDE, 0xAD, 0xBE, 0xEF})
+	testing.expect_value(t, types.value_to_string(b), "<BLOB 4 bytes>")
+	testing.expect_value(t, types.value_to_string(b, hex_blob = true), "X'DEADBEEF'")
+	testing.expect_value(t, types.value_to_string(types.value([]u8{}), hex_blob = true), "X''")
+}
+
 // CHECK constraints apply to UPDATE, not just INSERT: a violating UPDATE
 // fails cleanly and leaves the row untouched, like a type violation.
 @(test)

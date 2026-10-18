@@ -357,6 +357,9 @@ prepare_insert_row :: proc(
 		}
 		return {}, false
 	}
+	if !check_unique(values, table, t, root_page) {
+		return {}, false
+	}
 	return Insert_Row_Info {
 			values = values,
 			row_id = assign_insert_rowid(table, values, t, root_page, next_id),
@@ -473,6 +476,89 @@ assign_insert_rowid :: proc(
 	return id if err == .None else 1
 }
 
+// unique_column_indices collects the indices needing uniqueness checks:
+// UNIQUE columns plus non-INTEGER PKs (which imply UNIQUE but don't alias
+// the rowid). INTEGER PKs enforce structurally via rowid collision and are
+// skipped here.
+@(private = "file")
+unique_column_indices :: proc(
+	table: types.Table,
+	allocator := context.temp_allocator,
+) -> []int {
+	out := make([dynamic]int, allocator)
+	for col, i in table.columns {
+		if col.unique || (col.pk && col.type != .INTEGER) {
+			append(&out, i)
+		}
+	}
+	return out[:]
+}
+
+// check_unique scans committed rows for a duplicate of the candidate's
+// constrained-column values. NULLs never match (multiple NULLs allowed,
+// like the engine's null-comparison semantics). except_rowid skips one row
+// (the UPDATE self-exclusion: re-setting a row's own key must pass).
+// Fails closed with a logged violation; empty tables scan zero rows
+// and pass.
+@(private = "file")
+check_unique :: proc(
+	values: []types.Value,
+	table: types.Table,
+	t: ^btree.Tree,
+	root_page: u32,
+	except_rowid: Maybe(types.Row_ID) = nil,
+) -> bool {
+	indices := unique_column_indices(table, context.temp_allocator)
+	if len(indices) == 0 {
+		return true
+	}
+
+	data_tree := btree.init(t.pager, root_page)
+	cursor, c_err := btree.cursor_start(&data_tree)
+	if c_err != .None {
+		log.errorf("Error: UNIQUE scan failed for '%s'", table.name)
+		return false
+	}
+	defer btree.cursor_destroy(&cursor)
+	for cursor.is_valid {
+		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
+		if get_err != .None {
+			cell.destroy(&c, context.temp_allocator)
+			btree.cursor_advance(&cursor)
+			continue
+		}
+		if ex, is_ex := except_rowid.?; is_ex && ex == c.rowid {
+			cell.destroy(&c, context.temp_allocator)
+			btree.cursor_advance(&cursor)
+			continue
+		}
+		matched := -1
+		for idx in indices {
+			if idx >= len(c.values) || idx >= len(values) {
+				continue
+			}
+			if types.is_null(values[idx]) {
+				continue
+			}
+			if types.value_compare(c.values[idx], values[idx]) {
+				matched = idx
+				break
+			}
+		}
+		cell.destroy(&c, context.temp_allocator)
+		if matched >= 0 {
+			log.errorf(
+				"UNIQUE constraint violation: %s.%s",
+				table.name,
+				table.columns[matched].name,
+			)
+			return false
+		}
+		btree.cursor_advance(&cursor)
+	}
+	return true
+}
+
 // Bulk_Outcome tells the INSERT gate what the bulk attempt decided:
 // Committed/Failed are terminal (same shape as the row loop's returns);
 // Fallback_Loop reruns the existing row loop (overlap or depth mismatch —
@@ -528,6 +614,29 @@ prepare_sorted_batch :: proc(
 		if infos[i].row_id == infos[i - 1].row_id {
 			log.errorf("Error inserting row: %v", btree.Error.Duplicate_Rowid)
 			return nil, false
+		}
+	}
+	// Unique columns: peers are invisible to the per-row committed scan on
+	// a static tree, so reject intra-batch duplicates pairwise. NULLs never
+	// match (multiple NULLs allowed).
+	for uidx in unique_column_indices(table, context.temp_allocator) {
+		for i in 1 ..< len(infos) {
+			if uidx >= len(infos[i].values) || types.is_null(infos[i].values[uidx]) {
+				continue
+			}
+			for j in 0 ..< i {
+				if uidx >= len(infos[j].values) {
+					continue
+				}
+				if types.value_compare(infos[j].values[uidx], infos[i].values[uidx]) {
+					log.errorf(
+						"UNIQUE constraint violation: %s.%s",
+						table.name,
+						table.columns[uidx].name,
+					)
+					return nil, false
+				}
+			}
 		}
 	}
 	return infos, true
@@ -1262,6 +1371,9 @@ update_by_pk :: proc(
 		log.info("Updated 0 rows.")
 		return true, true, t.root, {}
 	}
+	if !check_unique(new_row, plan.tbl, t, plan.tbl.root_page, target_rowid) {
+		return true, false, t.root, {}
+	}
 
 	nroot, upd_err := btree.tree_update_cow(table_tree, target_rowid, new_row)
 	if upd_err != .None {
@@ -1366,6 +1478,10 @@ update_scan_cow :: proc(
 		if should_update {
 			new_row, had_err := apply_update(&c, plan.update_map, plan, .Fail)
 			if !had_err && new_row != nil {
+				if !check_unique(new_row, plan.tbl, t, current_root, c.rowid) {
+					cell.destroy(&c, context.temp_allocator)
+					return false, t.root, {}
+				}
 				tree_at := btree.init(t.pager, current_root)
 				nroot, upd_err := btree.tree_update_cow(&tree_at, c.rowid, new_row)
 				if upd_err == .None {

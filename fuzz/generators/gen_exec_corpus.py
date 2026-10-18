@@ -243,6 +243,17 @@ INSERT INTO txns VALUES ('a', 1);
 INSERT INTO txns VALUES (NULL, 2);
 SELECT docs.label, txns.amount FROM docs INNER JOIN txns ON docs.code = txns.ref_code;
 """),
+    ("script_uniques", """\
+CREATE TABLE u (code TEXT UNIQUE, v INT);
+INSERT INTO u VALUES ('a', 1);
+INSERT INTO u VALUES ('a', 2);
+INSERT INTO u VALUES (NULL, 3);
+INSERT INTO u VALUES (NULL, 4);
+SELECT code, v FROM u ORDER BY v;
+UPDATE u SET code = 'a' WHERE v = 1;
+UPDATE u SET v = 10 WHERE code = 'a';
+SELECT code, v FROM u ORDER BY v;
+"""),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
 INSERT INTO t (id, s, c) VALUES (1, 'a', 5);

@@ -141,6 +141,7 @@ print_help :: proc() {
 	fmt.println("  .debug_schema             Show low-level schema details")
 	fmt.println("  .desc <table>             Describe table columns")
 	fmt.println("  .dump <table>             Dump all rows")
+	fmt.println("  .blob hex|size            Show BLOBs as hex literals or size")
 	fmt.println("  .stats                    Database statistics")
 	fmt.println("  .integrity                Verify all B-trees")
 	fmt.println("  .checkpoint               Flush pages + garbage collect")

@@ -3,11 +3,12 @@
 //
 // Layout: [0xFE marker][version] then a varint column count, then per
 // column: varint name len, name bytes, one packed flags byte (type in the
-// low 3 bits, not-null/pk/check-present/default-present as bits), then the
-// optional default value followed by the optional check expression when
-// their bits are set. Decoding validates marker, version, and every length
-// against the blob, returning nil/false on any mismatch rather than a
-// partial list.
+// low 3 bits, not-null/pk/check-present/default-present/unique as bits),
+// then the optional default value followed by the optional check expression
+// when their bits are set. Decoding validates marker, version, and every
+// length against the blob, returning nil/false on any mismatch rather than
+// a partial list. Unknown flag bits are ignored, so a bit addition like
+// unique stays wire-compatible both ways without a version bump.
 package schema
 
 import "core:encoding/endian"
@@ -71,6 +72,9 @@ serialize_columns_to_blob :: proc(
 		if _, has := col.default_value.?; has {
 			packed |= 0x40
 		}
+		if col.unique {
+			packed |= 0x80
+		}
 
 		blob[offset] = packed; offset += 1
 		if def, ok := col.default_value.?; ok {
@@ -125,6 +129,7 @@ deserialize_columns :: proc(blob: []u8, allocator := context.allocator) -> []typ
 			type     = types.Column_Type(packed & 0x07),
 			not_null = (packed & 0x08) != 0,
 			pk       = (packed & 0x10) != 0,
+			unique   = (packed & 0x80) != 0,
 		}
 
 		if (packed & 0x40) != 0 {

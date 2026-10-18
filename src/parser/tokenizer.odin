@@ -67,6 +67,7 @@ keyword_table := []Keyword_Entry {
 	{"values", .VALUES},
 	{"except", .EXCEPT},
 	{"commit", .COMMIT},
+	{"unique", .UNIQUE},
 	// len 7
 	{"default", .DEFAULT},
 	{"primary", .PRIMARY},
@@ -88,7 +89,7 @@ keyword_table := []Keyword_Entry {
 // keyword_bucket_offsets[i] = start index into keyword_table for words of length i+2.
 // The final value equals len(keyword_table); the bucket for length N spans
 // keyword_table[offsets[N-2]:offsets[N-1]].
-keyword_bucket_offsets := [10]int{0, 7, 14, 26, 42, 52, 58, 61, 63, 64}
+keyword_bucket_offsets := [10]int{0, 7, 14, 26, 42, 53, 59, 62, 64, 65}
 
 // match_keyword classifies an identifier word case-insensitively (| 0x20
 // fold in a stack buffer — no allocation), scanning only the bucket for

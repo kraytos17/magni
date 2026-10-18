@@ -142,9 +142,10 @@ parse_foreign_key_clause :: proc(
 }
 
 // parse_column_modifier parses one trailing column modifier (PRIMARY KEY,
-// NOT NULL, DEFAULT, CHECK, REFERENCES) after the type. Returns handled=false
-// when the next token starts no modifier (caller breaks); ok=false on error.
-// REFERENCES appends a table-level Foreign_Key for the column being defined.
+// UNIQUE, NOT NULL, DEFAULT, CHECK, REFERENCES) after the type. Returns
+// handled=false when the next token starts no modifier (caller breaks);
+// ok=false on error. REFERENCES appends a table-level Foreign_Key for the
+// column being defined.
 @(private = "file")
 parse_column_modifier :: proc(
 	p: ^Parser,
@@ -161,6 +162,9 @@ parse_column_modifier :: proc(
 		}
 
 		col.pk = true
+		return true, true
+	} else if match(p, .UNIQUE) {
+		col.unique = true
 		return true, true
 	} else if match(p, .NOT) {
 		if !expect_match(p, .NULL, "Expected NULL after NOT") {

@@ -10,6 +10,7 @@ import "core:strings"
 import "core:sys/posix"
 import "src:admin"
 import "src:db"
+import "src:executor"
 import "src:linedit"
 import "src:pager"
 import "src:schema"
@@ -573,6 +574,30 @@ dot_cmd_desc :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) ->
 	return dot_table_arg(database, args, cmd, admin.describe_table)
 }
 
+// .blob [hex|size]: shows or switches BLOB cell display. Bare `.blob`
+// reports the current mode; unknown args print usage.
+@(private = "file")
+dot_cmd_blob :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
+	parts := dot_parts(args)
+	if len(parts) == 1 {
+		fmt.println("BLOB display:", "hex" if executor.blob_display_hex else "size")
+		return false
+	}
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "hex":
+			executor.blob_display_hex = true
+			return false
+		case "size":
+			executor.blob_display_hex = false
+			return false
+		}
+	}
+
+	fmt.println(cmd.usage)
+	return false
+}
+
 // Exact-match commands (full input line must equal name).
 @(private = "file")
 DOT_COMMANDS := []Dot_Command {
@@ -597,6 +622,7 @@ DOT_COMMANDS := []Dot_Command {
 	{".pager_stats", .Exact, dot_cmd_pager_stats, ""},
 	{".pager_layout", .Exact, dot_cmd_pager_layout, ""},
 	{".rollforward", .Exact, dot_cmd_rollforward, ""},
+	{".blob", .Exact, dot_cmd_blob, "Usage: .blob [hex|size]"},
 	{".snapshot tag ", .Prefix, dot_cmd_snapshot_tag, "Usage: .snapshot tag <id> <label>"},
 	{".snapshot restore ", .Prefix, dot_cmd_snapshot_restore, "Usage: .snapshot restore <id>"},
 	{".expire", .Prefix, dot_cmd_expire, ""},

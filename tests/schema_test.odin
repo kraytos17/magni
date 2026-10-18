@@ -70,6 +70,30 @@ test_column_blob_roundtrip :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_column_blob_unique_bit_roundtrip :: proc(t: ^testing.T) {
+	context.logger.lowest_level = .Error
+	cols := []types.Column {
+		{name = "code", type = .TEXT, unique = true},
+		{name = "id", type = .INTEGER},
+	}
+
+	blob := schema.serialize_columns_to_blob(cols, context.temp_allocator)
+	restored := schema.deserialize_columns(blob, context.temp_allocator)
+	testing.expect_value(t, len(restored), 2)
+	testing.expect_value(t, restored[0].unique, true)
+	testing.expect_value(t, restored[1].unique, false)
+
+	// Wire compat: a v1 blob (no 0x80 bit) decodes with unique cleared.
+	legacy := schema.serialize_columns_to_blob(
+		[]types.Column{{name = "code", type = .TEXT}},
+		context.temp_allocator,
+	)
+	legacy_restored := schema.deserialize_columns(legacy, context.temp_allocator)
+	testing.expect_value(t, len(legacy_restored), 1)
+	testing.expect_value(t, legacy_restored[0].unique, false)
+}
+
+@(test)
 test_add_and_find_table :: proc(t: ^testing.T) {
 	tree, file := setup_schema_env(t, "basic_ops")
 	defer teardown_schema_env(tree, file)
