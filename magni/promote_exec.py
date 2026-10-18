@@ -3,7 +3,7 @@
 Thin wrappers over the shared pool flow in magni.promote (EXEC_POOL):
 the exec target binary + 5000 ms timeout for minimization, the
 EXEC_SEEDS/EXEC_PROMOTED tables as diff basis, and
-corpus_exec/promoted_seeds.py as the append target. The promoted_NNNN
+fuzz/generators/promoted_exec_seeds.py as the append target. The promoted_NNNN
 counter is scoped to this pool (independent from the parser sequence).
 """
 

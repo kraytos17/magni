@@ -28,7 +28,7 @@ FUZZ_TARGET_LAF = TARGET_FUZZ / "fuzz_target_laf"
 FUZZ_EXEC_DIR = ROOT / "fuzz_exec"
 FUZZ_EXEC_TARGET = TARGET_FUZZ_EXEC / "fuzz_exec_target"
 EXEC_CORPUS_DIR = FUZZ_DIR / "corpus_exec"
-EXEC_PROMOTED = EXEC_CORPUS_DIR / "promoted_seeds.py"
+EXEC_PROMOTED = GENERATORS_DIR / "promoted_exec_seeds.py"
 EXEC_TIMEOUT_MS = "5000"
 SQL_DICT = FUZZ_DIR / "sql.dict"
 

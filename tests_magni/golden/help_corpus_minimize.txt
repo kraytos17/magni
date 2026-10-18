@@ -2,4 +2,4 @@ usage: magni.py corpus minimize [-h] [--exec]
 
 options:
   -h, --help  show this help message and exit
-  --exec      minimize exec scripts (corpus_exec/promoted_seeds.py) instead
+  --exec      minimize exec scripts (promoted_exec_seeds.py) instead

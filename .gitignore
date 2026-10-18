@@ -9,8 +9,9 @@ __pycache__
 # script in fuzz/generators/)
 fuzz/corpus/*
 !fuzz/corpus/promoted_seeds.py
-fuzz/corpus_exec/*
-!fuzz/corpus_exec/promoted_seeds.py
+# Exec corpus dir holds only generated output now; its promoted table lives
+# in fuzz/generators/promoted_exec_seeds.py (created by `corpus generate --exec`)
+fuzz/corpus_exec/
 
 # AFL++ runtime outputs (generated)
 fuzz/corpus_grown/

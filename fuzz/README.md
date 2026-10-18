@@ -196,7 +196,7 @@ governor check) and `AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1` (system
 - Single source of truth per corpus is the generator script; never hand-edit
   generated seeds. Exec promotion works like parser promotion against the
   exec campaign dir: `MAGNI_FUZZ_OUT=fuzz/afl-exec-output make fuzz-promote
-  EXEC=1` (append to `corpus_exec/promoted_seeds.py`, own `promoted_NNNN`
+  EXEC=1` (append to `generators/promoted_exec_seeds.py`, own `promoted_NNNN`
   counter). Never mix parser and exec output dirs — different binaries/maps.
 
 ## Regression policy

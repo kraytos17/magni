@@ -205,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec",
         dest="exec_promote",
         action="store_true",
-        help="promote exec queue into corpus_exec/promoted_seeds.py instead",
+        help="promote exec queue into promoted_exec_seeds.py instead",
     )
     pp.set_defaults(func=_corpus_promote)
     cm = csub.add_parser("minimize", help="afl-cmin + monster purge, rewrite promoted_seeds.py")
@@ -213,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec",
         dest="exec_minimize",
         action="store_true",
-        help="minimize exec scripts (corpus_exec/promoted_seeds.py) instead",
+        help="minimize exec scripts (promoted_exec_seeds.py) instead",
     )
     cm.set_defaults(func=lambda args: corpus_minimize(exec_pool=args.exec_minimize))
 

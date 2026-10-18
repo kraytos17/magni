@@ -1,7 +1,8 @@
 """Minimize a seed corpus: cmin → monster purge → rewrite promoted set.
 
 Parser pool regenerates fuzz/corpus/promoted_seeds.py; exec pool
-(`corpus minimize --exec`) regenerates fuzz/corpus_exec/promoted_seeds.py.
+(`corpus minimize --exec`) regenerates
+fuzz/generators/promoted_exec_seeds.py.
 Hand seeds in the generator scripts are never touched. Aborts (leaving
 everything unchanged) if tuple coverage would drop.
 """
@@ -145,9 +146,14 @@ def regenerate_and_drop_stale(pool: config.CorpusPool) -> None:
         sys.path.remove(str(pool.corpus_dir))
     live = set(config.DEEP_GUARD_SEEDS) | {
         pool.gen_script.name,
-        "promoted_seeds.py",
         "__pycache__",
     }
+    if not pool.is_exec:
+        # Parser pool only: its promoted table still lives inside the
+        # output dir (fuzz/corpus/promoted_seeds.py). The exec pool's
+        # table moved to fuzz/generators/, so a .py in corpus_exec/
+        # is stale and must go.
+        live.add("promoted_seeds.py")
     for table in pool.seed_tables:
         live |= {name for name, _ in getattr(mod, table)}
     stale = [f.name for f in pool.corpus_dir.iterdir() if f.is_file() and f.name not in live]

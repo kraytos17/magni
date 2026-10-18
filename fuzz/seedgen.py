@@ -15,6 +15,7 @@ def managed_names(entries):
 
 def clear_managed(corpus_dir, names):
     """Remove managed-name seeds on disk so deleted/renamed generator entries don't linger."""
+    os.makedirs(corpus_dir, exist_ok=True)
     for fn in os.listdir(corpus_dir):
         if fn in names:
             os.remove(os.path.join(corpus_dir, fn))
@@ -22,6 +23,7 @@ def clear_managed(corpus_dir, names):
 
 def write_entries(corpus_dir, entries):
     """Write (name, content) seeds; str is utf-8 encoded, bytes as-is."""
+    os.makedirs(corpus_dir, exist_ok=True)
     written = 0
     for name, content in entries:
         data = content.encode("utf-8") if isinstance(content, str) else content

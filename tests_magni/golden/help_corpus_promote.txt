@@ -5,4 +5,4 @@ options:
   --minimize
   --dry-run
   --test      regenerate corpus + ASan gate after promoting
-  --exec      promote exec queue into corpus_exec/promoted_seeds.py instead
+  --exec      promote exec queue into promoted_exec_seeds.py instead

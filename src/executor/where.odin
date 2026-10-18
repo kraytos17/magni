@@ -462,17 +462,31 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 // left slot compares against the literal. has_in replaces the comparison
 // with the membership test; negated flips the outcome last (so NOT IN /
 // NOT LIKE / IS NOT all compose).
+//
+// Index guards: a JOIN ON clause resolves against the full combined column
+// layout (build_join_result), but left-deep join evaluation runs predicates
+// over pairwise rows. An ON that references a table not yet in the pair (or
+// a WHERE term naming an unjoined table) resolves to an index past the row
+// width; out-of-range reads fail closed to "no match" — the same stance as
+// an unresolvable filter, never an out-of-bounds read.
 @(private = "file")
 evaluate_resolved_condition :: proc(
 	ctx: Where_Eval_Ctx,
 	rc: Resolved_Condition,
 	row: []types.Value,
 ) -> bool {
+	if rc.col_idx < 0 || rc.col_idx >= len(row) {
+		return false
+	}
+
 	left_val := row[rc.col_idx]
 	cond_result: bool
 	if rc.operator == .IS {
 		cond_result = types.is_null(left_val)
 	} else if rc.has_right_col {
+		if rc.right_idx < 0 || rc.right_idx >= len(row) {
+			return false
+		}
 		cond_result = compare_condition(left_val, rc.operator, row[rc.right_idx])
 	} else {
 		cond_result = compare_condition(left_val, rc.operator, rc.rhs)

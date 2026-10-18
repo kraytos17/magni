@@ -133,7 +133,7 @@ fuzz-stop: ## pkill afl-fuzz
 fuzz-clean: ## remove fuzz artifacts (out dir, target/fuzz*, min, cmin.map, pycache)
 	@python3 magni.py clean --fuzz-only
 
-fuzz-promote: ## merge grown queue → update gen_corpus.py (MIN=1 to minimize, TEST=1 for full gate, EXEC=1 for exec pool)
+fuzz-promote: ## merge grown queue → update promoted tables (MIN=1 to minimize, TEST=1 for full gate, EXEC=1 for exec pool)
 	@python3 magni.py corpus promote $(if $(filter 1,$(MIN)),--minimize) $(if $(filter 1,$(TEST)),--test) $(if $(filter 1,$(EXEC)),--exec)
 
 fuzz-minimize: ## cmin + monster purge, rewrite promoted set (EXEC=1 for exec pool)

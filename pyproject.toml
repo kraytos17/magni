@@ -7,7 +7,6 @@ line-length = 100
 exclude = [
     "fuzz/generators/*.py",
     "fuzz/corpus/promoted_seeds.py",
-    "fuzz/corpus_exec/promoted_seeds.py",
 ]
 
 [tool.ruff.lint]

@@ -3,8 +3,8 @@
 Run from the repo root: python3 magni.py corpus generate --exec
 
 EXEC_SEEDS are hand-written scripts covering DDL/DML/queries/txns/snapshots.
-EXEC_PROMOTED (in promoted_seeds.py) holds fuzzer-grown finds appended by
-`corpus promote --exec`.
+EXEC_PROMOTED (in promoted_exec_seeds.py, beside this script) holds
+fuzzer-grown finds appended by `corpus promote --exec`.
 """
 
 import os
@@ -13,7 +13,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.normpath(os.path.join(_HERE, "..")))  # fuzz/: seedgen
 CORPUS = os.path.normpath(os.path.join(_HERE, "..", "corpus_exec"))
-sys.path.insert(0, CORPUS)  # corpus dir: promoted_seeds
+sys.path.insert(0, _HERE)  # generators dir: promoted_exec_seeds
 import seedgen
 
 EXEC_SEEDS = [
@@ -318,11 +318,12 @@ SELECT * FROM t;
 """),
 ]
 
-from promoted_seeds import EXEC_PROMOTED
+from promoted_exec_seeds import EXEC_PROMOTED
 
 
 def main():
     """Rewrite the exec corpus deterministically (hand + promoted scripts)."""
+    os.makedirs(CORPUS, exist_ok=True)
     names = seedgen.managed_names(EXEC_SEEDS) | seedgen.managed_names(EXEC_PROMOTED)
     seedgen.clear_managed(CORPUS, names)
 
