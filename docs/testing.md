@@ -9,18 +9,23 @@ numbers.
 | Command | What | When |
 |---|---|---|
 | `make vet` / `python3 magni.py vet` | Fast vet (`odin check`, no LLVM) | Every change |
-| `make vet-all` | Full vet via build+test (`-vet -vet-shadowing -vet-tabs -disallow-do -warnings-as-errors -strict-style`) | Before commit |
+| `make vet-all` | Full vet via build+test (`-vet -vet-shadowing -vet-tabs -disallow-do -warnings-as-errors -strict-style`); also executes the vector-on suite | Before commit |
 | `make test` | All Odin tests, vector engine on (524 tests) | Every change |
 | `MAGNI_VECTOR=0 make test` | Same suite, scalar path (differential control) | Every behavior change |
 | `make test-cli` / `make test-cli-full` | CLI smoke (6) / full black-box (91) | CLI/executor changes |
 | `make test-py` | `tests_magni/` unit tests (139) incl. golden help-text surface | Orchestrator/doc changes |
 | `make fuzz-test` / `make fuzz-exec-test` | Every parser/exec corpus seed under ASan | Parser/executor/storage changes |
 | `make census` | Per-query allocation census (counts/bytes, not timing) | Must stay deterministic across runs |
+| `make census-check` | Census twice + diff (fails on drift; too slow for `ci`) | Pre-commit / weekly |
 | `make perf` | Timing baseline (release) | Perf claims only, on a quiet cool box, on-disk (`/tmp` is tmpfs and flatters I/O) |
-| `make ci` | `vet-all` + `test-matrix` + `test-py` + both ASan corpora | Pre-commit gate |
+| `make ci` | `test-py` + `test-scalar` + `vet-all` (incl. vector-on suite) + `test-cli-full` + both ASan corpora, ascending cost | Pre-commit gate |
 
-`make quick` (`check` + `test` + `test-py`) and `make smoke` (`test` + `test-cli`)
-are the short loops. Commits only happen on explicit request.
+`make quick` (`test` + `test-py`) and `make smoke` (`test` + `test-cli`)
+are the short loops. `make ci-fast` (`lint` + `test-py` + `vet`) is the
+sub-minute per-change gate. `make test-matrix` runs the suite in both vector
+states standalone; `ci` splits that across `vet-all` (vector-on) and
+`test-scalar` so the suite executes exactly twice. Commits only happen
+on explicit request.
 
 ## Layout
 

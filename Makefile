@@ -4,7 +4,6 @@ TARGET_DIR  := target
 TARGET_DEBUG := $(TARGET_DIR)/debug
 ODIN        ?= odin
 COLLECTIONS := -collection:src=$(SRC_DIR)
-
 RELEASE_FLAGS := -o:aggressive -lto:thin -no-bounds-check -no-type-assert \
                  -disable-assert -microarch:native -source-code-locations:none
 
@@ -19,9 +18,10 @@ ROLES ?=
 .DEFAULT_GOAL := help
 
 .PHONY: all build release run rebuild clean clean-all
-.PHONY: test test-verbose test-single test-matrix test-py test-cli test-cli-full smoke quick ci
+.PHONY: test test-verbose test-single test-matrix test-scalar test-py test-cli test-cli-full smoke quick ci-fast ci
+
 .PHONY: check vet vet-all lint
-.PHONY: perf bench census
+.PHONY: perf census census-check
 .PHONY: fuzz-build fuzz-test fuzz-exec-build fuzz-exec-test
 .PHONY: fuzz-corpus fuzz-exec-corpus fuzz-cov fuzz-run fuzz-campaign fuzz-status fuzz-stop
 .PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-one-exec fuzz-grammar-test fuzz-minimize
@@ -68,11 +68,16 @@ test-matrix: ## run full Odin suite in both vector states (vector on, then MAGNI
 	@python3 magni.py test
 	@MAGNI_VECTOR=0 python3 magni.py test
 
+test-scalar: ## run full Odin suite, scalar path only
+	@MAGNI_VECTOR=0 python3 magni.py test
+
 smoke: test test-cli ## quick smoke: unit tests + CLI
 
-quick: check test test-py ## fast gate: check + test + orchestrator unit tests (no vet/fuzz)
+quick: test test-py ## fast gate: tests + orchestrator unit tests (no vet/fuzz)
 
-ci: vet-all test-matrix test-py fuzz-test fuzz-exec-test ## CI gate: vet-all + both vector states + test-py + fuzz parser+exec corpora ASan
+ci-fast: lint test-py vet ## sub-minute gate: ruff + orchestrator tests + fast vet
+
+ci: test-py test-scalar vet-all test-cli-full fuzz-test fuzz-exec-test ## full gate: unit tests + scalar suite + vet-all (incl. vector-on suite) + CLI-full + both ASan corpora
 	@echo "ci: all gates passed"
 
 check: ## parse + type check (no vet)
@@ -81,7 +86,7 @@ check: ## parse + type check (no vet)
 vet: ## fast vet (odin check, full flags); extra: vet --shadowing|--unused|--style|--cast|--semicolon|--tabs|--do via magni.py vet
 	@python3 magni.py vet
 
-vet-all: ## full vet via build+test (LLVM, all flags)
+vet-all: ## full vet via build+test (also executes the vector-on suite; see ci/test-scalar pairing)
 	@python3 magni.py vet --all
 
 lint: ## ruff check + format check on tooling (needs ruff)
@@ -94,7 +99,10 @@ perf: ## run timing baseline (release flags)
 census: ## per-query allocation census: counts/bytes, heap vs temp (counts only, not timing)
 	$(ODIN) run tests/census $(COLLECTIONS) $(RELEASE_FLAGS)
 
-bench: perf ## alias for perf
+census-check: ## run census twice, fail on any drift
+	@$(ODIN) run tests/census $(COLLECTIONS) $(RELEASE_FLAGS) > /tmp/magni_census_a.txt
+	@$(ODIN) run tests/census $(COLLECTIONS) $(RELEASE_FLAGS) > /tmp/magni_census_b.txt
+	@diff /tmp/magni_census_a.txt /tmp/magni_census_b.txt && echo "census: deterministic"
 
 fuzz-corpus: ## regenerate seed corpus → fuzz/corpus/
 	@python3 magni.py corpus generate

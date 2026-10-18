@@ -100,9 +100,7 @@ class TestAppendToPromoted(unittest.TestCase):
         )
         self.assertEqual(pys, ["promoted_seeds.py"])
         exec_pys = sorted(
-            f.name
-            for f in config.EXEC_CORPUS_DIR.iterdir()
-            if f.is_file() and f.suffix == ".py"
+            f.name for f in config.EXEC_CORPUS_DIR.iterdir() if f.is_file() and f.suffix == ".py"
         )
         self.assertEqual(exec_pys, [])
         for target in (config.FUZZ_TARGET, config.FUZZ_TARGET_COV):
