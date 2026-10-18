@@ -80,8 +80,10 @@ cursor_destroy :: proc(c: ^Cursor) {
 // cursor_start initializes an in-order traversal at the leftmost leaf.
 // Returns an invalid cursor when the tree is empty. Empty leaves (possible
 // after deletes empty a leading leaf) are skipped so the cursor lands on the
-// first cell-bearing leaf.
-cursor_start :: proc(t: ^Tree, allocator := context.allocator) -> (c: Cursor, err: Error) {
+// first cell-bearing leaf. Pin state lives in the pager, not the cursor,
+// so no allocator is needed (contrast cursor_get_cell, whose output the
+// caller owns).
+cursor_start :: proc(t: ^Tree) -> (c: Cursor, err: Error) {
 	c = Cursor {
 		tree     = t,
 		is_valid = true,

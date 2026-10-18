@@ -139,7 +139,7 @@ exec_create_index :: proc(
 	pager.mark_dirty(t.pager, root_page.page_num)
 	index_root := root_page.page_num
 	data_tree := btree.init(t.pager, table.root_page)
-	cursor, c_err := btree.cursor_start(&data_tree, context.temp_allocator)
+	cursor, c_err := btree.cursor_start(&data_tree)
 	if c_err != .None {
 		log.error("Error: Failed to scan table for index build")
 		return false, t.root, {}
@@ -1325,7 +1325,7 @@ update_by_scan :: proc(
 	u32,
 	Mutated_Table_Info,
 ) {
-	cursor, cursor_err := btree.cursor_start(table_tree, context.temp_allocator)
+	cursor, cursor_err := btree.cursor_start(table_tree)
 	if cursor_err != .None {
 		return false, t.root, {}
 	}
@@ -1544,7 +1544,7 @@ collect_delete_targets :: proc(
 	table_tree: ^btree.Tree,
 ) -> [dynamic]types.Row_ID {
 	targets := make([dynamic]types.Row_ID, context.temp_allocator)
-	cursor, err := btree.cursor_start(table_tree, context.temp_allocator)
+	cursor, err := btree.cursor_start(table_tree)
 	if err != .None {
 		return targets
 	}

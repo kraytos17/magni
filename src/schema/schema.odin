@@ -396,7 +396,7 @@ get_table :: proc(
 // per entry (and the slice itself).
 list_tables :: proc(t: ^btree.Tree, allocator := context.allocator) -> []types.Table {
 	tables := make([dynamic]types.Table, allocator)
-	cursor, err := btree.cursor_start(t, context.temp_allocator)
+	cursor, err := btree.cursor_start(t)
 	if err != .None {
 		return nil
 	}

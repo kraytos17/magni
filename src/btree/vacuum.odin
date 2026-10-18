@@ -288,16 +288,10 @@ vacuum_empty_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
 // except the last, which becomes the rightmost pointer. handles must be
 // non-empty (the caller routes the empty tree to vacuum_empty_root).
 @(private = "file")
-vacuum_build_interiors :: proc(
-	t: ^Tree,
-	handles: [dynamic]Node_Handle,
-) -> (
-	root: u32,
-	err: Error,
-) {
+vacuum_build_interiors :: proc(t: ^Tree, handles: [dynamic]Bulk_Node) -> (root: u32, err: Error) {
 	level := handles
 	for len(level) > 1 {
-		next := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
+		next := make([dynamic]Bulk_Node, 0, 64, context.temp_allocator)
 		i := 0
 		for i < len(level) {
 			// Greedy chunk: children [i..e] with separators mins[i+1..e]
@@ -346,7 +340,7 @@ vacuum_build_interiors :: proc(
 			max_key := level[e].max_key
 			page_id := page.page_num
 			pager.unpin_page(t.pager, page_id)
-			append(&next, Node_Handle{id = page_id, min_key = level[i].min_key, max_key = max_key})
+			append(&next, Bulk_Node{id = page_id, min_key = level[i].min_key, max_key = max_key})
 			i = e + 1
 		}
 		level = next
@@ -359,8 +353,8 @@ vacuum_build_interiors :: proc(
 // time-travel snapshots remain readable; the superseded pages are reclaimed
 // by the next garbage-collection pass. It is an O(n) maintenance operation
 // intended for an explicit VACUUM, not for hot-path use.
-tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
-	handles := make([dynamic]Node_Handle, 0, 64, context.temp_allocator)
+tree_vacuum :: proc(t: ^Tree) -> (new_root: u32, err: Error) {
+	handles := make([dynamic]Bulk_Node, 0, 64, context.temp_allocator)
 	vc := vacuum_ctx {
 		t          = t,
 		leaf_empty = true,
@@ -384,23 +378,13 @@ tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32,
 	return vacuum_build_interiors(t, handles)
 }
 
-// Node_Handle identifies a packed node and its subtree edge keys, used
-// while building the new interior levels of a vacuumed tree. Separators
-// store right-child minima (the descent convention), so both edges travel.
-@(private)
-Node_Handle :: struct {
-	id     : u32,
-	min_key: types.Row_ID,
-	max_key: types.Row_ID,
-}
-
 // vacuum_ctx carries the bulk-loader state across tree_foreach callbacks.
 @(private)
 vacuum_ctx :: struct {
 	t         : ^Tree,
 	leaf      : Node,
 	leaf_empty: bool,
-	handles   : ^[dynamic]Node_Handle,
+	handles   : ^[dynamic]Bulk_Node,
 	leaf_min  : types.Row_ID,
 	leaf_max  : types.Row_ID,
 	failed    : bool,
@@ -479,7 +463,7 @@ vacuum_finish_leaf :: proc(vc: ^vacuum_ctx) -> Error {
 		return .None
 	}
 
-	append(vc.handles, Node_Handle{id = vc.leaf.id, min_key = vc.leaf_min, max_key = vc.leaf_max})
+	append(vc.handles, Bulk_Node{id = vc.leaf.id, min_key = vc.leaf_min, max_key = vc.leaf_max})
 	pager.unpin_page(vc.t.pager, vc.leaf.id)
 	vc.leaf_empty = true
 	return .None
@@ -894,7 +878,7 @@ text_index_is_empty :: proc(t: ^Tree, root: u32) -> bool {
 // interior levels bottom-up; originals untouched for COW safety. Separators
 // propagate verbatim as right-child minima — no re-encoding, no
 // recomparison. O(n) maintenance for explicit VACUUM, not hot-path use.
-text_tree_vacuum :: proc(t: ^Tree, allocator := context.allocator) -> (new_root: u32, err: Error) {
+text_tree_vacuum :: proc(t: ^Tree) -> (new_root: u32, err: Error) {
 	texts := make([dynamic][]u8, 0, 64, context.temp_allocator)
 	rids := make([dynamic]types.Row_ID, 0, 64, context.temp_allocator)
 	if c_err := text_vacuum_collect(t, t.root, &texts, &rids); c_err != .None {

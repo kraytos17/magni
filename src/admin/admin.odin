@@ -292,7 +292,7 @@ dump_table :: proc(database: ^db.Database, table_name: string) -> db.DB_Error {
 	}
 
 	table_tree := btree.init(database.pager, table.root_page)
-	cursor, err := btree.cursor_start(&table_tree, context.temp_allocator)
+	cursor, err := btree.cursor_start(&table_tree)
 	if err != .None {
 		return .IO_Error
 	}

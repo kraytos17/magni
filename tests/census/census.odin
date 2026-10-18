@@ -370,6 +370,7 @@ main :: proc() {
 	measure_lookups(d, &heap, &temp, 500)
 	db.close(d)
 	os.remove(DB_NAME)
+	os.remove(DB_NAME + "-wal")
 
 	// Restore context before the process exits (the census structs die with
 	// `main`).

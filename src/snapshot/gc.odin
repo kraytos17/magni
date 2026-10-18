@@ -47,7 +47,7 @@ mark_snapshot_live :: proc(p: ^pager.Pager, h: Snapshot_Header, page: u32, live:
 
 	t := btree.init(p, h.schema_root)
 	btree.collect_pages(&t, h.schema_root, live)
-	mark_index_roots(p, &t, live)
+	mark_index_roots(&t, live)
 	if h.manifest_page == 0 {
 		return
 	}
@@ -97,8 +97,8 @@ build_live_set :: proc(p: ^pager.Pager, latest_page: u32, keep_count: int, live:
 // pages, so they recycle naturally — no eager free needed (snapshots may
 // still reference them; DROP TABLE precedent).
 @(private)
-mark_index_roots :: proc(p: ^pager.Pager, t: ^btree.Tree, live: ^map[u32]bool) {
-	c, c_err := btree.cursor_start(t, context.temp_allocator)
+mark_index_roots :: proc(t: ^btree.Tree, live: ^map[u32]bool) {
+	c, c_err := btree.cursor_start(t)
 	if c_err != .None {
 		return
 	}

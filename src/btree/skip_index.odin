@@ -46,7 +46,7 @@ Skip_Index :: struct {
 // so callers hold no cursor state across the later sort/merge/write steps.
 @(private = "file")
 skip_collect_entries :: proc(t: ^Tree, col_index: int, entries: ^[dynamic]Skip_Entry) -> Error {
-	cursor, c_err := cursor_start(t, context.temp_allocator)
+	cursor, c_err := cursor_start(t)
 	if c_err != .None {
 		return c_err
 	}

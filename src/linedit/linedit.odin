@@ -123,7 +123,7 @@ read_line :: proc(ed: ^Editor, prompt: string) -> (line: string, ok: bool) {
 		case .Tab:
 			run_tab_complete(ed, &lb)
 		case .Ctrl_R:
-			run_reverse_search(ed, prompt, &lb)
+			run_reverse_search(ed, &lb)
 		case .Paste_Start:
 			read_pasted_text(ed.term.fd, &lb)
 		case .Escape, .None, .Eof, .Paste_End:
@@ -183,12 +183,24 @@ query_pop_rune :: proc(query: ^strings.Builder) {
 	strings.write_string(query, q[:last])
 }
 
+// research_seek restarts the search from the newest entry after the query
+// changed (typed or deleted rune): the shared reset-and-step tail behind
+// run_reverse_search's Char and Backspace arms.
+@(private = "file")
+research_seek :: proc(ed: ^Editor, query: string, st: ^Reverse_Search) {
+	st.wrapped = false
+	st.search_idx = len(ed.history.entries)
+	if !search_step(ed, query, st.search_idx, st, false) {
+		st.failed = true
+	}
+}
+
 // run_reverse_search runs one Ctrl-R session over history: type to narrow
 // (failed/wrapped shown in the prompt), Enter accepts the match into the
 // buffer, Esc/Ctrl-C aborts (buffer untouched). Ctrl-R with a non-empty
 // query steps to the next older hit, wrapping once (wrapped flag).
 @(private = "file")
-run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
+run_reverse_search :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 	query := strings.builder_make()
 	defer strings.builder_destroy(&query)
 
@@ -235,19 +247,11 @@ run_reverse_search :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 			}
 		case .Char:
 			strings.write_rune(&query, ev.char)
-			st.wrapped = false
-			st.search_idx = len(ed.history.entries)
-			if !search_step(ed, strings.to_string(query), st.search_idx, &st, false) {
-				st.failed = true
-			}
+			research_seek(ed, strings.to_string(query), &st)
 		case .Backspace:
 			if strings.builder_len(query) > 0 {
 				query_pop_rune(&query)
-				st.wrapped = false
-				st.search_idx = len(ed.history.entries)
-				if !search_step(ed, strings.to_string(query), st.search_idx, &st, false) {
-					st.failed = true
-				}
+				research_seek(ed, strings.to_string(query), &st)
 			}
 		}
 	}
@@ -333,18 +337,17 @@ sql_keywords :: []string {
 	"OF",
 }
 
-// run_tab_complete completes the current word: dot-command prefixes on
-// dot-lines, else the registered callback (schema names), else SQL
-// keywords (uppercase-prefix fallback). One candidate completes in place;
-// several list below the line; none is a no-op. Empty line completes
-// nothing.
-run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
-	line := lb_to_string(lb, context.temp_allocator)
-	if len(line) == 0 {
-		return
-	}
-
-	candidates := make([dynamic]string, context.temp_allocator)
+// collect_completions gathers Tab candidates for line: dot-command
+// prefixes on dot-lines, else the registered callback (schema names), else
+// SQL keywords (uppercase-prefix fallback). The gather half of
+// run_tab_complete; display (0/1/N) stays with the caller.
+@(private = "file")
+collect_completions :: proc(
+	ed: ^Editor,
+	line: string,
+	allocator := context.allocator,
+) -> [dynamic]string {
+	candidates := make([dynamic]string, allocator)
 	if line[0] == '.' {
 		for cmd in dot_commands {
 			if strings.has_prefix(cmd, line) {
@@ -360,12 +363,12 @@ run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 		word_start += 1
 		word := line[word_start:]
 		if ed.complete_fn != nil && len(word) > 0 {
-			for cand in ed.complete_fn(word, ed.complete_ud, context.temp_allocator) {
+			for cand in ed.complete_fn(word, ed.complete_ud, allocator) {
 				append(&candidates, cand)
 			}
 		}
 		if len(candidates) == 0 {
-			word_upper := strings.to_upper(word, context.temp_allocator)
+			word_upper := strings.to_upper(word, allocator)
 			for kw in sql_keywords {
 				if strings.has_prefix(kw, word_upper) {
 					append(&candidates, kw)
@@ -373,7 +376,21 @@ run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 			}
 		}
 	}
+	return candidates
+}
 
+// run_tab_complete completes the current word: dot-command prefixes on
+// dot-lines, else the registered callback (schema names), else SQL
+// keywords (uppercase-prefix fallback). One candidate completes in place;
+// several list below the line; none is a no-op. Empty line completes
+// nothing.
+run_tab_complete :: proc(ed: ^Editor, lb: ^Line_Buffer) {
+	line := lb_to_string(lb, context.temp_allocator)
+	if len(line) == 0 {
+		return
+	}
+
+	candidates := collect_completions(ed, line, context.temp_allocator)
 	if len(candidates) == 0 {
 		return
 	}

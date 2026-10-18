@@ -156,7 +156,7 @@ vec_seek_cursor :: proc(
 	cursor: btree.Cursor,
 	ok: bool,
 ) {
-	start, c_err := btree.cursor_start(tree, allocator)
+	start, c_err := btree.cursor_start(tree)
 	if c_err != .None {
 		return {}, false
 	}
@@ -165,7 +165,7 @@ vec_seek_cursor :: proc(
 	if plan.skip_start > 0 {
 		if seek_err := btree.cursor_seek_to_page(&cursor, plan.skip_start); seek_err != .None {
 			btree.cursor_destroy(&cursor)
-			cursor, c_err = btree.cursor_start(tree, allocator)
+			cursor, c_err = btree.cursor_start(tree)
 			if c_err != .None {
 				return {}, false
 			}
