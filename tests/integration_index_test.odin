@@ -948,7 +948,8 @@ test_index_select_eq_fallback :: proc(t: ^testing.T) {
 @(test)
 test_index_select_rowid_guard :: proc(t: ^testing.T) {
 	// A user column named "rowid" keeps today's meaning: the index never
-	// hijacks the projection, and unindexed `SELECT rowid` still errors.
+	// hijacks the projection. A bare `SELECT rowid` now projects the
+	// source rowid generally (no predicate needed).
 	d := setup_db(t, "idxselguard")
 	defer teardown_db(d, "idxselguard")
 
@@ -970,8 +971,7 @@ test_index_select_rowid_guard :: proc(t: ^testing.T) {
 		}
 	}
 
-	// No predicate: `SELECT rowid` on a table without that column errors,
-	// exactly as before Phase E.
+	// No predicate: bare `SELECT rowid` projects the source rowid.
 	testing.expect(
 		t,
 		db.execute(d, "CREATE TABLE p (id INT PRIMARY KEY, body TEXT);") == .None,
@@ -979,11 +979,18 @@ test_index_select_rowid_guard :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, db.execute(d, "INSERT INTO p VALUES (1, 'x');") == .None, "insert p")
 	testing.expect(t, db.execute(d, "CREATE INDEX i_p ON p (body);") == .None, "create index p")
-	saved, ctx := suppress_expected_errors()
-	context = ctx
-	bad := db.query(d, "SELECT rowid FROM p;")
-	context = restore_logger(saved)
-	testing.expect(t, !bad.ok, "bare SELECT rowid without predicate still fails")
+	bare := db.query(d, "SELECT rowid FROM p;")
+	testing.expect(t, bare.ok, "bare SELECT rowid succeeds")
+	if bare.ok {
+		testing.expect_value(t, len(bare.rows), 1)
+		if len(bare.rows) == 1 {
+			v, is_int := bare.rows[0][0].(i64)
+			testing.expect(t, is_int, "rowid projects as INTEGER")
+			if is_int {
+				testing.expect_value(t, v, 1)
+			}
+		}
+	}
 }
 
 @(test)

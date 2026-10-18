@@ -262,6 +262,24 @@ SELECT a, b, v FROM t ORDER BY v;
 UPDATE t SET a = 1, b = 'x' WHERE v = 30;
 SELECT a, b, v FROM t ORDER BY v;
 """),
+    ("script_rowid", """\
+CREATE TABLE t (a INT, b TEXT);
+INSERT INTO t VALUES (10, 'x');
+INSERT INTO t VALUES (20, 'y');
+INSERT INTO t VALUES (30, 'z');
+SELECT rowid FROM t ORDER BY rowid;
+SELECT rowid, a, b FROM t ORDER BY rowid;
+SELECT a, rowid FROM t ORDER BY rowid DESC;
+SELECT rowid, rowid FROM t ORDER BY rowid;
+DELETE FROM t WHERE a = 20;
+SELECT rowid, a FROM t ORDER BY rowid;
+SELECT a, b FROM t WHERE rowid = 1;
+SELECT a FROM t WHERE rowid = 999;
+SELECT rowid, a FROM t WHERE ROWID = 3;
+UPDATE t SET b = 'w' WHERE rowid = 1;
+DELETE FROM t WHERE rowid = 999;
+SELECT rowid, a, b FROM t ORDER BY rowid;
+"""),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
 INSERT INTO t (id, s, c) VALUES (1, 'a', 5);

@@ -175,15 +175,16 @@ vec_seek_cursor :: proc(
 }
 
 // clone_fused_row materializes one survivor directly at projected width:
-// display position i from table column proj_indices[i]. Text/blob clones
-// once per column and shares the header on repeats (SELECT a, a), exactly
-// like finish_select's copy. Mutates row_buf (clone-once sharing), same as
-// the inline code it replaces.
+// display position i from table column proj_indices[i], or from the source
+// rowid for ROWID_PROJ slots. Text/blob clones once per column and shares
+// the header on repeats (SELECT a, a), exactly like finish_select's copy.
+// Mutates row_buf (clone-once sharing), same as the inline code it replaces.
 @(private = "file")
 clone_fused_row :: proc(
 	row_buf: []types.Value,
 	proj_indices: []int,
 	out_width: int,
+	rowid: types.Row_ID,
 	allocator: mem.Allocator,
 ) -> (
 	vals: []types.Value,
@@ -192,6 +193,11 @@ clone_fused_row :: proc(
 	vals = make([]types.Value, out_width, allocator)
 	cloned_cols: [types.MAX_COLS]bool
 	for idx, i in proj_indices {
+		if idx == ROWID_PROJ {
+			vals[i] = types.value(i64(rowid))
+			continue
+		}
+
 		src := row_buf[idx]
 		#partial switch _ in src {
 		case string, []u8:
@@ -283,7 +289,12 @@ vec_projection :: proc(
 	if fused {
 		proj_cols = make([]types.Column, len(proj_indices), allocator)
 		for idx, i in proj_indices {
-			proj_cols[i] = columns[idx]
+			if idx == ROWID_PROJ {
+				proj_cols[i] = rowid_proj_column(stmt.columns[i])
+			} else {
+				proj_cols[i] = columns[idx]
+			}
+
 			if i < len(stmt.aliases) && stmt.aliases[i] != "" {
 				proj_cols[i].name = stmt.aliases[i]
 			}
@@ -418,7 +429,7 @@ scan_table_vec :: proc(
 		vals: []types.Value
 		vals_ok := true
 		if fused {
-			vals, vals_ok = clone_fused_row(row_buf[:], proj_indices, out_width, allocator)
+			vals, vals_ok = clone_fused_row(row_buf[:], proj_indices, out_width, rowid, allocator)
 		} else {
 			vals, vals_ok = clone_full_row(row_buf[:], total_cols, allocator)
 		}
@@ -473,6 +484,18 @@ fetch_single_rows_vec :: proc(
 
 	if wc, has_wc := stmt.where_clause.?; has_wc {
 		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
+			srows, scols, sranges, sok := seek_single_row(
+				&table_tree,
+				rowid,
+				tbl.columns,
+				single_range,
+				allocator,
+			)
+
+			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
+			return
+		}
+		if rowid, seek_ok := try_rowid_lookup(tbl, wc); seek_ok {
 			srows, scols, sranges, sok := seek_single_row(
 				&table_tree,
 				rowid,

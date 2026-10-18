@@ -312,9 +312,12 @@ or nested groups disable skipping (full scan).
 vector fetch paths): PK seek first (`try_pk_lookup`), then secondary-index
 routing for usable predicates on the indexed TEXT column — equality,
 canonical `LIKE 'stem%'`, literal `IN` (first usable conjunct of a flat
-AND chain; OR/NOT/nested/negated fall back). Covering `SELECT rowid`
-answers from the index alone; wider projections fetch per candidate and
-recheck the full filter. Index paths never push `LIMIT` down (candidates
+AND chain; OR/NOT/nested/negated fall back). Single-column covering
+`SELECT rowid` answers from the index alone; wider projections fetch per
+candidate and recheck the full filter. A bare `rowid` also projects
+generally (any position, `ORDER BY rowid`, both fetch paths): the
+projection resolves it from the entry's source rowid when no user column
+of that name exists. Index paths never push `LIMIT` down (candidates
 arrive in rowid order, so the shared tails slice exactly like the scan
 path). User guide: [docs/indexing.md](../docs/indexing.md).
 
@@ -724,8 +727,8 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   the stem — exactly where `like_match` reduces to a byte-prefix test, so
   candidates and recheck agree by construction), and literal `IN` lists
   (TEXT members; cross-class/NULL members provably never match a TEXT
-  row). Covering `SELECT rowid` answers from the index alone (synthetic
-  single-INTEGER `rowid` column through the unchanged `finish_select`
+  row). Single-column covering `SELECT rowid` answers from the index alone (synthetic
+  single-INTEGER `rowid` column through the shared `finish_select`
   tail; no user column named `rowid` may exist); wider projections fetch
   `tree_find` per candidate and recheck the full filter, with sorted
   candidates so LIMIT-without-ORDER-BY matches the scan path exactly. Flat

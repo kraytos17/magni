@@ -1,5 +1,6 @@
 package executor
 
+import "core:log"
 import "src:btree"
 import "src:parser"
 import "src:schema"
@@ -90,17 +91,29 @@ exec_subquery_data :: proc(
 	if len(stmt.aggregates) > 0 || len(stmt.group_by) > 0 || stmt.having != nil {
 		return exec_select_aggregate_data(stmt, rows[:], virtual_cols, single_range)
 	}
-	display_indices, ok := build_display_indices(
-		stmt.columns,
-		build_column_resolver(virtual_cols, single_range),
-		len(virtual_cols),
-	)
+
+	resolver := build_column_resolver(virtual_cols, single_range)
+	display_indices, ok := build_display_indices(stmt.columns, resolver, len(virtual_cols))
 	if !ok {
 		return nil, nil, false
 	}
+	for idx, i in display_indices {
+		if idx == ROWID_PROJ {
+			log.errorf("Error: Unknown column: %s", stmt.columns[i])
+			return nil, nil, false
+		}
+	}
 	// Sort on the full rows (so ORDER BY names outside the projected
 	// columns resolve), then project — same order as exec_select_join_data.
+	// A subquery result carries no rowid: reject the pseudo-column here
+	// rather than sorting by the inner rowids.
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		for o in order_clause {
+			if _, col_ok := resolve(resolver, o.column); !col_ok && is_rowid_name(o.column) {
+				log.errorf("Error: Unknown column in ORDER BY: %s", o.column)
+				return nil, nil, false
+			}
+		}
 		if !sort_rows(rows[:], order_clause, virtual_cols, single_range) {
 			return nil, nil, false
 		}

@@ -49,15 +49,17 @@ expect_rowids :: proc(t: ^testing.T, got, want: []i64) {
 		testing.expect_value(t, got[i], want[i])
 	}
 }
+
 // drop_index_ids runs a SELECT id projection (ORDER BY id at call
 // sites) and returns its ids. Real columns stay valid with and without
-// the index; covering SELECT rowid is index-only by design.
+// the index; covering SELECT rowid answers from data pages after a drop.
 drop_index_ids :: proc(t: ^testing.T, d: ^db.Database, sql: string) -> []i64 {
 	q := db.query(d, sql)
 	testing.expect(t, q.ok, "covering select succeeds")
 	if !q.ok {
 		return nil
 	}
+
 	out := make([]i64, len(q.rows), context.temp_allocator)
 	for row, i in q.rows {
 		v, is_int := row[0].(i64)

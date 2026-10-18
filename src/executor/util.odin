@@ -143,6 +143,47 @@ try_pk_lookup :: proc(
 	return types.Row_ID(val), true
 }
 
+// try_rowid_lookup resolves WHERE rowid = <int> into a direct rowid seek:
+// single COND clause, equality operator, bare rowid pseudo-column
+// (case-insensitive, unqualified — a qualified t.rowid stays unresolved,
+// matching the projection rule), literal i64 rhs. Bails when a user column
+// carries exactly cond.column (the normal filter owns that name) or the rhs
+// is not an int. Sound without re-checking the filter: rowid equality
+// identifies at most one row, like the pk path above.
+@(private)
+try_rowid_lookup :: proc(
+	table: types.Table,
+	clause: parser.Where_Clause,
+) -> (
+	rowid: types.Row_ID,
+	ok: bool,
+) {
+	cond, has_cond := where_single_condition(clause)
+	if !has_cond {
+		return
+	}
+	if cond.operator != .EQUALS {
+		return
+	}
+	if _, exists := schema.find_column_index(table.columns, cond.column); exists {
+		return
+	}
+	if !is_rowid_name(cond.column) {
+		return
+	}
+
+	val_untyped, is_val := cond.rhs.(types.Value)
+	if !is_val {
+		return
+	}
+
+	val, is_int := val_untyped.(i64)
+	if !is_int {
+		return
+	}
+	return types.Row_ID(val), true
+}
+
 // split_qualifier splits "t.col" into ("t", "col"); has=false when unqualified.
 @(private)
 split_qualifier :: proc(name: string) -> (qual: string, col: string, has: bool) {

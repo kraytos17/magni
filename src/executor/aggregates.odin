@@ -574,9 +574,12 @@ value_rank :: proc(v: types.Value) -> int {
 }
 
 // build_display_indices maps projected column names to absolute row
-// indices (empty list = all columns in order). False on the first unknown
-// column (logged). Shared by single-table, join, and subquery display
-// paths so projection resolution cannot diverge.
+// indices (empty list = all columns in order). A bare "rowid" with no user
+// column of that name maps to ROWID_PROJ (materialized from the entry's
+// rowid at projection). False on the first unknown column (logged).
+// Shared by single-table, join, and subquery display paths so projection
+// resolution cannot diverge; join/subquery callers reject the sentinel
+// where a source rowid is meaningless (see finish_select).
 @(private)
 build_display_indices :: proc(
 	columns: []string,
@@ -595,6 +598,11 @@ build_display_indices :: proc(
 		for req_col in columns {
 			idx, ok := resolve(resolver, req_col)
 			if !ok {
+				if is_rowid_name(req_col) {
+					append(&indices, ROWID_PROJ)
+					continue
+				}
+
 				log.errorf("Error: Unknown column: %s", req_col)
 				return nil, false
 			}

@@ -1208,9 +1208,11 @@ resolve_mutation_filter :: proc(f: ^Mutation_Filter, cols: []types.Column) {
 	}
 }
 
-// pk_target_rowid extracts a PK rowid from an equality filter, if usable.
-// Shared prologue for update_by_pk and delete_by_pk. table_name lets a
-// qualified `t.pk` / alias filter resolve to the same seek.
+// pk_target_rowid extracts a target rowid from an equality filter, if usable:
+// a PK lookup first, else a bare rowid pseudo-column lookup. Shared prologue
+// for update_by_pk and delete_by_pk. table_name lets a qualified `t.pk` /
+// alias filter resolve to the same seek (rowid stays bare-only, matching
+// the projection rule).
 @(private = "file")
 pk_target_rowid :: proc(
 	tbl: types.Table,
@@ -1224,7 +1226,10 @@ pk_target_rowid :: proc(
 	if !has_where {
 		return 0, false
 	}
-	return try_pk_lookup(tbl, where_clause, table_name)
+	if rid, ok := try_pk_lookup(tbl, where_clause, table_name); ok {
+		return rid, true
+	}
+	return try_rowid_lookup(tbl, where_clause)
 }
 
 // commit_cow_root publishes a COW-mutated table root to the schema.

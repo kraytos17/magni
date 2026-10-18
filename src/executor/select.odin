@@ -143,6 +143,9 @@ fetch_single_rows :: proc(
 		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
 			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
 		}
+		if rowid, seek_ok := try_rowid_lookup(tbl, wc); seek_ok {
+			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
+		}
 		if is_covering_rowid_select(stmt, tbl.columns) {
 			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
 				return fetch_covering_index(t, &tbl, plan, from_name, allocator)
@@ -424,19 +427,34 @@ finish_select :: proc(
 	if !i_ok {
 		return nil, nil, false
 	}
+	for idx, i in indices {
+		if idx == ROWID_PROJ && len(ranges) != 1 {
+			log.errorf("Error: Unknown column: %s", stmt.columns[i])
+			return nil, nil, false
+		}
+	}
 
 	proj := make([dynamic]Row_Entry, 0, len(rows), context.temp_allocator)
 	for entry in rows {
 		vals := make([]types.Value, len(indices), context.temp_allocator)
 		for idx, i in indices {
-			vals[i] = entry.values[idx]
+			if idx == ROWID_PROJ {
+				vals[i] = types.value(i64(entry.rowid))
+			} else {
+				vals[i] = entry.values[idx]
+			}
 		}
 		append(&proj, Row_Entry{entry.rowid, vals})
 	}
 
 	proj_cols := make([]types.Column, len(indices), context.temp_allocator)
 	for idx, i in indices {
-		proj_cols[i] = cols[idx]
+		if idx == ROWID_PROJ {
+			proj_cols[i] = rowid_proj_column(stmt.columns[i])
+		} else {
+			proj_cols[i] = cols[idx]
+		}
+
 		if i < len(stmt.aliases) && stmt.aliases[i] != "" {
 			proj_cols[i].name = stmt.aliases[i]
 		}

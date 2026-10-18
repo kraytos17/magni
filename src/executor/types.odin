@@ -51,6 +51,36 @@ Row_Entry :: struct {
 	values: []types.Value,
 }
 
+// ROWID_PROJ marks a projected or sorted rowid pseudo-column inside index
+// lists (build_display_indices / resolve_sort_indices): -1 never collides
+// with a real column index. A user column named "rowid" always wins at
+// resolution, so the sentinel only fires when no such column exists.
+ROWID_PROJ :: -1
+
+// is_rowid_name reports whether name is the bare rowid pseudo-column
+// (case-insensitive, unqualified only — "t.rowid" stays an unknown column).
+is_rowid_name :: proc(name: string) -> bool {
+	if strings.index_byte(name, '.') >= 0 {
+		return false
+	}
+	if len(name) != 5 {
+		return false
+	}
+	return(
+		(name[0] == 'r' || name[0] == 'R') &&
+		(name[1] == 'o' || name[1] == 'O') &&
+		(name[2] == 'w' || name[2] == 'W') &&
+		(name[3] == 'i' || name[3] == 'I') &&
+		(name[4] == 'd' || name[4] == 'D') \
+	)
+}
+
+// rowid_proj_column describes one projected rowid slot: the requested
+// spelling as header (so SELECT ROWID keeps its case), INTEGER typed.
+rowid_proj_column :: proc(requested: string) -> types.Column {
+	return types.Column{name = requested, type = .INTEGER}
+}
+
 // Virtual_Table is a materialized subquery result used as a FROM source:
 // its own columns + rows, scanned like a table with no btree behind it.
 Virtual_Table :: struct {

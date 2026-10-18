@@ -155,7 +155,16 @@ sort_rows :: proc(
 	if !r_ok {
 		return false
 	}
+	for sort_idx, i in sort_indices {
+		if sort_idx == ROWID_PROJ && len(table_ranges) != 1 {
+			log.errorf("Error: Unknown column in ORDER BY: %s", order_clause[i].column)
+			return false
+		}
+	}
 	if len(order_clause) == 1 && len(rows) > 1 {
+		if sort_indices[0] == ROWID_PROJ {
+			return sort_rows_rowid(rows, order_clause[0])
+		}
 		if sort_rows_int_fast(rows, order_clause[0], sort_indices[0]) {
 			return true
 		}
@@ -165,6 +174,16 @@ sort_rows :: proc(
 	slice.sort_by_with_data(rows, proc(a, b: Row_Entry, data: rawptr) -> bool {
 			ctx := (^Sort_Ctx)(data)
 			for sort_idx, i in ctx.sort_indices {
+				if sort_idx == ROWID_PROJ {
+					if a.rowid != b.rowid {
+						if ctx.order_clause[i].desc {
+							return a.rowid > b.rowid
+						}
+						return a.rowid < b.rowid
+					}
+					continue
+				}
+
 				a_null := types.is_null(a.values[sort_idx])
 				b_null := types.is_null(b.values[sort_idx])
 				if a_null != b_null {
@@ -189,9 +208,11 @@ sort_rows :: proc(
 }
 
 // resolve_sort_indices maps each ORDER BY column to its absolute index in the
-// row. Logs and returns false on an unknown column. Package-visible (not
-// file-private): the vector scan path needs sort keys for its needed-column
-// mask (sort runs on full rows before projection, so sort keys must decode).
+// row. A bare "rowid" with no user column of that name maps to ROWID_PROJ
+// (sorted from the entry's rowid). Logs and returns false on an unknown
+// column. Package-visible (not file-private): the vector scan path needs
+// sort keys for its needed-column mask (sort runs on full rows before
+// projection, so sort keys must decode).
 @(private)
 resolve_sort_indices :: proc(
 	order_clause: []parser.Order_By_Column,
@@ -204,12 +225,44 @@ resolve_sort_indices :: proc(
 	for o, i in order_clause {
 		idx, col_ok := resolve(resolver, o.column)
 		if !col_ok {
+			if is_rowid_name(o.column) {
+				sort_indices[i] = ROWID_PROJ
+				continue
+			}
+
 			log.errorf("Error: Unknown column in ORDER BY: %s", o.column)
 			return nil, false
 		}
 		sort_indices[i] = idx
 	}
 	return sort_indices, true
+}
+
+// sort_rows_rowid sorts by source rowid (never NULL, so null placement is
+// ignored). Single-key fast path mirroring sort_rows_int_fast's shape.
+@(private = "file")
+sort_rows_rowid :: proc(rows: []Row_Entry, order: parser.Order_By_Column) -> bool {
+	idx := make([]int, len(rows), context.temp_allocator)
+	for i in 0 ..< len(rows) {
+		idx[i] = i
+	}
+
+	r := rows
+	slice.sort_by_with_data(idx, proc(a, b: int, data: rawptr) -> bool {
+			rr := (^[]Row_Entry)(data)
+			return rr^[a].rowid < rr^[b].rowid
+		}, &r)
+
+	sorted := make([]Row_Entry, len(rows), context.temp_allocator)
+	for pi, i in idx {
+		sorted[i] = rows[pi]
+	}
+	if order.desc {
+		slice.reverse(sorted)
+	}
+
+	copy(rows, sorted)
+	return true
 }
 
 // sort_rows_int_fast sorts by a single integer column via a precomputed key

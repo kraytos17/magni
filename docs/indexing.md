@@ -22,8 +22,8 @@ DROP INDEX i_title ON docs;
   parse time.
 - `DROP INDEX` clears the definition atomically. Data is untouched;
   routed shapes fall back to full scan with identical results (covering
-  `SELECT rowid` / `SELECT <indexed-col>` are index-only, so they error
-  without the index — select real columns instead). Index pages recycle
+  `SELECT rowid` / `SELECT <indexed-col>` answer from data pages instead
+  of the index — select real columns instead). Index pages recycle
   through GC/vacuum, never freed eagerly (snapshots may still reference
   them).
 - `NULL` values are never indexed; empty strings are.
@@ -53,7 +53,9 @@ cap, subquery `IN`.
 
 `SELECT rowid` (literally — one projected column, no aggregates/grouping,
 and no user column named `rowid`, which keeps its existing meaning) is
-answered from the index alone, without touching data pages. So is
+answered from the index alone, without touching data pages. A bare
+`rowid` also projects generally in any position, with `ORDER BY rowid`,
+on tables with no index at all. So is
 `SELECT <indexed-col>` for Eq/In shapes (and Or thereof — the keys are
 known); prefix plans need the row and stay on fetch. Wider projections
 fetch each candidate row and recheck the full filter. Candidates arrive
