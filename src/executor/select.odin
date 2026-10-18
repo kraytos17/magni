@@ -146,6 +146,17 @@ fetch_single_rows :: proc(
 		if rowid, seek_ok := try_rowid_lookup(tbl, wc); seek_ok {
 			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
 		}
+		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, allocator); chain_ok {
+			if rs.empty {
+				return make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, true
+			}
+
+			frows, f_ok := seek_rowid_filtered(t, &table_tree, tbl, rs, single_range, allocator)
+			if !f_ok {
+				return nil, nil, nil, false
+			}
+			return frows, tbl.columns, single_range, true
+		}
 		if is_covering_rowid_select(stmt, tbl.columns) {
 			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
 				return fetch_covering_index(t, &tbl, plan, from_name, allocator)
@@ -218,6 +229,50 @@ seek_single_row :: proc(
 		return nil, nil, nil, false
 	}
 	return r[:], cols, single_range, true
+}
+
+// seek_rowid_filtered seeks one AND-chain rowid and rechecks the remaining
+// conjuncts on it: a miss or a recheck failure yields zero rows with
+// success=true (same shape as seek_single_row). An unresolvable rest fails
+// closed like the scan (nil, false) — reachable only through leaves the
+// seek rule rejected, e.g. a qualified t.rowid beside a usable bare one.
+@(private)
+seek_rowid_filtered :: proc(
+	schema_tree: ^btree.Tree,
+	table_tree: ^btree.Tree,
+	table: types.Table,
+	seek: Rowid_Seek,
+	table_ranges: []Table_Col_Range,
+	allocator := context.allocator,
+) -> (
+	[]Row_Entry,
+	bool,
+) {
+	c, find_err := btree.tree_find(table_tree, seek.rid, allocator)
+	if find_err != .None {
+		r := make([dynamic]Row_Entry, allocator)
+		return r[:], true
+	}
+
+	defer cell.destroy(&c, allocator)
+	if seek.rest.root != nil {
+		rest := seek.rest
+		ctx, ctx_ok := init_where_ctx(&rest, table.columns, table_ranges, schema_tree, allocator).?
+		if !ctx_ok {
+			return nil, false
+		}
+		if ctx.root != nil {
+			if !evaluate_where_ctx(ctx, c.values) {
+				r := make([dynamic]Row_Entry, allocator)
+				return r[:], true
+			}
+		}
+	}
+
+	r := make([dynamic]Row_Entry, allocator)
+	append(&r, Row_Entry{c.rowid, c.values})
+	c.values = nil
+	return r[:], true
 }
 
 // is_count_star_query recognizes SELECT COUNT(*) FROM table with no other

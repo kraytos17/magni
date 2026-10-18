@@ -583,6 +583,9 @@ explain_plan_text :: proc(
 		if _, seek_ok := try_rowid_lookup(table^, wc); seek_ok {
 			return fmt.tprintf("ROWID SEEK ON %s", tbl_name)
 		}
+		if _, chain_ok := try_rowid_chain_seek(table^, wc); chain_ok {
+			return fmt.tprintf("ROWID SEEK ON %s", tbl_name)
+		}
 		if is_covering_rowid_select(sel, table.columns) {
 			if plan, idx_ok := resolve_index_covering(table^, wc, tbl_name, sel.from_alias);
 			   idx_ok {

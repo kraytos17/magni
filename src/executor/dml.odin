@@ -1425,6 +1425,26 @@ update_by_pk :: proc(
 	info: Mutated_Table_Info,
 ) {
 	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
+	recheck := false
+	if !pk_ok {
+		if filt, has_f := plan.filter.?; has_f {
+			if rs, chain_ok := try_rowid_chain_seek(plan.tbl, filt, context.temp_allocator);
+			   chain_ok {
+				if rs.empty {
+					log.info("Updated 0 rows.")
+					return true, true, t.root, {}
+				}
+
+				target_rowid, pk_ok = rs.rid, true
+				plan.filt.filter = rs.rest
+				recheck = rs.rest.root != nil
+			} else {
+				return false, false, 0, {}
+			}
+		} else {
+			return false, false, 0, {}
+		}
+	}
 	if !pk_ok {
 		return false, false, 0, {}
 	}
@@ -1436,6 +1456,14 @@ update_by_pk :: proc(
 	}
 
 	defer cell.destroy(&c, context.temp_allocator)
+	if recheck {
+		resolve_mutation_filter(&plan.filt, plan.tbl.columns)
+		if !eval_mutation_filter(&plan.filt, c.values) {
+			log.info("Updated 0 rows.")
+			return true, true, t.root, {}
+		}
+	}
+
 	new_row, had_err := apply_update(&c, plan.update_map, plan, .Fail)
 	if had_err && new_row == nil {
 		return true, false, t.root, {}
@@ -1476,7 +1504,6 @@ update_by_pk :: proc(
 	}
 
 	new_schema_root, committed, ok1 := commit_cow_root(t, plan.table_name, nroot, pending, cache)
-
 	if !ok1 {
 		return true, false, t.root, {}
 	}
@@ -1675,8 +1702,42 @@ delete_by_pk :: proc(
 	info: Mutated_Table_Info,
 ) {
 	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
+	recheck := false
+	if !pk_ok {
+		if filt, has_f := plan.filter.?; has_f {
+			if rs, chain_ok := try_rowid_chain_seek(plan.tbl, filt, context.temp_allocator);
+			   chain_ok {
+				if rs.empty {
+					log.info("Deleted 0 rows.")
+					return true, true, t.root, {}
+				}
+
+				target_rowid, pk_ok = rs.rid, true
+				plan.filt.filter = rs.rest
+				recheck = rs.rest.root != nil
+			} else {
+				return false, false, 0, {}
+			}
+		} else {
+			return false, false, 0, {}
+		}
+	}
 	if !pk_ok {
 		return false, false, 0, {}
+	}
+	if recheck {
+		c, find_err := btree.tree_find(table_tree, target_rowid, context.temp_allocator)
+		if find_err != .None {
+			log.info("Deleted 0 rows.")
+			return true, true, t.root, {}
+		}
+
+		defer cell.destroy(&c, context.temp_allocator)
+		resolve_mutation_filter(&plan.filt, plan.tbl.columns)
+		if !eval_mutation_filter(&plan.filt, c.values) {
+			log.info("Deleted 0 rows.")
+			return true, true, t.root, {}
+		}
 	}
 
 	nroot, del_err := btree.tree_delete_cow(table_tree, target_rowid)

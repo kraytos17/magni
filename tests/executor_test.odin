@@ -2833,8 +2833,8 @@ test_exec_rowid_where_seek :: proc(t: ^testing.T) {
 	}
 }
 
-// WHERE rowid guards: user columns keep their meaning, and qualified,
-// non-int, and compound shapes stay clean errors.
+// WHERE rowid guards: user columns keep their meaning, and qualified and
+// non-int shapes stay clean errors (AND-chains seek; see the chain tests).
 @(test)
 test_exec_rowid_where_guards :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "rowid_seek_guard")
@@ -2868,13 +2868,6 @@ test_exec_rowid_where_guards :: proc(t: ^testing.T) {
 	_, _, xok := executor.exec_query(&tree, xbad)
 	context = restore_logger(saved2)
 	testing.expect(t, !xok, "non-int rowid rhs must fail")
-
-	saved3, ctx3 := suppress_expected_errors()
-	context = ctx3
-	abad := must_parse_select(t, "SELECT a FROM t WHERE rowid = 1 AND a = 10;")
-	_, _, aok := executor.exec_query(&tree, abad)
-	context = restore_logger(saved3)
-	testing.expect(t, !aok, "compound rowid filter must fail")
 }
 
 // UPDATE/DELETE by rowid seek the row directly: writes land, misses no-op,
@@ -2986,6 +2979,142 @@ test_exec_rowid_dml_guards :: proc(t: ^testing.T) {
 			"unguarded shapes no-op",
 		)
 	}
+}
+
+// AND-chains with a rowid conjunct seek the rowid then recheck the rest:
+// hits project, rest misses and contradictions yield zero rows, and
+// non-flat shapes stay clean errors.
+@(test)
+test_exec_rowid_chain_seek :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "rowid_chain")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (20, 'y');",
+			"INSERT INTO t VALUES (30, 'z');",
+		},
+	)
+	sel := must_parse_select(t, "SELECT a, b FROM t WHERE rowid = 2 AND a = 20;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[1], types.value("y")),
+			"chain seek lands on the row",
+		)
+	}
+
+	msel := must_parse_select(t, "SELECT a FROM t WHERE rowid = 2 AND a = 99;")
+	mrows, _ := must_exec_query(t, &tree, msel)
+	testing.expect_value(t, len(mrows), 0)
+
+	csel := must_parse_select(t, "SELECT a FROM t WHERE rowid = 1 AND rowid = 2;")
+	crows, _ := must_exec_query(t, &tree, csel)
+	testing.expect_value(t, len(crows), 0)
+
+	dsel := must_parse_select(t, "SELECT a FROM t WHERE rowid = 2 AND rowid = 2;")
+	drows, _ := must_exec_query(t, &tree, dsel)
+	testing.expect_value(t, len(drows), 1)
+	if len(drows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(drows[0].values[0], types.value(20)),
+			"agreeing leaves seek once",
+		)
+	}
+
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	obad := must_parse_select(t, "SELECT a FROM t WHERE rowid = 1 OR a = 20;")
+	_, _, ook := executor.exec_query(&tree, obad)
+	context = restore_logger(saved)
+	testing.expect(t, !ook, "OR with a rowid leaf must fail")
+}
+
+// DML AND-chains: matching rechecks write, mismatching rechecks and
+// contradictions no-op.
+@(test)
+test_exec_rowid_chain_dml :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "rowid_chain_dml")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (20, 'y');",
+		},
+	)
+	must_execute_sql(t, &tree, "UPDATE t SET b = 'w' WHERE rowid = 2 AND a = 20;")
+	must_execute_sql(t, &tree, "UPDATE t SET b = 'q' WHERE rowid = 2 AND a = 99;")
+	sel := must_parse_select(t, "SELECT a, b FROM t ORDER BY a;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	if len(rows) == 2 {
+		testing.expect(
+			t,
+			types.value_compare(rows[1].values[1], types.value("w")),
+			"matching recheck updated",
+		)
+	}
+
+	must_execute_sql(t, &tree, "DELETE FROM t WHERE rowid = 1 AND b = 'x';")
+	must_execute_sql(t, &tree, "DELETE FROM t WHERE rowid = 2 AND b = 'nope';")
+	must_execute_sql(t, &tree, "DELETE FROM t WHERE rowid = 1 AND rowid = 2;")
+	csel := must_parse_select(t, "SELECT a FROM t;")
+	crows, _ := must_exec_query(t, &tree, csel)
+	testing.expect_value(t, len(crows), 1)
+	if len(crows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(crows[0].values[0], types.value(20)),
+			"only the matching delete landed",
+		)
+	}
+}
+
+// Negated equality never seeks: `id NOT = 1` scans the complement, and a
+// bare `rowid NOT = 1` fails closed (no pseudo-column scan exists).
+@(test)
+test_exec_rowid_negated_guards :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "rowid_neg")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE p (id INT PRIMARY KEY, v TEXT);",
+			"INSERT INTO p VALUES (1, 'a');",
+			"INSERT INTO p VALUES (2, 'b');",
+			"CREATE TABLE t (a INT);",
+			"INSERT INTO t VALUES (10);",
+		},
+	)
+	psel := must_parse_select(t, "SELECT id FROM p WHERE id NOT = 1 ORDER BY id;")
+	prows, _ := must_exec_query(t, &tree, psel)
+	testing.expect_value(t, len(prows), 1)
+	if len(prows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(prows[0].values[0], types.value(2)),
+			"negated pk scans the complement",
+		)
+	}
+
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	nbad := must_parse_select(t, "SELECT a FROM t WHERE rowid NOT = 1;")
+	_, _, nok := executor.exec_query(&tree, nbad)
+	context = restore_logger(saved)
+	testing.expect(t, !nok, "negated rowid must fail closed")
 }
 
 // Empty string is a value, unlike NULL: a second '' violates UNIQUE.

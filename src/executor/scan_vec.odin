@@ -507,6 +507,22 @@ fetch_single_rows_vec :: proc(
 			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
 			return
 		}
+		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, allocator); chain_ok {
+			if rs.empty {
+				rows, cols, ranges, projected, ok =
+					make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, false, true
+				return
+			}
+
+			frows, f_ok := seek_rowid_filtered(t, &table_tree, tbl, rs, single_range, allocator)
+			if !f_ok {
+				rows, cols, ranges, projected, ok = nil, nil, nil, false, false
+				return
+			}
+
+			rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, true
+			return
+		}
 		if is_covering_rowid_select(stmt, tbl.columns) {
 			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
 				crows, ccols, cranges, cok := fetch_covering_index(

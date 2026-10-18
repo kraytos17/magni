@@ -90,11 +90,12 @@ where_single_condition :: proc(clause: parser.Where_Clause) -> (parser.Condition
 }
 
 // try_pk_lookup resolves WHERE <pk> = <int> into a direct rowid: single
-// COND clause, equality operator, column naming the pk (bare or qualified
-// by this table/alias), literal i64 rhs. Anything else bails (ok=false)
-// and the caller scans. Sound without re-checking the filter because stored
-// pk values are always ints: inserts coerce a non-int pk value to an
-// auto-assigned rowid (see the rowid-assignment path in dml.odin).
+// COND clause, unnegated equality operator, column naming the pk (bare or
+// qualified by this table/alias), literal i64 rhs. Anything else bails
+// (ok=false) and the caller scans. Sound without re-checking the filter
+// because stored pk values are always ints: inserts coerce a non-int pk
+// value to an auto-assigned rowid (see the rowid-assignment path in
+// dml.odin).
 @(private)
 try_pk_lookup :: proc(
 	table: types.Table,
@@ -109,7 +110,7 @@ try_pk_lookup :: proc(
 	if !has_cond {
 		return
 	}
-	if cond.operator != .EQUALS {
+	if cond.operator != .EQUALS || cond.negated {
 		return
 	}
 
@@ -143,13 +144,40 @@ try_pk_lookup :: proc(
 	return types.Row_ID(val), true
 }
 
+// rowid_seek_key reports whether one predicate is a usable rowid seek key:
+// unnegated equality, bare rowid pseudo-column (case-insensitive,
+// unqualified — a qualified t.rowid stays unresolved, matching the
+// projection rule) with no exact user column, literal i64 rhs. Single choke
+// point behind try_rowid_lookup (single COND) and try_rowid_chain_seek (AND
+// chains) so the paths cannot diverge on what "usable" means.
+@(private)
+rowid_seek_key :: proc(table: types.Table, cond: parser.Condition) -> (types.Row_ID, bool) {
+	if cond.operator != .EQUALS || cond.negated {
+		return 0, false
+	}
+	if _, exists := schema.find_column_index(table.columns, cond.column); exists {
+		return 0, false
+	}
+	if !is_rowid_name(cond.column) {
+		return 0, false
+	}
+
+	val_untyped, is_val := cond.rhs.(types.Value)
+	if !is_val {
+		return 0, false
+	}
+
+	val, is_int := val_untyped.(i64)
+	if !is_int {
+		return 0, false
+	}
+	return types.Row_ID(val), true
+}
+
 // try_rowid_lookup resolves WHERE rowid = <int> into a direct rowid seek:
-// single COND clause, equality operator, bare rowid pseudo-column
-// (case-insensitive, unqualified — a qualified t.rowid stays unresolved,
-// matching the projection rule), literal i64 rhs. Bails when a user column
-// carries exactly cond.column (the normal filter owns that name) or the rhs
-// is not an int. Sound without re-checking the filter: rowid equality
-// identifies at most one row, like the pk path above.
+// single COND clause satisfying rowid_seek_key. Bails otherwise and the
+// caller scans (or tries the chain form below). Sound without re-checking
+// the filter: rowid equality identifies at most one row, like the pk path.
 @(private)
 try_rowid_lookup :: proc(
 	table: types.Table,
@@ -162,26 +190,70 @@ try_rowid_lookup :: proc(
 	if !has_cond {
 		return
 	}
-	if cond.operator != .EQUALS {
-		return
-	}
-	if _, exists := schema.find_column_index(table.columns, cond.column); exists {
-		return
-	}
-	if !is_rowid_name(cond.column) {
-		return
+	return rowid_seek_key(table, cond)
+}
+
+// Rowid_Seek is a rowid seek pulled from a flat AND-chain: the agreed seek
+// key plus the remaining conjuncts to recheck on the sought row (nil root =
+// no recheck). empty marks contradictory rowid leaves (zero rows, success).
+Rowid_Seek :: struct {
+	rid  : types.Row_ID,
+	rest : parser.Where_Clause,
+	empty: bool,
+}
+
+// try_rowid_chain_seek finds a rowid seek inside a flat top-level AND chain.
+// The first usable leaf supplies the key; every other usable leaf must agree
+// (usable leaves drop from rest — the seek enforces the same equality).
+// Unusable leaves ride rest via original subtrees (synthetic AND on the
+// allocator, like split_where_for_join). ok=false when no usable leaf exists
+// or the root is not a flat AND (OR/NOT/nested bail to the normal paths,
+// exactly as before).
+@(private)
+try_rowid_chain_seek :: proc(
+	table: types.Table,
+	clause: parser.Where_Clause,
+	allocator := context.temp_allocator,
+) -> (
+	seek: Rowid_Seek,
+	ok: bool,
+) {
+	if clause.root == nil || clause.root.kind != .AND {
+		return {}, false
 	}
 
-	val_untyped, is_val := cond.rhs.(types.Value)
-	if !is_val {
-		return
+	rest := make([dynamic]^parser.Where_Node, 0, len(clause.root.children), allocator)
+	found := false
+	key: types.Row_ID
+	for child in clause.root.children {
+		if child.kind != .COND {
+			return {}, false
+		}
+		if k, usable := rowid_seek_key(table, child.cond); usable {
+			if !found {
+				key, found = k, true
+			} else if k != key {
+				return Rowid_Seek{empty = true}, true
+			}
+			continue
+		}
+		append(&rest, child)
+	}
+	if !found {
+		return {}, false
 	}
 
-	val, is_int := val_untyped.(i64)
-	if !is_int {
-		return
+	rest_clause := parser.Where_Clause{}
+	if len(rest) == 1 {
+		rest_clause.root = rest[0]
+	} else if len(rest) > 1 {
+		and_node := new(parser.Where_Node, allocator)
+		and_node.kind = .AND
+		and_node.children = make([dynamic]^parser.Where_Node, 0, len(rest), allocator)
+		append(&and_node.children, ..rest[:])
+		rest_clause.root = and_node
 	}
-	return types.Row_ID(val), true
+	return Rowid_Seek{rid = key, rest = rest_clause}, true
 }
 
 // split_qualifier splits "t.col" into ("t", "col"); has=false when unqualified.
