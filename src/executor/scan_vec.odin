@@ -495,7 +495,7 @@ fetch_single_rows_vec :: proc(
 			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
 			return
 		}
-		if rowid, seek_ok := try_rowid_lookup(tbl, wc); seek_ok {
+		if rowid, seek_ok := try_rowid_lookup(tbl, wc, from_name); seek_ok {
 			srows, scols, sranges, sok := seek_single_row(
 				&table_tree,
 				rowid,
@@ -507,7 +507,7 @@ fetch_single_rows_vec :: proc(
 			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
 			return
 		}
-		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, allocator); chain_ok {
+		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, from_name, allocator); chain_ok {
 			if rs.empty {
 				rows, cols, ranges, projected, ok =
 					make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, false, true

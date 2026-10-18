@@ -145,20 +145,36 @@ try_pk_lookup :: proc(
 }
 
 // rowid_seek_key reports whether one predicate is a usable rowid seek key:
-// unnegated equality, bare rowid pseudo-column (case-insensitive,
-// unqualified — a qualified t.rowid stays unresolved, matching the
-// projection rule) with no exact user column, literal i64 rhs. Single choke
-// point behind try_rowid_lookup (single COND) and try_rowid_chain_seek (AND
-// chains) so the paths cannot diverge on what "usable" means.
+// unnegated equality over the rowid pseudo-column — bare "rowid" or
+// "q.rowid" with q the query-visible table name (strict: unlike the pk
+// path, an aliased-away table name does not resolve, matching the
+// projection resolver) — with no exact user column, literal i64 rhs.
+// Single choke point behind try_rowid_lookup (single COND) and
+// try_rowid_chain_seek (AND chains) so the paths cannot diverge.
 @(private)
-rowid_seek_key :: proc(table: types.Table, cond: parser.Condition) -> (types.Row_ID, bool) {
+rowid_seek_key :: proc(
+	table: types.Table,
+	cond: parser.Condition,
+	visible: string,
+) -> (
+	types.Row_ID,
+	bool,
+) {
 	if cond.operator != .EQUALS || cond.negated {
 		return 0, false
 	}
-	if _, exists := schema.find_column_index(table.columns, cond.column); exists {
+
+	name := cond.column
+	if dot := strings.last_index_byte(name, '.'); dot >= 0 {
+		if name[:dot] != visible {
+			return 0, false
+		}
+		name = name[dot + 1:]
+	}
+	if _, exists := schema.find_column_index(table.columns, name); exists {
 		return 0, false
 	}
-	if !is_rowid_name(cond.column) {
+	if !is_rowid_name(name) {
 		return 0, false
 	}
 
@@ -175,13 +191,15 @@ rowid_seek_key :: proc(table: types.Table, cond: parser.Condition) -> (types.Row
 }
 
 // try_rowid_lookup resolves WHERE rowid = <int> into a direct rowid seek:
-// single COND clause satisfying rowid_seek_key. Bails otherwise and the
-// caller scans (or tries the chain form below). Sound without re-checking
-// the filter: rowid equality identifies at most one row, like the pk path.
+// single COND clause satisfying rowid_seek_key against the visible table
+// name. Bails otherwise and the caller scans (or tries the chain form
+// below). Sound without re-checking the filter: rowid equality identifies
+// at most one row, like the pk path.
 @(private)
 try_rowid_lookup :: proc(
 	table: types.Table,
 	clause: parser.Where_Clause,
+	visible: string,
 ) -> (
 	rowid: types.Row_ID,
 	ok: bool,
@@ -190,7 +208,7 @@ try_rowid_lookup :: proc(
 	if !has_cond {
 		return
 	}
-	return rowid_seek_key(table, cond)
+	return rowid_seek_key(table, cond, visible)
 }
 
 // Rowid_Seek is a rowid seek pulled from a flat AND-chain: the agreed seek
@@ -213,6 +231,7 @@ Rowid_Seek :: struct {
 try_rowid_chain_seek :: proc(
 	table: types.Table,
 	clause: parser.Where_Clause,
+	visible: string,
 	allocator := context.temp_allocator,
 ) -> (
 	seek: Rowid_Seek,
@@ -229,7 +248,7 @@ try_rowid_chain_seek :: proc(
 		if child.kind != .COND {
 			return {}, false
 		}
-		if k, usable := rowid_seek_key(table, child.cond); usable {
+		if k, usable := rowid_seek_key(table, child.cond, visible); usable {
 			if !found {
 				key, found = k, true
 			} else if k != key {

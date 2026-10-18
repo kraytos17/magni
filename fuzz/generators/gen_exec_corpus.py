@@ -284,6 +284,11 @@ SELECT a FROM t WHERE rowid = 1 AND a = 99;
 UPDATE t SET b = 'v' WHERE rowid = 2 AND a = 20;
 DELETE FROM t WHERE rowid = 3 AND b = 'z';
 SELECT rowid, a, b FROM t ORDER BY rowid;
+SELECT t.rowid, a FROM t ORDER BY t.rowid;
+SELECT a FROM t WHERE t.rowid = 1;
+UPDATE t SET b = 'q' WHERE t.rowid = 1 AND a = 10;
+DELETE FROM t WHERE t.rowid = 99;
+SELECT t.rowid, a, b FROM t ORDER BY t.rowid;
 """),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));

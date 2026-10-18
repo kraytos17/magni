@@ -2729,8 +2729,8 @@ test_exec_rowid_order_and_dup :: proc(t: ^testing.T) {
 	}
 }
 
-// A user column named "rowid" keeps its meaning; qualified t.rowid and
-// joined rowid stay clean errors.
+// A user column named "rowid" keeps its meaning; single-table qualified
+// rowid resolves, while joined rowid stays a clean error.
 @(test)
 test_exec_rowid_guard_rails :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "rowid_guard")
@@ -2767,13 +2767,16 @@ test_exec_rowid_guard_rails :: proc(t: ^testing.T) {
 	context = restore_logger(saved)
 	testing.expect(t, !qok, "joined rowid is ambiguous and must fail")
 
-	saved2, ctx2 := suppress_expected_errors()
-	context = ctx2
 	tbad := must_parse_select(t, "SELECT a.rowid FROM a;")
-
-	_, _, tok := executor.exec_query(&tree, tbad)
-	context = restore_logger(saved2)
-	testing.expect(t, !tok, "qualified rowid must fail")
+	trows, _ := must_exec_query(t, &tree, tbad)
+	testing.expect_value(t, len(trows), 1)
+	if len(trows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(trows[0].values[0], types.value(1)),
+			"single-table qualified rowid resolves",
+		)
+	}
 }
 
 // WHERE rowid = <int> seeks the row directly: hits project, misses yield
@@ -2833,8 +2836,9 @@ test_exec_rowid_where_seek :: proc(t: ^testing.T) {
 	}
 }
 
-// WHERE rowid guards: user columns keep their meaning, and qualified and
-// non-int shapes stay clean errors (AND-chains seek; see the chain tests).
+// WHERE rowid guards: user columns keep their meaning, qualified seeks
+// through the visible name, and non-int shapes stay clean errors
+// (AND-chains seek; see the chain tests).
 @(test)
 test_exec_rowid_where_guards :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "rowid_seek_guard")
@@ -2855,12 +2859,17 @@ test_exec_rowid_where_guards :: proc(t: ^testing.T) {
 	wrows, _ := must_exec_query(t, &tree, wsl)
 	testing.expect_value(t, len(wrows), 1)
 
-	saved, ctx := suppress_expected_errors()
-	context = ctx
-	qbad := must_parse_select(t, "SELECT a FROM t WHERE t.rowid = 1;")
-	_, _, qok := executor.exec_query(&tree, qbad)
-	context = restore_logger(saved)
-	testing.expect(t, !qok, "qualified rowid filter must fail")
+	// Qualified seeks through the visible name.
+	qsel := must_parse_select(t, "SELECT a FROM t WHERE t.rowid = 1;")
+	qrows, _ := must_exec_query(t, &tree, qsel)
+	testing.expect_value(t, len(qrows), 1)
+	if len(qrows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(qrows[0].values[0], types.value(10)),
+			"qualified seek lands",
+		)
+	}
 
 	saved2, ctx2 := suppress_expected_errors()
 	context = ctx2
@@ -2939,8 +2948,9 @@ test_exec_rowid_dml_by_seek :: proc(t: ^testing.T) {
 	}
 }
 
-// DML rowid guards: user columns route to the scan filter; non-int and
-// qualified shapes no-op without error (the DML unresolvable-filter rule).
+// DML rowid guards: user columns route to the scan filter and qualified
+// seeks write; non-int and hidden-name shapes no-op without error (the DML
+// unresolvable-filter rule).
 @(test)
 test_exec_rowid_dml_guards :: proc(t: ^testing.T) {
 	tree, file := setup_executor_env(t, "rowid_dml_guard")
@@ -2975,8 +2985,8 @@ test_exec_rowid_dml_guards :: proc(t: ^testing.T) {
 	if len(trows) == 1 {
 		testing.expect(
 			t,
-			types.value_compare(trows[0].values[0], types.value(10)),
-			"unguarded shapes no-op",
+			types.value_compare(trows[0].values[0], types.value(99)),
+			"qualified update landed, unguarded shapes no-op",
 		)
 	}
 }
@@ -3115,6 +3125,114 @@ test_exec_rowid_negated_guards :: proc(t: ^testing.T) {
 	_, _, nok := executor.exec_query(&tree, nbad)
 	context = restore_logger(saved)
 	testing.expect(t, !nok, "negated rowid must fail closed")
+}
+
+// Qualified rowid resolves single-table against the query-visible name
+// (alias when present): projection, ORDER BY, and seeks compose; hidden
+// names, wrong qualifiers, and joins stay clean errors.
+@(test)
+test_exec_rowid_qualified :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "rowid_qual")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (20, 'y');",
+			"CREATE TABLE a (id INT);",
+			"CREATE TABLE b (id INT);",
+			"INSERT INTO a VALUES (1);",
+			"INSERT INTO b VALUES (1);",
+		},
+	)
+	sel := must_parse_select(t, "SELECT t.rowid, a FROM t ORDER BY t.rowid DESC;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 2)
+	if len(rows) == 2 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[0], types.value(2)),
+			"qualified projection sorts",
+		)
+	}
+
+	asel := must_parse_select(t, "SELECT x.rowid, a FROM t AS x WHERE x.rowid = 1;")
+	arows, _ := must_exec_query(t, &tree, asel)
+	testing.expect_value(t, len(arows), 1)
+	if len(arows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(arows[0].values[1], types.value(10)),
+			"alias-qualified seek lands",
+		)
+	}
+
+	saved, ctx := suppress_expected_errors()
+	context = ctx
+	wbad := must_parse_select(t, "SELECT z.rowid FROM t;")
+	_, _, wok := executor.exec_query(&tree, wbad)
+	context = restore_logger(saved)
+	testing.expect(t, !wok, "wrong qualifier must fail")
+
+	saved2, ctx2 := suppress_expected_errors()
+	context = ctx2
+	hbad := must_parse_select(t, "SELECT t.rowid FROM t AS x;")
+	_, _, hok := executor.exec_query(&tree, hbad)
+	context = restore_logger(saved2)
+	testing.expect(t, !hok, "aliased-away name must fail")
+
+	saved3, ctx3 := suppress_expected_errors()
+	context = ctx3
+	jbad := must_parse_select(t, "SELECT a.rowid FROM a JOIN b ON a.id = b.id;")
+	_, _, jok := executor.exec_query(&tree, jbad)
+	context = restore_logger(saved3)
+	testing.expect(t, !jok, "joined qualified rowid must fail")
+}
+
+// Qualified DML and shadowing: UPDATE/DELETE by t.rowid write; a user
+// column named rowid keeps its meaning qualified too.
+@(test)
+test_exec_rowid_qualified_dml :: proc(t: ^testing.T) {
+	tree, file := setup_executor_env(t, "rowid_qual_dml")
+	defer teardown_executor_env(tree, file)
+
+	run_exec_setup(
+		t,
+		&tree,
+		{
+			"CREATE TABLE t (a INT);",
+			"INSERT INTO t VALUES (10);",
+			"INSERT INTO t VALUES (20);",
+			"CREATE TABLE w (rowid TEXT, v INT);",
+			"INSERT INTO w VALUES ('s', 1);",
+		},
+	)
+	must_execute_sql(t, &tree, "UPDATE t SET a = 99 WHERE t.rowid = 1;")
+	must_execute_sql(t, &tree, "DELETE FROM t WHERE t.rowid = 2 AND a = 20;")
+	sel := must_parse_select(t, "SELECT a FROM t;")
+	rows, _ := must_exec_query(t, &tree, sel)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(rows[0].values[0], types.value(99)),
+			"qualified update landed, qualified delete landed",
+		)
+	}
+
+	wsl := must_parse_select(t, "SELECT w.rowid, v FROM w;")
+	wrows, _ := must_exec_query(t, &tree, wsl)
+	testing.expect_value(t, len(wrows), 1)
+	if len(wrows) == 1 {
+		testing.expect(
+			t,
+			types.value_compare(wrows[0].values[0], types.value("s")),
+			"qualified user column wins",
+		)
+	}
 }
 
 // Empty string is a value, unlike NULL: a second '' violates UNIQUE.

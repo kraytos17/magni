@@ -143,10 +143,10 @@ fetch_single_rows :: proc(
 		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
 			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
 		}
-		if rowid, seek_ok := try_rowid_lookup(tbl, wc); seek_ok {
+		if rowid, seek_ok := try_rowid_lookup(tbl, wc, from_name); seek_ok {
 			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
 		}
-		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, allocator); chain_ok {
+		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, from_name, allocator); chain_ok {
 			if rs.empty {
 				return make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, true
 			}

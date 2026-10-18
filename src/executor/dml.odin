@@ -1209,10 +1209,10 @@ resolve_mutation_filter :: proc(f: ^Mutation_Filter, cols: []types.Column) {
 }
 
 // pk_target_rowid extracts a target rowid from an equality filter, if usable:
-// a PK lookup first, else a bare rowid pseudo-column lookup. Shared prologue
-// for update_by_pk and delete_by_pk. table_name lets a qualified `t.pk` /
-// alias filter resolve to the same seek (rowid stays bare-only, matching
-// the projection rule).
+// a PK lookup first, else a rowid pseudo-column lookup (bare or qualified by
+// the table name — DML has no aliases). Shared prologue for update_by_pk and
+// delete_by_pk. table_name lets a qualified `t.pk` / alias filter resolve to
+// the same seek.
 @(private = "file")
 pk_target_rowid :: proc(
 	tbl: types.Table,
@@ -1229,7 +1229,7 @@ pk_target_rowid :: proc(
 	if rid, ok := try_pk_lookup(tbl, where_clause, table_name); ok {
 		return rid, true
 	}
-	return try_rowid_lookup(tbl, where_clause)
+	return try_rowid_lookup(tbl, where_clause, table_name)
 }
 
 // commit_cow_root publishes a COW-mutated table root to the schema.
@@ -1428,8 +1428,12 @@ update_by_pk :: proc(
 	recheck := false
 	if !pk_ok {
 		if filt, has_f := plan.filter.?; has_f {
-			if rs, chain_ok := try_rowid_chain_seek(plan.tbl, filt, context.temp_allocator);
-			   chain_ok {
+			if rs, chain_ok := try_rowid_chain_seek(
+				plan.tbl,
+				filt,
+				plan.table_name,
+				context.temp_allocator,
+			); chain_ok {
 				if rs.empty {
 					log.info("Updated 0 rows.")
 					return true, true, t.root, {}
@@ -1705,8 +1709,12 @@ delete_by_pk :: proc(
 	recheck := false
 	if !pk_ok {
 		if filt, has_f := plan.filter.?; has_f {
-			if rs, chain_ok := try_rowid_chain_seek(plan.tbl, filt, context.temp_allocator);
-			   chain_ok {
+			if rs, chain_ok := try_rowid_chain_seek(
+				plan.tbl,
+				filt,
+				plan.table_name,
+				context.temp_allocator,
+			); chain_ok {
 				if rs.empty {
 					log.info("Deleted 0 rows.")
 					return true, true, t.root, {}

@@ -225,7 +225,7 @@ resolve_sort_indices :: proc(
 	for o, i in order_clause {
 		idx, col_ok := resolve(resolver, o.column)
 		if !col_ok {
-			if is_rowid_name(o.column) {
+			if is_rowid_ref(resolver, o.column) {
 				sort_indices[i] = ROWID_PROJ
 				continue
 			}

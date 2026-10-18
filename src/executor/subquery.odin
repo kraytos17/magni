@@ -109,7 +109,8 @@ exec_subquery_data :: proc(
 	// rather than sorting by the inner rowids.
 	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
 		for o in order_clause {
-			if _, col_ok := resolve(resolver, o.column); !col_ok && is_rowid_name(o.column) {
+			if _, col_ok := resolve(resolver, o.column);
+			   !col_ok && is_rowid_ref(resolver, o.column) {
 				log.errorf("Error: Unknown column in ORDER BY: %s", o.column)
 				return nil, nil, false
 			}

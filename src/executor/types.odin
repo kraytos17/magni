@@ -57,22 +57,52 @@ Row_Entry :: struct {
 // resolution, so the sentinel only fires when no such column exists.
 ROWID_PROJ :: -1
 
+// is_rowid_fold reports whether s spells "rowid" ASCII case-insensitively
+// (exactly 5 bytes; no dot handling — callers split qualifiers first).
+@(private = "file")
+is_rowid_fold :: proc(s: string) -> bool {
+	if len(s) != 5 {
+		return false
+	}
+	return(
+		(s[0] == 'r' || s[0] == 'R') &&
+		(s[1] == 'o' || s[1] == 'O') &&
+		(s[2] == 'w' || s[2] == 'W') &&
+		(s[3] == 'i' || s[3] == 'I') &&
+		(s[4] == 'd' || s[4] == 'D') \
+	)
+}
+
 // is_rowid_name reports whether name is the bare rowid pseudo-column
-// (case-insensitive, unqualified only — "t.rowid" stays an unknown column).
+// (case-insensitive, unqualified only — qualified forms go through
+// is_rowid_ref, which additionally checks the qualifier).
 is_rowid_name :: proc(name: string) -> bool {
 	if strings.index_byte(name, '.') >= 0 {
 		return false
 	}
-	if len(name) != 5 {
+	return is_rowid_fold(name)
+}
+
+// is_rowid_ref reports whether name references the rowid pseudo-column:
+// bare "rowid" (any case), or single-table-only "q.rowid" where q is the
+// query-visible table name (alias when present, else the table). Dotted
+// names never match in joins — joined rows carry rowid 0, so any match
+// would project a lie. A user column still wins first at resolve(); this
+// only fires when no such column exists.
+@(private)
+is_rowid_ref :: proc(r: Column_Resolver, name: string) -> bool {
+	if strings.index_byte(name, '.') < 0 {
+		return is_rowid_fold(name)
+	}
+	if len(r.ranges) != 1 {
 		return false
 	}
-	return(
-		(name[0] == 'r' || name[0] == 'R') &&
-		(name[1] == 'o' || name[1] == 'O') &&
-		(name[2] == 'w' || name[2] == 'W') &&
-		(name[3] == 'i' || name[3] == 'I') &&
-		(name[4] == 'd' || name[4] == 'D') \
-	)
+
+	dot := strings.last_index_byte(name, '.')
+	if dot < 0 || r.ranges[0].table_name != name[:dot] {
+		return false
+	}
+	return is_rowid_fold(name[dot + 1:])
 }
 
 // rowid_proj_column describes one projected rowid slot: the requested

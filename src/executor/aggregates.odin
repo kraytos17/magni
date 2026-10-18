@@ -598,7 +598,7 @@ build_display_indices :: proc(
 		for req_col in columns {
 			idx, ok := resolve(resolver, req_col)
 			if !ok {
-				if is_rowid_name(req_col) {
+				if is_rowid_ref(resolver, req_col) {
 					append(&indices, ROWID_PROJ)
 					continue
 				}
