@@ -303,6 +303,10 @@ SELECT a FROM t WHERE b = 'x';
 SELECT b FROM t WHERE b = 'y';
 INSERT INTO t VALUES (7, 'w');
 SELECT COUNT(*) FROM t;
+UPDATE t SET a = 8 WHERE b = 'w';
+UPDATE t SET a = NULL WHERE b = 'x';
+DELETE FROM t WHERE b = 'n';
+SELECT a, b FROM t ORDER BY b;
 DROP INDEX i_a;
 SELECT a FROM t WHERE a = 7;
 """),

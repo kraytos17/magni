@@ -179,7 +179,10 @@ test_create_index_errors :: proc(t: ^testing.T) {
 
 	testing.expect(
 		t,
-		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, score REAL, data BLOB);") ==
+		db.execute(
+			d,
+			"CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, score REAL, data BLOB);",
+		) ==
 		.None,
 		"create",
 	)
@@ -685,6 +688,115 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_index_int_vacuum :: proc(t: ^testing.T) {
+	// Vacuum rebuilds int indexes into fresh packed pages: new root,
+	// identical key->rowid sets, every reachable page validates as int
+	// pages, and SQL keeps routing.
+	d := setup_db(t, "idxintvac")
+	defer teardown_db(d, "idxintvac")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (v INT, w TEXT);") == .None, "create")
+	testing.expect(t, db.execute(d, "CREATE INDEX i_v ON t (v);") == .None, "create index")
+	for i in 1 ..= 400 {
+		free_all(context.temp_allocator)
+		sql := fmt.tprintf("INSERT INTO t VALUES (%d, 'w%d');", i % 50 - 25, i)
+		testing.expect(t, db.execute(d, sql) == .None, "insert succeeds")
+	}
+	free_all(context.temp_allocator)
+
+	st0 := db.Schema_Tree(d)
+	tbl0, _ := schema.find_table(&st0, "t", context.temp_allocator)
+	root_before := index_root_of(t, tbl0, "i_v")
+	testing.expect(t, root_before > 0, "index present before vacuum")
+
+	// Delete every fourth row, then vacuum.
+	for i in 4 ..= 400 {
+		if (i - 1) % 4 != 3 {
+			continue
+		}
+		free_all(context.temp_allocator)
+		sql := fmt.tprintf("DELETE FROM t WHERE w = 'w%d';", i)
+		testing.expect(t, db.execute(d, sql) == .None, "delete succeeds")
+	}
+	free_all(context.temp_allocator)
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
+
+	st1 := db.Schema_Tree(d)
+	tbl1, found1 := schema.find_table(&st1, "t", context.temp_allocator)
+	testing.expect(t, found1, "table found after vacuum")
+	if !found1 {
+		return
+	}
+	vac_root := index_root_of(t, tbl1, "i_v")
+	testing.expect(t, vac_root > 0, "index root present after vacuum")
+	testing.expect(t, vac_root != root_before, "vacuum rebuilt the index")
+
+	// Oracle: keys -25..24, each missing its deleted fourth-row members.
+	idx_tree := btree.init(d.pager, vac_root)
+	for k in -25 ..< 25 {
+		free_all(context.temp_allocator)
+		got, g_err := btree.int_find_rowids(&idx_tree, idx_tree.root, i64(k))
+		testing.expect(t, g_err == .None, "find succeeds")
+		if g_err != .None {
+			continue
+		}
+		want := 0
+		for i in 1 ..= 400 {
+			if i64(i % 50 - 25) == i64(k) && (i - 1) % 4 != 3 {
+				want += 1
+			}
+		}
+		testing.expect_value(t, len(got), want)
+	}
+	free_all(context.temp_allocator)
+
+	// Every reachable index page validates as int pages.
+	pages := make(map[u32]bool, context.temp_allocator)
+	defer delete(pages)
+	btree.collect_pages(&idx_tree, idx_tree.root, &pages)
+	testing.expect(t, len(pages) >= 1, "index reachable after vacuum")
+	for page_id in pages {
+		pg, pg_err := pager.get_page(d.pager, page_id)
+		if pg_err != nil {
+			continue
+		}
+		h := btree.get_header(pg.data, page_id)
+		if h == nil {
+			pager.unpin_page(d.pager, page_id)
+			continue
+		}
+		#partial switch h.page_type {
+		case .LEAF_INT:
+			testing.expect(
+				t,
+				btree.text_validate_leaf(pg.data, btree.Page_Id(page_id)) == .None,
+				"vacuumed leaf validates",
+			)
+		case .INT_INTERIOR:
+			testing.expect(
+				t,
+				btree.text_validate_interior(pg.data, btree.Page_Id(page_id)) == .None,
+				"vacuumed interior validates",
+			)
+		case:
+			testing.expect(t, false, "unexpected page type after vacuum")
+		}
+		pager.unpin_page(d.pager, page_id)
+	}
+
+	// SQL keeps routing through the rebuilt index.
+	q := db.query(d, "SELECT v FROM t WHERE v = 3 ORDER BY v;")
+	testing.expect(t, q.ok, "routed select succeeds")
+	for row in q.rows {
+		v, is_int := row[0].(i64)
+		testing.expect(t, is_int, "covering projects INTEGER")
+		if is_int {
+			testing.expect_value(t, v, 3)
+		}
+	}
+}
+
+@(test)
 test_index_vacuum_empty :: proc(t: ^testing.T) {
 	// Vacuuming an empty index yields a fresh validating empty LEAF_TEXT
 	// root, the same empty-root shape tree_vacuum produces for tables.
@@ -1001,6 +1113,28 @@ test_index_select_rowid_guard :: proc(t: ^testing.T) {
 	}
 }
 
+// int_index_rowids reads one int key's rowids through the named index root,
+// re-resolving the table each call (roots change per write).
+int_index_rowids :: proc(
+	t: ^testing.T,
+	d: ^db.Database,
+	table: string,
+	index: string,
+	val: i64,
+) -> []types.Row_ID {
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, table, context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return nil
+	}
+	root := index_root_of(t, tbl, index)
+	idx_tree := btree.init(d.pager, root)
+	rows, f_err := btree.int_find_rowids(&idx_tree, idx_tree.root, val)
+	testing.expect(t, f_err == .None, "find succeeds")
+	return rows
+}
+
 @(test)
 test_index_int_create_backfill :: proc(t: ^testing.T) {
 	// CREATE INDEX on INTEGER backfills every value (negatives, dups;
@@ -1122,6 +1256,165 @@ test_index_cross_projection_fetch :: proc(t: ^testing.T) {
 	mq := db.query(d, "SELECT v FROM m WHERE w = 'p';")
 	testing.expect(t, mq.ok, "mixed cross projection succeeds")
 	testing.expect_value(t, len(mq.rows), 1)
+}
+
+@(test)
+test_index_int_routing :: proc(t: ^testing.T) {
+	// INT index routing: Eq and IN answer covering (values, types, rowid
+	// order); cross-class literals miss; LIKE stays on the scan path with
+	// identical (empty) results; same-column OR covers, cross-column OR
+	// fetches with correct values.
+	d := setup_db(t, "idxintroute")
+	defer teardown_db(d, "idxintroute")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (-5, 'y');",
+			"INSERT INTO t VALUES (10, 'z');",
+			"CREATE INDEX i_a ON t (a);",
+			"CREATE INDEX i_b ON t (b);",
+		},
+	)
+	eq := db.query(d, "SELECT a FROM t WHERE a = 10 ORDER BY rowid;")
+	testing.expect(t, eq.ok, "int eq succeeds")
+	testing.expect_value(t, len(eq.rows), 2)
+	for row in eq.rows {
+		v, is_int := row[0].(i64)
+		testing.expect(t, is_int, "covering projects INTEGER")
+		if is_int {
+			testing.expect_value(t, v, 10)
+		}
+	}
+	if len(eq.rows) == 2 {
+		testing.expect(t, eq.rows[0][0].(i64) == 10, "rowid order stable")
+	}
+
+	in_q := db.query(d, "SELECT a FROM t WHERE a IN (10, -5) ORDER BY rowid;")
+	testing.expect(t, in_q.ok, "int in succeeds")
+	testing.expect_value(t, len(in_q.rows), 3)
+
+	miss := db.query(d, "SELECT a FROM t WHERE a = 'x';")
+	testing.expect(t, miss.ok, "cross-class succeeds")
+	testing.expect_value(t, len(miss.rows), 0)
+
+	like_idx := db.query(d, "SELECT a FROM t WHERE a LIKE '1%';")
+	testing.expect(t, like_idx.ok, "int like succeeds")
+	testing.expect_value(t, len(like_idx.rows), 0)
+
+	or_same := db.query(d, "SELECT a FROM t WHERE a = 10 OR a = -5 ORDER BY a;")
+	testing.expect(t, or_same.ok, "same-column or succeeds")
+	testing.expect_value(t, len(or_same.rows), 3)
+
+	or_cross := db.query(d, "SELECT b FROM t WHERE a = 10 OR b = 'y' ORDER BY b;")
+	testing.expect(t, or_cross.ok, "cross-column or succeeds")
+	testing.expect_value(t, len(or_cross.rows), 3)
+	for row in or_cross.rows {
+		_, is_text := row[0].(string)
+		testing.expect(t, is_text, "cross or projects stored values")
+	}
+	if len(or_cross.rows) == 3 {
+		// 'x' and 'z' via the int arm carry their stored texts, not keys.
+		got_y := false
+		for row in or_cross.rows {
+			if s, is_text := row[0].(string); is_text && s == "y" {
+				got_y = true
+			}
+		}
+		testing.expect(t, got_y, "text-arm value present")
+	}
+
+	// EXPLAIN agrees with execution on the new arms.
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a FROM t WHERE a = 10;"),
+		"INDEX SCAN ON t USING a (eq, covering)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT b FROM t WHERE a = 10 OR b = 'y';"),
+		"INDEX SCAN ON t USING a, b (or, fetch)",
+	)
+}
+
+@(test)
+test_index_or_cross_column_values :: proc(t: ^testing.T) {
+	// Cross-column OR with a matching projection must fetch the stored
+	// values, never emit other columns' keys (regression: covering used
+	// to project the matched keys).
+	d := setup_db(t, "idxorcross")
+	defer teardown_db(d, "idxorcross")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a TEXT, b TEXT);",
+			"INSERT INTO t VALUES ('m', 'x');",
+			"INSERT INTO t VALUES ('n', 'y');",
+			"CREATE INDEX i_a ON t (a);",
+			"CREATE INDEX i_b ON t (b);",
+		},
+	)
+	q := db.query(d, "SELECT a FROM t WHERE a = 'm' OR b = 'y' ORDER BY a;")
+	testing.expect(t, q.ok, "cross or succeeds")
+	testing.expect_value(t, len(q.rows), 2)
+	if len(q.rows) == 2 {
+		m, mok := q.rows[0][0].(string)
+		testing.expect(t, mok && m == "m", "first row stored value")
+		n, nok := q.rows[1][0].(string)
+		testing.expect(t, nok && n == "n", "second row stored value, not the key")
+	}
+}
+
+@(test)
+test_index_int_dml_fanout :: proc(t: ^testing.T) {
+	// Per-row writes maintain int indexes: single INSERTs land, UPDATEs
+	// move entries (no-op rewrites and NULL transitions included), DELETEs
+	// remove them. Verified at btree level — the planner does not route
+	// int indexes yet.
+	d := setup_db(t, "idxintfan")
+	defer teardown_db(d, "idxintfan")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"CREATE INDEX i_a ON t (a);",
+			"INSERT INTO t VALUES (5, 'x');",
+			"INSERT INTO t VALUES (NULL, 'n');",
+		},
+	)
+	five := int_index_rowids(t, d, "t", "i_a", 5)
+	testing.expect_value(t, len(five), 1)
+	if len(five) == 1 {
+		testing.expect_value(t, five[0], 1)
+	}
+
+	must_db_execute(t, d, "UPDATE t SET a = 6 WHERE b = 'x';")
+	testing.expect_value(t, len(int_index_rowids(t, d, "t", "i_a", 5)), 0)
+	six := int_index_rowids(t, d, "t", "i_a", 6)
+	testing.expect_value(t, len(six), 1)
+
+	// No-op rewrite neither dups nor drops.
+	must_db_execute(t, d, "UPDATE t SET a = 6 WHERE b = 'x';")
+	testing.expect_value(t, len(int_index_rowids(t, d, "t", "i_a", 6)), 1)
+
+	// Value-to-NULL removes the entry.
+	must_db_execute(t, d, "UPDATE t SET a = NULL WHERE b = 'x';")
+	testing.expect_value(t, len(int_index_rowids(t, d, "t", "i_a", 6)), 0)
+
+	must_db_execute(t, d, "DELETE FROM t WHERE b = 'n';")
+	testing.expect_value(t, len(int_index_rowids(t, d, "t", "i_a", 6)), 0)
+	cnt := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, cnt.ok, "count succeeds")
+	if len(cnt.rows) == 1 {
+		testing.expect(t, types.value_compare(cnt.rows[0][0], types.value(1)), "one row left")
+	}
 }
 
 @(test)
@@ -1555,6 +1848,33 @@ test_index_select_fetch_in_txn :: proc(t: ^testing.T) {
 	}
 }
 
+// explain renders one EXPLAIN statement to its plan string through the
+// executor directly (shared with test_index_explain).
+explain :: proc(t: ^testing.T, d: ^db.Database, sql: string) -> string {
+	st := db.Schema_Tree(d)
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	if !parse_ok {
+		testing.expect(t, false, "explain parses")
+		return ""
+	}
+	res := executor.Result{}
+	exec_ok, _, _ := executor.execute(&st, stmt, &res, nil, nil)
+	if !exec_ok {
+		testing.expect(t, false, "explain executes")
+		return ""
+	}
+	if len(res.rows) != 1 || len(res.rows[0].values) != 1 {
+		testing.expect(t, false, "explain yields one plan row")
+		return ""
+	}
+	plan_text, is_text := res.rows[0].values[0].(string)
+	if !is_text {
+		testing.expect(t, false, "plan row is TEXT")
+		return ""
+	}
+	return strings.clone(plan_text, context.temp_allocator)
+}
+
 @(test)
 test_index_explain :: proc(t: ^testing.T) {
 	// EXPLAIN renders the router's decision and never disagrees with
@@ -1579,31 +1899,6 @@ test_index_explain :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-
-	explain :: proc(t: ^testing.T, d: ^db.Database, sql: string) -> string {
-		st := db.Schema_Tree(d)
-		stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-		if !parse_ok {
-			testing.expect(t, false, "explain parses")
-			return ""
-		}
-		res := executor.Result{}
-		exec_ok, _, _ := executor.execute(&st, stmt, &res, nil, nil)
-		if !exec_ok {
-			testing.expect(t, false, "explain executes")
-			return ""
-		}
-		if len(res.rows) != 1 || len(res.rows[0].values) != 1 {
-			testing.expect(t, false, "explain yields one plan row")
-			return ""
-		}
-		plan_text, is_text := res.rows[0].values[0].(string)
-		if !is_text {
-			testing.expect(t, false, "plan row is TEXT")
-			return ""
-		}
-		return strings.clone(plan_text, context.temp_allocator)
-	}
 
 	testing.expect_value(
 		t,

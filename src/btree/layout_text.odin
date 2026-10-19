@@ -1,5 +1,5 @@
-// B-tree text leaf pages (LEAF_TEXT): prefix-compressed secondary text index
-// leaves.
+// B-tree secondary-index leaf pages (LEAF_TEXT/LEAF_INT): prefix-compressed
+// leaves shared by both index kinds (kind resolved per page).
 //
 // Scope: BINARY collation only, NULL-not-indexed (NULL rows never reach
 // these pages — DML skips them, so the format has no NULL encoding),

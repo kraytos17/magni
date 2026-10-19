@@ -13,9 +13,9 @@ import "src:types"
 // Index_Use names which predicate shape an Index_Plan answers.
 Index_Use :: enum u8 {
 	None,
-	Eq, // col = 'text'
-	Prefix, // col LIKE 'stem%' (canonical: single trailing %, no %/_ in stem)
-	In, // col IN ('a', ...) over literal TEXT members
+	Eq, // col = literal (text or int per index type)
+	Prefix, // col LIKE 'stem%' (canonical: single trailing %, no %/_ in stem; TEXT only)
+	In, // col IN (...) over literal members of the index's type
 	Or, // flat OR of usable same-column CONDs (union, exact)
 	And, // flat AND with 2+ usable conjuncts (intersection, needs recheck)
 }
@@ -23,15 +23,20 @@ Index_Use :: enum u8 {
 // Index_Plan is one resolved index access: the shape plus its operands.
 // Strings borrow the parser's arena (statement-scoped); candidates are
 // consumed synchronously, same as the dense path's temp arrays.
-// Or/And carry their member plans in subs (all on the indexed column by
-// construction — each member passed index_use_of_cond).
+// Eq/In carry the key in the arm matching col_type (eq_text/in_texts for
+// TEXT, eq_int/in_ints for INTEGER); the other arm stays zero.
+// Or/And carry their member plans in subs (each member routed its own
+// index and carries its own type; column is the first sub's, display-only).
 Index_Plan :: struct {
 	use     : Index_Use,
 	root    : u32, // index root this plan reads (per-sub for Or/And)
 	column  : string, // indexed column (arena-borrowed; Or/And: first sub's)
-	eq_text : string, // Eq
+	col_type: types.Column_Type, // index kind (per-sub for Or/And)
+	eq_text : string, // Eq on TEXT
+	eq_int  : i64, // Eq on INTEGER
 	prefix  : string, // Prefix stem
 	in_texts: []string, // In TEXT members
+	in_ints : []i64, // In INTEGER members
 	subs    : []Index_Plan, // Or/And members (each with its own root)
 }
 
@@ -101,16 +106,33 @@ cond_text_rhs :: proc(cond: parser.Condition) -> (string, bool) {
 	return s, true
 }
 
-// index_use_of_cond classifies one raw COND against the indexed column.
-// Negated, column-comparison (rhs is a column ref, not a Value), NULL and
-// non-TEXT literals all fall through (same result via the full scan, one
-// code path). IN over a literal list routes on its TEXT members: cross-class
-// members provably never match a TEXT row (compare_values ranks storage
-// classes apart) and NULL members never match (membership_test guards the
-// row side), so the member lookups are complete. Subquery IN stays on the
-// scan path (its membership materializes per resolve, not per lookup).
-// Non-TEXT indexes refuse here until typed planner arms land (int backfill
-// and writes are complete but unrouted — invisible, never wrong).
+// cond_int_rhs extracts a condition's INTEGER literal rhs: the shared
+// precondition behind the EQUALS and IN index arms on INTEGER indexes
+// (non-i64 and non-literal rhs never route to an int index).
+@(private = "file")
+cond_int_rhs :: proc(cond: parser.Condition) -> (i64, bool) {
+	val, is_val := cond.rhs.(types.Value)
+	if !is_val {
+		return 0, false
+	}
+
+	v, is_int := val.(i64)
+	if !is_int {
+		return 0, false
+	}
+	return v, true
+}
+
+// index_use_of_cond classifies one raw COND against the indexed column of
+// the given type. Negated, column-comparison (rhs is a column ref, not a
+// Value), NULL and cross-class literals all fall through (same result via
+// the full scan, one code path). IN over a literal list routes on members
+// of the index's type: other members provably never match (compare_values
+// ranks storage classes apart) and NULL members never match
+// (membership_test guards the row side), so the member lookups are
+// complete. Subquery IN stays on the scan path (its membership materializes
+// per resolve, not per lookup). LIKE routes TEXT indexes only — prefixes
+// are meaningless on integers.
 @(private)
 index_use_of_cond :: proc(
 	index_root: u32,
@@ -126,9 +148,6 @@ index_use_of_cond :: proc(
 	if index_root == 0 || len(index_column) == 0 {
 		return {}, false
 	}
-	if col_type != .TEXT {
-		return {}, false
-	}
 	if cond.negated {
 		return {}, false
 	}
@@ -136,13 +155,36 @@ index_use_of_cond :: proc(
 		return {}, false
 	}
 	if cond.operator == .EQUALS {
+		if col_type == .INTEGER {
+			if v, is_int := cond_int_rhs(cond); is_int {
+				return Index_Plan {
+						use = .Eq,
+						root = index_root,
+						column = index_column,
+						col_type = col_type,
+						eq_int = v,
+					},
+					true
+			}
+			return {}, false
+		}
 		if s, is_text := cond_text_rhs(cond); is_text {
-			return Index_Plan{use = .Eq, root = index_root, column = index_column, eq_text = s},
+			return Index_Plan {
+					use = .Eq,
+					root = index_root,
+					column = index_column,
+					col_type = col_type,
+					eq_text = s,
+				},
 				true
 		}
 		return {}, false
 	}
 	if cond.operator == .LIKE {
+		if col_type != .TEXT {
+			return {}, false
+		}
+
 		pat, is_text := cond_text_rhs(cond)
 		if !is_text {
 			return {}, false
@@ -152,6 +194,7 @@ index_use_of_cond :: proc(
 					use = .Prefix,
 					root = index_root,
 					column = index_column,
+					col_type = col_type,
 					prefix = stem,
 				},
 				true
@@ -161,6 +204,28 @@ index_use_of_cond :: proc(
 	if cond.operator == .IN {
 		if cond.in_subquery != nil || cond.in_values == nil {
 			return {}, false
+		}
+		if col_type == .INTEGER {
+			ints := make([dynamic]i64, 0, len(cond.in_values), context.temp_allocator)
+			for v in cond.in_values {
+				if n, is_int := v.(i64); is_int {
+					append(&ints, n)
+				}
+			}
+			if len(ints) == 0 {
+				return {}, false
+			}
+			if len(ints) > MAX_INDEX_IN_MEMBERS {
+				return {}, false
+			}
+			return Index_Plan {
+					use = .In,
+					root = index_root,
+					column = index_column,
+					col_type = col_type,
+					in_ints = ints[:],
+				},
+				true
 		}
 
 		texts := make([dynamic]string, 0, len(cond.in_values), context.temp_allocator)
@@ -179,6 +244,7 @@ index_use_of_cond :: proc(
 				use = .In,
 				root = index_root,
 				column = index_column,
+				col_type = col_type,
 				in_texts = texts[:],
 			},
 			true
@@ -275,7 +341,13 @@ resolve_index_or :: proc(
 			return {}, false
 		}
 	}
-	return Index_Plan{use = .Or, column = subs[0].column, subs = subs[:]}, true
+	return Index_Plan {
+			use = .Or,
+			column = subs[0].column,
+			col_type = subs[0].col_type,
+			subs = subs[:],
+		},
+		true
 }
 
 // resolve_index_fetch routes a flat AND-chain (or a lone COND) with at
@@ -347,7 +419,13 @@ resolve_index_fetch :: proc(
 	if len(subs) == 1 {
 		return subs[0], true
 	}
-	return Index_Plan{use = .And, column = subs[0].column, subs = subs[:]}, true
+	return Index_Plan {
+			use = .And,
+			column = subs[0].column,
+			col_type = subs[0].col_type,
+			subs = subs[:],
+		},
+		true
 }
 
 // index_candidate_rowids runs a plan's btree lookups and returns sorted,
@@ -479,8 +557,29 @@ candidate_lookup_eq :: proc(
 	return true
 }
 
+// candidate_lookup_int_eq appends one integer key's rowids. Twin of
+// candidate_lookup_eq for INTEGER indexes.
+@(private = "file")
+candidate_lookup_int_eq :: proc(
+	idx_tree: ^btree.Tree,
+	root: u32,
+	val: i64,
+	out: ^[dynamic]types.Row_ID,
+	table_name: string,
+) -> bool {
+	found, find_err := btree.int_find_rowids(idx_tree, root, val)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table_name)
+		return false
+	}
+
+	append(out, ..found)
+	return true
+}
+
 // index_candidate_single runs one Eq/Prefix/In plan's btree lookups.
-// Unsorted, may contain duplicates (IN overlap); the caller sorts.
+// Unsorted, may contain duplicates (IN overlap); the caller sorts. Eq/In
+// dispatch on the plan's kind (Prefix is TEXT-only by construction).
 @(private = "file")
 index_candidate_single :: proc(
 	t: ^btree.Tree,
@@ -493,9 +592,15 @@ index_candidate_single :: proc(
 ) {
 	idx_tree := btree.init(t.pager, plan.root)
 	out := make([dynamic]types.Row_ID, 0, 8, allocator)
+	is_int := plan.col_type == .INTEGER
 	#partial switch plan.use {
 	case .Eq:
-		if !candidate_lookup_eq(&idx_tree, plan.root, plan.eq_text, &out, table.name) {
+		if is_int {
+			if !candidate_lookup_int_eq(&idx_tree, plan.root, plan.eq_int, &out, table.name) {
+				delete(out)
+				return nil, false
+			}
+		} else if !candidate_lookup_eq(&idx_tree, plan.root, plan.eq_text, &out, table.name) {
 			delete(out)
 			return nil, false
 		}
@@ -509,10 +614,19 @@ index_candidate_single :: proc(
 		}
 		append(&out, ..found)
 	case .In:
-		for s in plan.in_texts {
-			if !candidate_lookup_eq(&idx_tree, plan.root, s, &out, table.name) {
-				delete(out)
-				return nil, false
+		if is_int {
+			for v in plan.in_ints {
+				if !candidate_lookup_int_eq(&idx_tree, plan.root, v, &out, table.name) {
+					delete(out)
+					return nil, false
+				}
+			}
+		} else {
+			for s in plan.in_texts {
+				if !candidate_lookup_eq(&idx_tree, plan.root, s, &out, table.name) {
+					delete(out)
+					return nil, false
+				}
 			}
 		}
 	case:
@@ -706,8 +820,10 @@ fetch_covering_index :: proc(
 // projection must name plan.column — not merely any indexed column —
 // because the caller emits plan.column's values; matching another index's
 // column would resolve the projection against the wrong columns
-// downstream. Like the rowid rule, one projected column only — wider
-// projections take the fetch path with its full-filter recheck.
+// downstream. OR plans additionally need every member on the projected
+// column: a cross-column union would emit other columns' keys as values.
+// Like the rowid rule, one projected column only — wider projections take
+// the fetch path with its full-filter recheck.
 @(private)
 is_covering_col_select :: proc(stmt: parser.Select_Stmt, plan: Index_Plan) -> bool {
 	if len(stmt.columns) != 1 {
@@ -716,7 +832,17 @@ is_covering_col_select :: proc(stmt: parser.Select_Stmt, plan: Index_Plan) -> bo
 	if len(stmt.aggregates) != 0 || len(stmt.group_by) != 0 || stmt.having != nil {
 		return false
 	}
-	return stmt.columns[0] == plan.column
+	if stmt.columns[0] != plan.column {
+		return false
+	}
+	if plan.use == .Or {
+		for sub in plan.subs {
+			if sub.column != stmt.columns[0] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // covering_known_values reports whether a covering plan's output values
@@ -744,7 +870,7 @@ covering_known_values :: proc(plan: Index_Plan) -> bool {
 @(private = "file")
 Covering_Pair :: struct {
 	rid: types.Row_ID,
-	val: string,
+	val: types.Value, // borrowed text header or by-value scalar; cloned at materialize
 }
 
 // covering_emit_eq emits the (rowid,text) pairs for one index key lookup.
@@ -764,7 +890,30 @@ covering_emit_eq :: proc(
 		return false
 	}
 	for rid in found {
-		append(out, Covering_Pair{rid = rid, val = text})
+		append(out, Covering_Pair{rid = rid, val = types.value(text)})
+	}
+	return true
+}
+
+// covering_emit_int_eq emits the (rowid,int) pairs for one integer key
+// lookup. Twin of covering_emit_eq for INTEGER indexes.
+@(private = "file")
+covering_emit_int_eq :: proc(
+	t: ^btree.Tree,
+	table: ^types.Table,
+	root: u32,
+	val: i64,
+	out: ^[dynamic]Covering_Pair,
+	allocator := context.allocator,
+) -> bool {
+	idx_tree := btree.init(t.pager, root)
+	found, find_err := btree.int_find_rowids(&idx_tree, root, val)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table.name)
+		return false
+	}
+	for rid in found {
+		append(out, Covering_Pair{rid = rid, val = types.value(val)})
 	}
 	return true
 }
@@ -772,7 +921,7 @@ covering_emit_eq :: proc(
 // covering_emit_plan emits the pairs for one Eq/In plan node: single lookup
 // for Eq, one per member for In. False on lookup failure or any other shape
 // (Prefix/And route elsewhere) — the shared arm behind covering_pairs'
-// top level and its Or members.
+// top level and its Or members. Eq/In dispatch on the node's kind.
 @(private = "file")
 covering_emit_plan :: proc(
 	t: ^btree.Tree,
@@ -781,10 +930,22 @@ covering_emit_plan :: proc(
 	out: ^[dynamic]Covering_Pair,
 	allocator := context.allocator,
 ) -> bool {
+	is_int := sub.col_type == .INTEGER
 	#partial switch sub.use {
 	case .Eq:
+		if is_int {
+			return covering_emit_int_eq(t, table, sub.root, sub.eq_int, out, allocator)
+		}
 		return covering_emit_eq(t, table, sub.root, sub.eq_text, out, allocator)
 	case .In:
+		if is_int {
+			for v in sub.in_ints {
+				if !covering_emit_int_eq(t, table, sub.root, v, out, allocator) {
+					return false
+				}
+			}
+			return true
+		}
 		for s in sub.in_texts {
 			if !covering_emit_eq(t, table, sub.root, s, out, allocator) {
 				return false
@@ -796,7 +957,7 @@ covering_emit_plan :: proc(
 	}
 }
 
-// covering_pairs resolves a known-values covering plan to (rowid, text)
+// covering_pairs resolves a known-values covering plan to (rowid, value)
 // pairs, one per matching row. Sorted by rowid (scan emission order),
 // deduplicated (duplicate IN members).
 @(private = "file")
@@ -833,9 +994,9 @@ covering_pairs :: proc(
 }
 
 // fetch_covering_col answers `SELECT <indexed-col> ... WHERE <routed>`
-// straight from the text index (Eq/In keys, or Or thereof). Same tail
-// contract as fetch_covering_index: single TEXT column, rowid-ordered
-// rows, caller slices LIMIT.
+// straight from the index (Eq/In keys, or Or thereof). Same tail
+// contract as fetch_covering_index: single column of the plan's type,
+// rowid-ordered rows, caller slices LIMIT.
 @(private)
 fetch_covering_col :: proc(
 	t: ^btree.Tree,
@@ -859,14 +1020,20 @@ fetch_covering_col :: proc(
 	rows := make([dynamic]Row_Entry, 0, len(pairs), allocator)
 	for p in pairs {
 		vals := make([]types.Value, 1, allocator)
-		vals[0] = types.value(strings.clone(p.val, allocator))
+		c, c_err := types.value_clone(p.val, allocator)
+		if c_err != nil {
+			delete(vals, allocator)
+			return nil, nil, nil, false
+		}
+
+		vals[0] = c
 		append(&rows, Row_Entry{rowid = p.rid, values = vals})
 	}
 
 	cols := make([]types.Column, 1, allocator)
 	cols[0] = types.Column {
 		name = strings.clone(col_name, allocator),
-		type = .TEXT,
+		type = plan.col_type,
 	}
 
 	ranges := make([]Table_Col_Range, 1, allocator)

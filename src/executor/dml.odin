@@ -85,11 +85,10 @@ exec_create :: proc(
 }
 
 // exec_create_index implements `CREATE INDEX name ON table (column)` —
-// single-column TEXT indexes only. Validates, allocates an empty
-// text root, backfills existing rows one by one (loop, not bulk: CREATE
-// INDEX is rare DDL), then publishes root + column atomically (readers
-// never see a half index). DDL publishes immediately like exec_create
-// (even in-txn, with reoverlay after).
+// single-column TEXT/INTEGER indexes. Validates, allocates an empty index
+// root of the column's kind, bulk-backfills existing rows, then publishes
+// root + column atomically (readers never see a half index). DDL publishes
+// immediately like exec_create (even in-txn, with reoverlay after).
 @(private)
 exec_create_index :: proc(
 	t: ^btree.Tree,
@@ -2190,6 +2189,9 @@ fanout_insert_row :: proc(
 ) {
 	text, ok := index_col_text(table, index_col, values)
 	if !ok {
+		if v, vok := index_col_int(table, index_col, values); vok {
+			return fanout_insert_int(t, table, index_root, v, rowid)
+		}
 		return index_root, true
 	}
 	return fanout_insert_text(t, table, index_root, text, rowid)
@@ -2211,6 +2213,33 @@ fanout_delete_text :: proc(
 ) {
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, del_err := btree.text_delete_cow(&idx_tree, transmute([]u8)text, rowid)
+	if del_err != .None {
+		if del_err == .Cell_Not_Found {
+			log.infof("Index entry already absent for row %d.", rowid)
+			return index_root, true
+		}
+
+		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
+// fanout_delete_int removes one int entry, tolerating absence like the text
+// twin (stale state, not a statement failure).
+@(private = "file")
+fanout_delete_int :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	val: i64,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, del_err := btree.int_delete_cow(&idx_tree, val, rowid)
 	if del_err != .None {
 		if del_err == .Cell_Not_Found {
 			log.infof("Index entry already absent for row %d.", rowid)
@@ -2247,15 +2276,18 @@ fanout_delete_rowid :: proc(
 	defer cell.destroy(&old, context.temp_allocator)
 	text, ok := index_col_text(table, index_col, old.values)
 	if !ok {
+		if v, vok := index_col_int(table, index_col, old.values); vok {
+			return fanout_delete_int(t, table, index_root, v, rowid)
+		}
 		return index_root, true
 	}
 	return fanout_delete_text(t, table, index_root, text, rowid)
 }
 
 // fanout_update_row maintains the index across one UPDATE from explicit
-// old/new values: unchanged text (or both sides unindexed) skips;
-// NULL<->text transitions insert/delete alone; otherwise delete-old +
-// insert-new.
+// old/new values: unchanged keys (or both sides unindexed) skip;
+// NULL<->value transitions insert/delete alone; otherwise delete-old +
+// insert-new, per side in its own storage class.
 @(private = "file")
 fanout_update_row :: proc(
 	t: ^btree.Tree,
@@ -2269,22 +2301,41 @@ fanout_update_row :: proc(
 	u32,
 	bool,
 ) {
-	old_text, old_ok := index_col_text(table, index_col, old_values)
-	new_text, new_ok := index_col_text(table, index_col, new_values)
-	if old_ok == new_ok && (!old_ok || old_text == new_text) {
+	old_text, old_is_text := index_col_text(table, index_col, old_values)
+	new_text, new_is_text := index_col_text(table, index_col, new_values)
+	old_int, old_is_int := index_col_int(table, index_col, old_values)
+	new_int, new_is_int := index_col_int(table, index_col, new_values)
+	if old_is_text == new_is_text &&
+	   old_is_int == new_is_int &&
+	   (!old_is_text || old_text == new_text) &&
+	   (!old_is_int || old_int == new_int) {
 		return index_root, true
 	}
 
 	cur := index_root
-	if old_ok {
+	if old_is_text {
 		nr, ok := fanout_delete_text(t, table, cur, old_text, rowid)
 		if !ok {
 			return index_root, false
 		}
 		cur = nr
 	}
-	if new_ok {
+	if old_is_int {
+		nr, ok := fanout_delete_int(t, table, cur, old_int, rowid)
+		if !ok {
+			return index_root, false
+		}
+		cur = nr
+	}
+	if new_is_text {
 		nr, ok := fanout_insert_text(t, table, cur, new_text, rowid)
+		if !ok {
+			return index_root, false
+		}
+		cur = nr
+	}
+	if new_is_int {
+		nr, ok := fanout_insert_int(t, table, cur, new_int, rowid)
 		if !ok {
 			return index_root, false
 		}
@@ -2334,6 +2385,28 @@ fanout_insert_text :: proc(
 ) {
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, ins_err := btree.text_insert_cow(&idx_tree, transmute([]u8)text, rowid)
+	if ins_err != .None {
+		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
+// fanout_insert_int inserts one int index entry by explicit value (the
+// update path's new side). Twin of fanout_insert_text for INTEGER indexes.
+@(private = "file")
+fanout_insert_int :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	val: i64,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, ins_err := btree.int_insert_cow(&idx_tree, val, rowid)
 	if ins_err != .None {
 		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
 		return index_root, false

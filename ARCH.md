@@ -310,11 +310,13 @@ or nested groups disable skipping (full scan).
 
 **Query planning** (`executor/index_scan.odin`, shared by the scalar and
 vector fetch paths): PK seek first (`try_pk_lookup`), then secondary-index
-routing for usable predicates on the indexed TEXT column — equality,
-canonical `LIKE 'stem%'`, literal `IN` (first usable conjunct of a flat
-AND chain; OR/NOT/nested/negated fall back). Single-column covering
-`SELECT rowid` answers from the index alone; wider projections fetch per
-candidate and recheck the full filter. A bare `rowid` also projects
+routing for usable predicates on the indexed column in its own type —
+equality, canonical `LIKE 'stem%'` (TEXT only), literal `IN` (first usable
+conjunct of a flat AND chain; OR/NOT/nested/negated fall back).
+Single-column covering `SELECT rowid` answers from the index alone;
+single-column `SELECT <indexed-col>` covers Eq/In (and same-column OR)
+in the column's type, cross-column projections fetch per candidate and
+recheck the full filter. A bare `rowid` also projects
 generally (any position, `ORDER BY rowid`, both fetch paths): the
 projection resolves it from the entry's source rowid when no user column
 of that name exists. Index paths never push `LIMIT` down (candidates
@@ -571,7 +573,7 @@ Schema is stored as a B-tree on page 1.
 | [3] | TEXT | Original CREATE TABLE statement |
 | [4] | BLOB | Serialized column definitions |
 | [5] | INT | Skip-index root page (present only when > 0) |
-| [6+3i] | INT | Index triple `i`: text index root page |
+| [6+3i] | INT | Index triple `i`: index root page |
 | [7+3i] | TEXT | Index triple `i`: indexed column name |
 | [8+3i] | TEXT | Index triple `i`: index name |
 
@@ -681,18 +683,21 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   removed V2 `Cell_Entry` used, so capacity math is unchanged). In
   production since B4a (fresh pages, splits, vacuum output); since B4b
   the tree is V3-only — no V2 encoding remains to upgrade or read.
-- Text leaves (`LEAF_TEXT` = 16, `btree/layout_text.odin`): prefix-compressed
-  secondary text index leaves — stock `Leaf_Header` + `prefix_len u16le` +
-  shared prefix, 4-byte `Text_Slot{off, len}` entries, cells are
-  `[rowid u64be biased][suffix]`. Full-key text interiors (`TEXT_INTERIOR`
-  = 17) hold separators + dense `u32le` children. Online COW inserts,
-  deletes, splits, root growth, and multi-leaf equality scans live in
-  `btree/text_tree.odin`; the dispatcher resolves both text page types
-  with kind `.Text` (reads via `Key_Kind.Text` dispatch; every
-  `Row_ID`-keyed vtable slot refuses).
-- Index catalog: any number of single-column text indexes per table —
-  `Schema_Row`/`Table` carry `indexes: []Index_Def` (fixed `[6+3i]`
-  `[root INT][column TEXT][name TEXT]` triples; 8/9-wide legacy rows
+- Text leaves (`LEAF_TEXT` = 16, `btree/layout_text.odin`) and int leaves
+  (`LEAF_INT` = 18): prefix-compressed secondary index leaves — stock
+  `Leaf_Header` + `prefix_len u16le` + shared prefix, 4-byte
+  `Text_Slot{off, len}` entries, cells are `[rowid u64be biased][suffix]`.
+  Full-key interiors (`TEXT_INTERIOR` = 17, `INT_INTERIOR` = 19) hold
+  separators + dense `u32le` children. Online COW inserts, deletes, splits,
+  root growth, and multi-leaf equality scans live in
+  `btree/text_tree.odin` (shared text/int internals, kind-parameterized
+  entry points); the dispatcher resolves each page type with its kind
+  (reads via `Key_Kind` dispatch; every `Row_ID`-keyed vtable slot
+  refuses).
+- Index catalog: any number of single-column TEXT/INTEGER indexes per
+  table — `Schema_Row`/`Table` carry `indexes: []Index_Def` (fixed
+  `[6+3i]` `[root INT][column TEXT][name TEXT]` triples, kind resolved
+  from the column at load — no wire change; 8/9-wide legacy rows
   parse as one unnamed/named triple). Root swaps reuse the
   `update_schema_root_cow` closure core; pending maps stage each index
   root by (table, name) through commit/vacuum/rollback.
@@ -712,24 +717,28 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   outright afterward; single-kind COW is the only write surface.)
   Table-cache map keys are
   heap-cloned (a temp-borrowed key dangled across per-statement temp frees
-  in-txn, silently serving stale roots). Text-index scope: BINARY
-  collation only, NULL-not-indexed, single-column TEXT indexes
-  (`DROP INDEX <name> [ON <table>]`, names unique per table).
-- Index vacuum: `VACUUM` rebuilds text indexes into packed pages
+  in-txn, silently serving stale roots). Index scope per kind: BINARY
+  collation (text) / numeric order (int), NULL-not-indexed, single-column
+  TEXT/INTEGER indexes (`DROP INDEX <name> [ON <table>]`, names unique
+  per table).
+- Index vacuum: `VACUUM` rebuilds indexes into packed pages
   (`text_tree_vacuum`: ordered collect, greedy byte-chunked leaves and
-  levels, empty index → fresh `LEAF_TEXT` root), hooked into the per-table
+  levels, empty index → fresh root of its kind), hooked into the per-table
   admin loop beside data vacuum (in-txn staged roots publish first, same
   as data). Rowids are logical, so this is space reclamation only —
   correctness never depended on it.
-- Planner routing (Phase E, `executor/index_scan.odin`): single-table
-  SELECT filters over the indexed column route through the text index —
-  equality, canonical `LIKE 'stem%'` (single trailing `%`, no `%`/`_` in
-  the stem — exactly where `like_match` reduces to a byte-prefix test, so
-  candidates and recheck agree by construction), and literal `IN` lists
-  (TEXT members; cross-class/NULL members provably never match a TEXT
-  row). Single-column covering `SELECT rowid` answers from the index alone (synthetic
+- Planner routing (Phase E, `executor/index_scan.odin`, since extended to
+  INTEGER indexes): single-table SELECT filters over the indexed column
+  route through the index in its own type — equality, canonical
+  `LIKE 'stem%'` (TEXT only; single trailing `%`, no `%`/`_` in the stem —
+  exactly where `like_match` reduces to a byte-prefix test, so candidates
+  and recheck agree by construction), and literal `IN` lists (members of
+  the index's type; cross-class/NULL members provably never match a row).
+  Single-column covering `SELECT rowid` answers from the index alone (synthetic
   single-INTEGER `rowid` column through the shared `finish_select`
-  tail; no user column named `rowid` may exist); wider projections fetch
+  tail; no user column named `rowid` may exist); single-column
+  `SELECT <indexed-col>` covers Eq/In in the column's type; wider
+  projections and cross-column ORs fetch
   `tree_find` per candidate and recheck the full filter, with sorted
   candidates so LIMIT-without-ORDER-BY matches the scan path exactly. Flat
   AND-chains route on the first usable conjunct; OR/NOT/nested groups,
@@ -1176,13 +1185,14 @@ context.allocator)`).
 ## Limitations
 
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
-- **Secondary text indexes**: single-column TEXT indexes
+- **Secondary indexes**: single-column TEXT/INTEGER indexes
   (`CREATE INDEX` / `DROP INDEX <name> [ON <table>]`, names unique per
-  table), BINARY collation, NULL-not-indexed. Routes equality, canonical
-  `LIKE 'stem%'`, and literal `IN` (up to 128 members) — plus flat-OR
+  table), BINARY collation (text) / numeric order (int), NULL-not-indexed.
+  Routes equality and literal `IN` (up to 128 members) in the column's
+  type, plus canonical `LIKE 'stem%'` on TEXT — plus flat-OR
   unions and multi-conjunct AND intersections across indexes. Covering
-  `SELECT rowid` and `SELECT <indexed-col>` (Eq/In shapes); fetch+recheck
-  otherwise; everything else scans.
+  `SELECT rowid` and `SELECT <indexed-col>` (Eq/In shapes, same-column OR);
+  fetch+recheck otherwise; everything else scans.
   User guide: [docs/indexing.md](docs/indexing.md).
 - **`CHECK` limited to integer comparisons**: `col > 0`, `col < 100`, `>=`, `<=`, `=`, `!=` format.
 - **Max 10 columns per table**: Enforced by `MAX_COLS` constant (inline `[dynamic; N]T` scratch buffer).
@@ -1207,7 +1217,7 @@ context.allocator)`).
 | `.stats` | DB statistics | `admin.stats()` |
 | `.integrity` | Verify B-trees | `admin.integrity_check()` |
 | `.checkpoint` | Flush + GC | `admin.checkpoint()` |
-| `.vacuum` | Rebuild tables + text indexes into packed pages | `admin.vacuum()` |
+| `.vacuum` | Rebuild tables + indexes into packed pages | `admin.vacuum()` |
 | `.snapshots` | Show chain | `admin.print_snapshots()` ← `snapshot.chain_infos()` |
 | `.snapdiff <a> <b>` | Diff snapshots | `db.snapshot_diff()` |
 | `.snapshot tag <id> <lbl>` | Tag snapshot | `db.snapshot_tag()` |

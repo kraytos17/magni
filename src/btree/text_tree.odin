@@ -1,8 +1,8 @@
-// Text secondary-index insert chain: online COW inserts over
-// single-kind text trees (LEAF_TEXT leaves + TEXT_INTERIOR interiors).
-// Everything here is text-tree-specific (codec-key routing); the rowid
-// chain in tree.odin/split.odin/cow.odin is independent. The DML entry
-// point is text_insert_cow.
+// Secondary-index insert chain: online COW inserts over single-kind trees
+// (text: LEAF_TEXT leaves + TEXT_INTERIOR interiors; int: LEAF_INT +
+// INT_INTERIOR). Everything here is index-tree-specific (codec-key
+// routing); the rowid chain in tree.odin/split.odin/cow.odin is
+// independent. The DML entry point is text_insert_cow.
 //
 // Deliberate differences from the rowid chain (each explained at use):
 // - No kind dispatch: a text tree holds only text pages. Per-proc type
@@ -597,7 +597,8 @@ text_insert_into_interior :: proc(
 }
 
 // text_insert_recursive COW-copies, loads, and dispatches leaf/interior.
-// Single-kind tree: no layout dispatch (per-proc type checks own safety).
+// Single-kind tree: no layout dispatch (per-proc kind derivation owns
+// safety).
 @(private = "file", require_results)
 text_insert_recursive :: proc(
 	t: ^Tree,

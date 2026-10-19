@@ -1,8 +1,8 @@
-# Secondary Text Indexes
+# Secondary Indexes
 
-Single-column TEXT indexes, maintained on every write path and used to
-route eligible `SELECT` filters. Scope is deliberately narrow;
-anything outside it takes the full scan with identical results.
+Single-column TEXT and INTEGER indexes, maintained on every write path
+and used to route eligible `SELECT` filters. Scope is deliberately
+narrow; anything outside it takes the full scan with identical results.
 
 ## DDL
 
@@ -18,8 +18,10 @@ DROP INDEX i_title ON docs;
   (a repeat fails cleanly) and may repeat across tables. Unqualified
   `DROP INDEX <name>` needs a unique match; otherwise qualify with
   `ON <table>` (ambiguous names error out).
-- Single TEXT column only: `CREATE INDEX i ON t (a, b)` is rejected at
-  parse time.
+- Single column only: `CREATE INDEX i ON t (a, b)` is rejected at
+  parse time. TEXT and INTEGER columns index; REAL/BLOB fail cleanly.
+  One index kind per column type (TEXT keys sort binary, INTEGER keys
+  numeric); cross-class literals never match, so they never route.
 - `DROP INDEX` clears the definition atomically. Data is untouched;
   routed shapes fall back to full scan with identical results (covering
   `SELECT rowid` / `SELECT <indexed-col>` answer from data pages instead
@@ -36,11 +38,13 @@ AND, union for OR):
 
 | Predicate | Route | Notes |
 |---|---|---|
-| `body = 'alpha'` | Index | TEXT literal only; `NULL`/non-TEXT fall through |
-| `body LIKE 'al%'` | Index (prefix) | Canonical shape only: single trailing `%`, non-empty stem, no `%` or `_` in the stem |
-| `body IN ('a', 'b')` | Index (union) | Literal lists up to 128 TEXT members; non-TEXT members match nothing; longer lists and subquery `IN` fall back |
+| `body = 'alpha'` | Index | TEXT literal on a TEXT index only; `NULL`/cross-class fall through |
+| `v = 42` | Index | INTEGER literal on an INTEGER index only |
+| `body LIKE 'al%'` | Index (prefix) | Canonical shape only: single trailing `%`, non-empty stem, no `%` or `_` in the stem; TEXT indexes only (`LIKE` on integers stays on the scan path with identical results) |
+| `body IN ('a', 'b')` | Index (union) | Literal lists up to 128 members of the index's type; other members match nothing; longer lists and subquery `IN` fall back |
+| `v IN (1, 2)` | Index (union) | Same cap and semantics on INTEGER indexes |
 | `body = 'x' AND v > 1` | Index on usable conjuncts | Full filter rechecks every candidate |
-| `title = 't' AND body = 'b'` | Indexes intersect | One candidate set per index |
+| `title = 't' AND body = 'b'` | Indexes intersect | One candidate set per index (each member routed on its own index and type) |
 | `body = 'a' OR body = 'b'` | Indexes union | Every disjunct must be usable, else the union would be incomplete |
 | `docs.body = 'x'` | Index | Table/alias-qualified names resolve the same |
 
@@ -57,7 +61,10 @@ answered from the index alone, without touching data pages. A bare
 `rowid` also projects generally in any position, with `ORDER BY rowid`,
 on tables with no index at all. So is
 `SELECT <indexed-col>` for Eq/In shapes (and Or thereof — the keys are
-known); prefix plans need the row and stay on fetch. Wider projections
+known), in the column's type; prefix plans need the row and stay on
+fetch. A covering projection must name the routed column, and every OR
+member must share it — otherwise the query fetches (emitting another
+column's keys as values would be wrong). Wider projections
 fetch each candidate row and recheck the full filter. Candidates arrive
 in rowid order, so `LIMIT` without `ORDER BY` matches the scan path
 exactly.
@@ -83,6 +90,9 @@ EXPLAIN SELECT id FROM docs WHERE id = 1;
 EXPLAIN SELECT id FROM docs WHERE body = 'a' OR body = 'b';
 -- INDEX SCAN ON docs USING body (or, fetch)
 
+EXPLAIN SELECT v FROM nums WHERE v = 42;
+-- INDEX SCAN ON nums USING v (eq, covering)
+
 EXPLAIN SELECT id FROM docs WHERE title = 't' AND body = 'b';
 -- INDEX SCAN ON docs USING title, body (and, fetch)
 ```
@@ -94,8 +104,9 @@ Non-single-table statements keep the legacy echo of the inner SQL.
 - DML fan-out keeps every index coherent on insert/update/delete, in
   autocommit and in transactions (staged roots are visible to the txn's
   own reads; `ROLLBACK` discards them).
-- `VACUUM` (`.vacuum`) rebuilds text indexes into packed pages alongside
-  data. Rowids are logical, so this is space reclamation only.
+- `VACUUM` (`.vacuum`) rebuilds indexes into packed pages alongside
+  data, preserving each index's kind. Rowids are logical, so this is
+  space reclamation only.
 - Reads get faster (50k-row on-disk A/B, release, interleaved): point
   lookup ≥20×, prefix fetch ~7×, 3-value `IN` ≥20× vs full scan (indexed
   point times sit at process-startup floor).

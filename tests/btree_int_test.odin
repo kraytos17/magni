@@ -98,21 +98,9 @@ test_int_tree_delete :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 
-	testing.expect(
-		t,
-		btree.int_delete(&ctx.tree, 7, 3) == .None,
-		"present pair deletes",
-	)
-	testing.expect(
-		t,
-		btree.int_delete(&ctx.tree, 7, 3) == .Cell_Not_Found,
-		"repeat delete misses",
-	)
-	testing.expect(
-		t,
-		btree.int_delete(&ctx.tree, 8, 1) == .Cell_Not_Found,
-		"wrong value misses",
-	)
+	testing.expect(t, btree.int_delete(&ctx.tree, 7, 3) == .None, "present pair deletes")
+	testing.expect(t, btree.int_delete(&ctx.tree, 7, 3) == .Cell_Not_Found, "repeat delete misses")
+	testing.expect(t, btree.int_delete(&ctx.tree, 8, 1) == .Cell_Not_Found, "wrong value misses")
 
 	found, f_err := btree.int_find_rowids(&ctx.tree, ctx.tree.root, 7)
 	testing.expect(t, f_err == .None, "find succeeds")

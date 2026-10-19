@@ -31,6 +31,6 @@ untouched. `AS OF` combines with `WHERE`, `LIMIT`, and the rest of `SELECT`.
 - Expiry never runs inside a transaction (warned no-op): uncommitted COW
   pages belong to no snapshot live set, so a sweep would free them from
   under the txn. `VACUUM` (`.vacuum`) is orthogonal — it repacks live
-  tables (data and text indexes) without touching snapshot history.
+  tables (data and secondary indexes) without touching snapshot history.
 
 Internals (chain/manifest/GC algorithm): [ARCH.md](../ARCH.md#snapshot-system).
