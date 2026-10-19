@@ -360,11 +360,12 @@ test_composite_codec_order_and_failures :: proc(t: T) {
 		"framing disambiguates",
 	)
 
-	// Unindexable components skip the whole tuple (NULL, mismatch, NaN).
+	// Unindexable components skip the whole tuple (mismatch, NaN). NULL
+	// frames as a marker (leading skip lives in the extractor).
 	nv := make([]types.Value, 2, context.temp_allocator)
 	nv[0] = types.value()
 	nv[1] = types.value("x")
-	testing.expect_value(t, cell.composite_encoded_len(nv, {.INTEGER, .TEXT}), 0)
+	testing.expect(t, cell.composite_encoded_len(nv, {.INTEGER, .TEXT}) > 0, "NULL frames")
 	mv := make([]types.Value, 2, context.temp_allocator)
 	mv[0] = types.value("x")
 	mv[1] = types.value("y")
@@ -388,4 +389,52 @@ test_composite_codec_order_and_failures :: proc(t: T) {
 	testing.expect(t, !cell.composite_wellformed(badtag), "bad tag fails")
 	testing.expect(t, cell.composite_compare(badtag, good) < 0, "invalid orders first")
 	testing.expect(t, cell.composite_compare(good, badtag) > 0, "valid orders last")
+
+	// NULL markers: NULL frames anywhere (leading skip is the extractor's
+	// call, not the codec's); markers sort before valued frames.
+	nulltup := make([]types.Value, 2, context.temp_allocator)
+	nulltup[0] = types.value(5)
+	nulltup[1] = types.value()
+	nlen := cell.composite_encoded_len(nulltup, {.INTEGER, .TEXT})
+	testing.expect(t, nlen > 0, "trailing NULL frames")
+	nbuf := make([]u8, 64, context.temp_allocator)
+	nn, nok := cell.composite_encode_raw(nulltup, {.INTEGER, .TEXT}, nbuf)
+	testing.expect(t, nok, "NULL tuple frames")
+	nfull := make([]u8, 64, context.temp_allocator)
+	fn, fok := cell.composite_encode(nulltup, {.INTEGER, .TEXT}, 9, nfull)
+	testing.expect(t, fok && cell.composite_wellformed(nfull[:fn]), "marked key parses")
+	nv2, nok2 := cell.composite_decode_col(nbuf[:nn], 1)
+	testing.expect(t, nok2, "marker decodes")
+	if nok2 {
+		testing.expect(t, types.is_null(nv2), "marker decodes to NULL")
+	}
+
+	// Blobs frame in TEXT positions after every text frame (rank order).
+	bv := make([]types.Value, 2, context.temp_allocator)
+	bv[0] = types.value(5)
+	bv[1] = types.value([]u8{0xAB})
+	blen := cell.composite_encoded_len(bv, {.INTEGER, .TEXT})
+	testing.expect(t, blen > 0, "blob frames")
+	bbuf := make([]u8, 64, context.temp_allocator)
+	bn, bok := cell.composite_encode_raw(bv, {.INTEGER, .TEXT}, bbuf)
+	testing.expect(t, bok, "blob tuple frames")
+	bfull := make([]u8, 64, context.temp_allocator)
+	fbn, fbok := cell.composite_encode(bv, {.INTEGER, .TEXT}, 9, bfull)
+	testing.expect(t, fbok && cell.composite_wellformed(bfull[:fbn]), "blob key parses")
+	bdec, bok2 := cell.composite_decode_col(bbuf[:bn], 1)
+	testing.expect(t, bok2, "blob decodes")
+	if bok2 {
+		bb, is_blob := bdec.([]u8)
+		testing.expect(t, is_blob && len(bb) == 1 && bb[0] == 0xAB, "blob bytes survive")
+	}
+	testing.expect(
+		t,
+		cell.composite_compare(bfull[:fbn], enc(mk(5, "z"), 9)) > 0,
+		"blob sorts after text",
+	)
+	testing.expect(
+		t,
+		cell.composite_compare(nfull[:fn], enc(mk(5, "a"), 9)) < 0,
+		"NULL marker sorts first",
+	)
 }

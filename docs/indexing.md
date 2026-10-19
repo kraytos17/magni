@@ -26,7 +26,10 @@ DROP INDEX i_title ON docs;
   widened key (REAL affinity); covering projections normalize them to
   REAL while fetch preserves classes.
 - Composite `CREATE INDEX i ON t (a, b)` indexes the tuple: components
-  sort in order, then rowid; a NULL anywhere skips the tuple. Eq on all
+  sort in order, then rowid; a NULL leading component skips the tuple
+  (no routable predicate matches it) while trailing NULLs frame as
+  markers inside the prefix run (leading-filtered rows stay complete);
+  blobs in TEXT positions frame after text (rank order). Eq on all
   columns answers exact; Eq on the leading column answers a prefix scan;
   leading-column ranges answer bounded scans (tightened pairs, Eq
   dominating); OR of ANDs unions exact composite scans; leading IN with

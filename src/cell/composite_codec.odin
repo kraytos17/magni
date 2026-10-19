@@ -33,17 +33,36 @@ COMPOSITE_INDEX_TAG    :: u8(0x43)
 COMPOSITE_COMP_HDR_LEN :: 1 + 4 // kind + len
 COMPOSITE_ROWID_LEN    :: 8
 
+// COMPOSITE_NULL_TAG marks a NULL component: sorts before every valued
+// frame of the prefix run (contiguity, not engine NULL placement —
+// output order comes from the later sort). A NULL anywhere used to skip
+// the whole tuple, which lost leading-filtered rows with NULLs in
+// unfiltered trailing columns; leading NULLs still skip.
+COMPOSITE_NULL_TAG :: u8(0x00)
+
+// COMPOSITE_BLOB_TAG frames blobs stored in TEXT positions (accepted
+// widening, like integers in REAL): sorts after every TEXT frame,
+// matching engine storage-class rank (blob above text).
+COMPOSITE_BLOB_TAG :: u8(0x55)
+
 // composite_comp_len returns the framed length of one component value, or
-// 0 when the value is not indexable under its declared type (NULL,
-// mismatched class, NaN real — caller skips the whole tuple).
+// 0 when the value is not indexable under its declared type (mismatched
+// class, NaN real — caller skips the whole tuple; NULL and TEXT-stored
+// blobs frame as markers).
 composite_comp_len :: #force_inline proc "contextless" (
 	val: types.Value,
 	type: types.Column_Type,
 ) -> int {
+	if _, is_null := val.(types.Null); is_null {
+		return COMPOSITE_COMP_HDR_LEN
+	}
 	switch type {
 	case .TEXT:
 		if s, ok := val.(string); ok {
 			return COMPOSITE_COMP_HDR_LEN + len(s)
+		}
+		if b, ok := val.([]u8); ok {
+			return COMPOSITE_COMP_HDR_LEN + len(b)
 		}
 	case .INTEGER:
 		if _, ok := val.(i64); ok {
@@ -117,10 +136,23 @@ composite_encode_raw :: proc "contextless" (
 	for v, i in vals {
 		payload: []u8
 		tag := TEXT_INDEX_TAG
+		if _, is_null := v.(types.Null); is_null {
+			buf[pos] = COMPOSITE_NULL_TAG
+			endian.unchecked_put_u32be(buf[pos + 1:pos + 5], 0)
+			pos += COMPOSITE_COMP_HDR_LEN
+			continue
+		}
 		switch col_types[i] {
 		case .TEXT:
-			tag = TEXT_INDEX_TAG
-			payload = transmute([]u8)v.(string)
+			if s, is_text := v.(string); is_text {
+				tag = TEXT_INDEX_TAG
+				payload = transmute([]u8)s
+			} else if b, is_blob := v.([]u8); is_blob {
+				tag = COMPOSITE_BLOB_TAG
+				payload = b
+			} else {
+				return 0, false
+			}
 		case .INTEGER:
 			tag = INT_INDEX_TAG
 			w := u64(v.(i64) ~ min(i64))
@@ -202,12 +234,19 @@ composite_wellformed :: proc "contextless" (src: []u8) -> bool {
 		}
 
 		kind := src[pos]
-		if kind != TEXT_INDEX_TAG && kind != INT_INDEX_TAG && kind != REAL_INDEX_TAG {
+		if kind != TEXT_INDEX_TAG &&
+		   kind != INT_INDEX_TAG &&
+		   kind != REAL_INDEX_TAG &&
+		   kind != COMPOSITE_NULL_TAG &&
+		   kind != COMPOSITE_BLOB_TAG {
 			return false
 		}
 
 		elen := int(endian.unchecked_get_u32be(src[pos + 1:pos + 5]))
-		if kind != TEXT_INDEX_TAG && elen != 8 {
+		if kind == COMPOSITE_NULL_TAG && elen != 0 {
+			return false
+		}
+		if (kind == INT_INDEX_TAG || kind == REAL_INDEX_TAG) && elen != 8 {
 			return false
 		}
 		pos += COMPOSITE_COMP_HDR_LEN + elen
@@ -283,8 +322,15 @@ composite_decode_col :: proc(key: []u8, idx: int) -> (val: types.Value, ok: bool
 
 	payload := key[pos + COMPOSITE_COMP_HDR_LEN:pos + COMPOSITE_COMP_HDR_LEN + elen]
 	switch kind {
+	case COMPOSITE_NULL_TAG:
+		if len(payload) != 0 {
+			return {}, false
+		}
+		return types.value(), true
 	case TEXT_INDEX_TAG:
 		return types.value(string(payload)), true
+	case COMPOSITE_BLOB_TAG:
+		return types.value(payload), true
 	case INT_INDEX_TAG:
 		if len(payload) != 8 {
 			return {}, false

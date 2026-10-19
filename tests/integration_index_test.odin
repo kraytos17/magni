@@ -655,6 +655,55 @@ test_index_composite_covering :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_index_composite_trailing_null :: proc(t: ^testing.T) {
+	// Prefix scans include leading-filtered rows with NULL in unfiltered
+	// trailing columns (framed markers stay inside the prefix run);
+	// leading NULLs stay out (no routable predicate matches them).
+	d := setup_db(t, "idxcompnull")
+	defer teardown_db(d, "idxcompnull")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT);",
+			"INSERT INTO t VALUES (5, 'x', 1);",
+			"INSERT INTO t VALUES (5, NULL, 2);",
+			"INSERT INTO t VALUES (5, 'y', 3);",
+			"INSERT INTO t VALUES (NULL, 'q', 4);",
+			"CREATE INDEX i_ab ON t (a, b);",
+		},
+	)
+	q := db.query(d, "SELECT a, b, v FROM t WHERE a = 5 ORDER BY v;")
+	testing.expect(t, q.ok, "prefix succeeds")
+	testing.expect_value(t, len(q.rows), 3)
+
+	ca := db.query(d, "SELECT a FROM t WHERE a = 5 ORDER BY a;")
+	testing.expect(t, ca.ok, "leading covering succeeds")
+	testing.expect_value(t, len(ca.rows), 3)
+
+	cov := db.query(d, "SELECT b FROM t WHERE a = 5 ORDER BY v;")
+	testing.expect(t, cov.ok, "fetch succeeds")
+	testing.expect_value(t, len(cov.rows), 3)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE a = 5;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a FROM t WHERE a = 5;"),
+		"INDEX SCAN ON t USING a,b (composite, covering)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT b FROM t WHERE a = 5;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+}
+
+@(test)
 test_index_composite_three_col :: proc(t: ^testing.T) {
 	// Three columns: full binds route exact, leading pairs route prefix,
 	// middle gaps degrade to the bound prefix (the gap rides the recheck),
@@ -747,6 +796,12 @@ test_index_composite_twin :: proc(t: ^testing.T) {
 		db.execute(d, "INSERT INTO t2 VALUES (NULL, 'n', 401);") == .None,
 		"null twin",
 	)
+	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (7, NULL, 402);") == .None, "trailing null")
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO t2 VALUES (7, NULL, 402);") == .None,
+		"trailing null twin",
+	)
 
 	queries := []string {
 		"SELECT a, b, v FROM t WHERE a = 7 AND b = 'alpha';",
@@ -769,6 +824,8 @@ test_index_composite_twin :: proc(t: ^testing.T) {
 		"SELECT a, b, v FROM t WHERE a = 7 AND b = 'alpha' ORDER BY v DESC LIMIT 3;",
 		"SELECT rowid FROM t WHERE a = 7 AND b = 'bb' ORDER BY rowid;",
 		"SELECT rowid FROM t WHERE a = 7 ORDER BY rowid LIMIT 4;",
+		"SELECT a, b, v FROM t WHERE a = 7 ORDER BY v;",
+		"SELECT b FROM t WHERE a = 7 ORDER BY v;",
 	}
 	for q in queries {
 		free_all(context.temp_allocator)

@@ -1154,8 +1154,10 @@ fanout_bulk_real :: proc(
 // composite_row_raw frames one row's indexed tuple for a composite def
 // into an owned raw (caller allocator): resolves every component column,
 // widens integers in REAL positions (same affinity as index_col_real),
-// and skips NULL/mismatch/NaN anywhere (false — the whole tuple is
-// unsearchable, mirroring the single-column skip policy).
+// and frames NULLs as markers past the leading column (a NULL leading
+// component skips the tuple — no routable predicate matches it — while
+// trailing NULLs stay searchable through leading-column scans).
+// Mismatched classes and NaN anywhere skip (false).
 @(private = "file")
 composite_row_raw :: proc(
 	table: types.Table,
@@ -1179,12 +1181,22 @@ composite_row_raw :: proc(
 		}
 
 		v := values[col_idx]
-		switch def.col_types[i] {
-		case .TEXT:
-			if _, is_text := v.(string); !is_text {
+		if _, is_null := v.(types.Null); is_null {
+			if i == 0 {
 				return nil, false
 			}
 			tuple[i] = v
+			continue
+		}
+		switch def.col_types[i] {
+		case .TEXT:
+			if _, is_text := v.(string); is_text {
+				tuple[i] = v
+			} else if _, is_blob := v.([]u8); is_blob {
+				tuple[i] = v
+			} else {
+				return nil, false
+			}
 		case .INTEGER:
 			if _, is_int := v.(i64); !is_int {
 				return nil, false
