@@ -17,6 +17,7 @@ Index_Use :: enum u8 {
 	Prefix, // col LIKE 'stem%' (canonical: single trailing %, no %/_ in stem; TEXT only)
 	In, // col IN (...) over literal members of the index's type
 	Range, // col >/</>=/<= literal (one open-ended bound, or both after AND-merge)
+	Composite, // multi-col Eq run: exact full tuple or leading-column prefix (fetch-only)
 	Or, // flat OR of usable same-column CONDs (union, exact)
 	And, // flat AND with 2+ usable conjuncts (intersection, needs recheck)
 }
@@ -29,13 +30,17 @@ Index_Use :: enum u8 {
 // arms stay zero. Range carries one bound per side in the matching arm
 // (absent side reads open-ended); range_empty marks a provably empty
 // interval (contradictory AND-merge — the btree short-circuits, zero I/O).
+// Composite carries pre-framed raws (arena-borrowed like strings):
+// comp_key for an exact full tuple, comp_prefix for a leading-column run,
+// comp_empty for a contradictory duplicate Eq. Fetch-only (covering
+// refuses Composite — tuple decomposition needs the row).
 // Or/And carry their member plans in subs (each member routed its own
 // index and carries its own type; column is the first sub's, display-only).
 Index_Plan :: struct {
 	use          : Index_Use,
 	root         : u32, // index root this plan reads (per-sub for Or/And)
-	column       : string, // indexed column (arena-borrowed; Or/And: first sub's)
-	col_type     : types.Column_Type, // index kind (per-sub for Or/And)
+	column       : string, // indexed column (arena-borrowed; Or/And: first sub's; Composite: joined)
+	col_type     : types.Column_Type, // index kind (per-sub for Or/And; Composite: first component's)
 	eq_text      : string, // Eq on TEXT
 	eq_int       : i64, // Eq on INTEGER
 	eq_real      : f64, // Eq on REAL
@@ -54,6 +59,9 @@ Index_Plan :: struct {
 	range_lo_real: f64, // Range lower bound on REAL
 	range_hi_real: f64, // Range upper bound on REAL
 	range_empty  : bool, // Range provably matches nothing (AND contradiction)
+	comp_key     : []u8, // Composite exact full-tuple raw
+	comp_prefix  : []u8, // Composite leading-column framed run
+	comp_empty   : bool, // Composite provably matches nothing (duplicate Eq)
 	subs         : []Index_Plan, // Or/And members (each with its own root)
 }
 
@@ -406,6 +414,152 @@ index_use_of_cond :: proc(
 	return {}, false
 }
 
+// composite_cond_value extracts one Eq literal for a composite component:
+// the per-type rhs check behind composite folding (same rejections as the
+// scalar arms — cross-class, NULL, and NaN never route).
+@(private = "file")
+composite_cond_value :: proc(
+	col_type: types.Column_Type,
+	cond: parser.Condition,
+) -> (
+	types.Value,
+	bool,
+) {
+	switch col_type {
+	case .TEXT:
+		if s, is_text := cond_text_rhs(cond); is_text {
+			return types.value(s), true
+		}
+	case .INTEGER:
+		if v, is_int := cond_int_rhs(cond); is_int {
+			return types.value(v), true
+		}
+	case .REAL:
+		if v, is_real := cond_real_rhs(cond); is_real {
+			return types.value(v), true
+		}
+	case .BLOB:
+	}
+	return {}, false
+}
+
+// composite_values_equal reports whether two bound literals of one
+// component type denote the same key (-0.0 shares +0.0's word, so float
+// equality — not bitwise identity — is the comparator).
+@(private = "file")
+composite_values_equal :: proc(col_type: types.Column_Type, a, b: types.Value) -> bool {
+	switch col_type {
+	case .TEXT:
+		as, aok := a.(string)
+		bs, bok := b.(string)
+		return aok && bok && as == bs
+	case .INTEGER:
+		ai, aok := a.(i64)
+		bi, bok := b.(i64)
+		return aok && bok && ai == bi
+	case .REAL:
+		af, aok := a.(f64)
+		bf, bok := b.(f64)
+		return aok && bok && af == bf
+	case .BLOB:
+		return false
+	}
+	return false
+}
+
+// try_composite_plan folds usable leading Eq CONDs on one composite def
+// into a Composite plan: an exact full-tuple lookup when every column
+// binds, otherwise a leading-column prefix scan. Later bound columns
+// behind an unbound middle ride the fetch recheck (same superset +
+// recheck contract as the scalar And path). Duplicate usable Eqs on one
+// column collapse when equal and empty the plan when contradictory.
+// Anything else on the leading column (ranges, LIKE, IN, cross-class,
+// NULL, negation, column refs) declines — the scan path stays correct.
+@(private)
+try_composite_plan :: proc(
+	def: types.Index_Def,
+	conds: []parser.Condition,
+	tbl_name: string,
+	tbl_alias: string,
+) -> (
+	plan: Index_Plan,
+	ok: bool,
+) {
+	n := len(def.columns)
+	if n < 2 || n != len(def.col_types) {
+		return {}, false
+	}
+
+	bound := make([]types.Value, n, context.temp_allocator)
+	has := make([]bool, n, context.temp_allocator)
+	for cond in conds {
+		if cond.negated || cond.operator != .EQUALS {
+			continue
+		}
+		for col, i in def.columns {
+			if !index_cond_column_ok(col, cond.column, tbl_name, tbl_alias) {
+				continue
+			}
+
+			v, usable := composite_cond_value(def.col_types[i], cond)
+			if !usable {
+				continue
+			}
+			if !has[i] {
+				bound[i], has[i] = v, true
+			} else if !composite_values_equal(def.col_types[i], bound[i], v) {
+				return Index_Plan {
+						use = .Composite,
+						root = def.root,
+						column = def.column,
+						col_type = def.col_types[0],
+						comp_empty = true,
+					},
+					true
+			}
+		}
+	}
+	if !has[0] {
+		return {}, false
+	}
+
+	run := 1
+	for run < n && has[run] {
+		run += 1
+	}
+	// Size exactly (bounds are pre-validated literals, so sizing cannot
+	// fail — the check below is defense in depth, not a path).
+	need := cell.composite_encoded_len(bound[:run], def.col_types[:run])
+	if need == 0 {
+		return {}, false
+	}
+
+	frame_buf := make([]u8, need, context.temp_allocator)
+	raw_n, raw_ok := cell.composite_encode_raw(bound[:run], def.col_types[:run], frame_buf)
+	if !raw_ok {
+		return {}, false
+	}
+	framed := frame_buf[:raw_n]
+	if run == n {
+		return Index_Plan {
+				use = .Composite,
+				root = def.root,
+				column = def.column,
+				col_type = def.col_types[0],
+				comp_key = framed,
+			},
+			true
+	}
+	return Index_Plan {
+			use = .Composite,
+			root = def.root,
+			column = def.column,
+			col_type = def.col_types[0],
+			comp_prefix = framed,
+		},
+		true
+}
+
 // resolve_index_covering routes when the filter is exactly one usable
 // COND — or a flat OR of usable CONDs (union of exact sets is exact) —
 // on the indexed column: index output is then exact (no recheck possible —
@@ -439,6 +593,16 @@ resolve_index_covering :: proc(
 				tbl_name,
 				tbl_alias,
 			); usable {
+				return cand, true
+			}
+		}
+
+		single := [1]parser.Condition{cond}
+		for def in table.indexes {
+			if len(def.columns) < 2 {
+				continue
+			}
+			if cand, usable := try_composite_plan(def, single[:], tbl_name, tbl_alias); usable {
 				return cand, true
 			}
 		}
@@ -539,6 +703,16 @@ resolve_index_fetch :: proc(
 				return cand, true
 			}
 		}
+
+		single := [1]parser.Condition{root.cond}
+		for def in table.indexes {
+			if len(def.columns) < 2 {
+				continue
+			}
+			if cand, usable := try_composite_plan(def, single[:], tbl_name, tbl_alias); usable {
+				return cand, true
+			}
+		}
 		return {}, false
 	}
 	if root.kind == .OR {
@@ -548,23 +722,36 @@ resolve_index_fetch :: proc(
 		return {}, false
 	}
 
-	subs := make([dynamic]Index_Plan, 0, len(root.children), context.temp_allocator)
+	conds := make([dynamic]parser.Condition, 0, len(root.children), context.temp_allocator)
 	for child in root.children {
 		if child.kind != .COND {
 			return {}, false
 		}
+		append(&conds, child.cond)
+	}
+
+	subs := make([dynamic]Index_Plan, 0, len(root.children), context.temp_allocator)
+	for cond in conds {
 		for def in table.indexes {
 			if cand, usable := index_use_of_cond(
 				def.root,
 				def.column,
 				def.col_type,
-				child.cond,
+				cond,
 				tbl_name,
 				tbl_alias,
 			); usable {
 				append(&subs, cand)
 				break
 			}
+		}
+	}
+	for def in table.indexes {
+		if len(def.columns) < 2 {
+			continue
+		}
+		if cand, usable := try_composite_plan(def, conds[:], tbl_name, tbl_alias); usable {
+			append(&subs, cand)
 		}
 	}
 	if len(subs) == 0 {
@@ -1389,6 +1576,36 @@ index_candidate_single :: proc(
 				return nil, false
 			}
 		}
+	case .Composite:
+		// Fetch-only: exact full-tuple lookup or leading-column prefix
+		// scan over pre-framed raws (arena-borrowed, consumed here).
+		if plan.comp_empty {
+			return out, true
+		}
+		if plan.comp_key != nil {
+			found, find_err := btree.composite_find_rowids(&idx_tree, plan.root, plan.comp_key)
+			if find_err != .None {
+				log.errorf("Error: Failed to search index for '%s'", table.name)
+				delete(out)
+				return nil, false
+			}
+			append(&out, ..found)
+		} else if plan.comp_prefix != nil {
+			found, find_err := btree.composite_prefix_rowids(
+				&idx_tree,
+				plan.root,
+				plan.comp_prefix,
+			)
+			if find_err != .None {
+				log.errorf("Error: Failed to search index for '%s'", table.name)
+				delete(out)
+				return nil, false
+			}
+			append(&out, ..found)
+		} else {
+			delete(out)
+			return nil, false
+		}
 	case:
 		delete(out)
 		return nil, false
@@ -1424,6 +1641,8 @@ index_use_name :: proc(use: Index_Use) -> string {
 		return "in"
 	case .Range:
 		return "range"
+	case .Composite:
+		return "composite"
 	case .Or:
 		return "or"
 	case .And:

@@ -18,13 +18,19 @@ DROP INDEX i_title ON docs;
   (a repeat fails cleanly) and may repeat across tables. Unqualified
   `DROP INDEX <name>` needs a unique match; otherwise qualify with
   `ON <table>` (ambiguous names error out).
-- Single column only: `CREATE INDEX i ON t (a, b)` is rejected at
-  parse time. TEXT, INTEGER, and REAL columns index; BLOB fails cleanly.
-  One index kind per column type (TEXT keys sort binary, INTEGER keys
-  numeric, REAL keys numeric with -0.0 normalized to +0.0); cross-class
-  literals never match, so they never route. Integers stored in a REAL
-  column index under their widened key (REAL affinity); covering
-  projections normalize them to REAL while fetch preserves classes.
+- One or more columns of indexable type (TEXT, INTEGER, REAL — BLOB
+  fails cleanly, naming the column). One index kind per column type
+  (TEXT keys sort binary, INTEGER keys numeric, REAL keys numeric with
+  -0.0 normalized to +0.0); cross-class literals never match, so they
+  never route. Integers stored in a REAL column index under their
+  widened key (REAL affinity); covering projections normalize them to
+  REAL while fetch preserves classes.
+- Composite `CREATE INDEX i ON t (a, b)` indexes the tuple: components
+  sort in order, then rowid; a NULL anywhere skips the tuple. Eq on all
+  columns answers exact; Eq on the leading column answers a prefix scan
+  (later gaps ride the fetch recheck); anything else on non-leading
+  columns stays on scan. Composite plans are fetch-only (covering needs
+  the row); `SELECT rowid` still covers.
 - `DROP INDEX` clears the definition atomically. Data is untouched;
   routed shapes fall back to full scan with identical results (covering
   `SELECT rowid` / `SELECT <indexed-col>` answer from data pages instead
@@ -116,6 +122,9 @@ EXPLAIN SELECT v FROM nums WHERE v BETWEEN 1 AND 9;
 
 EXPLAIN SELECT x FROM reals WHERE x = 1.5;
 -- INDEX SCAN ON reals USING x (eq, covering)
+
+EXPLAIN SELECT a, b FROM t WHERE a = 10 AND b = 'x';
+-- INDEX SCAN ON t USING a,b (composite, fetch)
 ```
 
 Non-single-table statements keep the legacy echo of the inner SQL.

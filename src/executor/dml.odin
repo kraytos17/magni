@@ -107,11 +107,9 @@ exec_create_index :: proc(
 
 	defer schema.table_free(table^, context.temp_allocator)
 	if len(stmt.columns) != 1 {
-		log.errorf(
-			"Error: Multi-column secondary indexes are not supported yet: %s",
-			stmt.table_name,
-		)
-		return false, t.root, {}
+		// Multi-column fans out to the composite twin (same contracts,
+		// framed tuples instead of scalar keys).
+		return exec_create_composite_index(t, stmt, table^, sql)
 	}
 
 	col_idx, col_ok := schema.find_column_index(table.columns, stmt.columns[0])
@@ -297,6 +295,154 @@ exec_create_index :: proc(
 		stmt.index_name,
 		stmt.table_name,
 		stmt.columns[0],
+		index_root,
+	)
+	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}
+}
+
+// exec_create_composite_index implements `CREATE INDEX name ON table (a, b,
+// ...)` — the multi-column twin of exec_create_index. Validates every
+// column (present, indexable kind — BLOB fails naming the column),
+// allocates an empty composite root, bulk-backfills framed tuples, then
+// publishes root + joined columns atomically. Same immediate-publish
+// contract as exec_create_index. Tuples with any unindexable component
+// skip (composite_row_raw predicate, exactly as the per-row path).
+@(private)
+exec_create_composite_index :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Create_Index_Stmt,
+	table: types.Table,
+	sql: string,
+) -> (
+	bool,
+	u32,
+	Mutated_Table_Info,
+) {
+	col_types := make([]types.Column_Type, len(stmt.columns), context.temp_allocator)
+	for col, i in stmt.columns {
+		col_idx, col_ok := schema.find_column_index(table.columns, col)
+		if !col_ok {
+			log.errorf("Error: Column does not exist: %s.%s", stmt.table_name, col)
+			return false, t.root, {}
+		}
+
+		ct := table.columns[col_idx].type
+		if ct != .TEXT && ct != .INTEGER && ct != .REAL {
+			log.errorf(
+				"Error: Secondary index requires a TEXT, INTEGER, or REAL column, got %s.%s",
+				stmt.table_name,
+				col,
+			)
+			return false, t.root, {}
+		}
+		col_types[i] = ct
+	}
+
+	joined := strings.join(stmt.columns, ",", context.temp_allocator)
+	for def in table.indexes {
+		if def.name == stmt.index_name {
+			log.errorf("Error: Index already exists on %s: %s", stmt.table_name, stmt.index_name)
+			return false, t.root, {}
+		}
+	}
+
+	def := types.Index_Def {
+		column    = joined,
+		name      = stmt.index_name,
+		col_type  = col_types[0],
+		columns   = stmt.columns,
+		col_types = col_types,
+	}
+
+	root_page, err := pager.allocate_page(t.pager)
+	for err == .None && (root_page.page_num == 1 || root_page.page_num == t.root) {
+		pager.mark_dirty(t.pager, root_page.page_num)
+		pager.unpin_page(t.pager, root_page.page_num)
+		root_page, err = pager.allocate_page(t.pager)
+	}
+	if err != .None {
+		log.error("Error: Failed to allocate index root page")
+		return false, t.root, {}
+	}
+
+	defer pager.unpin_page(t.pager, root_page.page_num)
+	if !btree.init_composite_leaf_page(root_page.data, root_page.page_num) {
+		log.error("Error: Failed to initialize index root page")
+		return false, t.root, {}
+	}
+
+	pager.mark_dirty(t.pager, root_page.page_num)
+	index_root := root_page.page_num
+	data_tree := btree.init(t.pager, table.root_page)
+	cursor, c_err := btree.cursor_start(&data_tree)
+	if c_err != .None {
+		log.error("Error: Failed to scan table for index build")
+		return false, t.root, {}
+	}
+
+	defer btree.cursor_destroy(&cursor)
+	pairs := make([dynamic]Composite_Bulk_Pair, 0, 64, context.temp_allocator)
+	for cursor.is_valid {
+		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
+		if get_err != .None {
+			cell.destroy(&c, context.temp_allocator)
+			btree.cursor_advance(&cursor)
+			continue
+		}
+		if raw, ok := composite_row_raw(table, def, c.values, context.temp_allocator); ok {
+			append(&pairs, Composite_Bulk_Pair{raw = raw, rid = c.rowid})
+		}
+
+		cell.destroy(&c, context.temp_allocator)
+		btree.cursor_advance(&cursor)
+	}
+	if len(pairs) > 0 {
+		// Sort once (framing order), build once. Zero pairs keeps the
+		// pre-allocated empty leaf root, exactly as the per-row path
+		// which inserts nothing.
+		slice.sort_by(pairs[:], proc(a, b: Composite_Bulk_Pair) -> bool {
+			if c := cell.bytes_compare(a.raw, b.raw); c != 0 {
+				return c < 0
+			}
+			return a.rid < b.rid
+		})
+
+		raws := make([][]u8, len(pairs), context.temp_allocator)
+		rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
+		for p, i in pairs {
+			raws[i] = p.raw
+			rids[i] = p.rid
+		}
+
+		idx_tree := btree.init(t.pager, index_root)
+		new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
+		if build_err != .None {
+			log.errorf("Error: Failed to bulk index '%s' on %s", stmt.index_name, stmt.table_name)
+			return false, t.root, {}
+		}
+		if new_root != 0 {
+			index_root = new_root
+		}
+	}
+
+	new_schema_root, ok := schema.update_index_def_cow(
+		t,
+		table.name,
+		index_root,
+		joined,
+		stmt.index_name,
+		col_types[0],
+	)
+	if !ok {
+		log.error("Error: Failed to register index in schema")
+		return false, t.root, {}
+	}
+
+	log.infof(
+		"Created index '%s' on %s(%s) at Page %d",
+		stmt.index_name,
+		stmt.table_name,
+		joined,
 		index_root,
 	)
 	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}
@@ -803,6 +949,14 @@ Real_Bulk_Pair :: struct {
 	rid: types.Row_ID,
 }
 
+// Composite_Bulk_Pair is one indexable (framed tuple, rowid) for bulk
+// composite builds. raws are owned (cloned at collect: source rows die
+// per iteration in DDL backfill, same as cloned texts).
+Composite_Bulk_Pair :: struct {
+	raw: []u8,
+	rid: types.Row_ID,
+}
+
 // collect_text_pairs projects one index's text values out of sorted infos,
 // skipping exactly what the per-row fan-out skips (same index_col_text
 // predicate, so NULLs and non-TEXT values never reach the index either way).
@@ -997,6 +1151,141 @@ fanout_bulk_real :: proc(
 	return new_root, true
 }
 
+// composite_row_raw frames one row's indexed tuple for a composite def
+// into an owned raw (caller allocator): resolves every component column,
+// widens integers in REAL positions (same affinity as index_col_real),
+// and skips NULL/mismatch/NaN anywhere (false — the whole tuple is
+// unsearchable, mirroring the single-column skip policy).
+@(private = "file")
+composite_row_raw :: proc(
+	table: types.Table,
+	def: types.Index_Def,
+	values: []types.Value,
+	allocator := context.temp_allocator,
+) -> (
+	raw: []u8,
+	ok: bool,
+) {
+	n := len(def.columns)
+	if n < 2 || n != len(def.col_types) {
+		return nil, false
+	}
+
+	tuple := make([]types.Value, n, context.temp_allocator)
+	for col, i in def.columns {
+		col_idx, col_ok := schema.find_column_index(table.columns, col)
+		if !col_ok || col_idx < 0 || col_idx >= len(values) {
+			return nil, false
+		}
+
+		v := values[col_idx]
+		switch def.col_types[i] {
+		case .TEXT:
+			if _, is_text := v.(string); !is_text {
+				return nil, false
+			}
+			tuple[i] = v
+		case .INTEGER:
+			if _, is_int := v.(i64); !is_int {
+				return nil, false
+			}
+			tuple[i] = v
+		case .REAL:
+			if r, is_real := v.(f64); is_real {
+				if !cell.real_index_encodable(r) {
+					return nil, false
+				}
+				tuple[i] = v
+			} else if iv, is_int := v.(i64); is_int {
+				tuple[i] = types.value(f64(iv))
+			} else {
+				return nil, false
+			}
+		case .BLOB:
+			return nil, false
+		}
+	}
+
+	size := cell.composite_encoded_len(tuple, def.col_types)
+	if size == 0 {
+		return nil, false
+	}
+
+	framed := make([]u8, size, context.temp_allocator)
+	wn, wok := cell.composite_encode_raw(tuple, def.col_types, framed)
+	if !wok {
+		return nil, false
+	}
+
+	owned, aerr := slice.clone(framed[:wn], allocator)
+	if aerr != nil {
+		return nil, false
+	}
+	return owned, true
+}
+
+// collect_composite_pairs projects one composite index's framed tuples out
+// of sorted infos, skipping exactly what the per-row fan-out skips (same
+// composite_row_raw predicate).
+@(private = "file")
+collect_composite_pairs :: proc(
+	table: types.Table,
+	def: types.Index_Def,
+	infos: []Insert_Row_Info,
+) -> [dynamic]Composite_Bulk_Pair {
+	pairs := make([dynamic]Composite_Bulk_Pair, 0, len(infos), context.temp_allocator)
+	for info in infos {
+		if raw, ok := composite_row_raw(table, def, info.values, context.temp_allocator); ok {
+			append(&pairs, Composite_Bulk_Pair{raw = raw, rid = info.row_id})
+		}
+	}
+
+	slice.sort_by(pairs[:], proc(a, b: Composite_Bulk_Pair) -> bool {
+		if c := cell.bytes_compare(a.raw, b.raw); c != 0 {
+			return c < 0
+		}
+		return a.rid < b.rid
+	})
+	return pairs
+}
+
+// fanout_bulk_composite builds one fresh composite index bottom-up from
+// sorted pairs (framing order, then rowid). Same empty contract as the
+// scalar twins; the bulk builder infers COMPOSITE from the pre-stamped root.
+@(private = "file")
+fanout_bulk_composite :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	def: types.Index_Def,
+	index_root: u32,
+	pairs: [dynamic]Composite_Bulk_Pair,
+) -> (
+	u32,
+	bool,
+) {
+	if len(pairs) == 0 {
+		return index_root, true
+	}
+
+	raws := make([][]u8, len(pairs), context.temp_allocator)
+	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
+	for p, i in pairs {
+		raws[i] = p.raw
+		rids[i] = p.rid
+	}
+
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
+	if build_err != .None {
+		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		return index_root, false
+	}
+	if new_root == 0 {
+		return index_root, true
+	}
+	return new_root, true
+}
+
 // commit_bulk_inserts runs the shared bulk tail: text fan-out over sorted
 // infos (bottom-up build for fresh indexes, per-row loop otherwise), then
 // the same root/index commits as the row loop.
@@ -1024,18 +1313,24 @@ commit_bulk_inserts :: proc(
 
 		idx_tree = btree.init(t.pager, def.root)
 		if btree.text_index_is_empty(&idx_tree, def.root) {
-			switch def.col_type {
-			case .INTEGER:
-				ipairs := collect_int_pairs(table, def.column, infos)
-				idx_roots[i], ok = fanout_bulk_int(t, table, def, idx_roots[i], ipairs)
-			case .REAL:
-				rpairs := collect_real_pairs(table, def.column, infos)
-				idx_roots[i], ok = fanout_bulk_real(t, table, def, idx_roots[i], rpairs)
-			case .TEXT:
-				pairs := collect_text_pairs(table, def.column, infos)
-				idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
-			case .BLOB:
+			if len(def.columns) > 1 {
+				cpairs := collect_composite_pairs(table, def, infos)
+				idx_roots[i], ok = fanout_bulk_composite(t, table, def, idx_roots[i], cpairs)
+			} else {
+				switch def.col_type {
+				case .INTEGER:
+					ipairs := collect_int_pairs(table, def.column, infos)
+					idx_roots[i], ok = fanout_bulk_int(t, table, def, idx_roots[i], ipairs)
+				case .REAL:
+					rpairs := collect_real_pairs(table, def.column, infos)
+					idx_roots[i], ok = fanout_bulk_real(t, table, def, idx_roots[i], rpairs)
+				case .TEXT:
+					pairs := collect_text_pairs(table, def.column, infos)
+					idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
+				case .BLOB:
+				}
 			}
+
 			if !ok {
 				return false, t.root, {}
 			}
@@ -1045,7 +1340,7 @@ commit_bulk_inserts :: proc(
 			idx_roots[i], ok = fanout_insert_row(
 				t,
 				table,
-				def.column,
+				def,
 				idx_roots[i],
 				info.row_id,
 				info.values,
@@ -1256,7 +1551,7 @@ exec_insert_impl :: proc(
 			idx_roots[i], ok = fanout_insert_row(
 				t,
 				table,
-				def.column,
+				def,
 				idx_roots[i],
 				info.row_id,
 				info.values,
@@ -1723,7 +2018,7 @@ update_by_pk :: proc(
 		nr, iok := fanout_update_row(
 			t,
 			plan.tbl,
-			def.column,
+			def,
 			idx_roots[i],
 			target_rowid,
 			c.values,
@@ -1824,7 +2119,7 @@ update_scan_cow :: proc(
 						nr, iok := fanout_update_row(
 							t,
 							plan.tbl,
-							def.column,
+							def,
 							idx_roots[i],
 							c.rowid,
 							c.values,
@@ -1988,7 +2283,7 @@ delete_by_pk :: proc(
 				t,
 				table_tree,
 				plan.tbl,
-				def.column,
+				def,
 				idx_roots[i],
 				target_rowid,
 			)
@@ -2088,14 +2383,7 @@ apply_deletes :: proc(
 				continue
 			}
 
-			nr, iok := fanout_delete_rowid(
-				t,
-				table_tree,
-				plan.tbl,
-				def.column,
-				idx_roots[i],
-				rowid,
-			)
+			nr, iok := fanout_delete_rowid(t, table_tree, plan.tbl, def, idx_roots[i], rowid)
 			if !iok {
 				return false, t.root, {}
 			}
@@ -2335,11 +2623,13 @@ index_col_real :: proc(
 
 // fanout_insert_row indexes one inserted row. Returns the (possibly new)
 // index root — same threading contract as the data root beside it.
+// Composite defs frame the whole tuple (single-column extractors would
+// resolve only the joined name, which matches nothing).
 @(private = "file")
 fanout_insert_row :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
-	index_col: string,
+	def: types.Index_Def,
 	index_root: u32,
 	rowid: types.Row_ID,
 	values: []types.Value,
@@ -2347,12 +2637,20 @@ fanout_insert_row :: proc(
 	u32,
 	bool,
 ) {
-	text, ok := index_col_text(table, index_col, values)
+	if len(def.columns) > 1 {
+		raw, ok := composite_row_raw(table, def, values, context.temp_allocator)
+		if !ok {
+			return index_root, true
+		}
+		return fanout_insert_composite(t, table, index_root, raw, rowid)
+	}
+
+	text, ok := index_col_text(table, def.column, values)
 	if !ok {
-		if v, vok := index_col_int(table, index_col, values); vok {
+		if v, vok := index_col_int(table, def.column, values); vok {
 			return fanout_insert(t, table, index_root, v, rowid)
 		}
-		if r, rok := index_col_real(table, index_col, values); rok {
+		if r, rok := index_col_real(table, def.column, values); rok {
 			return fanout_insert(t, table, index_root, r, rowid)
 		}
 		return index_root, true
@@ -2442,6 +2740,33 @@ fanout_delete_real :: proc(
 	return new_root, true
 }
 
+// fanout_delete_composite removes one composite entry by explicit framed
+// raw, tolerating absence like the scalar twins.
+@(private = "file")
+fanout_delete_composite :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	raw: []u8,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, del_err := btree.composite_delete_cow(&idx_tree, raw, rowid)
+	if del_err != .None {
+		if del_err == .Cell_Not_Found {
+			log.infof("Index entry already absent for row %d.", rowid)
+			return index_root, true
+		}
+
+		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
 // fanout_delete selects the text/int/real twin by the value's static type.
 @(private = "file")
 fanout_delete :: proc {
@@ -2458,7 +2783,7 @@ fanout_delete_rowid :: proc(
 	t: ^btree.Tree,
 	data_tree: ^btree.Tree,
 	table: types.Table,
-	index_col: string,
+	def: types.Index_Def,
 	index_root: u32,
 	rowid: types.Row_ID,
 ) -> (
@@ -2472,12 +2797,20 @@ fanout_delete_rowid :: proc(
 	}
 
 	defer cell.destroy(&old, context.temp_allocator)
-	text, ok := index_col_text(table, index_col, old.values)
+	if len(def.columns) > 1 {
+		raw, ok := composite_row_raw(table, def, old.values, context.temp_allocator)
+		if !ok {
+			return index_root, true
+		}
+		return fanout_delete_composite(t, table, index_root, raw, rowid)
+	}
+
+	text, ok := index_col_text(table, def.column, old.values)
 	if !ok {
-		if v, vok := index_col_int(table, index_col, old.values); vok {
+		if v, vok := index_col_int(table, def.column, old.values); vok {
 			return fanout_delete(t, table, index_root, v, rowid)
 		}
-		if r, rok := index_col_real(table, index_col, old.values); rok {
+		if r, rok := index_col_real(table, def.column, old.values); rok {
 			return fanout_delete(t, table, index_root, r, rowid)
 		}
 		return index_root, true
@@ -2488,12 +2821,13 @@ fanout_delete_rowid :: proc(
 // fanout_update_row maintains the index across one UPDATE from explicit
 // old/new values: unchanged keys (or both sides unindexed) skip;
 // NULL<->value transitions insert/delete alone; otherwise delete-old +
-// insert-new, per side in its own storage class.
+// insert-new, per side in its own storage class. Composite defs compare
+// framed bytes (identical bytes ⟺ identical keys, including -0.0).
 @(private = "file")
 fanout_update_row :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
-	index_col: string,
+	def: types.Index_Def,
 	index_root: u32,
 	rowid: types.Row_ID,
 	old_values: []types.Value,
@@ -2502,12 +2836,37 @@ fanout_update_row :: proc(
 	u32,
 	bool,
 ) {
-	old_text, old_is_text := index_col_text(table, index_col, old_values)
-	new_text, new_is_text := index_col_text(table, index_col, new_values)
-	old_int, old_is_int := index_col_int(table, index_col, old_values)
-	new_int, new_is_int := index_col_int(table, index_col, new_values)
-	old_real, old_is_real := index_col_real(table, index_col, old_values)
-	new_real, new_is_real := index_col_real(table, index_col, new_values)
+	if len(def.columns) > 1 {
+		old_raw, old_ok := composite_row_raw(table, def, old_values, context.temp_allocator)
+		new_raw, new_ok := composite_row_raw(table, def, new_values, context.temp_allocator)
+		if old_ok == new_ok && (!old_ok || cell.bytes_compare(old_raw, new_raw) == 0) {
+			return index_root, true
+		}
+
+		cur := index_root
+		if old_ok {
+			nr, ok := fanout_delete_composite(t, table, cur, old_raw, rowid)
+			if !ok {
+				return index_root, false
+			}
+			cur = nr
+		}
+		if new_ok {
+			nr, ok := fanout_insert_composite(t, table, cur, new_raw, rowid)
+			if !ok {
+				return index_root, false
+			}
+			cur = nr
+		}
+		return cur, true
+	}
+
+	old_text, old_is_text := index_col_text(table, def.column, old_values)
+	new_text, new_is_text := index_col_text(table, def.column, new_values)
+	old_int, old_is_int := index_col_int(table, def.column, old_values)
+	new_int, new_is_int := index_col_int(table, def.column, new_values)
+	old_real, old_is_real := index_col_real(table, def.column, old_values)
+	new_real, new_is_real := index_col_real(table, def.column, new_values)
 	if old_is_text == new_is_text &&
 	   old_is_int == new_is_int &&
 	   old_is_real == new_is_real &&
@@ -2570,7 +2929,7 @@ fanout_update_rowid :: proc(
 	t: ^btree.Tree,
 	data_tree: ^btree.Tree,
 	table: types.Table,
-	index_col: string,
+	def: types.Index_Def,
 	index_root: u32,
 	rowid: types.Row_ID,
 	new_values: []types.Value,
@@ -2585,7 +2944,7 @@ fanout_update_rowid :: proc(
 	}
 
 	defer cell.destroy(&old, context.temp_allocator)
-	return fanout_update_row(t, table, index_col, index_root, rowid, old.values, new_values)
+	return fanout_update_row(t, table, def, index_root, rowid, old.values, new_values)
 }
 
 // fanout_insert_text inserts one index entry by explicit text (the update
@@ -2648,6 +3007,29 @@ fanout_insert_real :: proc(
 ) {
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, ins_err := btree.insert_cow(&idx_tree, val, rowid)
+	if ins_err != .None {
+		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
+// fanout_insert_composite inserts one composite index entry by explicit
+// framed raw (the update path's new side). The raw arrives framed by the
+// caller (composite_row_raw); the tree wraps tag + rowid.
+@(private = "file")
+fanout_insert_composite :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	raw: []u8,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, ins_err := btree.composite_insert_cow(&idx_tree, raw, rowid)
 	if ins_err != .None {
 		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
 		return index_root, false

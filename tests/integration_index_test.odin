@@ -8,6 +8,7 @@ import "core:strings"
 import "core:testing"
 import "src:admin"
 import "src:btree"
+import "src:cell"
 import "src:db"
 import "src:executor"
 import "src:pager"
@@ -213,17 +214,493 @@ test_create_index_errors :: proc(t: ^testing.T) {
 	saved2, quiet2 := suppress_expected_errors()
 	context = quiet2
 	dup_name := db.execute(d, "CREATE INDEX i_body ON docs (body);")
-	multi := db.execute(d, "CREATE INDEX i_ab ON docs (body, id);")
 	context = restore_logger(saved2)
 	testing.expect(t, dup_name != .None, "duplicate name on same table rejected")
-	testing.expect(t, multi != .None, "multi-column refused without writes")
-	if multi != .None {
-		// Refusal publishes nothing: the name stays available.
+}
+
+@(test)
+test_create_composite_index :: proc(t: ^testing.T) {
+	// Multi-column DDL validates every component (present, indexable —
+	// BLOB fails naming the column), backfills framed tuples with the def
+	// tagged per-component, and SQL stays on the scan path (planner
+	// untouched this phase).
+	d := setup_db(t, "idxcompcreate")
+	defer teardown_db(d, "idxcompcreate")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, r REAL, g BLOB);",
+			"INSERT INTO t VALUES (10, 'x', 1.5, X'01');",
+			"INSERT INTO t VALUES (-5, 'y', -2.5, X'02');",
+			"INSERT INTO t VALUES (10, 'z', 1.5, X'03');",
+			"INSERT INTO t VALUES (NULL, 'n', NULL, X'04');",
+		},
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_ab ON t (a, b);") == .None,
+		"composite create succeeds",
+	)
+
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	def, dok := schema.table_index(tbl, "i_ab")
+	testing.expect(t, dok, "def present")
+	if dok {
+		testing.expect(t, def.root != 0, "root published")
+		testing.expect_value(t, def.column, "a,b")
+		testing.expect(t, len(def.columns) == 2, "two columns resolve")
+		if len(def.col_types) == 2 {
+			testing.expect_value(t, def.col_types[0], types.Column_Type.INTEGER)
+			testing.expect_value(t, def.col_types[1], types.Column_Type.TEXT)
+		}
+	}
+
+	// Backfilled tuples read through the published root (NULL row skips:
+	// 3 tuples for 4 rows).
+	comp_root := index_root_of(t, tbl, "i_ab")
+	testing.expect(t, comp_root > 0, "composite root present")
+	{
+		idx_tree := btree.init(d.pager, comp_root)
+		cnt, c_err := btree.tree_count_rows(&idx_tree)
+		testing.expect(t, c_err == .None, "count succeeds")
+		testing.expect_value(t, cnt, 3)
+		free_all(context.temp_allocator)
+	}
+
+	saved, quiet := suppress_expected_errors()
+	context = quiet
+	neg_col := db.execute(d, "CREATE INDEX i_no ON t (a, missing);")
+	neg_blob := db.execute(d, "CREATE INDEX i_bl ON t (a, g);")
+	dup := db.execute(d, "CREATE INDEX i_ab ON t (a, b);")
+	context = restore_logger(saved)
+	testing.expect(t, neg_col != .None, "unknown component rejected")
+	testing.expect(t, neg_blob != .None, "BLOB component rejected")
+	testing.expect(t, dup != .None, "duplicate composite name rejected")
+
+	// Routed SQL answers through the new index.
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b FROM t WHERE a = 10 AND b = 'x';"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	q := db.query(d, "SELECT a, b FROM t WHERE a = 10 AND b = 'x' ORDER BY b;")
+	testing.expect(t, q.ok, "unrouted select succeeds")
+	testing.expect_value(t, len(q.rows), 1)
+}
+
+@(test)
+test_index_composite_routing :: proc(t: ^testing.T) {
+	// Composite routing: full-tuple Eq answers exact, leading-column Eq
+	// answers prefix scans (both fetch-only); non-leading filters,
+	// contradictions, and cross-class literals behave exactly; EXPLAIN
+	// names the composite shape.
+	d := setup_db(t, "idxcomproute")
+	defer teardown_db(d, "idxcomproute")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT);",
+			"INSERT INTO t VALUES (10, 'x', 1);",
+			"INSERT INTO t VALUES (-5, 'y', 2);",
+			"INSERT INTO t VALUES (10, 'z', 3);",
+			"INSERT INTO t VALUES (10, 'x', 4);",
+			"INSERT INTO t VALUES (NULL, 'n', 5);",
+			"CREATE INDEX i_ab ON t (a, b);",
+		},
+	)
+	full := db.query(d, "SELECT a, b, v FROM t WHERE a = 10 AND b = 'x' ORDER BY v;")
+	testing.expect(t, full.ok, "full eq succeeds")
+	testing.expect_value(t, len(full.rows), 2)
+
+	lead := db.query(d, "SELECT a, b, v FROM t WHERE a = 10 ORDER BY b, v;")
+	testing.expect(t, lead.ok, "leading eq succeeds")
+	testing.expect_value(t, len(lead.rows), 3)
+
+	// Non-leading column alone never routes the composite (scan answers).
+	second := db.query(d, "SELECT a, b, v FROM t WHERE b = 'x' ORDER BY v;")
+	testing.expect(t, second.ok, "second-col succeeds")
+	testing.expect_value(t, len(second.rows), 2)
+
+	contra := db.query(d, "SELECT a, b, v FROM t WHERE a = 10 AND a = 11;")
+	testing.expect(t, contra.ok, "contradiction succeeds")
+	testing.expect_value(t, len(contra.rows), 0)
+
+	// Leading Eq plus an extra conjunct narrows through the recheck.
+	narrow := db.query(d, "SELECT a, b, v FROM t WHERE a = 10 AND v > 2 ORDER BY v;")
+	testing.expect(t, narrow.ok, "narrowed succeeds")
+	testing.expect_value(t, len(narrow.rows), 2)
+
+	// Rowid covering answers from the index alone.
+	rid := db.query(d, "SELECT rowid FROM t WHERE a = 10 AND b = 'z' ORDER BY rowid;")
+	testing.expect(t, rid.ok, "rowid covering succeeds")
+	testing.expect_value(t, len(rid.rows), 1)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE a = 10 AND b = 'x';"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE a = 10;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE b = 'x';"),
+		"FULL SCAN ON t",
+	)
+}
+
+@(test)
+test_index_composite_three_col :: proc(t: ^testing.T) {
+	// Three columns: full binds route exact, leading pairs route prefix,
+	// middle gaps degrade to the bound prefix (the gap rides the recheck),
+	// and a bound non-leading column alone never routes.
+	d := setup_db(t, "idxcomp3")
+	defer teardown_db(d, "idxcomp3")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, c INT);",
+			"INSERT INTO t VALUES (1, 'x', 10);",
+			"INSERT INTO t VALUES (1, 'x', 20);",
+			"INSERT INTO t VALUES (1, 'y', 10);",
+			"INSERT INTO t VALUES (2, 'x', 10);",
+			"CREATE INDEX i_abc ON t (a, b, c);",
+		},
+	)
+	full := db.query(d, "SELECT a, b, c FROM t WHERE a = 1 AND b = 'x' AND c = 10 ORDER BY a;")
+	testing.expect(t, full.ok, "full succeeds")
+	testing.expect_value(t, len(full.rows), 1)
+
+	pair := db.query(d, "SELECT a, b, c FROM t WHERE a = 1 AND b = 'x' ORDER BY c;")
+	testing.expect(t, pair.ok, "pair succeeds")
+	testing.expect_value(t, len(pair.rows), 2)
+
+	gap := db.query(d, "SELECT a, b, c FROM t WHERE a = 1 AND c = 10 ORDER BY b;")
+	testing.expect(t, gap.ok, "gap succeeds")
+	testing.expect_value(t, len(gap.rows), 2)
+
+	second := db.query(d, "SELECT a, b, c FROM t WHERE b = 'x' ORDER BY a;")
+	testing.expect(t, second.ok, "non-leading succeeds")
+	testing.expect_value(t, len(second.rows), 3)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, c FROM t WHERE a = 1 AND b = 'x' AND c = 10;"),
+		"INDEX SCAN ON t USING a,b,c (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, c FROM t WHERE a = 1 AND c = 10;"),
+		"INDEX SCAN ON t USING a,b,c (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, c FROM t WHERE b = 'x';"),
+		"FULL SCAN ON t",
+	)
+}
+
+@(test)
+test_index_composite_twin :: proc(t: ^testing.T) {
+	// Differential twin: indexed t vs unindexed t2 over 400 mixed rows.
+	// Every composite shape — full, prefix, narrowed, union-adjacent,
+	// limits — returns identical output.
+	d := setup_db(t, "idxcomptwin")
+	defer teardown_db(d, "idxcomptwin")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (a INT, b TEXT, v INT);") == .None, "create t")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t2 (a INT, b TEXT, v INT);") == .None,
+		"create t2",
+	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i_ab ON t (a, b);") == .None, "index")
+	bodies := []string{"alpha", "bb", "gamma"}
+	for i in 1 ..= 400 {
+		free_all(context.temp_allocator)
+		body := bodies[(i - 1) % len(bodies)]
+		val := i % 50 - 25
 		testing.expect(
 			t,
-			db.execute(d, "CREATE INDEX i_ab ON docs (body);") == .None,
-			"refused name reusable",
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, '%s', %d);", val, body, i)) ==
+			.None,
+			"insert t",
 		)
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t2 VALUES (%d, '%s', %d);", val, body, i)) ==
+			.None,
+			"insert t2",
+		)
+	}
+	free_all(context.temp_allocator)
+	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (NULL, 'n', 401);") == .None, "null")
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO t2 VALUES (NULL, 'n', 401);") == .None,
+		"null twin",
+	)
+
+	queries := []string {
+		"SELECT a, b, v FROM t WHERE a = 7 AND b = 'alpha';",
+		"SELECT a, b, v FROM t WHERE a = 7;",
+		"SELECT a, b, v FROM t WHERE a = 7 AND v > 100;",
+		"SELECT a, b, v FROM t WHERE a = 7 AND a = 8;",
+		"SELECT a, b, v FROM t WHERE b = 'alpha';",
+		"SELECT a, b, v FROM t WHERE a = 7 AND b = 'missing';",
+		"SELECT a, b, v FROM t WHERE a = 7 OR b = 'alpha';",
+		"SELECT a, b, v FROM t WHERE a = 7 LIMIT 5;",
+		"SELECT a, b, v FROM t WHERE a = 7 AND b = 'alpha' ORDER BY v DESC LIMIT 3;",
+		"SELECT rowid FROM t WHERE a = 7 AND b = 'bb' ORDER BY rowid;",
+		"SELECT rowid FROM t WHERE a = 7 ORDER BY rowid LIMIT 4;",
+	}
+	for q in queries {
+		free_all(context.temp_allocator)
+		twin, _ := strings.replace(q, "FROM t ", "FROM t2 ", 1, context.temp_allocator)
+		a := db.query(d, q)
+		b := db.query(d, twin)
+		testing.expect(t, a.ok && b.ok, "twin queries succeed")
+		if !a.ok || !b.ok {
+			continue
+		}
+		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
+		for i in 0 ..< min(len(a.rows), len(b.rows)) {
+			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
+			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
+				testing.expect(
+					t,
+					twin_values_equal(a.rows[i][j], b.rows[i][j]),
+					"twin values match",
+				)
+			}
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
+test_index_composite_vacuum :: proc(t: ^testing.T) {
+	// Vacuum rebuilds composite indexes into fresh packed pages: new root,
+	// identical key->rowid sets, every reachable page validates as
+	// composite pages, and SQL keeps routing.
+	d := setup_db(t, "idxcompvac")
+	defer teardown_db(d, "idxcompvac")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (a INT, b TEXT);") == .None, "create")
+	testing.expect(t, db.execute(d, "CREATE INDEX i_ab ON t (a, b);") == .None, "create index")
+	bodies := []string{"alpha", "bb", "gamma"}
+	for i in 1 ..= 400 {
+		free_all(context.temp_allocator)
+		sql := fmt.tprintf(
+			"INSERT INTO t VALUES (%d, '%s');",
+			i % 50 - 25,
+			bodies[(i - 1) % len(bodies)],
+		)
+		testing.expect(t, db.execute(d, sql) == .None, "insert succeeds")
+	}
+	free_all(context.temp_allocator)
+
+	st0 := db.Schema_Tree(d)
+	tbl0, _ := schema.find_table(&st0, "t", context.temp_allocator)
+	root_before := index_root_of(t, tbl0, "i_ab")
+	testing.expect(t, root_before > 0, "index present before vacuum")
+
+	for i in 4 ..= 400 {
+		if (i - 1) % 4 != 3 {
+			continue
+		}
+		free_all(context.temp_allocator)
+		sql := fmt.tprintf(
+			"DELETE FROM t WHERE a = %d AND b = '%s';",
+			i % 50 - 25,
+			bodies[(i - 1) % len(bodies)],
+		)
+		testing.expect(t, db.execute(d, sql) == .None, "delete succeeds")
+	}
+	free_all(context.temp_allocator)
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
+
+	st1 := db.Schema_Tree(d)
+	tbl1, found1 := schema.find_table(&st1, "t", context.temp_allocator)
+	testing.expect(t, found1, "table found after vacuum")
+	if !found1 {
+		return
+	}
+	vac_root := index_root_of(t, tbl1, "i_ab")
+	testing.expect(t, vac_root > 0, "index root present after vacuum")
+	testing.expect(t, vac_root != root_before, "vacuum rebuilt the index")
+
+	// Oracle: pair-level wipe — a DELETE removes every row sharing the
+	// targeted pair, so a pair survives iff no multiple-of-4 row carries
+	// it. Wiped residues are precomputed once, independently of the index
+	// (heap-owned: the pair loop frees temp per iteration).
+	wiped := make([]bool, 150, context.allocator)
+	defer delete(wiped)
+	for j in 4 ..= 400 {
+		if (j - 1) % 4 != 3 {
+			continue
+		}
+		wiped[j % 150] = true
+	}
+	mk_tuple :: proc(a: i64, b: string) -> []types.Value {
+		vals := make([]types.Value, 2, context.temp_allocator)
+		vals[0] = types.value(a)
+		vals[1] = types.value(b)
+		return vals
+	}
+	ct := []types.Column_Type{.INTEGER, .TEXT}
+	idx_tree := btree.init(d.pager, vac_root)
+	for k in 0 ..< 50 {
+		for b in bodies {
+			free_all(context.temp_allocator)
+			got := composite_index_rowids(t, d, "t", "i_ab", mk_tuple(i64(k - 25), b), ct)
+			want := 0
+			for i in 1 ..= 400 {
+				if i64(i % 50 - 25) == i64(k - 25) &&
+				   bodies[(i - 1) % len(bodies)] == b &&
+				   !wiped[i % 150] {
+					want += 1
+				}
+			}
+			testing.expectf(t, len(got) == want, "pair (%d,%s) count", k - 25, b)
+		}
+	}
+	free_all(context.temp_allocator)
+
+	// Every reachable index page validates as composite pages.
+	pages := make(map[u32]bool, context.temp_allocator)
+	defer delete(pages)
+	btree.collect_pages(&idx_tree, idx_tree.root, &pages)
+	testing.expect(t, len(pages) >= 1, "index reachable after vacuum")
+	for page_id in pages {
+		pg, pg_err := pager.get_page(d.pager, page_id)
+		if pg_err != nil {
+			continue
+		}
+		h := btree.get_header(pg.data, page_id)
+		if h == nil {
+			pager.unpin_page(d.pager, page_id)
+			continue
+		}
+		#partial switch h.page_type {
+		case .LEAF_COMPOSITE:
+			testing.expect(
+				t,
+				btree.text_validate_leaf(pg.data, btree.Page_Id(page_id)) == .None,
+				"vacuumed leaf validates",
+			)
+		case .COMPOSITE_INTERIOR:
+			testing.expect(
+				t,
+				btree.text_validate_interior(pg.data, btree.Page_Id(page_id)) == .None,
+				"vacuumed interior validates",
+			)
+		case:
+			testing.expect(t, false, "unexpected page type after vacuum")
+		}
+		pager.unpin_page(d.pager, page_id)
+	}
+
+	// SQL keeps routing through the rebuilt index.
+	q := db.query(d, "SELECT a, b FROM t WHERE a = 7 AND b = 'alpha' ORDER BY a;")
+	testing.expect(t, q.ok, "routed select succeeds")
+	for row in q.rows {
+		a, aok := row[0].(i64)
+		b, bok := row[1].(string)
+		testing.expect(t, aok && a == 7, "routed value matches")
+		testing.expect(t, bok && b == "alpha", "routed value matches")
+	}
+}
+
+@(test)
+test_index_composite_dml_fanout :: proc(t: ^testing.T) {
+	// Per-row writes maintain composite indexes: INSERTs land framed
+	// tuples, UPDATEs move them (no-op rewrites and NULL transitions
+	// included), DELETEs remove them. Verified at btree level.
+	d := setup_db(t, "idxcompfan")
+	defer teardown_db(d, "idxcompfan")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"CREATE INDEX i_ab ON t (a, b);",
+			"INSERT INTO t VALUES (5, 'x');",
+			"INSERT INTO t VALUES (NULL, 'n');",
+			"INSERT INTO t VALUES (5, NULL);",
+		},
+	)
+	mk_tuple :: proc(a: i64, b: string) -> []types.Value {
+		vals := make([]types.Value, 2, context.temp_allocator)
+		vals[0] = types.value(a)
+		vals[1] = types.value(b)
+		return vals
+	}
+	ct := []types.Column_Type{.INTEGER, .TEXT}
+	five_x := composite_index_rowids(t, d, "t", "i_ab", mk_tuple(5, "x"), ct)
+	testing.expect_value(t, len(five_x), 1)
+	if len(five_x) == 1 {
+		testing.expect_value(t, five_x[0], 1)
+	}
+
+	must_db_execute(t, d, "UPDATE t SET b = 'y' WHERE a = 5 AND b = 'x';")
+	testing.expect_value(
+		t,
+		len(composite_index_rowids(t, d, "t", "i_ab", mk_tuple(5, "x"), ct)),
+		0,
+	)
+	five_y := composite_index_rowids(t, d, "t", "i_ab", mk_tuple(5, "y"), ct)
+	testing.expect_value(t, len(five_y), 1)
+
+	// No-op rewrite neither dups nor drops.
+	must_db_execute(t, d, "UPDATE t SET b = 'y' WHERE a = 5 AND b = 'y';")
+	testing.expect_value(
+		t,
+		len(composite_index_rowids(t, d, "t", "i_ab", mk_tuple(5, "y"), ct)),
+		1,
+	)
+
+	// Value-to-NULL removes the entry.
+	must_db_execute(t, d, "UPDATE t SET a = NULL WHERE b = 'y';")
+	testing.expect_value(
+		t,
+		len(composite_index_rowids(t, d, "t", "i_ab", mk_tuple(5, "y"), ct)),
+		0,
+	)
+
+	// Multi-row INSERT exercises the bulk-build path.
+	must_db_execute(t, d, "INSERT INTO t VALUES (6, 'p'), (7, 'q');")
+	testing.expect_value(
+		t,
+		len(composite_index_rowids(t, d, "t", "i_ab", mk_tuple(6, "p"), ct)),
+		1,
+	)
+	testing.expect_value(
+		t,
+		len(composite_index_rowids(t, d, "t", "i_ab", mk_tuple(7, "q"), ct)),
+		1,
+	)
+
+	must_db_execute(t, d, "DELETE FROM t WHERE b = 'n';")
+	cnt := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, cnt.ok, "count succeeds")
+	if len(cnt.rows) == 1 {
+		testing.expect(t, types.value_compare(cnt.rows[0][0], types.value(4)), "four rows left")
 	}
 }
 
@@ -1279,6 +1756,55 @@ real_index_rowids :: proc(
 	rows, f_err := btree.real_find_rowids(&idx_tree, idx_tree.root, val)
 	testing.expect(t, f_err == .None, "find succeeds")
 	return rows
+}
+
+// composite_index_rowids reads one framed tuple's rowids through the named
+// index root, re-resolving the table each call (roots change per write).
+composite_index_rowids :: proc(
+	t: ^testing.T,
+	d: ^db.Database,
+	table: string,
+	index: string,
+	vals: []types.Value,
+	col_types: []types.Column_Type,
+) -> []types.Row_ID {
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, table, context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return nil
+	}
+	root := index_root_of(t, tbl, index)
+	raw, rok := comp_frame(t, vals, col_types)
+	testing.expect(t, rok, "tuple frames")
+	if !rok {
+		return nil
+	}
+	idx_tree := btree.init(d.pager, root)
+	rows, f_err := btree.composite_find_rowids(&idx_tree, idx_tree.root, raw)
+	testing.expect(t, f_err == .None, "find succeeds")
+	return rows
+}
+
+// comp_frame frames one tuple into temp bytes for composite test lookups.
+comp_frame :: proc(
+	t: ^testing.T,
+	vals: []types.Value,
+	col_types: []types.Column_Type,
+) -> (
+	[]u8,
+	bool,
+) {
+	n := cell.composite_encoded_len(vals, col_types)
+	if n == 0 {
+		return nil, false
+	}
+	buf := make([]u8, n, context.temp_allocator)
+	wn, wok := cell.composite_encode_raw(vals, col_types, buf)
+	if !wok {
+		return nil, false
+	}
+	return buf[:wn], true
 }
 
 @(test)

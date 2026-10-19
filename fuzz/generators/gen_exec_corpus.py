@@ -359,6 +359,23 @@ UPDATE t SET r = 3.5 WHERE b = 'x';
 DELETE FROM t WHERE b = 'n';
 SELECT r, b FROM t ORDER BY b;
 """),
+    ("script_composite_index", """\
+CREATE TABLE t (a INT, b TEXT, v INT);
+INSERT INTO t VALUES (10, 'x', 1);
+INSERT INTO t VALUES (-5, 'y', 2);
+INSERT INTO t VALUES (10, 'z', 3);
+INSERT INTO t VALUES (10, 'x', 4);
+INSERT INTO t VALUES (NULL, 'n', 5);
+CREATE INDEX i_ab ON t (a, b);
+SELECT a, b, v FROM t WHERE a = 10 AND b = 'x' ORDER BY v;
+SELECT a, b, v FROM t WHERE a = 10 ORDER BY b, v;
+SELECT a, b, v FROM t WHERE b = 'x' ORDER BY v;
+SELECT a, b, v FROM t WHERE a = 10 AND a = 11;
+SELECT rowid FROM t WHERE a = 10 AND b = 'z' ORDER BY rowid;
+UPDATE t SET b = 'w' WHERE a = 10 AND b = 'z';
+DELETE FROM t WHERE a = -5;
+SELECT a, b, v FROM t ORDER BY v;
+"""),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
 INSERT INTO t (id, s, c) VALUES (1, 'a', 5);
