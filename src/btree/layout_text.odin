@@ -24,7 +24,8 @@
 // - All borrows (prefix, suffix) die on page move: the cursor pins exactly
 //   one page, same contract as text_index_decode.
 //
-// Ordering authority is cell.text_index_compare; page order must equal codec
+// Ordering authority is page_key_compare (text codec order on text pages,
+// int codec order on int pages); page order must equal codec
 // order on the same key set.
 //
 // Intra-page suffix comparison is equivalent to full-text comparison ONLY under the
@@ -72,6 +73,26 @@ init_text_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 	return true
 }
 
+// init_int_leaf_page zeroes and headers a fresh LEAF_INT page: identical
+// geometry to LEAF_TEXT (shared prefix-compressed layout, per-page kind
+// from layout_for_page) with the int page type stamped.
+@(require_results)
+init_int_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
+	off := get_page_header_offset(page_id)
+	if len(data) < off + TEXT_LEAF_FIXED {
+		return false
+	}
+
+	mem.zero_slice(data[off:])
+	header := (^Leaf_Header)(raw_data(data[off:]))
+	header.page_type = .LEAF_INT
+	header.first_freeblock = 0
+	header.cell_count = 0
+	header.cell_content_offset = PAGE_SIZE
+	header.fragmented_bytes = 0
+	return true
+}
+
 // text_entry_area_end is where the slot array ends (cells must start at or
 // past it). Error source for corrupt prefix_len/count — callers fail closed.
 @(require_results)
@@ -80,7 +101,7 @@ text_entry_area_end :: proc "contextless" (data: []u8, id: Page_Id) -> (int, Err
 	if hdr == nil {
 		return 0, .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return 0, .Invalid_Page_Header
 	}
 
@@ -104,7 +125,7 @@ text_prefix :: proc "contextless" (data: []u8, id: Page_Id) -> ([]u8, Error) {
 	if hdr == nil {
 		return nil, .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return nil, .Invalid_Page_Header
 	}
 
@@ -137,7 +158,7 @@ text_entry_at :: proc "contextless" (
 	if hdr == nil {
 		return nil, 0, .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return nil, 0, .Invalid_Page_Header
 	}
 	if intrinsics.unlikely(i < 0 || i >= int(hdr.cell_count)) {
@@ -207,7 +228,7 @@ text_lower_bound :: proc "contextless" (
 	if hdr == nil {
 		return 0, .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return 0, .Invalid_Page_Header
 	}
 
@@ -260,10 +281,10 @@ text_lower_bound :: proc "contextless" (
 text_build_from_sorted :: proc "contextless" (
 	data: []u8,
 	id: Page_Id,
-	texts: [][]u8,
+	raws: [][]u8,
 	rowids: []types.Row_ID,
 ) -> Error {
-	n := len(texts)
+	n := len(raws)
 	if len(rowids) != n {
 		return .Invalid_Bounds
 	}
@@ -271,23 +292,38 @@ text_build_from_sorted :: proc "contextless" (
 		return .Page_Full
 	}
 
+	// Kind comes from the page itself: rebuilds re-stamp their own kind,
+	// and fresh pages arrive pre-stamped by the allocator (init dispatchers
+	// below) — so the builder never takes a kind parameter that could
+	// disagree with the page. Zero/unknown headers fail closed.
+	kind := Key_Kind.Text
+	if hdr0 := get_header(data, u32(id)); hdr0 != nil {
+		if k, kok := index_kind_of_page(hdr0.page_type); kok {
+			kind = k
+		} else {
+			return .Invalid_Page_Header
+		}
+	} else {
+		return .Invalid_Page_Header
+	}
+
 	off0 := get_page_header_offset(u32(id))
 	plen := 0
 	if n > 0 {
-		plen = cell.text_index_shared_prefix(texts[0], texts[n - 1], PAGE_SIZE)
+		plen = cell.text_index_shared_prefix(raws[0], raws[n - 1], PAGE_SIZE)
 	}
 
 	total := off0 + TEXT_LEAF_FIXED + plen + n * size_of(Text_Slot)
 	for i in 0 ..< n {
-		if !cell.text_index_has_prefix(texts[i], texts[0][:plen]) {
+		if !cell.text_index_has_prefix(raws[i], raws[0][:plen]) {
 			return .Cell_Deserialize_Failed
 		}
-		total += TEXT_ENTRY_ROWID_LEN + (len(texts[i]) - plen)
+		total += TEXT_ENTRY_ROWID_LEN + (len(raws[i]) - plen)
 	}
 	if total > len(data) {
 		return .Page_Full
 	}
-	if !init_text_leaf_page(data, u32(id)) {
+	if !init_index_leaf_page(kind, data, u32(id)) {
 		return .Invalid_Page_Header
 	}
 
@@ -300,13 +336,13 @@ text_build_from_sorted :: proc "contextless" (
 	data[off0 + 8] = u8(plen)
 	data[off0 + 9] = u8(plen >> 8)
 	if plen > 0 {
-		copy(data[off0 + TEXT_LEAF_FIXED:off0 + TEXT_LEAF_FIXED + plen], texts[0][:plen])
+		copy(data[off0 + TEXT_LEAF_FIXED:off0 + TEXT_LEAF_FIXED + plen], raws[0][:plen])
 	}
 
 	slots_start := off0 + TEXT_LEAF_FIXED + plen
 	dest := PAGE_SIZE
 	for i in 0 ..< n {
-		suflen := len(texts[i]) - plen
+		suflen := len(raws[i]) - plen
 		elen := TEXT_ENTRY_ROWID_LEN + suflen
 		dest -= elen
 		if !endian.put_u64(
@@ -317,7 +353,7 @@ text_build_from_sorted :: proc "contextless" (
 			return .Serialization_Failed
 		}
 
-		copy(data[dest + TEXT_ENTRY_ROWID_LEN:dest + elen], texts[i][plen:])
+		copy(data[dest + TEXT_ENTRY_ROWID_LEN:dest + elen], raws[i][plen:])
 		slot := (^Text_Slot)(raw_data(data[slots_start + i * size_of(Text_Slot):]))
 		slot^ = Text_Slot {
 			off = u16le(u16(dest)),
@@ -341,7 +377,7 @@ text_validate_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 	if hdr == nil {
 		return .Invalid_Page_Header
 	}
-	if hdr.page_type != .LEAF_TEXT {
+	if !is_index_leaf_type(hdr.page_type) {
 		return .Invalid_Page_Header
 	}
 
@@ -405,6 +441,57 @@ init_text_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool
 	return true
 }
 
+// init_int_interior_page zeroes and headers a fresh INT_INTERIOR page:
+// identical geometry to TEXT_INTERIOR with the int page type stamped.
+@(require_results)
+init_int_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
+	off := get_page_header_offset(page_id)
+	if len(data) < off + size_of(Leaf_Header) {
+		return false
+	}
+
+	mem.zero_slice(data[off:])
+	header := (^Leaf_Header)(raw_data(data[off:]))
+	header.page_type = .INT_INTERIOR
+	header.first_freeblock = 0
+	header.cell_count = 0
+	header.cell_content_offset = PAGE_SIZE
+	header.fragmented_bytes = 0
+	return true
+}
+
+// init_index_leaf_page zeroes and headers a fresh secondary-index leaf of
+// the tree's kind. Single choke point behind splits/vacuum/bulk fresh-page
+// allocation so a fresh page cannot stamp the wrong kind. Rowid kind refuses
+// (never a secondary page).
+@(private)
+init_index_leaf_page :: proc "contextless" (kind: Key_Kind, data: []u8, page_id: u32) -> bool {
+	switch kind {
+	case .Text:
+		return init_text_leaf_page(data, page_id)
+	case .Int:
+		return init_int_leaf_page(data, page_id)
+	case .Rowid:
+		return false
+	}
+	return false
+}
+
+// init_index_interior_page zeroes and headers a fresh secondary-index
+// interior of the tree's kind; see init_index_leaf_page.
+@(private)
+init_index_interior_page :: proc "contextless" (kind: Key_Kind, data: []u8, page_id: u32) -> bool {
+	switch kind {
+	case .Text:
+		return init_text_interior_page(data, page_id)
+	case .Int:
+		return init_int_interior_page(data, page_id)
+	case .Rowid:
+		return false
+	}
+	return false
+}
+
 // text_interior_children_off is the absolute offset of child[0].
 // -1 on any header fault (callers fail closed, never index garbage).
 @(private = "file")
@@ -417,7 +504,7 @@ text_interior_children_off :: #force_inline proc "contextless" (
 	if hdr == nil {
 		return -1
 	}
-	if hdr.page_type != .TEXT_INTERIOR {
+	if !is_index_interior_type(hdr.page_type) {
 		return -1
 	}
 
@@ -437,7 +524,7 @@ text_interior_child_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -
 	if hdr == nil {
 		return 0, .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .TEXT_INTERIOR) {
+	if intrinsics.unlikely(!is_index_interior_type(hdr.page_type)) {
 		return 0, .Invalid_Page_Header
 	}
 
@@ -469,7 +556,7 @@ text_interior_sep_at :: proc "contextless" (
 	if hdr == nil {
 		return nil, .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .TEXT_INTERIOR) {
+	if intrinsics.unlikely(!is_index_interior_type(hdr.page_type)) {
 		return nil, .Invalid_Page_Header
 	}
 
@@ -495,10 +582,46 @@ text_interior_sep_at :: proc "contextless" (
 	if intrinsics.unlikely(off < cco || off + elen > PAGE_SIZE || off + elen > len(data)) {
 		return nil, .Cell_Deserialize_Failed
 	}
-	if _, _, ok := cell.text_index_split(data[off:off + elen]); !ok {
+
+	kind, kok := index_kind_of_page(hdr.page_type)
+	if !kok || !page_key_wellformed(kind, data[off:off + elen]) {
 		return nil, .Cell_Deserialize_Failed
 	}
 	return data[off:off + elen], .None
+}
+
+// page_key_compare orders two full index keys under the page's own kind
+// (text codec order on text pages, int codec order on int pages).
+// Separator routing and validation compare through this — never a hardcoded
+// codec — so new index kinds extend one switch. Unknown page types fall back
+// to memcmp (deterministic; callers gate page type first, so it never fires).
+@(private = "file")
+page_key_compare :: #force_inline proc "contextless" (pt: Page_Type, a: []u8, b: []u8) -> int {
+	if pt == .LEAF_TEXT || pt == .TEXT_INTERIOR {
+		return cell.text_index_compare(a, b)
+	}
+	if pt == .LEAF_INT || pt == .INT_INTERIOR {
+		return cell.int_index_compare(a, b)
+	}
+	return mem.compare(a, b)
+}
+
+// page_key_wellformed reports whether key parses under the given kind.
+// Separator validation flows through this so int separators are not rejected
+// by the text split. Callers holding a page map it via index_kind_of_page.
+@(private = "file")
+page_key_wellformed :: proc "contextless" (kind: Key_Kind, key: []u8) -> bool {
+	switch kind {
+	case .Text:
+		_, _, ok := cell.text_index_split(key)
+		return ok
+	case .Int:
+		_, _, ok := cell.int_index_split(key)
+		return ok
+	case .Rowid:
+		return false
+	}
+	return false
 }
 
 // text_interior_find_upper routes a target codec key: first separator
@@ -526,12 +649,16 @@ text_interior_find_upper :: #force_inline proc "contextless" (
 	}
 
 	idx := 0
+	hdr := get_header(data, page_id)
+	if hdr == nil {
+		return 0, -1
+	}
 	for idx < cell_count {
 		sep, s_err := text_interior_sep_at(data, pid, idx)
 		if s_err != .None {
 			return 0, -1
 		}
-		if cell.text_index_compare(sep, target) > 0 {
+		if page_key_compare(hdr.page_type, sep, target) > 0 {
 			break
 		}
 		idx += 1
@@ -561,11 +688,11 @@ text_interior_find_child :: proc "contextless" (
 	return text_interior_find_upper(data, page_id, target)
 }
 
-// text_interior_build_from_sorted builds a text interior from full codec
-// keys + children. Same atomic contract as the dense builder: measured
-// first (.Page_Full leaves the page untouched), per-key well-formedness
-// guard (same role as the dense FOR guard), trailing validator (unsorted
-// input fails closed, never half-built).
+// text_interior_build_from_sorted builds an index interior from full codec
+// keys + children of the tree's kind. Same atomic contract as the dense
+// builder: measured first (.Page_Full leaves the page untouched), per-key
+// well-formedness guard (same role as the dense FOR guard), trailing
+// validator (unsorted input fails closed, never half-built).
 @(require_results)
 text_interior_build_from_sorted :: proc "contextless" (
 	data: []u8,
@@ -581,10 +708,21 @@ text_interior_build_from_sorted :: proc "contextless" (
 		return .Page_Full
 	}
 
+	kind := Key_Kind.Text
+	if hdr0 := get_header(data, u32(id)); hdr0 != nil {
+		if k, kok := index_kind_of_page(hdr0.page_type); kok {
+			kind = k
+		} else {
+			return .Invalid_Page_Header
+		}
+	} else {
+		return .Invalid_Page_Header
+	}
+
 	off0 := get_page_header_offset(u32(id))
 	total := off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
 	for i in 0 ..< n {
-		if _, _, ok := cell.text_index_split(keys[i]); !ok {
+		if !page_key_wellformed(kind, keys[i]) {
 			return .Cell_Deserialize_Failed
 		}
 		total += len(keys[i])
@@ -592,7 +730,7 @@ text_interior_build_from_sorted :: proc "contextless" (
 	if total > len(data) {
 		return .Page_Full
 	}
-	if !init_text_interior_page(data, u32(id)) {
+	if !init_index_interior_page(kind, data, u32(id)) {
 		return .Invalid_Page_Header
 	}
 
@@ -638,7 +776,7 @@ text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error 
 	if hdr == nil {
 		return .Invalid_Page_Header
 	}
-	if hdr.page_type != .TEXT_INTERIOR {
+	if !is_index_interior_type(hdr.page_type) {
 		return .Invalid_Page_Header
 	}
 
@@ -666,7 +804,7 @@ text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error 
 		if s_err != .None {
 			return s_err
 		}
-		if have_prev && cell.text_index_compare(prev, sep) >= 0 {
+		if have_prev && page_key_compare(hdr.page_type, prev, sep) >= 0 {
 			return .Cell_Deserialize_Failed
 		}
 		prev, have_prev = sep, true
@@ -692,7 +830,7 @@ text_slot_insert :: proc "contextless" (
 	if hdr == nil {
 		return .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return .Invalid_Page_Header
 	}
 
@@ -744,7 +882,7 @@ text_interior_child_store :: proc "contextless" (
 	if hdr == nil {
 		return .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .TEXT_INTERIOR) {
+	if intrinsics.unlikely(!is_index_interior_type(hdr.page_type)) {
 		return .Invalid_Page_Header
 	}
 
@@ -772,7 +910,7 @@ text_slot_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Er
 	if hdr == nil {
 		return .Invalid_Page_Header
 	}
-	if intrinsics.unlikely(hdr.page_type != .LEAF_TEXT) {
+	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return .Invalid_Page_Header
 	}
 

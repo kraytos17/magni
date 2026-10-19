@@ -115,11 +115,12 @@ init :: proc(p: ^pager.Pager, root_page: u32, config := DEFAULT_CONFIG) -> Tree 
 	return t
 }
 
-// is_leaf reports whether a node is a leaf (both leaf page kinds: rowid
-// slotdir and text). Public because every page reader must ask it and each
+// is_leaf reports whether a node is a leaf (rowid slotdir plus the
+// secondary-index leaf predicate — new index kinds extend the predicate,
+// not this). Public because every page reader must ask it and each
 // new leaf page type is pinned by tests through it.
 is_leaf :: #force_inline proc "contextless" (n: Node) -> bool {
-	return n.header.page_type == .LEAF_SLOTDIR || n.header.page_type == .LEAF_TEXT
+	return n.header.page_type == .LEAF_SLOTDIR || is_index_leaf_type(n.header.page_type)
 }
 
 // node_leaf reinterprets the node's buffer as a leaf header (callers have

@@ -1,5 +1,6 @@
 package executor
 
+import "core:encoding/endian"
 import "core:log"
 import "core:slice"
 import "core:strings"
@@ -111,9 +112,10 @@ exec_create_index :: proc(
 		log.errorf("Error: Column does not exist: %s.%s", stmt.table_name, stmt.column)
 		return false, t.root, {}
 	}
-	if table.columns[col_idx].type != .TEXT {
+	col_type := table.columns[col_idx].type
+	if col_type != .TEXT && col_type != .INTEGER {
 		log.errorf(
-			"Error: Secondary index requires a TEXT column, got %s.%s",
+			"Error: Secondary index requires a TEXT or INTEGER column, got %s.%s",
 			stmt.table_name,
 			stmt.column,
 		)
@@ -138,7 +140,13 @@ exec_create_index :: proc(
 	}
 
 	defer pager.unpin_page(t.pager, root_page.page_num)
-	if !btree.init_text_leaf_page(root_page.data, root_page.page_num) {
+	init_ok := false
+	if col_type == .TEXT {
+		init_ok = btree.init_text_leaf_page(root_page.data, root_page.page_num)
+	} else {
+		init_ok = btree.init_int_leaf_page(root_page.data, root_page.page_num)
+	}
+	if !init_ok {
 		log.error("Error: Failed to initialize index root page")
 		return false, t.root, {}
 	}
@@ -153,11 +161,13 @@ exec_create_index :: proc(
 	}
 
 	defer btree.cursor_destroy(&cursor)
-	// Bulk collect: every TEXT value (empty included; NULLs and non-TEXT
-	// skipped by the type assertion, exactly as the per-row path). Texts
-	// are cloned: cells die per iteration but the build consumes them after
-	// the scan. Corrupt rows skip-and-continue, same as before.
-	pairs := make([dynamic]Text_Bulk_Pair, 0, 64, context.temp_allocator)
+	// Bulk collect: every indexable value (empty TEXT included; NULLs and
+	// mismatched storage classes skipped by the type assertion, exactly as
+	// the per-row path). Texts are cloned: cells die per iteration but the
+	// build consumes them after the scan. Corrupt rows skip-and-continue,
+	// same as before.
+	tpairs := make([dynamic]Text_Bulk_Pair, 0, 64, context.temp_allocator)
+	ipairs := make([dynamic]Int_Bulk_Pair, 0, 64, context.temp_allocator)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
@@ -165,14 +175,18 @@ exec_create_index :: proc(
 			btree.cursor_advance(&cursor)
 			continue
 		}
-		if s, is_text := c.values[col_idx].(string); is_text {
-			owned, c_err := strings.clone(s, context.temp_allocator)
-			if c_err != .None {
-				cell.destroy(&c, context.temp_allocator)
-				btree.cursor_advance(&cursor)
-				continue
+		if col_type == .TEXT {
+			if s, is_text := c.values[col_idx].(string); is_text {
+				owned, c_err := strings.clone(s, context.temp_allocator)
+				if c_err != .None {
+					cell.destroy(&c, context.temp_allocator)
+					btree.cursor_advance(&cursor)
+					continue
+				}
+				append(&tpairs, Text_Bulk_Pair{text = owned, rid = c.rowid})
 			}
-			append(&pairs, Text_Bulk_Pair{text = owned, rid = c.rowid})
+		} else if v, is_int := c.values[col_idx].(i64); is_int {
+			append(&ipairs, Int_Bulk_Pair{val = v, rid = c.rowid})
 		}
 
 		cell.destroy(&c, context.temp_allocator)
@@ -180,24 +194,39 @@ exec_create_index :: proc(
 	}
 	// Sort once (codec order), build once. Zero pairs keeps the
 	// pre-allocated empty leaf root, exactly as the per-row path which
-	// inserts nothing.
-	if len(pairs) > 0 {
-		slice.sort_by(pairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
-			if c := strings.compare(a.text, b.text); c != 0 {
-				return c < 0
+	// inserts nothing. The bulk builder infers the kind from the
+	// pre-stamped root above, so text and int share the build tail.
+	if len(tpairs) + len(ipairs) > 0 {
+		raws := make([][]u8, max(len(tpairs), len(ipairs)), context.temp_allocator)
+		rids := make([]types.Row_ID, len(raws), context.temp_allocator)
+		if col_type == .TEXT {
+			slice.sort_by(tpairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
+				if c := strings.compare(a.text, b.text); c != 0 {
+					return c < 0
+				}
+				return a.rid < b.rid
+			})
+			for p, i in tpairs {
+				raws[i] = transmute([]u8)p.text
+				rids[i] = p.rid
 			}
-			return a.rid < b.rid
-		})
-
-		texts := make([][]u8, len(pairs), context.temp_allocator)
-		rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
-		for p, i in pairs {
-			texts[i] = transmute([]u8)p.text
-			rids[i] = p.rid
+		} else {
+			slice.sort_by(ipairs[:], proc(a, b: Int_Bulk_Pair) -> bool {
+				if a.val != b.val {
+					return a.val < b.val
+				}
+				return a.rid < b.rid
+			})
+			words := make([][8]u8, len(ipairs), context.temp_allocator)
+			for p, i in ipairs {
+				endian.unchecked_put_u64be(words[i][:], u64(p.val ~ min(i64)))
+				raws[i] = words[i][:]
+				rids[i] = p.rid
+			}
 		}
 
 		idx_tree := btree.init(t.pager, index_root)
-		new_root, build_err := btree.build_sorted_text_index(&idx_tree, texts, rids)
+		new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
 		if build_err != .None {
 			log.errorf("Error: Failed to bulk index '%s' on %s", stmt.index_name, stmt.table_name)
 			return false, t.root, {}
@@ -213,6 +242,7 @@ exec_create_index :: proc(
 		index_root,
 		stmt.column,
 		stmt.index_name,
+		table.columns[col_idx].type,
 	)
 	if !ok {
 		log.error("Error: Failed to register index in schema")
@@ -716,6 +746,12 @@ Text_Bulk_Pair :: struct {
 	rid : types.Row_ID,
 }
 
+// Int_Bulk_Pair is one indexable (integer, rowid) for bulk int builds.
+Int_Bulk_Pair :: struct {
+	val: i64,
+	rid: types.Row_ID,
+}
+
 // collect_text_pairs projects one index's text values out of sorted infos,
 // skipping exactly what the per-row fan-out skips (same index_col_text
 // predicate, so NULLs and non-TEXT values never reach the index either way).
@@ -735,6 +771,31 @@ collect_text_pairs :: proc(
 	slice.sort_by(pairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
 		if c := strings.compare(a.text, b.text); c != 0 {
 			return c < 0
+		}
+		return a.rid < b.rid
+	})
+	return pairs
+}
+
+// collect_int_pairs projects one index's integer values out of sorted infos,
+// skipping exactly what the per-row fan-out will skip (same index_col_int
+// predicate, so NULLs and non-integers never reach the index either way).
+@(private = "file")
+collect_int_pairs :: proc(
+	table: types.Table,
+	column: string,
+	infos: []Insert_Row_Info,
+) -> [dynamic]Int_Bulk_Pair {
+	pairs := make([dynamic]Int_Bulk_Pair, 0, len(infos), context.temp_allocator)
+	for info in infos {
+		if v, ok := index_col_int(table, column, info.values); ok {
+			append(&pairs, Int_Bulk_Pair{val = v, rid = info.row_id})
+		}
+	}
+
+	slice.sort_by(pairs[:], proc(a, b: Int_Bulk_Pair) -> bool {
+		if a.val != b.val {
+			return a.val < b.val
 		}
 		return a.rid < b.rid
 	})
@@ -779,6 +840,45 @@ fanout_bulk_text :: proc(
 	return new_root, true
 }
 
+// fanout_bulk_int builds one fresh int index bottom-up from sorted pairs
+// (codec order: biased value, then rowid). Same empty contract as the text
+// twin; the bulk builder infers INT from the pre-stamped root.
+@(private = "file")
+fanout_bulk_int :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	def: types.Index_Def,
+	index_root: u32,
+	pairs: [dynamic]Int_Bulk_Pair,
+) -> (
+	u32,
+	bool,
+) {
+	if len(pairs) == 0 {
+		return index_root, true
+	}
+
+	words := make([][8]u8, len(pairs), context.temp_allocator)
+	raws := make([][]u8, len(pairs), context.temp_allocator)
+	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
+	for p, i in pairs {
+		endian.unchecked_put_u64be(words[i][:], u64(p.val ~ min(i64)))
+		raws[i] = words[i][:]
+		rids[i] = p.rid
+	}
+
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
+	if build_err != .None {
+		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		return index_root, false
+	}
+	if new_root == 0 {
+		return index_root, true
+	}
+	return new_root, true
+}
+
 // commit_bulk_inserts runs the shared bulk tail: text fan-out over sorted
 // infos (bottom-up build for fresh indexes, per-row loop otherwise), then
 // the same root/index commits as the row loop.
@@ -806,8 +906,13 @@ commit_bulk_inserts :: proc(
 
 		idx_tree = btree.init(t.pager, def.root)
 		if btree.text_index_is_empty(&idx_tree, def.root) {
-			pairs := collect_text_pairs(table, def.column, infos)
-			idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
+			if def.col_type == .INTEGER {
+				ipairs := collect_int_pairs(table, def.column, infos)
+				idx_roots[i], ok = fanout_bulk_int(t, table, def, idx_roots[i], ipairs)
+			} else {
+				pairs := collect_text_pairs(table, def.column, infos)
+				idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
+			}
 			if !ok {
 				return false, t.root, {}
 			}
@@ -2039,6 +2144,34 @@ index_col_text :: proc(
 		return "", false
 	}
 	return s, true
+}
+
+// index_col_int extracts the indexed INTEGER value of a row: (0, false)
+// when the column is missing, short, or not an integer (NULLs and
+// mismatched classes never reach the index either way).
+@(private = "file")
+index_col_int :: proc(
+	table: types.Table,
+	index_col: string,
+	values: []types.Value,
+) -> (
+	i64,
+	bool,
+) {
+	if len(index_col) == 0 {
+		return 0, false
+	}
+
+	col_idx, col_ok := schema.find_column_index(table.columns, index_col)
+	if !col_ok || col_idx < 0 || col_idx >= len(values) {
+		return 0, false
+	}
+
+	v, is_int := values[col_idx].(i64)
+	if !is_int {
+		return 0, false
+	}
+	return v, true
 }
 
 // fanout_insert_row indexes one inserted row. Returns the (possibly new)

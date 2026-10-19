@@ -109,10 +109,13 @@ cond_text_rhs :: proc(cond: parser.Condition) -> (string, bool) {
 // classes apart) and NULL members never match (membership_test guards the
 // row side), so the member lookups are complete. Subquery IN stays on the
 // scan path (its membership materializes per resolve, not per lookup).
+// Non-TEXT indexes refuse here until typed planner arms land (int backfill
+// and writes are complete but unrouted — invisible, never wrong).
 @(private)
 index_use_of_cond :: proc(
 	index_root: u32,
 	index_column: string,
+	col_type: types.Column_Type,
 	cond: parser.Condition,
 	tbl_name: string,
 	tbl_alias: string,
@@ -121,6 +124,9 @@ index_use_of_cond :: proc(
 	ok: bool,
 ) {
 	if index_root == 0 || len(index_column) == 0 {
+		return {}, false
+	}
+	if col_type != .TEXT {
 		return {}, false
 	}
 	if cond.negated {
@@ -205,8 +211,14 @@ resolve_index_covering :: proc(
 			return {}, false
 		}
 		for def in table.indexes {
-			if cand, usable := index_use_of_cond(def.root, def.column, cond, tbl_name, tbl_alias);
-			   usable {
+			if cand, usable := index_use_of_cond(
+				def.root,
+				def.column,
+				def.col_type,
+				cond,
+				tbl_name,
+				tbl_alias,
+			); usable {
 				return cand, true
 			}
 		}
@@ -249,6 +261,7 @@ resolve_index_or :: proc(
 			if sub, usable := index_use_of_cond(
 				def.root,
 				def.column,
+				def.col_type,
 				child.cond,
 				tbl_name,
 				tbl_alias,
@@ -292,6 +305,7 @@ resolve_index_fetch :: proc(
 			if cand, usable := index_use_of_cond(
 				def.root,
 				def.column,
+				def.col_type,
 				root.cond,
 				tbl_name,
 				tbl_alias,
@@ -317,6 +331,7 @@ resolve_index_fetch :: proc(
 			if cand, usable := index_use_of_cond(
 				def.root,
 				def.column,
+				def.col_type,
 				child.cond,
 				tbl_name,
 				tbl_alias,
@@ -599,16 +614,14 @@ explain_plan_text :: proc(
 				)
 			}
 		}
-		if is_covering_col_select(sel, table^) {
-			if plan, idx_ok := resolve_index_covering(table^, wc, tbl_name, sel.from_alias);
-			   idx_ok && covering_known_values(plan) {
-				return fmt.tprintf(
-					"INDEX SCAN ON %s USING %s (%s, covering)",
-					tbl_name,
-					plan_index_columns(plan, context.temp_allocator),
-					index_use_name(plan.use),
-				)
-			}
+		if plan, idx_ok := resolve_index_covering(table^, wc, tbl_name, sel.from_alias);
+		   idx_ok && covering_known_values(plan) && is_covering_col_select(sel, plan) {
+			return fmt.tprintf(
+				"INDEX SCAN ON %s USING %s (%s, covering)",
+				tbl_name,
+				plan_index_columns(plan, context.temp_allocator),
+				index_use_name(plan.use),
+			)
 		}
 		if plan, idx_ok := resolve_index_fetch(table^, wc, tbl_name, sel.from_alias); idx_ok {
 			return fmt.tprintf(
@@ -689,23 +702,21 @@ fetch_covering_index :: proc(
 }
 
 // is_covering_col_select reports whether the statement projects exactly
-// the indexed TEXT column (bare name, no aggregates/grouping). Like the
-// rowid rule, one projected column only — wider projections take the
-// fetch path with its full-filter recheck.
+// the routed plan's column (bare name, no aggregates/grouping). The
+// projection must name plan.column — not merely any indexed column —
+// because the caller emits plan.column's values; matching another index's
+// column would resolve the projection against the wrong columns
+// downstream. Like the rowid rule, one projected column only — wider
+// projections take the fetch path with its full-filter recheck.
 @(private)
-is_covering_col_select :: proc(stmt: parser.Select_Stmt, table: types.Table) -> bool {
+is_covering_col_select :: proc(stmt: parser.Select_Stmt, plan: Index_Plan) -> bool {
 	if len(stmt.columns) != 1 {
 		return false
 	}
 	if len(stmt.aggregates) != 0 || len(stmt.group_by) != 0 || stmt.having != nil {
 		return false
 	}
-	for def in table.indexes {
-		if def.root != 0 && stmt.columns[0] == def.column {
-			return true
-		}
-	}
-	return false
+	return stmt.columns[0] == plan.column
 }
 
 // covering_known_values reports whether a covering plan's output values

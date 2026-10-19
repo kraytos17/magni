@@ -498,7 +498,7 @@ text_vacuum_collect :: proc(
 
 	defer unpin_node(t, node)
 	if is_leaf(node) {
-		if node.header.page_type != .LEAF_TEXT {
+		if !is_index_leaf_type(node.header.page_type) {
 			return .Invalid_Page_Header
 		}
 
@@ -522,7 +522,7 @@ text_vacuum_collect :: proc(
 		}
 		return .None
 	}
-	if node.header.page_type != .TEXT_INTERIOR {
+	if !is_index_interior_type(node.header.page_type) {
 		return .Invalid_Page_Header
 	}
 
@@ -545,19 +545,40 @@ text_vacuum_collect :: proc(
 // exactly, or chunk planning would under/over-fill pages the builder then
 // rejects.
 @(private = "file")
-text_leaf_chunk_bytes :: proc(texts: [][]u8, lo: int, hi: int) -> (total: int, plen: int) {
-	plen = cell.text_index_shared_prefix(texts[lo], texts[hi - 1], PAGE_SIZE)
+text_leaf_chunk_bytes :: proc(raws: [][]u8, lo: int, hi: int) -> (total: int, plen: int) {
+	plen = cell.text_index_shared_prefix(raws[lo], raws[hi - 1], PAGE_SIZE)
 	total = 10 + plen + (hi - lo) * size_of(Text_Slot)
 	for k in lo ..< hi {
-		total += TEXT_ENTRY_ROWID_LEN + (len(texts[k]) - plen)
+		total += TEXT_ENTRY_ROWID_LEN + (len(raws[k]) - plen)
 	}
 	return
+}
+
+// vacuum_tree_kind resolves the secondary-index kind from the source root
+// header so pack stamping and key building agree with the tree. Fails closed
+// on unreadable or non-index roots (collect already failed on those, so this
+// is unreachable in practice — defense in depth, not a path).
+@(private = "file")
+vacuum_tree_kind :: proc(t: ^Tree) -> (Key_Kind, Error) {
+	rnode, r_err := load_node(t, t.root)
+	if r_err != .None {
+		return .Text, r_err
+	}
+
+	defer unpin_node(t, rnode)
+	if kind, kok := index_kind_of_page(rnode.header.page_type); kok {
+		return kind, .None
+	}
+	return .Text, .Invalid_Page_Header
 }
 
 // vacuum_empty_text_root allocates a fresh empty text leaf for vacuuming an
 // empty text index (collection yielded nothing to rebuild).
 @(private = "file")
-vacuum_empty_text_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
+vacuum_empty_index_root :: proc(t: ^Tree, kind: Key_Kind) -> (root: u32, err: Error) {
+	if kind == .Int {
+		return vacuum_empty_root_with(t, init_int_leaf_page)
+	}
 	return vacuum_empty_root_with(t, init_text_leaf_page)
 }
 
@@ -567,19 +588,21 @@ vacuum_empty_text_root :: proc(t: ^Tree) -> (root: u32, err: Error) {
 @(private = "file")
 vacuum_pack_text_leaves :: proc(
 	t: ^Tree,
-	texts: [dynamic][]u8,
+	raws: [dynamic][]u8,
 	rids: [dynamic]types.Row_ID,
 ) -> (
 	handles: [dynamic]Text_Node_Handle,
 	err: Error,
 ) {
+	kind := vacuum_tree_kind(t) or_return
+
 	handles = make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
-	n := len(texts)
+	n := len(raws)
 	i := 0
 	for i < n {
 		e := i
 		for e + 1 < n {
-			total, _ := text_leaf_chunk_bytes(texts[:], i, e + 2)
+			total, _ := text_leaf_chunk_bytes(raws[:], i, e + 2)
 			if total > PAGE_SIZE {
 				break
 			}
@@ -590,23 +613,27 @@ vacuum_pack_text_leaves :: proc(
 		if a_err != .None {
 			return nil, .Page_Full
 		}
+		if !init_index_leaf_page(kind, page.data, page.page_num) {
+			pager.unpin_page(t.pager, page.page_num)
+			return nil, .Invalid_Page_Header
+		}
 		if b_err := text_build_from_sorted(
 			page.data,
 			Page_Id(page.page_num),
-			texts[i:e + 1],
+			raws[i:e + 1],
 			rids[i:e + 1],
 		); b_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
 			return nil, b_err
 		}
 
-		max_key, m_err := text_make_key(texts[e], rids[e])
+		max_key, m_err := make_index_key(kind, raws[e], rids[e])
 		if m_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
 			return nil, m_err
 		}
 
-		min_key, n_err := text_make_key(texts[i], rids[i])
+		min_key, n_err := make_index_key(kind, raws[i], rids[i])
 		if n_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
 			return nil, n_err
@@ -637,6 +664,7 @@ vacuum_build_text_interiors :: proc(
 	root: u32,
 	err: Error,
 ) {
+	kind := vacuum_tree_kind(t) or_return
 	level := handles
 	for len(level) > 1 {
 		next := make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
@@ -670,6 +698,10 @@ vacuum_build_text_interiors :: proc(
 			page, a_err := pager.allocate_page(t.pager)
 			if a_err != .None {
 				return 0, .Page_Full
+			}
+			if !init_index_interior_page(kind, page.data, page.page_num) {
+				pager.unpin_page(t.pager, page.page_num)
+				return 0, .Invalid_Page_Header
 			}
 			if b_err := text_interior_build_from_sorted(
 				page.data,
@@ -708,10 +740,12 @@ bulk_pack_text_level :: proc(
 	t: ^Tree,
 	level: []Text_Node_Handle,
 ) -> (
-	[dynamic]Text_Node_Handle,
-	Error,
+	next: [dynamic]Text_Node_Handle,
+	err: Error,
 ) {
-	next := make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
+	kind := vacuum_tree_kind(t) or_return
+
+	next = make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
 	lo := 0
 	for lo < len(level) {
 		hi := lo
@@ -741,6 +775,10 @@ bulk_pack_text_level :: proc(
 		page, a_err := pager.allocate_page(t.pager)
 		if a_err != .None {
 			return next, .Page_Full
+		}
+		if !init_index_interior_page(kind, page.data, page.page_num) {
+			pager.unpin_page(t.pager, page.page_num)
+			return next, .Invalid_Page_Header
 		}
 		if b_err := text_interior_build_from_sorted(
 			page.data,
@@ -786,32 +824,34 @@ bulk_build_text_interiors :: proc(t: ^Tree, nodes: [dynamic]Text_Node_Handle) ->
 	return level[0].id, .None
 }
 
-// build_sorted_text_index bulk-loads pre-sorted (text, rowid) pairs into a
-// fresh text index: greedy leaf packing (same measure rule as
-// vacuum_pack_text_leaves) then bottom-up right-min interiors. Sort order
-// must be codec order (text bytes, then rowid). Fresh pages only — the
-// existing index is untouched. Zero pairs build nothing and return root 0
-// (the caller keeps the empty index as-is, matching the per-row path which
-// inserts nothing).
+// build_sorted_text_index bulk-loads pre-sorted (raw, rowid) pairs into a
+// fresh index of the caller-rooted kind (the caller pre-stamps the root):
+// greedy leaf packing (same measure rule as vacuum_pack_text_leaves) then
+// bottom-up right-min interiors. Sort order must be codec order (raw bytes,
+// then rowid). Fresh pages only — the existing index is untouched. Zero
+// pairs build nothing and return root 0 (the caller keeps the empty index
+// as-is, matching the per-row path which inserts nothing).
 build_sorted_text_index :: proc(
 	t: ^Tree,
-	texts: [][]u8,
+	raws: [][]u8,
 	rids: []types.Row_ID,
 ) -> (
 	root: u32,
 	err: Error,
 ) {
-	if len(texts) == 0 {
+	if len(raws) == 0 {
 		return 0, .None
 	}
 
+	kind := vacuum_tree_kind(t) or_return
+
 	handles := make([dynamic]Text_Node_Handle, 0, 64, context.temp_allocator)
-	n := len(texts)
+	n := len(raws)
 	i := 0
 	for i < n {
 		e := i
 		for e + 1 < n {
-			total, _ := text_leaf_chunk_bytes(texts[:], i, e + 2)
+			total, _ := text_leaf_chunk_bytes(raws[:], i, e + 2)
 			if total > PAGE_SIZE {
 				break
 			}
@@ -822,23 +862,27 @@ build_sorted_text_index :: proc(
 		if a_err != .None {
 			return 0, .Page_Full
 		}
+		if !init_index_leaf_page(kind, page.data, page.page_num) {
+			pager.unpin_page(t.pager, page.page_num)
+			return 0, .Page_Full
+		}
 		if b_err := text_build_from_sorted(
 			page.data,
 			Page_Id(page.page_num),
-			texts[i:e + 1],
+			raws[i:e + 1],
 			rids[i:e + 1],
 		); b_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
 			return 0, b_err
 		}
 
-		max_key, m_err := text_make_key(texts[e], rids[e])
+		max_key, m_err := make_index_key(kind, raws[e], rids[e])
 		if m_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
 			return 0, m_err
 		}
 
-		min_key, n_err := text_make_key(texts[i], rids[i])
+		min_key, n_err := make_index_key(kind, raws[i], rids[i])
 		if n_err != .None {
 			pager.unpin_page(t.pager, page.page_num)
 			return 0, n_err
@@ -887,7 +931,8 @@ text_tree_vacuum :: proc(t: ^Tree) -> (new_root: u32, err: Error) {
 
 	n := len(texts)
 	if n == 0 {
-		return vacuum_empty_text_root(t)
+		kind := vacuum_tree_kind(t) or_return
+		return vacuum_empty_index_root(t, kind)
 	}
 
 	handles, h_err := vacuum_pack_text_leaves(t, texts, rids)

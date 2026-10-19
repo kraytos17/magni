@@ -229,3 +229,103 @@ test_text_codec_roundtrip_and_order :: proc(t: ^testing.T) {
 		"static dispatch compares",
 	)
 }
+
+@(test)
+test_int_codec_roundtrip_and_order :: proc(t: ^testing.T) {
+	// Round-trip incl extremes and negative rowids; fixed 17-byte width.
+	lo := i64(-9223372036854775807) - 1
+	hi := i64(9223372036854775807)
+	vals := []i64{lo, -257, -1, 0, 1, 257, hi}
+	for v, i in vals {
+		buf: [32]u8
+		n, ok := cell.int_index_encode(types.value(v), types.Row_ID(i64(i) - 3), buf[:])
+		testing.expect(t, ok, "int encodes")
+		testing.expect_value(t, n, 17)
+		testing.expect(t, n == cell.int_index_encoded_len(types.value(v)), "len matches")
+		dv, dr, dok := cell.int_index_decode(buf[:n])
+		testing.expect(t, dok, "decode succeeds")
+		testing.expect_value(t, dv, v)
+		testing.expect_value(t, dr, types.Row_ID(i64(i) - 3))
+	}
+	// Exact-length decode: truncation and trailing garbage fail loudly.
+	full := make([]u8, 32, context.temp_allocator)
+	fn, _ := cell.int_index_encode(types.value(42), 7, full)
+	_, _, tok := cell.int_index_decode(full[:fn - 1])
+	testing.expect(t, !tok, "truncation fails")
+	_, _, gok := cell.int_index_decode(full[:fn + 1])
+	testing.expect(t, !gok, "trailing garbage fails")
+
+	// Non-i64 storage classes are not indexed.
+	blob := make([]u8, 2, context.temp_allocator)
+	testing.expect_value(t, cell.int_index_encoded_len(types.value("x")), 0)
+	testing.expect_value(t, cell.int_index_encoded_len(types.value()), 0)
+	testing.expect_value(t, cell.int_index_encoded_len(types.value(1.5)), 0)
+	testing.expect_value(t, cell.int_index_encoded_len(types.value(blob)), 0)
+	scratch: [32]u8
+	_, sok := cell.int_index_encode(types.value("x"), 1, scratch[:])
+	testing.expect(t, !sok, "text does not encode into int index")
+	_, nok := cell.int_index_encode(types.value(), 1, scratch[:])
+	testing.expect(t, !nok, "Null does not encode")
+
+	// Order: numeric value first (across the sign boundary), rowid tiebreak.
+	enc := proc(v: i64, r: i64) -> []u8 {
+		b := make([]u8, 32, context.temp_allocator)
+		n, ok := cell.int_index_encode(types.value(v), types.Row_ID(r), b)
+		assert(ok)
+		return b[:n]
+	}
+	testing.expect(t, cell.int_index_compare(enc(-1, 9), enc(0, 0)) < 0, "negative sorts first")
+	testing.expect(t, cell.int_index_compare(enc(0, 9), enc(1, 0)) < 0, "zero before positive")
+	testing.expect(t, cell.int_index_compare(enc(5, -5), enc(5, 3)) < 0, "rowid tiebreak")
+	testing.expect_value(t, cell.int_index_compare(enc(7, 2), enc(7, 2)), 0)
+
+	// Same surface through the static Key_Kind dispatch.
+	ikey := btree.Key_Kind.Int
+	kb := make([]u8, 32, context.temp_allocator)
+	kn, kok := btree.key_encode(ikey, types.value(11), 9, kb)
+	testing.expect(t, kok && kn == 17, "static dispatch encodes")
+	testing.expect_value(t, btree.key_encoded_len(ikey, types.value("x")), 0)
+	_, kiok := btree.key_encode(ikey, types.value("x"), 9, kb)
+	testing.expect(t, !kiok, "static dispatch skips non-int")
+	testing.expect(
+		t,
+		btree.key_compare(ikey, enc(-5, 1), enc(3, 2)) < 0,
+		"static dispatch compares",
+	)
+	testing.expect_value(t, btree.key_shared_prefix_len(ikey, enc(1, 1), enc(1, 2), 99), 16)
+}
+
+@(test)
+test_int_page_types_resolve :: proc(t: ^testing.T) {
+	leaf := make([]u8, btree.PAGE_SIZE, context.temp_allocator)
+	testing.expect(t, btree.init_int_leaf_page(leaf, 2), "int leaf inits")
+	layout, kind, l_err := btree.layout_for_page(leaf, btree.Page_Id(2))
+	testing.expect(t, l_err == .None, "int leaf resolves")
+	testing.expect(t, kind == btree.Key_Kind.Int, "int leaf kind is Int")
+	testing.expect(
+		t,
+		layout.vtable.validate(leaf, btree.Page_Id(2)) == .None,
+		"empty int leaf validates",
+	)
+
+	interior := make([]u8, btree.PAGE_SIZE, context.temp_allocator)
+	testing.expect(t, btree.init_int_interior_page(interior, 2), "int interior inits")
+	ilayout, ikind, i_err := btree.layout_for_page(interior, btree.Page_Id(2))
+	testing.expect(t, i_err == .None, "int interior resolves")
+	testing.expect(t, ikind == btree.Key_Kind.Int, "int interior kind is Int")
+	testing.expect(
+		t,
+		ilayout.vtable.validate(interior, btree.Page_Id(2)) == .None,
+		"empty int interior validates",
+	)
+
+	// Text pages keep their kind; unknown types still fail closed.
+	tleaf := make([]u8, btree.PAGE_SIZE, context.temp_allocator)
+	testing.expect(t, btree.init_text_leaf_page(tleaf, 2), "text leaf inits")
+	_, tkind, _ := btree.layout_for_page(tleaf, btree.Page_Id(2))
+	testing.expect(t, tkind == btree.Key_Kind.Text, "text leaf stays Text")
+	garbage := make([]u8, btree.PAGE_SIZE, context.temp_allocator)
+	garbage[0] = 99
+	_, _, g_err := btree.layout_for_page(garbage, btree.Page_Id(2))
+	testing.expect(t, g_err != .None, "unknown type fails closed")
+}

@@ -84,15 +84,17 @@ Page_Layout_VTable :: struct {
 }
 
 // Key_Kind selects the codec; the key_* procs below dispatch statically.
-// Rowid arms live here; Text arms delegate to cell/text_codec.odin
-// (single implementation, no wrapper layer).
+// Rowid arms live here; Text and Int arms delegate to cell/text_codec.odin
+// and cell/int_codec.odin (single implementation, no wrapper layer).
 Key_Kind :: enum u8 {
 	Rowid,
 	Text,
+	Int,
 }
 
 // key_compare orders two ENCODED keys (-1/0/+1): numeric rowid order for
-// Rowid pages, (text BINARY, rowid) for Text pages. Raw (unencoded) text is
+// Rowid pages, (text BINARY, rowid) for Text pages, (value numeric, rowid)
+// for Int pages. Raw (unencoded) text is
 // not its input. One entry point on purpose: order and layout share the
 // encoding, so a second entry would be speculative duplication — split them
 // if an encoding ever divorces order from layout.
@@ -103,6 +105,8 @@ key_compare :: #force_inline proc "contextless" (kind: Key_Kind, a: []u8, b: []u
 		res = mem.compare(a, b)
 	case .Text:
 		res = cell.text_index_compare(a, b)
+	case .Int:
+		res = cell.int_index_compare(a, b)
 	}
 	return res
 }
@@ -121,14 +125,16 @@ key_shared_prefix_len :: #force_inline proc "contextless" (
 		res = rowid_shared_prefix_len(a, b, max_cap)
 	case .Text:
 		res = cell.text_index_shared_prefix(a, b, max_cap)
+	case .Int:
+		res = cell.int_index_shared_prefix(a, b, max_cap)
 	}
 	return res
 }
 
 // key_encode maps (value,rowid) -> key bytes, returning bytes written.
-// Only the codec's own storage class encodes (i64 for Rowid, string for
-// Text); everything else — including NULL — reports ok=false so the caller
-// SKIPS the entry instead of failing the row.
+// Only the codec's own storage class encodes (i64 for Rowid and Int,
+// string for Text); everything else — including NULL — reports ok=false so
+// the caller SKIPS the entry instead of failing the row.
 @(require_results)
 key_encode :: proc "contextless" (
 	kind: Key_Kind,
@@ -145,6 +151,8 @@ key_encode :: proc "contextless" (
 		n, ok = rowid_encode(val, rowid, buf)
 	case .Text:
 		n, ok = cell.text_index_encode(val, rowid, buf)
+	case .Int:
+		n, ok = cell.int_index_encode(val, rowid, buf)
 	}
 	return n, ok
 }
@@ -158,6 +166,8 @@ key_encoded_len :: #force_inline proc "contextless" (kind: Key_Kind, val: types.
 		res = rowid_encoded_len(val)
 	case .Text:
 		res = cell.text_index_encoded_len(val)
+	case .Int:
+		res = cell.int_index_encoded_len(val)
 	}
 	return res
 }
@@ -685,6 +695,10 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 		return prefix_leaf_layout(), .Text, .None
 	case .TEXT_INTERIOR:
 		return prefix_interior_layout(), .Text, .None
+	case .LEAF_INT:
+		return prefix_leaf_layout(), .Int, .None
+	case .INT_INTERIOR:
+		return prefix_interior_layout(), .Int, .None
 	case:
 		return {}, {}, .Invalid_Page_Header
 	}

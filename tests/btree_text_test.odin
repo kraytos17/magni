@@ -127,6 +127,9 @@ test_text_table_ops :: proc(t: ^testing.T) {
 	texts := [][]u8{{'a', 'p', 'p', 'l', 'e'}, {'a', 'p', 'p', 'l', 'e', 't'}}
 	rids := []types.Row_ID{2, 5}
 	page := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(page, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_build_from_sorted(page, 2, texts, rids) == .None,
@@ -198,6 +201,9 @@ test_text_build_roundtrip :: proc(t: ^testing.T) {
 	}
 	rids := []types.Row_ID{2, 5, 4}
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(buf, 2) {
+		return
+	}
 	testing.expect(t, btree.text_build_from_sorted(buf, 2, texts, rids) == .None, "build succeeds")
 
 	prefix, p_err := btree.text_prefix(buf, WT(2))
@@ -224,6 +230,9 @@ test_text_build_roundtrip :: proc(t: ^testing.T) {
 	sorted_flat := [][]u8{{'a', 'a'}, {'b'}, {'c'}}
 	sorted_rids := []types.Row_ID{2, 1, 3}
 	fbuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(fbuf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_build_from_sorted(fbuf, 2, sorted_flat, sorted_rids) == .None,
@@ -236,6 +245,9 @@ test_text_build_roundtrip :: proc(t: ^testing.T) {
 	one := [][]u8{{'s', 'o', 'l', 'o'}}
 	one_rids := []types.Row_ID{9}
 	obuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(obuf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_build_from_sorted(obuf, 2, one, one_rids) == .None,
@@ -248,6 +260,9 @@ test_text_build_roundtrip :: proc(t: ^testing.T) {
 
 	// Empty page builds and validates.
 	ebuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(ebuf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_build_from_sorted(ebuf, 2, [][]u8{}, []types.Row_ID{}) == .None,
@@ -257,6 +272,9 @@ test_text_build_roundtrip :: proc(t: ^testing.T) {
 
 	// Mismatched inputs fail closed.
 	mbuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(mbuf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_build_from_sorted(mbuf, 2, texts, rids[:2]) == .Invalid_Bounds,
@@ -299,6 +317,9 @@ test_text_search_vs_oracle :: proc(t: ^testing.T) {
 		rids[i] = types.Row_ID(crid[i])
 	}
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(buf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_build_from_sorted(buf, 2, texts, rids) == .None,
@@ -335,6 +356,9 @@ test_text_search_vs_oracle :: proc(t: ^testing.T) {
 	}
 	prids := []types.Row_ID{2, 3, 5}
 	pbuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(pbuf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_build_from_sorted(pbuf, 2, ptexts, prids) == .None,
@@ -396,6 +420,9 @@ test_text_corruption_loud :: proc(t: ^testing.T) {
 	texts := [][]u8{{'a'}, {'b'}}
 	rids := []types.Row_ID{1, 2}
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(buf, 2) {
+		return
+	}
 	testing.expect(t, btree.text_build_from_sorted(buf, 2, texts, rids) == .None, "build succeeds")
 
 	// Wrong discriminant: never reinterpreted.
@@ -458,6 +485,9 @@ test_text_corruption_loud :: proc(t: ^testing.T) {
 	big := [][]u8{big_text}
 	big_rids := []types.Row_ID{1}
 	obuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_leaf_page(obuf, 2) {
+		return
+	}
 	testing.expect(t, btree.init_text_leaf_page(obuf, 2), "overflow target starts valid")
 	testing.expect(
 		t,
@@ -477,6 +507,9 @@ test_text_interior_header_layout :: proc(t: ^testing.T) {
 	testing.expect_value(t, btree.page_header_size(.TEXT_INTERIOR), size_of(btree.Leaf_Header))
 
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_interior_page(buf, 2) {
+		return
+	}
 	testing.expect(t, btree.init_text_interior_page(buf, 2), "init text interior")
 	testing.expect_value(t, buf[0], u8(btree.Page_Type.TEXT_INTERIOR))
 	h := btree.get_header(buf, 2)
@@ -533,6 +566,9 @@ test_text_interior_build_roundtrip :: proc(t: ^testing.T) {
 	keys := [][]u8{enc("apple", 2), enc("applet", 3), enc("application", 5)}
 	children := []u32{11, 12, 13, 14}
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_interior_page(buf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_interior_build_from_sorted(buf, 2, keys, children) == .None,
@@ -607,6 +643,9 @@ test_text_interior_find_vs_oracle :: proc(t: ^testing.T) {
 	seps := [][]u8{enc("apple", 2), enc("applet", 3), enc("application", 5)}
 	children := []u32{11, 12, 13, 14}
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_interior_page(buf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_interior_build_from_sorted(buf, 2, seps, children) == .None,
@@ -649,6 +688,9 @@ test_text_interior_find_vs_oracle :: proc(t: ^testing.T) {
 
 	// Empty interior routes everything to its only child.
 	ebuf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_interior_page(ebuf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_interior_build_from_sorted(ebuf, 2, [][]u8{}, []u32{7}) == .None,
@@ -672,6 +714,9 @@ test_text_interior_table_ops :: proc(t: ^testing.T) {
 	keys := [][]u8{enc("m", 1), enc("z", 2)}
 	children := []u32{21, 22, 23}
 	page := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_interior_page(page, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_interior_build_from_sorted(page, 2, keys, children) == .None,
@@ -729,6 +774,9 @@ test_text_interior_corruption_loud :: proc(t: ^testing.T) {
 	keys := [][]u8{enc("a", 1), enc("b", 2)}
 	children := []u32{1, 2, 3}
 	buf := make([]u8, types.PAGE_SIZE, context.temp_allocator)
+	if !btree.init_text_interior_page(buf, 2) {
+		return
+	}
 	testing.expect(
 		t,
 		btree.text_interior_build_from_sorted(buf, 2, keys, children) == .None,
@@ -918,6 +966,9 @@ test_text_boundary_routing :: proc(t: ^testing.T) {
 		if a_err != nil {
 			return 0
 		}
+		if !btree.init_text_leaf_page(pg.data, pg.page_num) {
+			return 0
+		}
 		defer pager.unpin_page(ctx.pager, pg.page_num)
 		testing.expect(
 			t,
@@ -940,6 +991,9 @@ test_text_boundary_routing :: proc(t: ^testing.T) {
 	ipg, a_err := pager.allocate_page(ctx.pager)
 	testing.expect(t, a_err == nil, "alloc interior")
 	if a_err != nil {
+		return
+	}
+	if !btree.init_text_interior_page(ipg.data, ipg.page_num) {
 		return
 	}
 	defer pager.unpin_page(ctx.pager, ipg.page_num)
@@ -1048,6 +1102,9 @@ test_text_absorb_overflow :: proc(t: ^testing.T) {
 	ipg, a_err := pager.allocate_page(ctx.pager)
 	testing.expect(t, a_err == nil, "alloc interior")
 	if a_err != nil {
+		return
+	}
+	if !btree.init_text_interior_page(ipg.data, ipg.page_num) {
 		return
 	}
 	defer pager.unpin_page(ctx.pager, ipg.page_num)

@@ -179,18 +179,26 @@ test_create_index_errors :: proc(t: ^testing.T) {
 
 	testing.expect(
 		t,
-		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);") == .None,
+		db.execute(d, "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, score REAL, data BLOB);") ==
+		.None,
 		"create",
 	)
 	saved, quiet := suppress_expected_errors()
 	context = quiet
 	neg_table := db.execute(d, "CREATE INDEX i_nope ON missing (body);")
 	neg_col := db.execute(d, "CREATE INDEX i_nope ON docs (missing);")
-	neg_type := db.execute(d, "CREATE INDEX i_nope ON docs (id);")
+	neg_real := db.execute(d, "CREATE INDEX i_nope ON docs (score);")
+	neg_blob := db.execute(d, "CREATE INDEX i_nope ON docs (data);")
 	context = restore_logger(saved)
 	testing.expect(t, neg_table != .None, "unknown table rejected")
 	testing.expect(t, neg_col != .None, "unknown column rejected")
-	testing.expect(t, neg_type != .None, "non-TEXT column rejected")
+	testing.expect(t, neg_real != .None, "REAL column rejected")
+	testing.expect(t, neg_blob != .None, "BLOB column rejected")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_id ON docs (id);") == .None,
+		"INTEGER column accepted",
+	)
 	testing.expect(
 		t,
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
@@ -991,6 +999,129 @@ test_index_select_rowid_guard :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+@(test)
+test_index_int_create_backfill :: proc(t: ^testing.T) {
+	// CREATE INDEX on INTEGER backfills every value (negatives, dups;
+	// NULLs skipped) with the def tagged INTEGER; reads go through
+	// btree.int_find_rowids on the published root (the planner does not
+	// route int indexes yet, so SQL stays on the scan path).
+	d := setup_db(t, "idxintback")
+	defer teardown_db(d, "idxintback")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (-5, 'y');",
+			"INSERT INTO t VALUES (10, 'z');",
+			"INSERT INTO t VALUES (NULL, 'n');",
+		},
+	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i_a ON t (a);") == .None, "create int index")
+
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	def, dok := schema.table_index(tbl, "i_a")
+	testing.expect(t, dok, "def present")
+	if dok {
+		testing.expect_value(t, def.col_type, types.Column_Type.INTEGER)
+		testing.expect(t, def.root != 0, "root published")
+	}
+	// TEXT defs on the same table keep their kind.
+	testing.expect(t, db.execute(d, "CREATE INDEX i_b ON t (b);") == .None, "create text index")
+	st2 := db.Schema_Tree(d)
+	tbl2, found2 := schema.find_table(&st2, "t", context.temp_allocator)
+	testing.expect(t, found2, "table found")
+	if found2 {
+		if bdef, bok := schema.table_index(tbl2, "i_b"); bok {
+			testing.expect_value(t, bdef.col_type, types.Column_Type.TEXT)
+		}
+		if adef, aok := schema.table_index(tbl2, "i_a"); aok {
+			testing.expect_value(t, adef.col_type, types.Column_Type.INTEGER)
+		}
+	}
+
+	idx_root := index_root_of(t, tbl, "i_a")
+	idx_tree := btree.init(d.pager, idx_root)
+	ten, t_err := btree.int_find_rowids(&idx_tree, idx_tree.root, 10)
+	testing.expect(t, t_err == .None, "find succeeds")
+	if t_err == .None {
+		testing.expect_value(t, len(ten), 2)
+	}
+	neg, n_err := btree.int_find_rowids(&idx_tree, idx_tree.root, -5)
+	testing.expect(t, n_err == .None, "negative find succeeds")
+	if n_err == .None {
+		testing.expect_value(t, len(neg), 1)
+	}
+	miss, m_err := btree.int_find_rowids(&idx_tree, idx_tree.root, 999)
+	testing.expect(t, m_err == .None, "miss succeeds")
+	if m_err == .None {
+		testing.expect_value(t, len(miss), 0)
+	}
+
+	// Unrouted SQL still answers correctly through the scan.
+	q := db.query(d, "SELECT a, b FROM t WHERE a = 10 ORDER BY b;")
+	testing.expect(t, q.ok, "unrouted select succeeds")
+	testing.expect_value(t, len(q.rows), 2)
+}
+
+@(test)
+test_index_cross_projection_fetch :: proc(t: ^testing.T) {
+	// Projecting one indexed column while filtering on another must fetch
+	// (never cover with the wrong column's values): correct rows here, and
+	// the matching projection still covers.
+	d := setup_db(t, "idxcrossproj")
+	defer teardown_db(d, "idxcrossproj")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a TEXT, b TEXT);",
+			"INSERT INTO t VALUES ('m', 'x');",
+			"INSERT INTO t VALUES ('n', 'y');",
+			"CREATE INDEX i_a ON t (a);",
+			"CREATE INDEX i_b ON t (b);",
+		},
+	)
+	cross := db.query(d, "SELECT a FROM t WHERE b = 'x';")
+	testing.expect(t, cross.ok, "cross projection succeeds")
+	testing.expect_value(t, len(cross.rows), 1)
+	if len(cross.rows) == 1 {
+		s, is_text := cross.rows[0][0].(string)
+		testing.expect(t, is_text, "text value projects")
+		if is_text {
+			testing.expect_value(t, s, "m")
+		}
+	}
+
+	// Matching projection still answers covering.
+	match := db.query(d, "SELECT b FROM t WHERE b = 'y';")
+	testing.expect(t, match.ok, "matching projection succeeds")
+	if len(match.rows) == 1 {
+		s, is_text := match.rows[0][0].(string)
+		testing.expect(t, is_text, "text value projects")
+		if is_text {
+			testing.expect_value(t, s, "y")
+		}
+	}
+
+	// Mixed int/text tables route the same way.
+	testing.expect(t, db.execute(d, "CREATE TABLE m (v INT, w TEXT);") == .None, "create m")
+	testing.expect(t, db.execute(d, "INSERT INTO m VALUES (1, 'p');") == .None, "insert m")
+	testing.expect(t, db.execute(d, "CREATE INDEX i_v ON m (v);") == .None, "index v")
+	testing.expect(t, db.execute(d, "CREATE INDEX i_w ON m (w);") == .None, "index w")
+	mq := db.query(d, "SELECT v FROM m WHERE w = 'p';")
+	testing.expect(t, mq.ok, "mixed cross projection succeeds")
+	testing.expect_value(t, len(mq.rows), 1)
 }
 
 @(test)

@@ -545,7 +545,7 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	)
 
 	st := db.Schema_Tree(d)
-	def_root, def_ok := schema.update_index_def_cow(&st, "docs", 50, "body", "i_body")
+	def_root, def_ok := schema.update_index_def_cow(&st, "docs", 50, "body", "i_body", .TEXT)
 	testing.expect(t, def_ok, "index def publish succeeds")
 	if !def_ok {
 		return

@@ -290,6 +290,22 @@ UPDATE t SET b = 'q' WHERE t.rowid = 1 AND a = 10;
 DELETE FROM t WHERE t.rowid = 99;
 SELECT t.rowid, a, b FROM t ORDER BY t.rowid;
 """),
+    ("script_int_index", """\
+CREATE TABLE t (a INT, b TEXT);
+INSERT INTO t VALUES (10, 'x');
+INSERT INTO t VALUES (-5, 'y');
+INSERT INTO t VALUES (10, 'z');
+INSERT INTO t VALUES (NULL, 'n');
+CREATE INDEX i_a ON t (a);
+CREATE INDEX i_b ON t (b);
+SELECT a, b FROM t WHERE a = 10 ORDER BY b;
+SELECT a FROM t WHERE b = 'x';
+SELECT b FROM t WHERE b = 'y';
+INSERT INTO t VALUES (7, 'w');
+SELECT COUNT(*) FROM t;
+DROP INDEX i_a;
+SELECT a FROM t WHERE a = 7;
+"""),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
 INSERT INTO t (id, s, c) VALUES (1, 'a', 5);

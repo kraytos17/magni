@@ -340,13 +340,18 @@ hash :: proc {
 	hash_values,
 }
 
-// Index_Def is one secondary text index: covering text->rowid over a
-// single TEXT column. Names are unique per table (may repeat across
-// tables); DROP INDEX <name> needs a unique match or ON <table>.
+// Index_Def is one secondary index: covering column->rowid over a single
+// TEXT or INTEGER column (kind in col_type). Names are unique per table
+// (may repeat across tables); DROP INDEX <name> needs a unique match or
+// ON <table>. col_type is always resolved, never stored: table_from_values
+// tags it from the column definition (unknown column ⇒ root cleared,
+// never routed), and creation tags it from the validated column. A zero
+// value reads .INTEGER (enum order), so no path may trust an untagged def.
 Index_Def :: struct {
-	name  : string, // index name (empty = legacy unnamed single)
-	column: string, // indexed column name
-	root  : u32, // root page of the text index (0 = none, never routed)
+	name    : string, // index name (empty = legacy unnamed single)
+	column  : string, // indexed column name
+	root    : u32, // root page of the index (0 = none, never routed)
+	col_type: Column_Type, // indexed column type (resolved at load/creation)
 }
 
 // Table is an in-memory table definition as published in the catalog.

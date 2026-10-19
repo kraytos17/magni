@@ -484,10 +484,12 @@ table_from_values :: proc(
 	if len(sr.indexes) > 0 {
 		defs := make([]types.Index_Def, len(sr.indexes), allocator)
 		for def, i in sr.indexes {
+			col_type, type_ok := schema_column_type(cols, def.column)
 			defs[i] = types.Index_Def {
-				root   = def.root,
-				column = strings.clone(def.column, allocator),
-				name   = strings.clone(def.name, allocator),
+				root     = def.root if type_ok else 0,
+				column   = strings.clone(def.column, allocator),
+				name     = strings.clone(def.name, allocator),
+				col_type = col_type,
 			}
 		}
 		table.indexes = defs
@@ -697,6 +699,7 @@ update_index_def_cow :: proc(
 	new_index_root: u32,
 	index_column: string,
 	index_name: string,
+	col_type: types.Column_Type,
 ) -> (
 	new_schema_root: u32,
 	ok: bool,
@@ -714,7 +717,12 @@ update_index_def_cow :: proc(
 		if def.name == index_name {
 			append(
 				&defs,
-				types.Index_Def{name = index_name, column = index_column, root = new_index_root},
+				types.Index_Def {
+					name = index_name,
+					column = index_column,
+					root = new_index_root,
+					col_type = col_type,
+				},
 			)
 			replaced = true
 		} else {
@@ -724,7 +732,12 @@ update_index_def_cow :: proc(
 	if !replaced {
 		append(
 			&defs,
-			types.Index_Def{name = index_name, column = index_column, root = new_index_root},
+			types.Index_Def {
+				name = index_name,
+				column = index_column,
+				root = new_index_root,
+				col_type = col_type,
+			},
 		)
 	}
 
@@ -873,6 +886,17 @@ validate_columns :: proc(columns: []types.Column) -> (bool, string) {
 		return false, "Multiple primary keys not supported right now"
 	}
 	return true, ""
+}
+
+// schema_column_type reports a column's type for index-def tagging at load.
+// False when the column is absent (corrupt catalog) — the caller clears the
+// def root so it can never route.
+schema_column_type :: proc(columns: []types.Column, name: string) -> (types.Column_Type, bool) {
+	idx, ok := find_column_index(columns, name)
+	if !ok {
+		return .TEXT, false
+	}
+	return columns[idx].type, true
 }
 
 // find_column_index returns the position of the named column, or (-1, false)
