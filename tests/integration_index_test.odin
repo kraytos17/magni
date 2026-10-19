@@ -362,6 +362,299 @@ test_index_composite_routing :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_index_composite_range :: proc(t: ^testing.T) {
+	// Leading-column ranges scan the composite slice: single bounds,
+	// tightened pairs, contradictions empty without I/O, Eq dominating
+	// ranges, and range-plus-Eq narrowing through the recheck.
+	d := setup_db(t, "idxcomprange")
+	defer teardown_db(d, "idxcomprange")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT);",
+			"INSERT INTO t VALUES (10, 'x', 1);",
+			"INSERT INTO t VALUES (-5, 'y', 2);",
+			"INSERT INTO t VALUES (7, 'z', 3);",
+			"INSERT INTO t VALUES (10, 'w', 4);",
+			"INSERT INTO t VALUES (NULL, 'n', 5);",
+			"CREATE INDEX i_ab ON t (a, b);",
+		},
+	)
+	cases := []struct {
+		sql : string,
+		want: int,
+	} {
+		{"SELECT a, b, v FROM t WHERE a > 5;", 3},
+		{"SELECT a, b, v FROM t WHERE a >= 7 AND a <= 10;", 3},
+		{"SELECT a, b, v FROM t WHERE a > 100;", 0},
+		{"SELECT a, b, v FROM t WHERE a < 10 AND a > 5;", 1},
+		{"SELECT a, b, v FROM t WHERE a > 5 AND b = 'w';", 1},
+		{"SELECT a, b, v FROM t WHERE a = 10 AND a > 5;", 2},
+		{"SELECT a, b, v FROM t WHERE a > 10 AND a < 5;", 0},
+		{"SELECT a, b, v FROM t WHERE a > 'x';", 0},
+		{"SELECT a, b, v FROM t WHERE a < 10;", 2},
+	}
+	for c in cases {
+		free_all(context.temp_allocator)
+		q := db.query(d, c.sql)
+		testing.expect(t, q.ok, "range query succeeds")
+		if q.ok {
+			testing.expectf(t, len(q.rows) == c.want, "row count for %s", c.sql)
+		}
+	}
+	free_all(context.temp_allocator)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE a > 5;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE a >= 7 AND a <= 10;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+}
+
+@(test)
+test_index_composite_text_leading_range :: proc(t: ^testing.T) {
+	// Leading TEXT ranges order BINARY (empty string included); leading
+	// REAL ranges order numeric with signed zeros shared.
+	d := setup_db(t, "idxcomplead")
+	defer teardown_db(d, "idxcomplead")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (b TEXT, a INT);",
+			"INSERT INTO t VALUES ('x', 10);",
+			"INSERT INTO t VALUES ('m', 3);",
+			"INSERT INTO t VALUES ('', 1);",
+			"INSERT INTO t VALUES ('y', -5);",
+			"INSERT INTO t VALUES (NULL, 9);",
+			"CREATE INDEX i_ba ON t (b, a);",
+			"CREATE TABLE n (r REAL, v INT);",
+			"INSERT INTO n VALUES (1.5, 1);",
+			"INSERT INTO n VALUES (-0.0, 2);",
+			"INSERT INTO n VALUES (0.0, 3);",
+			"INSERT INTO n VALUES (-2.5, 4);",
+			"CREATE INDEX i_rv ON n (r, v);",
+		},
+	)
+	cases := []struct {
+		sql : string,
+		want: int,
+	} {
+		{"SELECT b, a FROM t WHERE b > 'm';", 2},
+		{"SELECT b, a FROM t WHERE b >= 'm';", 3},
+		{"SELECT b, a FROM t WHERE b > '';", 3},
+		{"SELECT b, a FROM t WHERE b BETWEEN 'm' AND 'y';", 3},
+		{"SELECT r, v FROM n WHERE r > 0.0;", 1},
+		{"SELECT r, v FROM n WHERE r >= -0.0;", 3},
+		{"SELECT r, v FROM n WHERE r BETWEEN -3.0 AND 0.0;", 3},
+	}
+	for c in cases {
+		free_all(context.temp_allocator)
+		q := db.query(d, c.sql)
+		testing.expect(t, q.ok, "range query succeeds")
+		if q.ok {
+			testing.expectf(t, len(q.rows) == c.want, "row count for %s", c.sql)
+		}
+	}
+	free_all(context.temp_allocator)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT b, a FROM t WHERE b > 'm';"),
+		"INDEX SCAN ON t USING b,a (composite, fetch)",
+	)
+}
+
+@(test)
+test_index_composite_or_union :: proc(t: ^testing.T) {
+	// OR of ANDs folds each disjunct through its composite def (union of
+	// exact scans); mixed scalar/composite disjuncts union too. Unusable
+	// disjuncts fail the whole union to scan.
+	d := setup_db(t, "idxcompor")
+	defer teardown_db(d, "idxcompor")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT);",
+			"INSERT INTO t VALUES (10, 'x', 1);",
+			"INSERT INTO t VALUES (-5, 'y', 2);",
+			"INSERT INTO t VALUES (7, 'z', 3);",
+			"INSERT INTO t VALUES (10, 'w', 4);",
+			"CREATE INDEX i_ab ON t (a, b);",
+		},
+	)
+	full := db.query(
+		d,
+		"SELECT a, b, v FROM t WHERE (a = 10 AND b = 'x') OR (a = 7 AND b = 'z') ORDER BY v;",
+	)
+	testing.expect(t, full.ok, "union succeeds")
+	testing.expect_value(t, len(full.rows), 2)
+
+	mixed := db.query(d, "SELECT a, b, v FROM t WHERE a = 10 OR (a = 7 AND b = 'z') ORDER BY v;")
+	testing.expect(t, mixed.ok, "mixed union succeeds")
+	testing.expect_value(t, len(mixed.rows), 3)
+
+	half := db.query(
+		d,
+		"SELECT a, b, v FROM t WHERE (a = 10 AND b = 'q') OR (a = 7 AND b = 'z') ORDER BY v;",
+	)
+	testing.expect(t, half.ok, "half-empty union succeeds")
+	testing.expect_value(t, len(half.rows), 1)
+
+	rid := db.query(
+		d,
+		"SELECT rowid FROM t WHERE (a = 10 AND b = 'x') OR (a = -5 AND b = 'y') ORDER BY rowid;",
+	)
+	testing.expect(t, rid.ok, "rowid union succeeds")
+	testing.expect_value(t, len(rid.rows), 2)
+
+	bad := db.query(d, "SELECT a, b, v FROM t WHERE (a = 10 AND b = 'x') OR v = 2 ORDER BY v;")
+	testing.expect(t, bad.ok, "unusable disjunct succeeds")
+	testing.expect_value(t, len(bad.rows), 2)
+
+	testing.expect_value(
+		t,
+		explain(
+			t,
+			d,
+			"EXPLAIN SELECT a, b, v FROM t WHERE (a = 10 AND b = 'x') OR (a = 7 AND b = 'z');",
+		),
+		"INDEX SCAN ON t USING a,b (or, fetch)",
+	)
+}
+
+@(test)
+test_index_composite_in_expansion :: proc(t: ^testing.T) {
+	// Leading IN with bound trailing Eqs expands to a union of exact
+	// full-tuple lookups; bare leading IN unions prefix scans. Over-cap
+	// and subquery IN stay on scan with identical results.
+	d := setup_db(t, "idxcompin")
+	defer teardown_db(d, "idxcompin")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT, v INT);",
+			"INSERT INTO t VALUES (10, 'x', 1);",
+			"INSERT INTO t VALUES (-5, 'y', 2);",
+			"INSERT INTO t VALUES (7, 'z', 3);",
+			"INSERT INTO t VALUES (10, 'w', 4);",
+			"CREATE INDEX i_ab ON t (a, b);",
+		},
+	)
+	full := db.query(d, "SELECT a, b, v FROM t WHERE a IN (10, 7) AND b = 'x' ORDER BY v;")
+	testing.expect(t, full.ok, "expansion succeeds")
+	testing.expect_value(t, len(full.rows), 1)
+
+	pre := db.query(d, "SELECT a, b, v FROM t WHERE a IN (10, -5) ORDER BY a, b, v;")
+	testing.expect(t, pre.ok, "prefix union succeeds")
+	testing.expect_value(t, len(pre.rows), 3)
+
+	miss := db.query(d, "SELECT a, b, v FROM t WHERE a IN (10, 7) AND b = 'q' ORDER BY v;")
+	testing.expect(t, miss.ok, "empty expansion succeeds")
+	testing.expect_value(t, len(miss.rows), 0)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE a IN (10, 7) AND b = 'x';"),
+		"INDEX SCAN ON t USING a,b (or, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM t WHERE a IN (10, -5);"),
+		"INDEX SCAN ON t USING a,b (or, fetch)",
+	)
+}
+
+@(test)
+test_index_composite_covering :: proc(t: ^testing.T) {
+	// Composite covering: single leading-Eq prefix plans project bound
+	// columns (decoded with column types) without touching data pages;
+	// anything wider, unbound, or ranged fetches.
+	d := setup_db(t, "idxcompcov")
+	defer teardown_db(d, "idxcompcov")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (10, 'z');",
+			"INSERT INTO t VALUES (-5, 'y');",
+			"CREATE INDEX i_ab ON t (a, b);",
+			"CREATE TABLE n (r REAL, v INT);",
+			"INSERT INTO n VALUES (1.5, 1);",
+			"INSERT INTO n VALUES (1.5, 2);",
+			"INSERT INTO n VALUES (-2.5, 3);",
+			"CREATE INDEX i_rv ON n (r, v);",
+		},
+	)
+	ca := db.query(d, "SELECT a FROM t WHERE a = 10 ORDER BY a;")
+	testing.expect(t, ca.ok, "int covering succeeds")
+	testing.expect_value(t, len(ca.rows), 2)
+	for row in ca.rows {
+		v, is_int := row[0].(i64)
+		testing.expect(t, is_int, "covering projects INTEGER")
+		if is_int {
+			testing.expect_value(t, v, 10)
+		}
+	}
+
+	cr := db.query(d, "SELECT r FROM n WHERE r = 1.5 ORDER BY r;")
+	testing.expect(t, cr.ok, "real covering succeeds")
+	testing.expect_value(t, len(cr.rows), 2)
+	for row in cr.rows {
+		v, is_real := row[0].(f64)
+		testing.expect(t, is_real, "covering projects REAL")
+		if is_real {
+			testing.expect_value(t, v, 1.5)
+		}
+	}
+
+	// Unbound projection, wide projection, and ranges fetch.
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a FROM t WHERE a = 10;"),
+		"INDEX SCAN ON t USING a,b (composite, covering)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT b FROM t WHERE a = 10;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b FROM t WHERE a = 10;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a FROM t WHERE a > 5;"),
+		"INDEX SCAN ON t USING a,b (composite, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT r FROM n WHERE r = 1.5;"),
+		"INDEX SCAN ON n USING r,v (composite, covering)",
+	)
+	fb := db.query(d, "SELECT b FROM t WHERE a = 10 ORDER BY b;")
+	testing.expect(t, fb.ok, "fetch succeeds")
+	testing.expect_value(t, len(fb.rows), 2)
+}
+
+@(test)
 test_index_composite_three_col :: proc(t: ^testing.T) {
 	// Three columns: full binds route exact, leading pairs route prefix,
 	// middle gaps degrade to the bound prefix (the gap rides the recheck),
@@ -463,6 +756,15 @@ test_index_composite_twin :: proc(t: ^testing.T) {
 		"SELECT a, b, v FROM t WHERE b = 'alpha';",
 		"SELECT a, b, v FROM t WHERE a = 7 AND b = 'missing';",
 		"SELECT a, b, v FROM t WHERE a = 7 OR b = 'alpha';",
+		"SELECT a, b, v FROM t WHERE (a = 7 AND b = 'alpha') OR (a = -5 AND b = 'bb');",
+		"SELECT a, b, v FROM t WHERE a IN (7, -5) AND b = 'alpha';",
+		"SELECT a, b, v FROM t WHERE a IN (7, -5);",
+		"SELECT a FROM t WHERE a = 7 ORDER BY a;",
+		"SELECT a FROM t WHERE a = 7 AND b = 'alpha' ORDER BY a;",
+		"SELECT a, b, v FROM t WHERE a > 5;",
+		"SELECT a, b, v FROM t WHERE a >= 7 AND a <= 24;",
+		"SELECT a, b, v FROM t WHERE a > 5 AND b = 'alpha';",
+		"SELECT a, b, v FROM t WHERE a = 7 AND a > 0;",
 		"SELECT a, b, v FROM t WHERE a = 7 LIMIT 5;",
 		"SELECT a, b, v FROM t WHERE a = 7 AND b = 'alpha' ORDER BY v DESC LIMIT 3;",
 		"SELECT rowid FROM t WHERE a = 7 AND b = 'bb' ORDER BY rowid;",

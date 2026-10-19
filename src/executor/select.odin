@@ -164,7 +164,7 @@ fetch_single_rows :: proc(
 		}
 		if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias);
 		   idx_ok && covering_known_values(plan) && is_covering_col_select(stmt, plan) {
-			return fetch_covering_col(t, &tbl, plan, plan.column, from_name, allocator)
+			return fetch_covering_col(t, &tbl, plan, stmt.columns[0], from_name, allocator)
 		}
 		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
 			rows, f_ok := fetch_index_rows(

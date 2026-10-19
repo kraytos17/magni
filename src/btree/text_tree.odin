@@ -1402,6 +1402,48 @@ text_find_prefix :: proc(
 	return text_scan_leaf_run(t, leaf_id, &path, prefix, .Prefix)
 }
 
+// text_leftmost_leaf drills from root to its leftmost leaf, recording the
+// spine in path. Shared drill behind unbounded scans (scalar ranges
+// without lo, composite leading ranges): identical pin discipline to the
+// descent path (every loaded node unpinned on all paths).
+@(private = "file")
+text_leftmost_leaf :: proc(
+	t: ^Tree,
+	root: u32,
+	path: ^[dynamic]Text_Path_Item,
+) -> (
+	leaf: u32,
+	err: Error,
+) {
+	root_node := load_node(t, root) or_return
+	if is_leaf(root_node) {
+		if !is_index_leaf_type(root_node.header.page_type) {
+			unpin_node(t, root_node)
+			return 0, .Invalid_Page_Header
+		}
+
+		unpin_node(t, root_node)
+		return root, .None
+	}
+	if !is_index_interior_type(root_node.header.page_type) {
+		unpin_node(t, root_node)
+		return 0, .Invalid_Page_Header
+	}
+
+	child, c_err := text_interior_child_at(root_node.data, Page_Id(root_node.id), 0)
+	unpin_node(t, root_node)
+	if c_err != .None {
+		return 0, c_err
+	}
+
+	append(path, Text_Path_Item{page_id = root, child_idx = 0})
+	drilled, drill_ok := text_drill_leftmost(t, child, path)
+	if !drill_ok {
+		return 0, .Invalid_Cell_Pointer
+	}
+	return drilled, .None
+}
+
 // index_scan_range collects the rowids of every entry in [lo, hi] under the
 // tree's kind order (BINARY for text, numeric for int), with per-side
 // inclusivity. Either side may be absent (open-ended half-scan). Raw-level
@@ -1443,34 +1485,11 @@ index_scan_range :: proc(
 		}
 		leaf_id = leaf
 	} else {
-		root_node := load_node(t, root) or_return
-		if is_leaf(root_node) {
-			if !is_index_leaf_type(root_node.header.page_type) {
-				unpin_node(t, root_node)
-				return nil, .Invalid_Page_Header
-			}
-
-			leaf_id = root
-			unpin_node(t, root_node)
-		} else {
-			if !is_index_interior_type(root_node.header.page_type) {
-				unpin_node(t, root_node)
-				return nil, .Invalid_Page_Header
-			}
-
-			child, c_err := text_interior_child_at(root_node.data, Page_Id(root_node.id), 0)
-			unpin_node(t, root_node)
-			if c_err != .None {
-				return nil, c_err
-			}
-
-			append(&path, Text_Path_Item{page_id = root, child_idx = 0})
-			leaf, drill_ok := text_drill_leftmost(t, child, &path)
-			if !drill_ok {
-				return nil, .Invalid_Cell_Pointer
-			}
-			leaf_id = leaf
+		leaf, l_err := text_leftmost_leaf(t, root, &path)
+		if l_err != .None {
+			return nil, l_err
 		}
+		leaf_id = leaf
 	}
 
 	out := make([dynamic]types.Row_ID, 0, 8, context.temp_allocator)
@@ -1517,6 +1536,155 @@ index_scan_range :: proc(
 			}
 			if has_hi {
 				if c := cell.bytes_compare(full, hi_raw); c > 0 || (c == 0 && !hi_inc) {
+					stopped = true
+					break
+				}
+			}
+
+			append(&out, rid)
+			i += 1
+		}
+
+		unpin_node(t, node)
+		if stopped || i < count {
+			break
+		}
+
+		next, adv_ok := text_advance_path(t, &path)
+		if !adv_ok {
+			return nil, .Invalid_Cell_Pointer
+		}
+		curr = next
+	}
+	return out[:], .None
+}
+
+// comp_lead_payload returns full's leading-component payload: the bounds-
+// checked slice behind composite leading comparisons (kind + len header,
+// then the value word or text bytes). Malformed entries fail closed to
+// the caller (loud query failure, never silent row loss).
+@(private = "file")
+comp_lead_payload :: proc(full: []u8) -> (payload: []u8, ok: bool) {
+	if len(full) < cell.COMPOSITE_COMP_HDR_LEN {
+		return nil, false
+	}
+
+	elen := int(endian.unchecked_get_u32be(full[1:5]))
+	if len(full) < cell.COMPOSITE_COMP_HDR_LEN + elen {
+		return nil, false
+	}
+	return full[cell.COMPOSITE_COMP_HDR_LEN:cell.COMPOSITE_COMP_HDR_LEN + elen], true
+}
+
+// composite_scan_leading collects the rowids whose leading component lies
+// in [lo, hi] (per-side inclusivity, either side open). lo/hi are framed
+// single-component bounds of the index's leading kind; entries compare on
+// the leading payload only (same kind both sides, so payload order is
+// value order). The index_scan_range skeleton with component bounds:
+// single descend, lower-bound start, per-entry checks on every leaf (an
+// exclusive lo straddling a leaf boundary still skips), stop past hi.
+@(require_results)
+composite_scan_leading :: proc(
+	t: ^Tree,
+	root: u32,
+	lo: []u8,
+	hi: []u8,
+	has_lo: bool,
+	has_hi: bool,
+	lo_inc: bool,
+	hi_inc: bool,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	lo_pay: []u8
+	hi_pay: []u8
+	if has_lo {
+		p, pok := comp_lead_payload(lo)
+		if !pok {
+			return nil, .Serialization_Failed
+		}
+		lo_pay = p
+	}
+	if has_hi {
+		p, pok := comp_lead_payload(hi)
+		if !pok {
+			return nil, .Serialization_Failed
+		}
+
+		hi_pay = p
+		if has_lo {
+			if c := cell.bytes_compare(lo_pay, hi_pay); c > 0 || (c == 0 && !(lo_inc && hi_inc)) {
+				return nil, .None
+			}
+		}
+	}
+
+	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	leaf_id := u32(0)
+	if has_lo {
+		leaf, d_err := text_descend_to_leaf(t, root, .Composite, lo, &path)
+		if d_err != .None {
+			return nil, d_err
+		}
+		leaf_id = leaf
+	} else {
+		leaf, l_err := text_leftmost_leaf(t, root, &path)
+		if l_err != .None {
+			return nil, l_err
+		}
+		leaf_id = leaf
+	}
+
+	out := make([dynamic]types.Row_ID, 0, 8, context.temp_allocator)
+	first_round := true
+	curr := leaf_id
+	for curr != 0 {
+		node := load_node(t, curr) or_return
+		page_prefix, p_err := text_prefix(node.data, Page_Id(node.id))
+		if p_err != .None {
+			unpin_node(t, node)
+			return nil, p_err
+		}
+
+		count := int(node.header.cell_count)
+		start := 0
+		if first_round {
+			first_round = false
+			if has_lo {
+				lo_rid := min(types.Row_ID) if lo_inc else max(types.Row_ID)
+				idx, lb_err := text_lower_bound(node.data, Page_Id(node.id), lo, lo_rid)
+				if lb_err != .None {
+					unpin_node(t, node)
+					return nil, lb_err
+				}
+				start = idx
+			}
+		}
+
+		stopped := false
+		i := start
+		for i < count {
+			suf, rid, k_err := text_entry_at(node.data, Page_Id(node.id), i)
+			if k_err != .None {
+				unpin_node(t, node)
+				return nil, k_err
+			}
+
+			full := text_concat_full(page_prefix, suf)
+			lead, lok := comp_lead_payload(full)
+			if !lok {
+				unpin_node(t, node)
+				return nil, .Cell_Deserialize_Failed
+			}
+			if has_lo {
+				if c := cell.bytes_compare(lead, lo_pay); c < 0 || (c == 0 && !lo_inc) {
+					i += 1
+					continue
+				}
+			}
+			if has_hi {
+				if c := cell.bytes_compare(lead, hi_pay); c > 0 || (c == 0 && !hi_inc) {
 					stopped = true
 					break
 				}

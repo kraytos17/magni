@@ -27,10 +27,14 @@ DROP INDEX i_title ON docs;
   REAL while fetch preserves classes.
 - Composite `CREATE INDEX i ON t (a, b)` indexes the tuple: components
   sort in order, then rowid; a NULL anywhere skips the tuple. Eq on all
-  columns answers exact; Eq on the leading column answers a prefix scan
-  (later gaps ride the fetch recheck); anything else on non-leading
-  columns stays on scan. Composite plans are fetch-only (covering needs
-  the row); `SELECT rowid` still covers.
+  columns answers exact; Eq on the leading column answers a prefix scan;
+  leading-column ranges answer bounded scans (tightened pairs, Eq
+  dominating); OR of ANDs unions exact composite scans; leading IN with
+  bound trailing Eqs expands to a union of full lookups (bare leading
+  IN unions prefix scans); later gaps ride
+  the fetch recheck. Single leading-Eq composite plans cover bound
+  columns (decoded with column types); wider, unbound, and ranged
+  projections fetch. `SELECT rowid` still covers.
 - `DROP INDEX` clears the definition atomically. Data is untouched;
   routed shapes fall back to full scan with identical results (covering
   `SELECT rowid` / `SELECT <indexed-col>` answer from data pages instead

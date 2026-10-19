@@ -254,3 +254,47 @@ composite_shared_prefix :: #force_inline proc "contextless" (
 	}
 	return n
 }
+
+// composite_decode_col extracts the idx-th component of a framed key
+// (full tuple or leading run) as a Value: text borrows the key bytes,
+// scalars decode by value. False on malformed keys or out-of-range idx —
+// the covering path fails loudly rather than projecting garbage.
+// Not contextless (constructs Values); runs once per covering plan,
+// never per row.
+composite_decode_col :: proc(key: []u8, idx: int) -> (val: types.Value, ok: bool) {
+	pos := 0
+	for _ in 0 ..< idx {
+		if len(key) - pos < COMPOSITE_COMP_HDR_LEN {
+			return {}, false
+		}
+
+		elen := int(endian.unchecked_get_u32be(key[pos + 1:pos + 5]))
+		pos += COMPOSITE_COMP_HDR_LEN + elen
+	}
+	if len(key) - pos < COMPOSITE_COMP_HDR_LEN {
+		return {}, false
+	}
+
+	kind := key[pos]
+	elen := int(endian.unchecked_get_u32be(key[pos + 1:pos + 5]))
+	if len(key) - pos - COMPOSITE_COMP_HDR_LEN < elen {
+		return {}, false
+	}
+
+	payload := key[pos + COMPOSITE_COMP_HDR_LEN:pos + COMPOSITE_COMP_HDR_LEN + elen]
+	switch kind {
+	case TEXT_INDEX_TAG:
+		return types.value(string(payload)), true
+	case INT_INDEX_TAG:
+		if len(payload) != 8 {
+			return {}, false
+		}
+		return types.value(i64(endian.unchecked_get_u64be(payload)) ~ min(i64)), true
+	case REAL_INDEX_TAG:
+		if len(payload) != 8 {
+			return {}, false
+		}
+		return types.value(real_index_decode_value(payload)), true
+	}
+	return {}, false
+}

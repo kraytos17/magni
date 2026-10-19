@@ -543,7 +543,7 @@ fetch_single_rows_vec :: proc(
 				t,
 				&tbl,
 				plan,
-				plan.column,
+				stmt.columns[0],
 				from_name,
 				allocator,
 			)
