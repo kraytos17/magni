@@ -16,22 +16,24 @@ Page_Type :: enum u8 {
 	TEXT_INTERIOR  = 17, // Interior node: full-key text separators + u32le children
 	LEAF_INT       = 18, // Leaf node: prefix-compressed secondary int index
 	INT_INTERIOR   = 19, // Interior node: full-key int separators + u32le children
+	LEAF_REAL      = 20, // Leaf node: prefix-compressed secondary real index
+	REAL_INTERIOR  = 21, // Interior node: full-key real separators + u32le children
 }
 
 // is_index_leaf_type / is_index_interior_type report secondary-index pages
-// (text or int kind): shared prefix-compressed geometry with per-page kind
+// (text, int, or real kind): shared prefix-compressed geometry with per-page kind
 // from layout_for_page. New index kinds extend these predicates, not the
 // call sites.
 @(private)
 is_index_leaf_type :: proc "contextless" (pt: Page_Type) -> bool {
-	return pt == .LEAF_TEXT || pt == .LEAF_INT
+	return pt == .LEAF_TEXT || pt == .LEAF_INT || pt == .LEAF_REAL
 }
 
 // is_index_interior_type reports secondary-index interior pages; see
 // is_index_leaf_type.
 @(private)
 is_index_interior_type :: proc "contextless" (pt: Page_Type) -> bool {
-	return pt == .TEXT_INTERIOR || pt == .INT_INTERIOR
+	return pt == .TEXT_INTERIOR || pt == .INT_INTERIOR || pt == .REAL_INTERIOR
 }
 
 // index_kind_of_page maps a secondary-index page type to its Key_Kind for
@@ -44,6 +46,8 @@ index_kind_of_page :: proc "contextless" (pt: Page_Type) -> (Key_Kind, bool) {
 		return .Text, true
 	case .LEAF_INT, .INT_INTERIOR:
 		return .Int, true
+	case .LEAF_REAL, .REAL_INTERIOR:
+		return .Real, true
 	case .INTERIOR_DENSE, .LEAF_SLOTDIR:
 		return .Text, false
 	}
@@ -83,9 +87,15 @@ page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> i
 	switch page_type {
 	case .INTERIOR_DENSE:
 		sz = size_of(Dense_Interior_Header)
-	case .LEAF_SLOTDIR, .LEAF_TEXT, .TEXT_INTERIOR, .LEAF_INT, .INT_INTERIOR:
-	// LEAF_TEXT/LEAF_INT carry a variable prefix past the stock header
-	// (text_entry_area_end owns that math); TEXT_INTERIOR/INT_INTERIOR
+	case .LEAF_SLOTDIR,
+	     .LEAF_TEXT,
+	     .TEXT_INTERIOR,
+	     .LEAF_INT,
+	     .INT_INTERIOR,
+	     .LEAF_REAL,
+	     .REAL_INTERIOR:
+	// LEAF_TEXT/LEAF_INT/LEAF_REAL carry a variable prefix past the stock header
+	// (text_entry_area_end owns that math); TEXT_INTERIOR/INT_INTERIOR/REAL_INTERIOR
 	// carry children + sep slots past it (interior geometry procs own it).
 	}
 	return sz

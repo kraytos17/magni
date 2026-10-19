@@ -40,7 +40,7 @@ CREATE TABLE users (
 -- Drop table
 DROP TABLE users;
 
--- Secondary indexes (single-column TEXT/INTEGER, several per table;
+-- Secondary indexes (single-column TEXT/INTEGER/REAL, several per table;
 -- BINARY collation for text, NULLs not indexed; DROP INDEX <name> [ON <table>])
 CREATE INDEX i_name ON users (name);
 DROP INDEX i_name;
@@ -151,7 +151,7 @@ ROLLBACK;
 | Area | Capabilities |
 |---|---|
 | **SQL** | CREATE/DROP/INSERT/SELECT/UPDATE/DELETE, CREATE INDEX / DROP INDEX (single-column TEXT, several per table), WHERE (full boolean expressions with AND/OR precedence, parentheses, NOT/NOT IN/NOT LIKE, IS [NOT] NULL), BETWEEN, covering `SELECT rowid` / `SELECT <indexed-col>`, column aliases (AS and bare identifier), multi-row INSERT VALUES, JOINs (INNER/LEFT/RIGHT/CROSS, ON and USING), GROUP BY/HAVING, ORDER BY (multi-column, NULLS FIRST/LAST), LIMIT/OFFSET, DISTINCT, subqueries, set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]), FROM-less literal SELECTs, aggregates (COUNT/SUM/AVG/MIN/MAX), CHECK/UNIQUE/FOREIGN KEY constraints, EXPLAIN (plan output), transactions, hex literals |
-| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-descent UPDATE (lookup, then delete + re-insert in one root-to-leaf pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **V3-only page format** (dense interiors, slotdir leaves, prefix-compressed secondary index pages (text and int kinds); older stamps rejected, migrate via dump/reimport). Secondary indexes (single-column TEXT/INTEGER, several per table, BINARY collation for text, NULL-not-indexed). **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **Space reclamation** via `.vacuum` — rebuilds tables and indexes into densely packed pages (COW-safe; delete paths do not merge leaves automatically). **Row count tracking** with fast `COUNT(*)` via incremental cache. |
+| **Storage** | Copy-on-write B+tree — every mutation creates new pages along the path; old pages persist for time-travel. Single-descent UPDATE (lookup, then delete + re-insert in one root-to-leaf pass). SQLite-compatible row format with varint encoding. Freeblock chain reuses deleted cell space. **V3-only page format** (dense interiors, slotdir leaves, prefix-compressed secondary index pages (text, int, and real kinds); older stamps rejected, migrate via dump/reimport). Secondary indexes (single-column TEXT/INTEGER/REAL, several per table, BINARY collation for text, NULL-not-indexed). **Schema catalog cache** — lazy per-table cache invalidated by schema-root version. **Space reclamation** via `.vacuum` — rebuilds tables and indexes into densely packed pages (COW-safe; delete paths do not merge leaves automatically). **Row count tracking** with fast `COUNT(*)` via incremental cache. |
 | **Time-Travel** | Append-only snapshot chain. Query data `AS OF SNAPSHOT <id>` or `AS OF TIMESTAMP <micros>`. Restore to any historical state. Diff two snapshots. Tag snapshots with labels. Rollforward log. |
 | **WAL** | Write-ahead log with sequential append and single `fsync` per commit. Commit/abort iterate only the dirtied-page list instead of scanning the whole page cache. Crash recovery replays committed frames; corrupt frames (bad XXH64 checksum, format v2) are skipped. Checkpoint flushes WAL frames back to the main file; auto-checkpoint (`--wal-size-threshold`) reclaims the WAL proactively once it grows past a frame budget. |
 | **Line Editor** | Raw-mode REPL with arrow-key navigation, history (Up/Down), Ctrl-R incremental reverse search (results shown below prompt, wraps around), Ctrl-T transpose, Ctrl-L clear screen, Ctrl-Z multi-level undo, Tab dot-command and SQL keyword completion with table/column name support, bracketed paste, SIGWINCH-aware wrap-correct redraw with CJK support. Falls back to `bufio.Reader` on non-TTY input. |
@@ -301,13 +301,14 @@ src/
 ├── script.odin            Script/pipe execution (statement loop over sqltext)
 ├── paths.odin             Path helpers
 ├── btree/                 COW B+tree (V3-only): dense interiors, slotdir leaves,
-│                          secondary indexes (text/int kinds: leaves/interiors,
-│                          inserts/deletes/splits, prefix scans on text),
+│                          secondary indexes (text/int/real kinds:
+│                          leaves/interiors, inserts/deletes/splits,
+│                          prefix scans on text),
 │                          cursor, split, skip index, vacuum
 │                          (data + index rebuilds), page format registry,
 │                          COW helpers, stats
 ├── cell/                  Row/cell serialization: SQLite varint, row codec,
-│                          secondary index codecs (text/int)
+│                          secondary index codecs (text/int/real)
 ├── db/                    Database handle: open/close, execute/query (shared AS OF
 │                          prologue + result packing), snapshots, transactions,
 │                          programmatic Query_Result API
@@ -383,7 +384,7 @@ Requires Odin (see [odin-lang.org](https://odin-lang.org)).
 
 ## Limitations
 
-- Secondary indexes are single-column TEXT/INTEGER (BINARY collation for text, NULLs not indexed, several per table, `DROP INDEX <name> [ON <table>]`); equality and literal `IN` (up to 128 members) route in the column's type, canonical `LIKE 'stem%'` routes on TEXT, plus flat-OR unions and multi-conjunct AND intersections — everything else scans (see `docs/indexing.md`)
+- Secondary indexes are single-column TEXT/INTEGER/REAL (BINARY collation for text, NULLs not indexed, several per table, `DROP INDEX <name> [ON <table>]`); equality, literal `IN` (up to 128 members), and ordered comparisons route in the column's type, canonical `LIKE 'stem%'` routes on TEXT, plus flat-OR unions and multi-conjunct AND intersections — everything else scans (see `docs/indexing.md`)
 - No `FOREIGN KEY` enforcement on INSERT/UPDATE (validated at CREATE TABLE time)
 - `CHECK` expression limited to simple integer comparisons (col > 0, col < 100, >=, <=, =, !=)
 - `UNIQUE` is single- or multi-column (`UNIQUE (a, b)`); NULLs never match so multiple NULLs coexist; non-`INTEGER` PRIMARY KEYs imply `UNIQUE` but don't alias the rowid

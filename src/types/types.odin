@@ -341,7 +341,7 @@ hash :: proc {
 }
 
 // Index_Def is one secondary index: covering column->rowid over a single
-// TEXT or INTEGER column (kind in col_type). Names are unique per table
+// TEXT, INTEGER, or REAL column (kind in col_type). Names are unique per table
 // (may repeat across tables); DROP INDEX <name> needs a unique match or
 // ON <table>. col_type is always resolved, never stored: table_from_values
 // tags it from the column definition (unknown column ⇒ root cleared,

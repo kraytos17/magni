@@ -296,6 +296,82 @@ test_int_codec_roundtrip_and_order :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_real_codec_roundtrip_and_order :: proc(t: ^testing.T) {
+	// Round-trip incl -0.0 normalization (decodes as +0.0, matching
+	// cmp_f64), infinities, and negative rowids; fixed 17-byte width.
+	vals := []f64{-1e308, -257.5, -1, -0.0, 0, 1, 257.5, 1e308}
+	for v, i in vals {
+		buf: [32]u8
+		n, ok := cell.real_index_encode(types.value(v), types.Row_ID(i64(i) - 3), buf[:])
+		testing.expect(t, ok, "real encodes")
+		testing.expect_value(t, n, 17)
+		testing.expect(t, n == cell.real_index_encoded_len(types.value(v)), "len matches")
+		dv, dr, dok := cell.real_index_decode(buf[:n])
+		testing.expect(t, dok, "decode succeeds")
+		testing.expect_value(t, transmute(u64)dv, transmute(u64)(v if v != 0 else 0))
+		testing.expect_value(t, dr, types.Row_ID(i64(i) - 3))
+	}
+	pos_inf := transmute(f64)u64(0x7ff0000000000000)
+	neg_inf := transmute(f64)u64(0xfff0000000000000)
+	nan := transmute(f64)u64(0x7ff8000000000000)
+	ibuf: [32]u8
+	in_, iok := cell.real_index_encode(types.value(pos_inf), 1, ibuf[:])
+	testing.expect(t, iok && in_ == 17, "infinities encode")
+	testing.expect(t, !cell.real_index_encodable(nan), "NaN not encodable")
+
+	// Exact-length decode: truncation and trailing garbage fail loudly.
+	full := make([]u8, 32, context.temp_allocator)
+	fn, _ := cell.real_index_encode(types.value(4.5), 7, full)
+	_, _, tok := cell.real_index_decode(full[:fn - 1])
+	testing.expect(t, !tok, "truncation fails")
+	_, _, gok := cell.real_index_decode(full[:fn + 1])
+	testing.expect(t, !gok, "trailing garbage fails")
+
+	// Non-f64 storage classes and NaN are not indexed.
+	blob := make([]u8, 2, context.temp_allocator)
+	testing.expect_value(t, cell.real_index_encoded_len(types.value("x")), 0)
+	testing.expect_value(t, cell.real_index_encoded_len(types.value()), 0)
+	testing.expect_value(t, cell.real_index_encoded_len(types.value(7)), 0)
+	testing.expect_value(t, cell.real_index_encoded_len(types.value(blob)), 0)
+	testing.expect_value(t, cell.real_index_encoded_len(types.value(nan)), 0)
+	scratch: [32]u8
+	_, sok := cell.real_index_encode(types.value("x"), 1, scratch[:])
+	testing.expect(t, !sok, "text does not encode into real index")
+	_, nok := cell.real_index_encode(types.value(nan), 1, scratch[:])
+	testing.expect(t, !nok, "NaN does not encode")
+
+	// Order: numeric value first (-Inf < finite < +Inf, -0.0 == +0.0),
+	// rowid tiebreak.
+	enc := proc(v: f64, r: i64) -> []u8 {
+		b := make([]u8, 32, context.temp_allocator)
+		n, ok := cell.real_index_encode(types.value(v), types.Row_ID(r), b)
+		assert(ok)
+		return b[:n]
+	}
+	testing.expect(t, cell.real_index_compare(enc(neg_inf, 0), enc(-1e308, 0)) < 0, "-Inf sorts first")
+	testing.expect(t, cell.real_index_compare(enc(1e308, 0), enc(pos_inf, 0)) < 0, "+Inf sorts last")
+	testing.expect(t, cell.real_index_compare(enc(-1, 9), enc(0, 0)) < 0, "negative sorts first")
+	testing.expect_value(t, cell.real_index_compare(enc(-0.0, 4), enc(0, 4)), 0)
+	testing.expect(t, cell.real_index_compare(enc(5.5, -5), enc(5.5, 3)) < 0, "rowid tiebreak")
+	testing.expect_value(t, cell.real_index_compare(enc(7.25, 2), enc(7.25, 2)), 0)
+
+	// Same surface through the static Key_Kind dispatch.
+	rkey := btree.Key_Kind.Real
+	rb := make([]u8, 32, context.temp_allocator)
+	rn, rok := btree.key_encode(rkey, types.value(1.5), 9, rb)
+	testing.expect(t, rok && rn == 17, "static dispatch encodes")
+	testing.expect_value(t, btree.key_encoded_len(rkey, types.value("x")), 0)
+	_, rkok := btree.key_encode(rkey, types.value("x"), 9, rb)
+	testing.expect(t, !rkok, "static dispatch skips non-real")
+	testing.expect(
+		t,
+		btree.key_compare(rkey, enc(-5.5, 1), enc(3.25, 2)) < 0,
+		"static dispatch compares",
+	)
+	testing.expect_value(t, btree.key_shared_prefix_len(rkey, enc(1.5, 1), enc(1.5, 2), 99), 16)
+}
+
+@(test)
 test_int_page_types_resolve :: proc(t: ^testing.T) {
 	leaf := make([]u8, btree.PAGE_SIZE, context.temp_allocator)
 	testing.expect(t, btree.init_int_leaf_page(leaf, 2), "int leaf inits")

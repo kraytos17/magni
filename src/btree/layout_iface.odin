@@ -84,17 +84,19 @@ Page_Layout_VTable :: struct {
 }
 
 // Key_Kind selects the codec; the key_* procs below dispatch statically.
-// Rowid arms live here; Text and Int arms delegate to cell/text_codec.odin
-// and cell/int_codec.odin (single implementation, no wrapper layer).
+// Rowid arms live here; Text, Int, and Real arms delegate to
+// cell/text_codec.odin, cell/int_codec.odin, and cell/real_codec.odin
+// (single implementation, no wrapper layer).
 Key_Kind :: enum u8 {
 	Rowid,
 	Text,
 	Int,
+	Real,
 }
 
 // key_compare orders two ENCODED keys (-1/0/+1): numeric rowid order for
 // Rowid pages, (text BINARY, rowid) for Text pages, (value numeric, rowid)
-// for Int pages. Raw (unencoded) text is
+// for Int pages, (value numeric, rowid) for Real pages. Raw (unencoded) text is
 // not its input. One entry point on purpose: order and layout share the
 // encoding, so a second entry would be speculative duplication — split them
 // if an encoding ever divorces order from layout.
@@ -107,6 +109,8 @@ key_compare :: #force_inline proc "contextless" (kind: Key_Kind, a: []u8, b: []u
 		res = cell.text_index_compare(a, b)
 	case .Int:
 		res = cell.int_index_compare(a, b)
+	case .Real:
+		res = cell.real_index_compare(a, b)
 	}
 	return res
 }
@@ -127,14 +131,16 @@ key_shared_prefix_len :: #force_inline proc "contextless" (
 		res = cell.text_index_shared_prefix(a, b, max_cap)
 	case .Int:
 		res = cell.int_index_shared_prefix(a, b, max_cap)
+	case .Real:
+		res = cell.real_index_shared_prefix(a, b, max_cap)
 	}
 	return res
 }
 
 // key_encode maps (value,rowid) -> key bytes, returning bytes written.
 // Only the codec's own storage class encodes (i64 for Rowid and Int,
-// string for Text); everything else — including NULL — reports ok=false so
-// the caller SKIPS the entry instead of failing the row.
+// string for Text, f64 for Real); everything else — including NULL —
+// reports ok=false so the caller SKIPS the entry instead of failing the row.
 @(require_results)
 key_encode :: proc "contextless" (
 	kind: Key_Kind,
@@ -153,6 +159,8 @@ key_encode :: proc "contextless" (
 		n, ok = cell.text_index_encode(val, rowid, buf)
 	case .Int:
 		n, ok = cell.int_index_encode(val, rowid, buf)
+	case .Real:
+		n, ok = cell.real_index_encode(val, rowid, buf)
 	}
 	return n, ok
 }
@@ -168,6 +176,8 @@ key_encoded_len :: #force_inline proc "contextless" (kind: Key_Kind, val: types.
 		res = cell.text_index_encoded_len(val)
 	case .Int:
 		res = cell.int_index_encoded_len(val)
+	case .Real:
+		res = cell.real_index_encoded_len(val)
 	}
 	return res
 }
@@ -210,14 +220,7 @@ ROWID_INDEX_ENCODED_LEN :: 9 // tag + 8-byte biased word
 #assert(ROWID_INDEX_ENCODED_LEN == 1 + 8)
 
 @(private = "file")
-rowid_encode :: proc "contextless" (
-	val: types.Value,
-	rowid: types.Row_ID,
-	buf: []u8,
-) -> (
-	int,
-	bool,
-) {
+rowid_encode :: proc "contextless" (val: types.Value, _: types.Row_ID, buf: []u8) -> (int, bool) {
 	v, ok := val.(i64)
 	if intrinsics.unlikely(!ok) {
 		return 0, false
@@ -228,10 +231,6 @@ rowid_encode :: proc "contextless" (
 
 	buf[0] = 0x52 // 'R': rowid tag, reserves tag space for composite keys
 	w := rowid_encode_u64(types.Row_ID(v))
-	// rowid is interface-mandated (Text arms need the tiebreak) but unused
-	// here: for Rowid pages the key IS the value, unique by construction.
-	_ = rowid
-
 	endian.unchecked_put_u64be(buf[1:ROWID_INDEX_ENCODED_LEN], w)
 	return ROWID_INDEX_ENCODED_LEN, true
 }
@@ -699,6 +698,10 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 		return prefix_leaf_layout(), .Int, .None
 	case .INT_INTERIOR:
 		return prefix_interior_layout(), .Int, .None
+	case .LEAF_REAL:
+		return prefix_leaf_layout(), .Real, .None
+	case .REAL_INTERIOR:
+		return prefix_interior_layout(), .Real, .None
 	case:
 		return {}, {}, .Invalid_Page_Header
 	}

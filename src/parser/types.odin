@@ -69,7 +69,7 @@ Create_Stmt :: struct {
 }
 
 // Create_Index_Stmt is `CREATE INDEX name ON table (column)`: single-column
-// indexes over TEXT columns only (enforced in exec_create_index).
+// indexes over TEXT/INTEGER/REAL columns (enforced in exec_create_index).
 Create_Index_Stmt :: struct {
 	index_name: string,
 	table_name: string,

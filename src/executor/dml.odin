@@ -85,7 +85,7 @@ exec_create :: proc(
 }
 
 // exec_create_index implements `CREATE INDEX name ON table (column)` —
-// single-column TEXT/INTEGER indexes. Validates, allocates an empty index
+// single-column TEXT/INTEGER/REAL indexes. Validates, allocates an empty index
 // root of the column's kind, bulk-backfills existing rows, then publishes
 // root + column atomically (readers never see a half index). DDL publishes
 // immediately like exec_create (even in-txn, with reoverlay after).
@@ -111,10 +111,11 @@ exec_create_index :: proc(
 		log.errorf("Error: Column does not exist: %s.%s", stmt.table_name, stmt.column)
 		return false, t.root, {}
 	}
+
 	col_type := table.columns[col_idx].type
-	if col_type != .TEXT && col_type != .INTEGER {
+	if col_type != .TEXT && col_type != .INTEGER && col_type != .REAL {
 		log.errorf(
-			"Error: Secondary index requires a TEXT or INTEGER column, got %s.%s",
+			"Error: Secondary index requires a TEXT, INTEGER, or REAL column, got %s.%s",
 			stmt.table_name,
 			stmt.column,
 		)
@@ -142,9 +143,12 @@ exec_create_index :: proc(
 	init_ok := false
 	if col_type == .TEXT {
 		init_ok = btree.init_text_leaf_page(root_page.data, root_page.page_num)
-	} else {
+	} else if col_type == .INTEGER {
 		init_ok = btree.init_int_leaf_page(root_page.data, root_page.page_num)
+	} else {
+		init_ok = btree.init_real_leaf_page(root_page.data, root_page.page_num)
 	}
+
 	if !init_ok {
 		log.error("Error: Failed to initialize index root page")
 		return false, t.root, {}
@@ -167,6 +171,7 @@ exec_create_index :: proc(
 	// same as before.
 	tpairs := make([dynamic]Text_Bulk_Pair, 0, 64, context.temp_allocator)
 	ipairs := make([dynamic]Int_Bulk_Pair, 0, 64, context.temp_allocator)
+	rpairs := make([dynamic]Real_Bulk_Pair, 0, 64, context.temp_allocator)
 	for cursor.is_valid {
 		c, get_err := btree.cursor_get_cell(&cursor, context.temp_allocator)
 		if get_err != .None {
@@ -184,8 +189,12 @@ exec_create_index :: proc(
 				}
 				append(&tpairs, Text_Bulk_Pair{text = owned, rid = c.rowid})
 			}
-		} else if v, is_int := c.values[col_idx].(i64); is_int {
-			append(&ipairs, Int_Bulk_Pair{val = v, rid = c.rowid})
+		} else if col_type == .INTEGER {
+			if v, is_int := c.values[col_idx].(i64); is_int {
+				append(&ipairs, Int_Bulk_Pair{val = v, rid = c.rowid})
+			}
+		} else if v, ok := index_col_real(table^, stmt.column, c.values); ok {
+			append(&rpairs, Real_Bulk_Pair{val = v, rid = c.rowid})
 		}
 
 		cell.destroy(&c, context.temp_allocator)
@@ -194,9 +203,9 @@ exec_create_index :: proc(
 	// Sort once (codec order), build once. Zero pairs keeps the
 	// pre-allocated empty leaf root, exactly as the per-row path which
 	// inserts nothing. The bulk builder infers the kind from the
-	// pre-stamped root above, so text and int share the build tail.
-	if len(tpairs) + len(ipairs) > 0 {
-		raws := make([][]u8, max(len(tpairs), len(ipairs)), context.temp_allocator)
+	// pre-stamped root above, so text, int, and real share the build tail.
+	if len(tpairs) + len(ipairs) + len(rpairs) > 0 {
+		raws := make([][]u8, max(len(tpairs), len(ipairs), len(rpairs)), context.temp_allocator)
 		rids := make([]types.Row_ID, len(raws), context.temp_allocator)
 		if col_type == .TEXT {
 			slice.sort_by(tpairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
@@ -209,7 +218,7 @@ exec_create_index :: proc(
 				raws[i] = transmute([]u8)p.text
 				rids[i] = p.rid
 			}
-		} else {
+		} else if col_type == .INTEGER {
 			slice.sort_by(ipairs[:], proc(a, b: Int_Bulk_Pair) -> bool {
 				if a.val != b.val {
 					return a.val < b.val
@@ -219,6 +228,22 @@ exec_create_index :: proc(
 			words := make([][8]u8, len(ipairs), context.temp_allocator)
 			for p, i in ipairs {
 				endian.unchecked_put_u64be(words[i][:], u64(p.val ~ min(i64)))
+				raws[i] = words[i][:]
+				rids[i] = p.rid
+			}
+		} else {
+			slice.sort_by(rpairs[:], proc(a, b: Real_Bulk_Pair) -> bool {
+				wa := cell.real_sort_word(a.val)
+				wb := cell.real_sort_word(b.val)
+				if wa != wb {
+					return wa < wb
+				}
+				return a.rid < b.rid
+			})
+
+			words := make([][8]u8, len(rpairs), context.temp_allocator)
+			for p, i in rpairs {
+				endian.unchecked_put_u64be(words[i][:], cell.real_sort_word(p.val))
 				raws[i] = words[i][:]
 				rids[i] = p.rid
 			}
@@ -751,6 +776,14 @@ Int_Bulk_Pair :: struct {
 	rid: types.Row_ID,
 }
 
+// Real_Bulk_Pair is one indexable (real, rowid) for bulk real builds.
+// NaN never appears (collect skips unencodable values, same as the
+// per-row fan-out), so sort-word order is total.
+Real_Bulk_Pair :: struct {
+	val: f64,
+	rid: types.Row_ID,
+}
+
 // collect_text_pairs projects one index's text values out of sorted infos,
 // skipping exactly what the per-row fan-out skips (same index_col_text
 // predicate, so NULLs and non-TEXT values never reach the index either way).
@@ -795,6 +828,34 @@ collect_int_pairs :: proc(
 	slice.sort_by(pairs[:], proc(a, b: Int_Bulk_Pair) -> bool {
 		if a.val != b.val {
 			return a.val < b.val
+		}
+		return a.rid < b.rid
+	})
+	return pairs
+}
+
+// collect_real_pairs projects one index's real values out of sorted infos,
+// skipping exactly what the per-row fan-out will skip (same index_col_real
+// predicate, so NULLs, NaN, and non-numerics never reach the index either
+// way; integers arrive widened).
+@(private = "file")
+collect_real_pairs :: proc(
+	table: types.Table,
+	column: string,
+	infos: []Insert_Row_Info,
+) -> [dynamic]Real_Bulk_Pair {
+	pairs := make([dynamic]Real_Bulk_Pair, 0, len(infos), context.temp_allocator)
+	for info in infos {
+		if v, ok := index_col_real(table, column, info.values); ok {
+			append(&pairs, Real_Bulk_Pair{val = v, rid = info.row_id})
+		}
+	}
+
+	slice.sort_by(pairs[:], proc(a, b: Real_Bulk_Pair) -> bool {
+		wa := cell.real_sort_word(a.val)
+		wb := cell.real_sort_word(b.val)
+		if wa != wb {
+			return wa < wb
 		}
 		return a.rid < b.rid
 	})
@@ -878,6 +939,45 @@ fanout_bulk_int :: proc(
 	return new_root, true
 }
 
+// fanout_bulk_real builds one fresh real index bottom-up from sorted pairs
+// (codec order: sort word, then rowid). Same empty contract as the int
+// twin; the bulk builder infers REAL from the pre-stamped root.
+@(private = "file")
+fanout_bulk_real :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	def: types.Index_Def,
+	index_root: u32,
+	pairs: [dynamic]Real_Bulk_Pair,
+) -> (
+	u32,
+	bool,
+) {
+	if len(pairs) == 0 {
+		return index_root, true
+	}
+
+	words := make([][8]u8, len(pairs), context.temp_allocator)
+	raws := make([][]u8, len(pairs), context.temp_allocator)
+	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
+	for p, i in pairs {
+		endian.unchecked_put_u64be(words[i][:], cell.real_sort_word(p.val))
+		raws[i] = words[i][:]
+		rids[i] = p.rid
+	}
+
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
+	if build_err != .None {
+		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		return index_root, false
+	}
+	if new_root == 0 {
+		return index_root, true
+	}
+	return new_root, true
+}
+
 // commit_bulk_inserts runs the shared bulk tail: text fan-out over sorted
 // infos (bottom-up build for fresh indexes, per-row loop otherwise), then
 // the same root/index commits as the row loop.
@@ -908,6 +1008,9 @@ commit_bulk_inserts :: proc(
 			if def.col_type == .INTEGER {
 				ipairs := collect_int_pairs(table, def.column, infos)
 				idx_roots[i], ok = fanout_bulk_int(t, table, def, idx_roots[i], ipairs)
+			} else if def.col_type == .REAL {
+				rpairs := collect_real_pairs(table, def.column, infos)
+				idx_roots[i], ok = fanout_bulk_real(t, table, def, idx_roots[i], rpairs)
 			} else {
 				pairs := collect_text_pairs(table, def.column, infos)
 				idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
@@ -2173,6 +2276,42 @@ index_col_int :: proc(
 	return v, true
 }
 
+// index_col_real extracts the indexed REAL value of a row: (0, false) when
+// the column is missing, short, or neither real nor integer (NULLs and other
+// classes never reach the index either way). Integers widen to f64 (SQLite
+// REAL-affinity semantics): filters compare numerics across classes, so an
+// int-stored row must be indexed under its widened key or Eq/Range would
+// miss it. Covering projections therefore normalize int-stored values to
+// the column's declared type; fetch paths preserve stored classes exactly.
+@(private = "file")
+index_col_real :: proc(
+	table: types.Table,
+	index_col: string,
+	values: []types.Value,
+) -> (
+	f64,
+	bool,
+) {
+	if len(index_col) == 0 {
+		return 0, false
+	}
+
+	col_idx, col_ok := schema.find_column_index(table.columns, index_col)
+	if !col_ok || col_idx < 0 || col_idx >= len(values) {
+		return 0, false
+	}
+	if v, is_real := values[col_idx].(f64); is_real {
+		if !cell.real_index_encodable(v) {
+			return 0, false
+		}
+		return v, true
+	}
+	if v, is_int := values[col_idx].(i64); is_int {
+		return f64(v), true
+	}
+	return 0, false
+}
+
 // fanout_insert_row indexes one inserted row. Returns the (possibly new)
 // index root — same threading contract as the data root beside it.
 @(private = "file")
@@ -2190,11 +2329,14 @@ fanout_insert_row :: proc(
 	text, ok := index_col_text(table, index_col, values)
 	if !ok {
 		if v, vok := index_col_int(table, index_col, values); vok {
-			return fanout_insert_int(t, table, index_root, v, rowid)
+			return fanout_insert(t, table, index_root, v, rowid)
+		}
+		if r, rok := index_col_real(table, index_col, values); rok {
+			return fanout_insert(t, table, index_root, r, rowid)
 		}
 		return index_root, true
 	}
-	return fanout_insert_text(t, table, index_root, text, rowid)
+	return fanout_insert(t, table, index_root, text, rowid)
 }
 
 // fanout_delete_text removes one entry, tolerating absence (a missing entry
@@ -2212,7 +2354,7 @@ fanout_delete_text :: proc(
 	bool,
 ) {
 	idx_tree := btree.init(t.pager, index_root)
-	new_root, del_err := btree.text_delete_cow(&idx_tree, transmute([]u8)text, rowid)
+	new_root, del_err := btree.delete_cow(&idx_tree, transmute([]u8)text, rowid)
 	if del_err != .None {
 		if del_err == .Cell_Not_Found {
 			log.infof("Index entry already absent for row %d.", rowid)
@@ -2239,7 +2381,7 @@ fanout_delete_int :: proc(
 	bool,
 ) {
 	idx_tree := btree.init(t.pager, index_root)
-	new_root, del_err := btree.int_delete_cow(&idx_tree, val, rowid)
+	new_root, del_err := btree.delete_cow(&idx_tree, val, rowid)
 	if del_err != .None {
 		if del_err == .Cell_Not_Found {
 			log.infof("Index entry already absent for row %d.", rowid)
@@ -2250,6 +2392,41 @@ fanout_delete_int :: proc(
 		return index_root, false
 	}
 	return new_root, true
+}
+
+// fanout_delete_real removes one real entry, tolerating absence like the
+// text twin (stale state, not a statement failure).
+@(private = "file")
+fanout_delete_real :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	val: f64,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, del_err := btree.delete_cow(&idx_tree, val, rowid)
+	if del_err != .None {
+		if del_err == .Cell_Not_Found {
+			log.infof("Index entry already absent for row %d.", rowid)
+			return index_root, true
+		}
+
+		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
+// fanout_delete selects the text/int/real twin by the value's static type.
+@(private = "file")
+fanout_delete :: proc {
+	fanout_delete_text,
+	fanout_delete_int,
+	fanout_delete_real,
 }
 
 // fanout_delete_rowid removes one row's index entry, looked up by rowid.
@@ -2277,11 +2454,14 @@ fanout_delete_rowid :: proc(
 	text, ok := index_col_text(table, index_col, old.values)
 	if !ok {
 		if v, vok := index_col_int(table, index_col, old.values); vok {
-			return fanout_delete_int(t, table, index_root, v, rowid)
+			return fanout_delete(t, table, index_root, v, rowid)
+		}
+		if r, rok := index_col_real(table, index_col, old.values); rok {
+			return fanout_delete(t, table, index_root, r, rowid)
 		}
 		return index_root, true
 	}
-	return fanout_delete_text(t, table, index_root, text, rowid)
+	return fanout_delete(t, table, index_root, text, rowid)
 }
 
 // fanout_update_row maintains the index across one UPDATE from explicit
@@ -2305,37 +2485,55 @@ fanout_update_row :: proc(
 	new_text, new_is_text := index_col_text(table, index_col, new_values)
 	old_int, old_is_int := index_col_int(table, index_col, old_values)
 	new_int, new_is_int := index_col_int(table, index_col, new_values)
+	old_real, old_is_real := index_col_real(table, index_col, old_values)
+	new_real, new_is_real := index_col_real(table, index_col, new_values)
 	if old_is_text == new_is_text &&
 	   old_is_int == new_is_int &&
+	   old_is_real == new_is_real &&
 	   (!old_is_text || old_text == new_text) &&
-	   (!old_is_int || old_int == new_int) {
+	   (!old_is_int || old_int == new_int) &&
+	   (!old_is_real || old_real == new_real) {
 		return index_root, true
 	}
 
 	cur := index_root
 	if old_is_text {
-		nr, ok := fanout_delete_text(t, table, cur, old_text, rowid)
+		nr, ok := fanout_delete(t, table, cur, old_text, rowid)
 		if !ok {
 			return index_root, false
 		}
 		cur = nr
 	}
 	if old_is_int {
-		nr, ok := fanout_delete_int(t, table, cur, old_int, rowid)
+		nr, ok := fanout_delete(t, table, cur, old_int, rowid)
+		if !ok {
+			return index_root, false
+		}
+		cur = nr
+	}
+	if old_is_real {
+		nr, ok := fanout_delete(t, table, cur, old_real, rowid)
 		if !ok {
 			return index_root, false
 		}
 		cur = nr
 	}
 	if new_is_text {
-		nr, ok := fanout_insert_text(t, table, cur, new_text, rowid)
+		nr, ok := fanout_insert(t, table, cur, new_text, rowid)
 		if !ok {
 			return index_root, false
 		}
 		cur = nr
 	}
 	if new_is_int {
-		nr, ok := fanout_insert_int(t, table, cur, new_int, rowid)
+		nr, ok := fanout_insert(t, table, cur, new_int, rowid)
+		if !ok {
+			return index_root, false
+		}
+		cur = nr
+	}
+	if new_is_real {
+		nr, ok := fanout_insert(t, table, cur, new_real, rowid)
 		if !ok {
 			return index_root, false
 		}
@@ -2384,7 +2582,7 @@ fanout_insert_text :: proc(
 	bool,
 ) {
 	idx_tree := btree.init(t.pager, index_root)
-	new_root, ins_err := btree.text_insert_cow(&idx_tree, transmute([]u8)text, rowid)
+	new_root, ins_err := btree.insert_cow(&idx_tree, transmute([]u8)text, rowid)
 	if ins_err != .None {
 		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
 		return index_root, false
@@ -2406,10 +2604,40 @@ fanout_insert_int :: proc(
 	bool,
 ) {
 	idx_tree := btree.init(t.pager, index_root)
-	new_root, ins_err := btree.int_insert_cow(&idx_tree, val, rowid)
+	new_root, ins_err := btree.insert_cow(&idx_tree, val, rowid)
 	if ins_err != .None {
 		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
+}
+
+// fanout_insert_real inserts one real index entry by explicit value (the
+// update path's new side). Twin of fanout_insert_text for REAL indexes.
+@(private = "file")
+fanout_insert_real :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	val: f64,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, ins_err := btree.insert_cow(&idx_tree, val, rowid)
+	if ins_err != .None {
+		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
+// fanout_insert selects the text/int/real twin by the value's static type.
+@(private = "file")
+fanout_insert :: proc {
+	fanout_insert_text,
+	fanout_insert_int,
+	fanout_insert_real,
 }

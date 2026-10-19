@@ -190,13 +190,16 @@ test_create_index_errors :: proc(t: ^testing.T) {
 	context = quiet
 	neg_table := db.execute(d, "CREATE INDEX i_nope ON missing (body);")
 	neg_col := db.execute(d, "CREATE INDEX i_nope ON docs (missing);")
-	neg_real := db.execute(d, "CREATE INDEX i_nope ON docs (score);")
 	neg_blob := db.execute(d, "CREATE INDEX i_nope ON docs (data);")
 	context = restore_logger(saved)
 	testing.expect(t, neg_table != .None, "unknown table rejected")
 	testing.expect(t, neg_col != .None, "unknown column rejected")
-	testing.expect(t, neg_real != .None, "REAL column rejected")
 	testing.expect(t, neg_blob != .None, "BLOB column rejected")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_score ON docs (score);") == .None,
+		"REAL column accepted",
+	)
 	testing.expect(
 		t,
 		db.execute(d, "CREATE INDEX i_id ON docs (id);") == .None,
@@ -688,6 +691,117 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_index_real_vacuum :: proc(t: ^testing.T) {
+	// Vacuum rebuilds real indexes into fresh packed pages: new root,
+	// identical key->rowid sets, every reachable page validates as real
+	// pages, and SQL keeps routing.
+	d := setup_db(t, "idxrealvac")
+	defer teardown_db(d, "idxrealvac")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (v REAL, w TEXT);") == .None, "create")
+	testing.expect(t, db.execute(d, "CREATE INDEX i_v ON t (v);") == .None, "create index")
+	for i in 1 ..= 400 {
+		free_all(context.temp_allocator)
+		sql := fmt.tprintf("INSERT INTO t VALUES (%.2f, 'w%d');", f64(i % 50 - 25) / 4.0, i)
+		testing.expect(t, db.execute(d, sql) == .None, "insert succeeds")
+	}
+	free_all(context.temp_allocator)
+
+	st0 := db.Schema_Tree(d)
+	tbl0, _ := schema.find_table(&st0, "t", context.temp_allocator)
+	root_before := index_root_of(t, tbl0, "i_v")
+	testing.expect(t, root_before > 0, "index present before vacuum")
+
+	// Delete every fourth row, then vacuum.
+	for i in 4 ..= 400 {
+		if (i - 1) % 4 != 3 {
+			continue
+		}
+		free_all(context.temp_allocator)
+		sql := fmt.tprintf("DELETE FROM t WHERE w = 'w%d';", i)
+		testing.expect(t, db.execute(d, sql) == .None, "delete succeeds")
+	}
+	free_all(context.temp_allocator)
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
+
+	st1 := db.Schema_Tree(d)
+	tbl1, found1 := schema.find_table(&st1, "t", context.temp_allocator)
+	testing.expect(t, found1, "table found after vacuum")
+	if !found1 {
+		return
+	}
+	vac_root := index_root_of(t, tbl1, "i_v")
+	testing.expect(t, vac_root > 0, "index root present after vacuum")
+	testing.expect(t, vac_root != root_before, "vacuum rebuilt the index")
+
+	// Oracle: keys (k-25)/4 for k in 0..50, each missing its deleted
+	// fourth-row members.
+	idx_tree := btree.init(d.pager, vac_root)
+	for k in 0 ..< 50 {
+		free_all(context.temp_allocator)
+		key := f64(k - 25) / 4.0
+		got, g_err := btree.real_find_rowids(&idx_tree, idx_tree.root, key)
+		testing.expect(t, g_err == .None, "find succeeds")
+		if g_err != .None {
+			continue
+		}
+		want := 0
+		for i in 1 ..= 400 {
+			if f64(i % 50 - 25) / 4.0 == key && (i - 1) % 4 != 3 {
+				want += 1
+			}
+		}
+		testing.expect_value(t, len(got), want)
+	}
+	free_all(context.temp_allocator)
+
+	// Every reachable index page validates as real pages.
+	pages := make(map[u32]bool, context.temp_allocator)
+	defer delete(pages)
+	btree.collect_pages(&idx_tree, idx_tree.root, &pages)
+	testing.expect(t, len(pages) >= 1, "index reachable after vacuum")
+	for page_id in pages {
+		pg, pg_err := pager.get_page(d.pager, page_id)
+		if pg_err != nil {
+			continue
+		}
+		h := btree.get_header(pg.data, page_id)
+		if h == nil {
+			pager.unpin_page(d.pager, page_id)
+			continue
+		}
+		#partial switch h.page_type {
+		case .LEAF_REAL:
+			testing.expect(
+				t,
+				btree.text_validate_leaf(pg.data, btree.Page_Id(page_id)) == .None,
+				"vacuumed leaf validates",
+			)
+		case .REAL_INTERIOR:
+			testing.expect(
+				t,
+				btree.text_validate_interior(pg.data, btree.Page_Id(page_id)) == .None,
+				"vacuumed interior validates",
+			)
+		case:
+			testing.expect(t, false, "unexpected page type after vacuum")
+		}
+		pager.unpin_page(d.pager, page_id)
+	}
+
+	// SQL keeps routing through the rebuilt index.
+	q := db.query(d, "SELECT v FROM t WHERE v = 0.75 ORDER BY v;")
+	testing.expect(t, q.ok, "routed select succeeds")
+	for row in q.rows {
+		v, is_real := row[0].(f64)
+		testing.expect(t, is_real, "covering projects REAL")
+		if is_real {
+			testing.expect_value(t, v, 0.75)
+		}
+	}
+}
+
+@(test)
 test_index_int_vacuum :: proc(t: ^testing.T) {
 	// Vacuum rebuilds int indexes into fresh packed pages: new root,
 	// identical key->rowid sets, every reachable page validates as int
@@ -1135,6 +1249,28 @@ int_index_rowids :: proc(
 	return rows
 }
 
+// real_index_rowids reads one real key's rowids through the named index root,
+// re-resolving the table each call (roots change per write).
+real_index_rowids :: proc(
+	t: ^testing.T,
+	d: ^db.Database,
+	table: string,
+	index: string,
+	val: f64,
+) -> []types.Row_ID {
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, table, context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return nil
+	}
+	root := index_root_of(t, tbl, index)
+	idx_tree := btree.init(d.pager, root)
+	rows, f_err := btree.real_find_rowids(&idx_tree, idx_tree.root, val)
+	testing.expect(t, f_err == .None, "find succeeds")
+	return rows
+}
+
 @(test)
 test_index_int_create_backfill :: proc(t: ^testing.T) {
 	// CREATE INDEX on INTEGER backfills every value (negatives, dups;
@@ -1203,6 +1339,60 @@ test_index_int_create_backfill :: proc(t: ^testing.T) {
 
 	// Unrouted SQL still answers correctly through the scan.
 	q := db.query(d, "SELECT a, b FROM t WHERE a = 10 ORDER BY b;")
+	testing.expect(t, q.ok, "unrouted select succeeds")
+	testing.expect_value(t, len(q.rows), 2)
+}
+
+@(test)
+test_index_real_create_backfill :: proc(t: ^testing.T) {
+	// CREATE INDEX on REAL backfills every value (negatives, fractions,
+	// dups, signed zeros sharing one key; NULLs skipped) with the def
+	// tagged REAL; reads go through btree.real_find_rowids on the published
+	// root (later tests pin the planner routing on top).
+	d := setup_db(t, "idxrealback")
+	defer teardown_db(d, "idxrealback")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (r REAL, b TEXT);",
+			"INSERT INTO t VALUES (1.5, 'x');",
+			"INSERT INTO t VALUES (-2.5, 'y');",
+			"INSERT INTO t VALUES (1.5, 'z');",
+			"INSERT INTO t VALUES (-0.0, 'neg');",
+			"INSERT INTO t VALUES (0.0, 'pos');",
+			"INSERT INTO t VALUES (NULL, 'n');",
+		},
+	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i_r ON t (r);") == .None, "create real index")
+
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	def, dok := schema.table_index(tbl, "i_r")
+	testing.expect(t, dok, "def present")
+	if dok {
+		testing.expect_value(t, def.col_type, types.Column_Type.REAL)
+		testing.expect(t, def.root != 0, "root published")
+	}
+
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 1.5)), 2)
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", -2.5)), 1)
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 0.0)), 2)
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", -0.0)), 2)
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 999.25)), 0)
+
+	// Routed SQL answers through the new index.
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT r, b FROM t WHERE r = 1.5;"),
+		"INDEX SCAN ON t USING r (eq, fetch)",
+	)
+	q := db.query(d, "SELECT r, b FROM t WHERE r = 1.5 ORDER BY b;")
 	testing.expect(t, q.ok, "unrouted select succeeds")
 	testing.expect_value(t, len(q.rows), 2)
 }
@@ -1683,6 +1873,291 @@ test_index_int_dml_fanout :: proc(t: ^testing.T) {
 	if len(cnt.rows) == 1 {
 		testing.expect(t, types.value_compare(cnt.rows[0][0], types.value(1)), "one row left")
 	}
+}
+
+@(test)
+test_index_real_dml_fanout :: proc(t: ^testing.T) {
+	// Per-row writes maintain real indexes: single INSERTs land, UPDATEs
+	// move entries (no-op rewrites, signed-zero shares, and NULL
+	// transitions included), DELETEs remove them. Verified at btree level.
+	d := setup_db(t, "idxrealfan")
+	defer teardown_db(d, "idxrealfan")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (r REAL, b TEXT);",
+			"CREATE INDEX i_r ON t (r);",
+			"INSERT INTO t VALUES (0.5, 'x');",
+			"INSERT INTO t VALUES (NULL, 'n');",
+		},
+	)
+	half := real_index_rowids(t, d, "t", "i_r", 0.5)
+	testing.expect_value(t, len(half), 1)
+	if len(half) == 1 {
+		testing.expect_value(t, half[0], 1)
+	}
+
+	must_db_execute(t, d, "UPDATE t SET r = 1.5 WHERE b = 'x';")
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 0.5)), 0)
+	one_half := real_index_rowids(t, d, "t", "i_r", 1.5)
+	testing.expect_value(t, len(one_half), 1)
+
+	// No-op rewrite neither dups nor drops.
+	must_db_execute(t, d, "UPDATE t SET r = 1.5 WHERE b = 'x';")
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 1.5)), 1)
+
+	// -0.0 rewrite shares the +0.0 key (normalization, not a move).
+	must_db_execute(t, d, "UPDATE t SET r = -0.0 WHERE b = 'x';")
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 1.5)), 0)
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 0.0)), 1)
+
+	// Value-to-NULL removes the entry.
+	must_db_execute(t, d, "UPDATE t SET r = NULL WHERE b = 'x';")
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 0.0)), 0)
+
+	must_db_execute(t, d, "DELETE FROM t WHERE b = 'n';")
+	testing.expect_value(t, len(real_index_rowids(t, d, "t", "i_r", 0.0)), 0)
+	cnt := db.query(d, "SELECT COUNT(*) FROM t;")
+	testing.expect(t, cnt.ok, "count succeeds")
+	if len(cnt.rows) == 1 {
+		testing.expect(t, types.value_compare(cnt.rows[0][0], types.value(1)), "one row left")
+	}
+}
+
+@(test)
+test_index_real_routing :: proc(t: ^testing.T) {
+	// REAL index routing: Eq and IN answer covering (values typed f64);
+	// Range answers fetch; cross-class literals miss; LIKE stays on the
+	// scan path with identical (empty) results; same-column OR covers,
+	// BETWEEN merges to one bounded scan.
+	d := setup_db(t, "idxrealroute")
+	defer teardown_db(d, "idxrealroute")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (r REAL, b TEXT);",
+			"INSERT INTO t VALUES (1.5, 'x');",
+			"INSERT INTO t VALUES (-2.5, 'y');",
+			"INSERT INTO t VALUES (1.5, 'z');",
+			"INSERT INTO t VALUES (-0.0, 'neg');",
+			"INSERT INTO t VALUES (0.0, 'pos');",
+			"INSERT INTO t VALUES (NULL, 'n');",
+			"CREATE INDEX i_r ON t (r);",
+			"CREATE INDEX i_b ON t (b);",
+		},
+	)
+	eq := db.query(d, "SELECT r FROM t WHERE r = 1.5 ORDER BY r;")
+	testing.expect(t, eq.ok, "real eq succeeds")
+	testing.expect_value(t, len(eq.rows), 2)
+	for row in eq.rows {
+		v, is_real := row[0].(f64)
+		testing.expect(t, is_real, "covering projects REAL")
+		if is_real {
+			testing.expect_value(t, v, 1.5)
+		}
+	}
+
+	// Signed zeros cover as the canonical key, value-equal either way.
+	zero := db.query(d, "SELECT r FROM t WHERE r = -0.0 ORDER BY r;")
+	testing.expect(t, zero.ok, "signed-zero eq succeeds")
+	testing.expect_value(t, len(zero.rows), 2)
+	for row in zero.rows {
+		v, is_real := row[0].(f64)
+		testing.expect(t, is_real, "covering projects REAL")
+		if is_real {
+			testing.expect_value(t, v, 0.0)
+		}
+	}
+
+	in_q := db.query(d, "SELECT r, b FROM t WHERE r IN (1.5, -2.5) ORDER BY r, b;")
+	testing.expect(t, in_q.ok, "real in succeeds")
+	testing.expect_value(t, len(in_q.rows), 3)
+
+	rng := db.query(d, "SELECT r, b FROM t WHERE r > 0.0 ORDER BY r, b;")
+	testing.expect(t, rng.ok, "real range succeeds")
+	testing.expect_value(t, len(rng.rows), 2)
+
+	btw := db.query(d, "SELECT r, b FROM t WHERE r BETWEEN -3.0 AND 1.0 ORDER BY r, b;")
+	testing.expect(t, btw.ok, "real between succeeds")
+	testing.expect_value(t, len(btw.rows), 3)
+
+	miss := db.query(d, "SELECT r, b FROM t WHERE r = 'x';")
+	testing.expect(t, miss.ok, "cross-class succeeds")
+	testing.expect_value(t, len(miss.rows), 0)
+
+	int_miss := db.query(d, "SELECT r, b FROM t WHERE r = 1;")
+	testing.expect(t, int_miss.ok, "int literal succeeds")
+	testing.expect_value(t, len(int_miss.rows), 0)
+
+	like_q := db.query(d, "SELECT r, b FROM t WHERE r LIKE '1%';")
+	testing.expect(t, like_q.ok, "real like succeeds")
+	testing.expect_value(t, len(like_q.rows), 0)
+
+	or_same := db.query(d, "SELECT r FROM t WHERE r = 1.5 OR r = -2.5 ORDER BY r;")
+	testing.expect(t, or_same.ok, "same-column or succeeds")
+	testing.expect_value(t, len(or_same.rows), 3)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT r FROM t WHERE r = 1.5;"),
+		"INDEX SCAN ON t USING r (eq, covering)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT r, b FROM t WHERE r BETWEEN -3.0 AND 1.0;"),
+		"INDEX SCAN ON t USING r (range, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT r, b FROM t WHERE r LIKE '1%';"),
+		"FULL SCAN ON t",
+	)
+}
+
+@(test)
+test_index_real_mixed_storage :: proc(t: ^testing.T) {
+	// Integers stored in a REAL column (accepted widening) index under
+	// their widened key: Eq/Range find them exactly. Fetch preserves the
+	// stored classes; covering normalizes to the declared REAL type.
+	d := setup_db(t, "idxrealmix")
+	defer teardown_db(d, "idxrealmix")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (r REAL, b TEXT);",
+			"INSERT INTO t VALUES (2, 'a');",
+			"INSERT INTO t VALUES (2.0, 'b');",
+			"INSERT INTO t VALUES (2.5, 'c');",
+			"CREATE INDEX i_r ON t (r);",
+		},
+	)
+	fetch := db.query(d, "SELECT r, b FROM t WHERE r = 2.0 ORDER BY b;")
+	testing.expect(t, fetch.ok, "fetch succeeds")
+	testing.expect_value(t, len(fetch.rows), 2)
+	if len(fetch.rows) == 2 {
+		_, a_int := fetch.rows[0][0].(i64)
+		testing.expect(t, a_int, "fetch preserves int storage class")
+		_, b_real := fetch.rows[1][0].(f64)
+		testing.expect(t, b_real, "fetch preserves real storage class")
+	}
+
+	rng := db.query(d, "SELECT r, b FROM t WHERE r >= 2.0 AND r < 2.5 ORDER BY b;")
+	testing.expect(t, rng.ok, "range succeeds")
+	testing.expect_value(t, len(rng.rows), 2)
+
+	cov := db.query(d, "SELECT r FROM t WHERE r = 2.0 ORDER BY r;")
+	testing.expect(t, cov.ok, "covering succeeds")
+	testing.expect_value(t, len(cov.rows), 2)
+	for row in cov.rows {
+		v, is_real := row[0].(f64)
+		testing.expect(t, is_real, "covering normalizes to REAL")
+		if is_real {
+			testing.expect_value(t, v, 2.0)
+		}
+	}
+}
+
+@(test)
+test_index_real_twin :: proc(t: ^testing.T) {
+	// Differential twin: indexed t vs unindexed t2, same 400 rows
+	// (fractions, negatives, signed zeros, NULLs). Every real shape —
+	// bounds, exclusivity, merges, unions, limits — returns identical
+	// output, proving the transform order matches the filter order.
+	d := setup_db(t, "idxrealtwin")
+	defer teardown_db(d, "idxrealtwin")
+
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t (r REAL, b TEXT, v INT);") == .None,
+		"create t",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t2 (r REAL, b TEXT, v INT);") == .None,
+		"create t2",
+	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i_r ON t (r);") == .None, "index r")
+	bodies := []string{"alpha", "bb", "gamma"}
+	for i in 1 ..= 400 {
+		free_all(context.temp_allocator)
+		body := bodies[(i - 1) % len(bodies)]
+		// Dotted literals only: whole numbers must parse as REAL (a bare
+		// "1" would store i64, mixing storage classes under test).
+		val := fmt.tprintf("%.2f", f64(i % 50 - 25) / 4.0)
+		testing.expect(
+			t,
+			db.execute(
+				d,
+				fmt.tprintf("INSERT INTO t VALUES (%s, '%s', %d);", val, body, i),
+			) ==
+			.None,
+			"insert t",
+		)
+		testing.expect(
+			t,
+			db.execute(
+				d,
+				fmt.tprintf("INSERT INTO t2 VALUES (%s, '%s', %d);", val, body, i),
+			) ==
+			.None,
+			"insert t2",
+		)
+	}
+	free_all(context.temp_allocator)
+	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (-0.0, 'neg', 401);") == .None, "neg zero")
+	testing.expect(t, db.execute(d, "INSERT INTO t2 VALUES (-0.0, 'neg', 401);") == .None, "neg zero twin")
+	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (NULL, 'n', 402);") == .None, "null")
+	testing.expect(t, db.execute(d, "INSERT INTO t2 VALUES (NULL, 'n', 402);") == .None, "null twin")
+
+	queries := []string {
+		"SELECT r, b, v FROM t WHERE r = 1.5;",
+		"SELECT r FROM t WHERE r = 0.0;",
+		"SELECT r FROM t WHERE r = -0.0;",
+		"SELECT r, b, v FROM t WHERE r > 0.0;",
+		"SELECT r, b, v FROM t WHERE r >= 0.0;",
+		"SELECT r, b, v FROM t WHERE r < -10.0;",
+		"SELECT r, b, v FROM t WHERE r <= -6.25;",
+		"SELECT r, b, v FROM t WHERE r BETWEEN -5.0 AND 5.0;",
+		"SELECT r, b, v FROM t WHERE r > -5.0 AND r < 5.0;",
+		"SELECT r, b, v FROM t WHERE r NOT BETWEEN -1.0 AND 1.0;",
+		"SELECT r, b, v FROM t WHERE r = 2.5 AND r > 0.0;",
+		"SELECT r, b, v FROM t WHERE r IN (1.5, -2.5, 99.0) AND r >= 0.0;",
+		"SELECT r, b, v FROM t WHERE r > 0.0 OR r < -10.0;",
+		"SELECT r, b, v FROM t WHERE r > 0.0 AND v > 100;",
+		"SELECT r, b, v FROM t WHERE r > 0.0 LIMIT 10;",
+		"SELECT r, b, v FROM t WHERE r BETWEEN -5.0 AND 5.0 ORDER BY v DESC LIMIT 7;",
+		"SELECT rowid FROM t WHERE r > 5.0 ORDER BY rowid;",
+		"SELECT r, b, v FROM t WHERE r = 1;",
+		"SELECT r, b, v FROM t WHERE r LIKE '1%';",
+	}
+	for q in queries {
+		free_all(context.temp_allocator)
+		twin, _ := strings.replace(q, "FROM t ", "FROM t2 ", 1, context.temp_allocator)
+		a := db.query(d, q)
+		b := db.query(d, twin)
+		testing.expect(t, a.ok && b.ok, "twin queries succeed")
+		if !a.ok || !b.ok {
+			continue
+		}
+		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
+		for i in 0 ..< min(len(a.rows), len(b.rows)) {
+			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
+			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
+				testing.expect(
+					t,
+					twin_values_equal(a.rows[i][j], b.rows[i][j]),
+					"twin values match",
+				)
+			}
+		}
+	}
+	free_all(context.temp_allocator)
 }
 
 @(test)

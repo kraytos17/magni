@@ -100,10 +100,30 @@ int_make_key :: proc(raw: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
 	return buf[:n], .None
 }
 
+// real_make_key encodes one real index key into a temp buffer (caller-owned
+// for the statement). raw is the 8-byte ordered value word; the full key is
+// fixed 17 bytes, so no length parameter is needed. NaN raws fail (never
+// stored — encode-side skip keeps the index total-ordered).
+@(private, require_results)
+real_make_key :: proc(raw: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
+	if len(raw) != 8 {
+		return nil, .Serialization_Failed
+	}
+
+	buf := make([]u8, cell.REAL_INDEX_LEN, context.temp_allocator)
+	v := cell.real_index_decode_value(raw)
+	n, ok := cell.real_index_encode(types.value(v), rowid, buf)
+	if !ok {
+		return nil, .Serialization_Failed
+	}
+	return buf[:n], .None
+}
+
 // make_index_key encodes one secondary-index key for the tree's kind: text
-// bytes on text pages, the 8-byte biased word on int pages. Single choke
-// point behind the insert/descend/delete chains so a new kind extends one
-// switch, not every call site.
+// bytes on text pages, the 8-byte biased word on int pages, the 8-byte
+// ordered word on real pages. Single choke point behind the
+// insert/descend/delete chains so a new kind extends one switch, not every
+// call site.
 @(private, require_results)
 make_index_key :: proc(kind: Key_Kind, raw: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
 	switch kind {
@@ -111,6 +131,8 @@ make_index_key :: proc(kind: Key_Kind, raw: []u8, rowid: types.Row_ID) -> ([]u8,
 		return text_make_key(raw, rowid)
 	case .Int:
 		return int_make_key(raw, rowid)
+	case .Real:
+		return real_make_key(raw, rowid)
 	case .Rowid:
 		return nil, .Unsupported_Format
 	}
@@ -919,6 +941,44 @@ int_insert_cow :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> (new_root: u3
 	return index_insert_cow(t, .Int, wbuf[:], rowid)
 }
 
+// real_insert_cow inserts one (val,rowid) into a real tree with COW copies
+// along the touched path. Real-kind entry point over the index_insert_cow
+// core.
+@(require_results)
+real_insert_cow :: proc(t: ^Tree, val: f64, rowid: types.Row_ID) -> (new_root: u32, err: Error) {
+	wbuf: [8]u8
+	endian.unchecked_put_u64be(wbuf[:], cell.real_sort_word(val))
+	return index_insert_cow(t, .Real, wbuf[:], rowid)
+}
+
+// Kind-selected overloads over the text/int/real entry twins: call sites
+// with a statically-known value type use the group and drop the kind
+// suffix. Dynamic-kind paths keep the index_* cores; kind-pinning tests
+// keep the explicit names.
+insert_cow :: proc {
+	text_insert_cow,
+	int_insert_cow,
+	real_insert_cow,
+}
+
+find_rowids :: proc {
+	text_find_rowids,
+	int_find_rowids,
+	real_find_rowids,
+}
+
+delete_cow :: proc {
+	text_delete_cow,
+	int_delete_cow,
+	real_delete_cow,
+}
+
+range_rowids :: proc {
+	text_range_rowids,
+	int_range_rowids,
+	real_range_rowids,
+}
+
 // text_find_rowids returns every indexed rowid for text, in index order.
 // Multi-leaf forward scan over a recorded parent path (same algorithm as
 // the primary cursor's descend_to_next_leaf: sibling-or-carry advance,
@@ -1199,6 +1259,15 @@ int_find_rowids :: proc(t: ^Tree, root: u32, val: i64) -> (found: []types.Row_ID
 	return index_find_rowids(t, root, .Int, wbuf[:])
 }
 
+// real_find_rowids returns every indexed rowid for val, in index order.
+// Real-kind entry point over the index_find_rowids core.
+@(require_results)
+real_find_rowids :: proc(t: ^Tree, root: u32, val: f64) -> (found: []types.Row_ID, err: Error) {
+	wbuf: [8]u8
+	endian.unchecked_put_u64be(wbuf[:], cell.real_sort_word(val))
+	return index_find_rowids(t, root, .Real, wbuf[:])
+}
+
 // text_find_prefix collects the rowids of every entry whose text starts with
 // prefix (BINARY collation): descend once with (prefix, -inf), lower-bound
 // the first leaf, collect while entries carry the prefix, stop at the first
@@ -1424,6 +1493,38 @@ int_range_rowids :: proc(
 	return index_scan_range(t, root, .Int, lo_raw, hi_raw, has_lo, has_hi, lo_inc, hi_inc)
 }
 
+// real_range_rowids returns every indexed rowid with value in [lo, hi]
+// (numeric order, per-side inclusivity, either side open). Real-kind entry
+// point over the index_scan_range core.
+@(require_results)
+real_range_rowids :: proc(
+	t: ^Tree,
+	root: u32,
+	lo_val: f64,
+	hi_val: f64,
+	has_lo: bool,
+	has_hi: bool,
+	lo_inc: bool,
+	hi_inc: bool,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	lo_buf: [8]u8
+	hi_buf: [8]u8
+	lo_raw: []u8
+	hi_raw: []u8
+	if has_lo {
+		endian.unchecked_put_u64be(lo_buf[:], cell.real_sort_word(lo_val))
+		lo_raw = lo_buf[:]
+	}
+	if has_hi {
+		endian.unchecked_put_u64be(hi_buf[:], cell.real_sort_word(hi_val))
+		hi_raw = hi_buf[:]
+	}
+	return index_scan_range(t, root, .Real, lo_raw, hi_raw, has_lo, has_hi, lo_inc, hi_inc)
+}
+
 // text_node_delete_leaf_cell removes one exact (text,rowid) entry from a
 // text leaf: lower_bound, exact-match verify (suffix + rowid — a neighbor
 // with the same text but another rowid must NOT delete), slot shift, count--,
@@ -1577,6 +1678,15 @@ int_delete :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> Error {
 	return index_delete(t, .Int, wbuf[:], rowid)
 }
 
+// real_delete removes one exact (val,rowid) entry in place (no COW).
+// Real-kind entry point over the index_delete core.
+@(require_results)
+real_delete :: proc(t: ^Tree, val: f64, rowid: types.Row_ID) -> Error {
+	wbuf: [8]u8
+	endian.unchecked_put_u64be(wbuf[:], cell.real_sort_word(val))
+	return index_delete(t, .Real, wbuf[:], rowid)
+}
+
 // index_delete_cow removes one exact entry copy-on-write (nested
 // cow-recursive, repoint on change, root dance). Unlike the rowid COW
 // path it maintains stats (leaf set + interior -1 — both exact here; the
@@ -1692,6 +1802,15 @@ int_delete_cow :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> (new_root: u3
 	return index_delete_cow(t, .Int, wbuf[:], rowid)
 }
 
+// real_delete_cow removes one exact entry copy-on-write. Real-kind entry
+// point over the index_delete_cow core.
+@(require_results)
+real_delete_cow :: proc(t: ^Tree, val: f64, rowid: types.Row_ID) -> (new_root: u32, err: Error) {
+	wbuf: [8]u8
+	endian.unchecked_put_u64be(wbuf[:], cell.real_sort_word(val))
+	return index_delete_cow(t, .Real, wbuf[:], rowid)
+}
+
 // finish_text_root_split grows the text root when a recursive insert split
 // it, then recounts. The leaf fast path in text_insert additionally
 // recounts unconditionally (its own count changed before the split).
@@ -1771,4 +1890,13 @@ int_insert :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> Error {
 	wbuf: [8]u8
 	endian.unchecked_put_u64be(wbuf[:], u64(val ~ min(i64)))
 	return index_insert(t, .Int, wbuf[:], rowid)
+}
+
+// real_insert inserts one (val,rowid) in place (no COW).
+// Real-kind entry point over the index_insert core.
+@(require_results)
+real_insert :: proc(t: ^Tree, val: f64, rowid: types.Row_ID) -> Error {
+	wbuf: [8]u8
+	endian.unchecked_put_u64be(wbuf[:], cell.real_sort_word(val))
+	return index_insert(t, .Real, wbuf[:], rowid)
 }

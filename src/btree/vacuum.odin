@@ -579,6 +579,9 @@ vacuum_empty_index_root :: proc(t: ^Tree, kind: Key_Kind) -> (root: u32, err: Er
 	if kind == .Int {
 		return vacuum_empty_root_with(t, init_int_leaf_page)
 	}
+	if kind == .Real {
+		return vacuum_empty_root_with(t, init_real_leaf_page)
+	}
 	return vacuum_empty_root_with(t, init_text_leaf_page)
 }
 

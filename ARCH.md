@@ -686,18 +686,21 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   removed V2 `Cell_Entry` used, so capacity math is unchanged). In
   production since B4a (fresh pages, splits, vacuum output); since B4b
   the tree is V3-only — no V2 encoding remains to upgrade or read.
-- Text leaves (`LEAF_TEXT` = 16, `btree/layout_text.odin`) and int leaves
-  (`LEAF_INT` = 18): prefix-compressed secondary index leaves — stock
-  `Leaf_Header` + `prefix_len u16le` + shared prefix, 4-byte
-  `Text_Slot{off, len}` entries, cells are `[rowid u64be biased][suffix]`.
-  Full-key interiors (`TEXT_INTERIOR` = 17, `INT_INTERIOR` = 19) hold
-  separators + dense `u32le` children. Online COW inserts, deletes, splits,
+- Text leaves (`LEAF_TEXT` = 16, `btree/layout_text.odin`), int leaves
+  (`LEAF_INT` = 18), and real leaves (`LEAF_REAL` = 20): prefix-compressed
+  secondary index leaves — stock `Leaf_Header` + `prefix_len u16le` +
+  shared prefix, 4-byte `Text_Slot{off, len}` entries, cells are
+  `[rowid u64be biased][suffix]`. Full-key interiors (`TEXT_INTERIOR`
+  = 17, `INT_INTERIOR` = 19, `REAL_INTERIOR` = 21) hold separators +
+  dense `u32le` children. Online COW inserts, deletes, splits,
   root growth, and multi-leaf equality scans live in
-  `btree/text_tree.odin` (shared text/int internals, kind-parameterized
-  entry points); the dispatcher resolves each page type with its kind
-  (reads via `Key_Kind` dispatch; every `Row_ID`-keyed vtable slot
-  refuses).
-- Index catalog: any number of single-column TEXT/INTEGER indexes per
+  `btree/text_tree.odin` (shared text/int/real internals,
+  kind-parameterized entry points); the dispatcher resolves each page type
+  with its kind (reads via `Key_Kind` dispatch; every `Row_ID`-keyed
+  vtable slot refuses). Real keys are order-preserving float words
+  (`cell/real_codec.odin`: negatives bitwise-not, positives sign-flipped,
+  -0.0 normalized to +0.0 so byte order equals `cmp_f64`).
+- Index catalog: any number of single-column TEXT/INTEGER/REAL indexes per
   table — `Schema_Row`/`Table` carry `indexes: []Index_Def` (fixed
   `[6+3i]` `[root INT][column TEXT][name TEXT]` triples, kind resolved
   from the column at load — no wire change; 8/9-wide legacy rows
@@ -721,8 +724,9 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   Table-cache map keys are
   heap-cloned (a temp-borrowed key dangled across per-statement temp frees
   in-txn, silently serving stale roots). Index scope per kind: BINARY
-  collation (text) / numeric order (int), NULL-not-indexed, single-column
-  TEXT/INTEGER indexes (`DROP INDEX <name> [ON <table>]`, names unique
+  collation (text) / numeric order (int and real, -0.0 normalized),
+  NULL-not-indexed (NaN likewise, unordered), single-column
+  TEXT/INTEGER/REAL indexes (`DROP INDEX <name> [ON <table>]`, names unique
   per table).
 - Index vacuum: `VACUUM` rebuilds indexes into packed pages
   (`text_tree_vacuum`: ordered collect, greedy byte-chunked leaves and
@@ -1191,13 +1195,13 @@ context.allocator)`).
 ## Limitations
 
 - **No `FOREIGN KEY` enforcement on INSERT/UPDATE**: Validated at CREATE TABLE time only.
-- **Secondary indexes**: single-column TEXT/INTEGER indexes
+- **Secondary indexes**: single-column TEXT/INTEGER/REAL indexes
   (`CREATE INDEX` / `DROP INDEX <name> [ON <table>]`, names unique per
-  table), BINARY collation (text) / numeric order (int), NULL-not-indexed.
-  Routes equality, literal `IN` (up to 128 members), and ordered
-  comparisons (fetch-only ranges, same-column ANDs merged) in the column's
-  type, plus canonical `LIKE 'stem%'` on TEXT — plus flat-OR
-  unions and multi-conjunct AND intersections across indexes. Covering
+  table), BINARY collation (text) / numeric order (int and real),
+  NULL-not-indexed. Routes equality, literal `IN` (up to 128 members),
+  and ordered comparisons (fetch-only ranges, same-column ANDs merged)
+  in the column's type, plus canonical `LIKE 'stem%'` on TEXT — plus
+  flat-OR unions and multi-conjunct AND intersections across indexes. Covering
   `SELECT rowid` and `SELECT <indexed-col>` (Eq/In shapes, same-column OR);
   fetch+recheck otherwise; everything else scans.
   User guide: [docs/indexing.md](docs/indexing.md).

@@ -25,10 +25,10 @@ Index_Use :: enum u8 {
 // Strings borrow the parser's arena (statement-scoped); candidates are
 // consumed synchronously, same as the dense path's temp arrays.
 // Eq/In carry the key in the arm matching col_type (eq_text/in_texts for
-// TEXT, eq_int/in_ints for INTEGER); the other arm stays zero. Range carries
-// one bound per side in the matching arm (absent side reads open-ended);
-// range_empty marks a provably empty interval (contradictory AND-merge —
-// the btree short-circuits, zero I/O).
+// TEXT, eq_int/in_ints for INTEGER, eq_real/in_reals for REAL); the other
+// arms stay zero. Range carries one bound per side in the matching arm
+// (absent side reads open-ended); range_empty marks a provably empty
+// interval (contradictory AND-merge — the btree short-circuits, zero I/O).
 // Or/And carry their member plans in subs (each member routed its own
 // index and carries its own type; column is the first sub's, display-only).
 Index_Plan :: struct {
@@ -38,9 +38,11 @@ Index_Plan :: struct {
 	col_type     : types.Column_Type, // index kind (per-sub for Or/And)
 	eq_text      : string, // Eq on TEXT
 	eq_int       : i64, // Eq on INTEGER
+	eq_real      : f64, // Eq on REAL
 	prefix       : string, // Prefix stem
 	in_texts     : []string, // In TEXT members
 	in_ints      : []i64, // In INTEGER members
+	in_reals     : []f64, // In REAL members
 	range_has_lo : bool, // Range lower bound present
 	range_has_hi : bool, // Range upper bound present
 	range_lo_inc : bool, // Range lower bound inclusive (>=)
@@ -49,6 +51,8 @@ Index_Plan :: struct {
 	range_hi_text: string, // Range upper bound on TEXT
 	range_lo_int : i64, // Range lower bound on INTEGER
 	range_hi_int : i64, // Range upper bound on INTEGER
+	range_lo_real: f64, // Range lower bound on REAL
+	range_hi_real: f64, // Range upper bound on REAL
 	range_empty  : bool, // Range provably matches nothing (AND contradiction)
 	subs         : []Index_Plan, // Or/And members (each with its own root)
 }
@@ -136,6 +140,25 @@ cond_int_rhs :: proc(cond: parser.Condition) -> (i64, bool) {
 	return v, true
 }
 
+// cond_real_rhs extracts a condition's REAL literal rhs: the shared
+// precondition behind the EQUALS, IN, and Range index arms on REAL
+// indexes. Non-f64 and non-literal rhs never route; NaN never routes
+// either (unordered under every comparison the recheck can express, so no
+// bound could delimit it — the scan path answers NaN filters).
+@(private = "file")
+cond_real_rhs :: proc(cond: parser.Condition) -> (f64, bool) {
+	val, is_val := cond.rhs.(types.Value)
+	if !is_val {
+		return 0, false
+	}
+
+	v, is_real := val.(f64)
+	if !is_real || !cell.real_index_encodable(v) {
+		return 0, false
+	}
+	return v, true
+}
+
 // index_use_of_cond classifies one raw COND against the indexed column of
 // the given type. Negated, column-comparison (rhs is a column ref, not a
 // Value), NULL and cross-class literals all fall through (same result via
@@ -178,6 +201,19 @@ index_use_of_cond :: proc(
 						column = index_column,
 						col_type = col_type,
 						eq_int = v,
+					},
+					true
+			}
+			return {}, false
+		}
+		if col_type == .REAL {
+			if v, is_real := cond_real_rhs(cond); is_real {
+				return Index_Plan {
+						use = .Eq,
+						root = index_root,
+						column = index_column,
+						col_type = col_type,
+						eq_real = v,
 					},
 					true
 			}
@@ -242,6 +278,28 @@ index_use_of_cond :: proc(
 				},
 				true
 		}
+		if col_type == .REAL {
+			reals := make([dynamic]f64, 0, len(cond.in_values), context.temp_allocator)
+			for v in cond.in_values {
+				if n, is_real := v.(f64); is_real && cell.real_index_encodable(n) {
+					append(&reals, n)
+				}
+			}
+			if len(reals) == 0 {
+				return {}, false
+			}
+			if len(reals) > MAX_INDEX_IN_MEMBERS {
+				return {}, false
+			}
+			return Index_Plan {
+					use = .In,
+					root = index_root,
+					column = index_column,
+					col_type = col_type,
+					in_reals = reals[:],
+				},
+				true
+		}
 
 		texts := make([dynamic]string, 0, len(cond.in_values), context.temp_allocator)
 		for v in cond.in_values {
@@ -286,6 +344,27 @@ index_use_of_cond :: proc(
 					rp.range_has_hi = true
 					rp.range_hi_inc = inc
 					rp.range_hi_int = v
+				}
+				return rp, true
+			}
+			return {}, false
+		}
+		if col_type == .REAL {
+			if v, is_real := cond_real_rhs(cond); is_real {
+				rp := Index_Plan {
+					use      = .Range,
+					root     = index_root,
+					column   = index_column,
+					col_type = col_type,
+				}
+				if is_lo {
+					rp.range_has_lo = true
+					rp.range_lo_inc = inc
+					rp.range_lo_real = v
+				} else {
+					rp.range_has_hi = true
+					rp.range_hi_inc = inc
+					rp.range_hi_real = v
 				}
 				return rp, true
 			}
@@ -485,21 +564,33 @@ resolve_index_fetch :: proc(
 }
 
 // range_val_cmp orders two bound literals of one index type: numeric for
-// INTEGER, BINARY for TEXT. The file-private comparator behind AND-merge
-// (callers in one group share col_type, so one switch covers both arms).
+// INTEGER, sort-word order for REAL, BINARY for TEXT. The file-private
+// comparator behind AND-merge (callers in one group share col_type, so one
+// switch covers all arms). REAL compares transformed words, not cmp_f64 —
+// bounds need index order, and -0.0/+0.0 share one word by construction.
 @(private = "file")
 range_val_cmp :: proc(
 	col_type: types.Column_Type,
 	a_text: string,
 	a_int: i64,
+	a_real: f64,
 	b_text: string,
 	b_int: i64,
+	b_real: f64,
 ) -> int {
 	if col_type == .INTEGER {
 		if a_int == b_int {
 			return 0
 		}
 		return -1 if a_int < b_int else 1
+	}
+	if col_type == .REAL {
+		wa := cell.real_sort_word(a_real)
+		wb := cell.real_sort_word(b_real)
+		if wa == wb {
+			return 0
+		}
+		return -1 if wa < wb else 1
 	}
 	return cell.bytes_compare(transmute([]u8)a_text, transmute([]u8)b_text)
 }
@@ -511,16 +602,33 @@ range_value_ok :: proc(
 	col_type: types.Column_Type,
 	v_text: string,
 	v_int: i64,
+	v_real: f64,
 	bound: Index_Plan,
 ) -> bool {
 	if bound.range_has_lo {
-		c := range_val_cmp(col_type, v_text, v_int, bound.range_lo_text, bound.range_lo_int)
+		c := range_val_cmp(
+			col_type,
+			v_text,
+			v_int,
+			v_real,
+			bound.range_lo_text,
+			bound.range_lo_int,
+			bound.range_lo_real,
+		)
 		if c < 0 || (c == 0 && !bound.range_lo_inc) {
 			return false
 		}
 	}
 	if bound.range_has_hi {
-		c := range_val_cmp(col_type, v_text, v_int, bound.range_hi_text, bound.range_hi_int)
+		c := range_val_cmp(
+			col_type,
+			v_text,
+			v_int,
+			v_real,
+			bound.range_hi_text,
+			bound.range_hi_int,
+			bound.range_hi_real,
+		)
 		if c > 0 || (c == 0 && !bound.range_hi_inc) {
 			return false
 		}
@@ -539,6 +647,7 @@ range_value_ok :: proc(
 collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: bool) {
 	col_type := group[0].col_type
 	is_int := col_type == .INTEGER
+	is_real := col_type == .REAL
 	for sub in group {
 		if sub.use != .Eq && sub.use != .In && sub.use != .Range {
 			return group, false
@@ -548,6 +657,7 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 	eq_set := false
 	eq_text := ""
 	eq_int := i64(0)
+	eq_real := f64(0)
 	for sub in group {
 		if sub.use != .Eq {
 			continue
@@ -556,6 +666,12 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 			if !eq_set {
 				eq_set, eq_int = true, sub.eq_int
 			} else if eq_int != sub.eq_int {
+				return nil, true
+			}
+		} else if is_real {
+			if !eq_set {
+				eq_set, eq_real = true, sub.eq_real
+			} else if eq_real != sub.eq_real {
 				return nil, true
 			}
 		} else {
@@ -573,7 +689,7 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				if sub.range_empty {
 					return nil, true
 				}
-				if !range_value_ok(col_type, eq_text, eq_int, sub) {
+				if !range_value_ok(col_type, eq_text, eq_int, eq_real, sub) {
 					return nil, true
 				}
 			case .In:
@@ -581,6 +697,13 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				if is_int {
 					for m in sub.in_ints {
 						if m == eq_int {
+							found = true
+							break
+						}
+					}
+				} else if is_real {
+					for m in sub.in_reals {
+						if m == eq_real {
 							found = true
 							break
 						}
@@ -611,6 +734,7 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 
 	had_in := false
 	keep_ints := make([dynamic]i64, 0, 8, context.temp_allocator)
+	keep_reals := make([dynamic]f64, 0, 8, context.temp_allocator)
 	keep_texts := make([dynamic]string, 0, 8, context.temp_allocator)
 	for sub in group {
 		if sub.use != .In {
@@ -630,6 +754,21 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 					}
 				}
 				keep_ints = next
+			}
+		} else if is_real {
+			if !had_in {
+				append(&keep_reals, ..sub.in_reals)
+			} else {
+				next := make([dynamic]f64, 0, len(keep_reals), context.temp_allocator)
+				for m in keep_reals {
+					for c in sub.in_reals {
+						if m == c {
+							append(&next, m)
+							break
+						}
+					}
+				}
+				keep_reals = next
 			}
 		} else {
 			if !had_in {
@@ -659,15 +798,23 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 		if is_int {
 			next := make([dynamic]i64, 0, len(keep_ints), context.temp_allocator)
 			for m in keep_ints {
-				if range_value_ok(col_type, "", m, sub) {
+				if range_value_ok(col_type, "", m, 0, sub) {
 					append(&next, m)
 				}
 			}
 			keep_ints = next
+		} else if is_real {
+			next := make([dynamic]f64, 0, len(keep_reals), context.temp_allocator)
+			for m in keep_reals {
+				if range_value_ok(col_type, "", 0, m, sub) {
+					append(&next, m)
+				}
+			}
+			keep_reals = next
 		} else {
 			next := make([dynamic]string, 0, len(keep_texts), context.temp_allocator)
 			for m in keep_texts {
-				if range_value_ok(col_type, m, 0, sub) {
+				if range_value_ok(col_type, m, 0, 0, sub) {
 					append(&next, m)
 				}
 			}
@@ -675,7 +822,9 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 		}
 	}
 	if had_in {
-		if (is_int && len(keep_ints) == 0) || (!is_int && len(keep_texts) == 0) {
+		if (is_int && len(keep_ints) == 0) ||
+		   (is_real && len(keep_reals) == 0) ||
+		   (!is_int && !is_real && len(keep_texts) == 0) {
 			return nil, true
 		}
 		kept := Index_Plan {
@@ -686,6 +835,8 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 		}
 		if is_int {
 			kept.in_ints = keep_ints[:]
+		} else if is_real {
+			kept.in_reals = keep_reals[:]
 		} else {
 			kept.in_texts = keep_texts[:]
 		}
@@ -712,8 +863,10 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 					col_type,
 					sub.range_lo_text,
 					sub.range_lo_int,
+					sub.range_lo_real,
 					merged.range_lo_text,
 					merged.range_lo_int,
+					merged.range_lo_real,
 				)
 				tighter = c > 0 || (c == 0 && merged.range_lo_inc && !sub.range_lo_inc)
 			}
@@ -722,6 +875,7 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				merged.range_lo_inc = sub.range_lo_inc
 				merged.range_lo_text = sub.range_lo_text
 				merged.range_lo_int = sub.range_lo_int
+				merged.range_lo_real = sub.range_lo_real
 			}
 		}
 		if sub.range_has_hi {
@@ -731,8 +885,10 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 					col_type,
 					sub.range_hi_text,
 					sub.range_hi_int,
+					sub.range_hi_real,
 					merged.range_hi_text,
 					merged.range_hi_int,
+					merged.range_hi_real,
 				)
 				tighter = c < 0 || (c == 0 && merged.range_hi_inc && !sub.range_hi_inc)
 			}
@@ -741,6 +897,7 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				merged.range_hi_inc = sub.range_hi_inc
 				merged.range_hi_text = sub.range_hi_text
 				merged.range_hi_int = sub.range_hi_int
+				merged.range_hi_real = sub.range_hi_real
 			}
 		}
 	}
@@ -749,8 +906,10 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 			col_type,
 			merged.range_lo_text,
 			merged.range_lo_int,
+			merged.range_lo_real,
 			merged.range_hi_text,
 			merged.range_hi_int,
+			merged.range_hi_real,
 		)
 		if c > 0 || (c == 0 && !(merged.range_lo_inc && merged.range_hi_inc)) {
 			return nil, true
@@ -938,18 +1097,18 @@ index_candidate_multi :: proc(
 	return acc, true
 }
 
-// candidate_lookup_eq appends one key's rowids for Eq/In candidate plans.
+// candidate_lookup_text_eq appends one key's rowids for Eq/In candidate plans.
 // Lifted from index_candidate_single's nested closure (it captures nothing);
 // the Prefix arm keeps its inline lookup (different btree entry point).
 @(private = "file")
-candidate_lookup_eq :: proc(
+candidate_lookup_text_eq :: proc(
 	idx_tree: ^btree.Tree,
 	root: u32,
 	text: string,
 	out: ^[dynamic]types.Row_ID,
 	table_name: string,
 ) -> bool {
-	found, find_err := btree.text_find_rowids(idx_tree, root, transmute([]u8)text)
+	found, find_err := btree.find_rowids(idx_tree, root, transmute([]u8)text)
 	if find_err != .None {
 		log.errorf("Error: Failed to search index for '%s'", table_name)
 		return false
@@ -969,7 +1128,7 @@ candidate_lookup_int_eq :: proc(
 	out: ^[dynamic]types.Row_ID,
 	table_name: string,
 ) -> bool {
-	found, find_err := btree.int_find_rowids(idx_tree, root, val)
+	found, find_err := btree.find_rowids(idx_tree, root, val)
 	if find_err != .None {
 		log.errorf("Error: Failed to search index for '%s'", table_name)
 		return false
@@ -977,6 +1136,15 @@ candidate_lookup_int_eq :: proc(
 
 	append(out, ..found)
 	return true
+}
+
+// candidate_lookup_eq appends one key's rowids for Eq/In candidate plans,
+// selecting the text/int/real twin by the key's static type.
+@(private = "file")
+candidate_lookup_eq :: proc {
+	candidate_lookup_text_eq,
+	candidate_lookup_int_eq,
+	candidate_lookup_real_eq,
 }
 
 // candidate_lookup_range appends one text range's rowids. Twin of
@@ -989,7 +1157,7 @@ candidate_lookup_range :: proc(
 	out: ^[dynamic]types.Row_ID,
 	table_name: string,
 ) -> bool {
-	found, find_err := btree.text_range_rowids(
+	found, find_err := btree.range_rowids(
 		idx_tree,
 		root,
 		plan.range_lo_text,
@@ -1018,11 +1186,60 @@ candidate_lookup_int_range :: proc(
 	out: ^[dynamic]types.Row_ID,
 	table_name: string,
 ) -> bool {
-	found, find_err := btree.int_range_rowids(
+	found, find_err := btree.range_rowids(
 		idx_tree,
 		root,
 		plan.range_lo_int,
 		plan.range_hi_int,
+		plan.range_has_lo,
+		plan.range_has_hi,
+		plan.range_lo_inc,
+		plan.range_hi_inc,
+	)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table_name)
+		return false
+	}
+
+	append(out, ..found)
+	return true
+}
+
+// candidate_lookup_real_eq appends one real key's rowids. Twin of
+// candidate_lookup_int_eq for REAL indexes.
+@(private = "file")
+candidate_lookup_real_eq :: proc(
+	idx_tree: ^btree.Tree,
+	root: u32,
+	val: f64,
+	out: ^[dynamic]types.Row_ID,
+	table_name: string,
+) -> bool {
+	found, find_err := btree.find_rowids(idx_tree, root, val)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table_name)
+		return false
+	}
+
+	append(out, ..found)
+	return true
+}
+
+// candidate_lookup_real_range appends one real range's rowids. Twin of
+// candidate_lookup_int_range for REAL indexes.
+@(private = "file")
+candidate_lookup_real_range :: proc(
+	idx_tree: ^btree.Tree,
+	root: u32,
+	plan: Index_Plan,
+	out: ^[dynamic]types.Row_ID,
+	table_name: string,
+) -> bool {
+	found, find_err := btree.range_rowids(
+		idx_tree,
+		root,
+		plan.range_lo_real,
+		plan.range_hi_real,
 		plan.range_has_lo,
 		plan.range_has_hi,
 		plan.range_lo_inc,
@@ -1053,10 +1270,16 @@ index_candidate_single :: proc(
 	idx_tree := btree.init(t.pager, plan.root)
 	out := make([dynamic]types.Row_ID, 0, 8, allocator)
 	is_int := plan.col_type == .INTEGER
+	is_real := plan.col_type == .REAL
 	#partial switch plan.use {
 	case .Eq:
 		if is_int {
-			if !candidate_lookup_int_eq(&idx_tree, plan.root, plan.eq_int, &out, table.name) {
+			if !candidate_lookup_eq(&idx_tree, plan.root, plan.eq_int, &out, table.name) {
+				delete(out)
+				return nil, false
+			}
+		} else if is_real {
+			if !candidate_lookup_eq(&idx_tree, plan.root, plan.eq_real, &out, table.name) {
 				delete(out)
 				return nil, false
 			}
@@ -1076,7 +1299,14 @@ index_candidate_single :: proc(
 	case .In:
 		if is_int {
 			for v in plan.in_ints {
-				if !candidate_lookup_int_eq(&idx_tree, plan.root, v, &out, table.name) {
+				if !candidate_lookup_eq(&idx_tree, plan.root, v, &out, table.name) {
+					delete(out)
+					return nil, false
+				}
+			}
+		} else if is_real {
+			for v in plan.in_reals {
+				if !candidate_lookup_eq(&idx_tree, plan.root, v, &out, table.name) {
 					delete(out)
 					return nil, false
 				}
@@ -1095,6 +1325,11 @@ index_candidate_single :: proc(
 		}
 		if is_int {
 			if !candidate_lookup_int_range(&idx_tree, plan.root, plan, &out, table.name) {
+				delete(out)
+				return nil, false
+			}
+		} else if is_real {
+			if !candidate_lookup_real_range(&idx_tree, plan.root, plan, &out, table.name) {
 				delete(out)
 				return nil, false
 			}
@@ -1348,9 +1583,9 @@ Covering_Pair :: struct {
 	val: types.Value, // borrowed text header or by-value scalar; cloned at materialize
 }
 
-// covering_emit_eq emits the (rowid,text) pairs for one index key lookup.
+// covering_emit_text_eq emits the (rowid,text) pairs for one index key lookup.
 @(private = "file")
-covering_emit_eq :: proc(
+covering_emit_text_eq :: proc(
 	t: ^btree.Tree,
 	table: ^types.Table,
 	root: u32,
@@ -1359,7 +1594,7 @@ covering_emit_eq :: proc(
 	allocator := context.allocator,
 ) -> bool {
 	idx_tree := btree.init(t.pager, root)
-	found, find_err := btree.text_find_rowids(&idx_tree, root, transmute([]u8)text)
+	found, find_err := btree.find_rowids(&idx_tree, root, transmute([]u8)text)
 	if find_err != .None {
 		log.errorf("Error: Failed to search index for '%s'", table.name)
 		return false
@@ -1382,7 +1617,7 @@ covering_emit_int_eq :: proc(
 	allocator := context.allocator,
 ) -> bool {
 	idx_tree := btree.init(t.pager, root)
-	found, find_err := btree.int_find_rowids(&idx_tree, root, val)
+	found, find_err := btree.find_rowids(&idx_tree, root, val)
 	if find_err != .None {
 		log.errorf("Error: Failed to search index for '%s'", table.name)
 		return false
@@ -1391,6 +1626,45 @@ covering_emit_int_eq :: proc(
 		append(out, Covering_Pair{rid = rid, val = types.value(val)})
 	}
 	return true
+}
+
+// covering_emit_real_eq emits the (rowid,real) pairs for one real key
+// lookup. Twin of covering_emit_int_eq for REAL indexes. Emits the
+// canonical index key (+0.0 for either zero — the codec normalizes -0.0,
+// so the stored sign is unrecoverable without the row): value-equal to
+// the stored rows under engine equality, deterministic across spellings.
+@(private = "file")
+covering_emit_real_eq :: proc(
+	t: ^btree.Tree,
+	table: ^types.Table,
+	root: u32,
+	val: f64,
+	out: ^[dynamic]Covering_Pair,
+	allocator := context.allocator,
+) -> bool {
+	idx_tree := btree.init(t.pager, root)
+	found, find_err := btree.find_rowids(&idx_tree, root, val)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table.name)
+		return false
+	}
+
+	key := val
+	if key == 0 {
+		key = 0.0
+	}
+	for rid in found {
+		append(out, Covering_Pair{rid = rid, val = types.value(key)})
+	}
+	return true
+}
+
+// covering_emit_eq emits the (rowid,value) pairs for one index key lookup,
+// selecting the text/int/real twin by the key's static type.
+covering_emit_eq :: proc {
+	covering_emit_text_eq,
+	covering_emit_int_eq,
+	covering_emit_real_eq,
 }
 
 // covering_emit_plan emits the pairs for one Eq/In plan node: single lookup
@@ -1406,16 +1680,28 @@ covering_emit_plan :: proc(
 	allocator := context.allocator,
 ) -> bool {
 	is_int := sub.col_type == .INTEGER
+	is_real := sub.col_type == .REAL
 	#partial switch sub.use {
 	case .Eq:
 		if is_int {
-			return covering_emit_int_eq(t, table, sub.root, sub.eq_int, out, allocator)
+			return covering_emit_eq(t, table, sub.root, sub.eq_int, out, allocator)
+		}
+		if is_real {
+			return covering_emit_eq(t, table, sub.root, sub.eq_real, out, allocator)
 		}
 		return covering_emit_eq(t, table, sub.root, sub.eq_text, out, allocator)
 	case .In:
 		if is_int {
 			for v in sub.in_ints {
-				if !covering_emit_int_eq(t, table, sub.root, v, out, allocator) {
+				if !covering_emit_eq(t, table, sub.root, v, out, allocator) {
+					return false
+				}
+			}
+			return true
+		}
+		if is_real {
+			for v in sub.in_reals {
+				if !covering_emit_eq(t, table, sub.root, v, out, allocator) {
 					return false
 				}
 			}

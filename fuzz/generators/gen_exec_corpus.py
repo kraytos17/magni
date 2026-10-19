@@ -333,6 +333,32 @@ SELECT a, b FROM t WHERE b = '' ORDER BY b;
 SELECT a, b FROM t WHERE b > '' ORDER BY b;
 SELECT rowid FROM t WHERE a > 3 ORDER BY rowid;
 """),
+    ("script_real_index", """\
+CREATE TABLE t (r REAL, b TEXT);
+INSERT INTO t VALUES (1.5, 'x');
+INSERT INTO t VALUES (-2.5, 'y');
+INSERT INTO t VALUES (1.5, 'z');
+INSERT INTO t VALUES (-0.0, 'neg');
+INSERT INTO t VALUES (0.0, 'pos');
+INSERT INTO t VALUES (NULL, 'n');
+INSERT INTO t VALUES (2, 'i');
+CREATE INDEX i_r ON t (r);
+CREATE INDEX i_b ON t (b);
+SELECT r, b FROM t WHERE r = 1.5 ORDER BY b;
+SELECT r FROM t WHERE r = 0.0 ORDER BY r;
+SELECT r, b FROM t WHERE r > 0.0 ORDER BY r, b;
+SELECT r, b FROM t WHERE r BETWEEN -3.0 AND 1.0 ORDER BY r, b;
+SELECT r, b FROM t WHERE r NOT BETWEEN 0.0 AND 2.0 ORDER BY r, b;
+SELECT r, b FROM t WHERE r IN (1.5, -2.5) ORDER BY r, b;
+SELECT r, b FROM t WHERE r = 2.0 ORDER BY b;
+SELECT r FROM t WHERE r = 2.0 ORDER BY r;
+SELECT r, b FROM t WHERE r = 'x' ORDER BY b;
+SELECT r, b FROM t WHERE r LIKE '1%';
+SELECT rowid FROM t WHERE r > 0.0 ORDER BY rowid;
+UPDATE t SET r = 3.5 WHERE b = 'x';
+DELETE FROM t WHERE b = 'n';
+SELECT r, b FROM t ORDER BY b;
+"""),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
 INSERT INTO t (id, s, c) VALUES (1, 'a', 5);

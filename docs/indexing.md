@@ -1,7 +1,7 @@
 # Secondary Indexes
 
-Single-column TEXT and INTEGER indexes, maintained on every write path
-and used to route eligible `SELECT` filters. Scope is deliberately
+Single-column TEXT, INTEGER, and REAL indexes, maintained on every write
+path and used to route eligible `SELECT` filters. Scope is deliberately
 narrow; anything outside it takes the full scan with identical results.
 
 ## DDL
@@ -19,9 +19,12 @@ DROP INDEX i_title ON docs;
   `DROP INDEX <name>` needs a unique match; otherwise qualify with
   `ON <table>` (ambiguous names error out).
 - Single column only: `CREATE INDEX i ON t (a, b)` is rejected at
-  parse time. TEXT and INTEGER columns index; REAL/BLOB fail cleanly.
+  parse time. TEXT, INTEGER, and REAL columns index; BLOB fails cleanly.
   One index kind per column type (TEXT keys sort binary, INTEGER keys
-  numeric); cross-class literals never match, so they never route.
+  numeric, REAL keys numeric with -0.0 normalized to +0.0); cross-class
+  literals never match, so they never route. Integers stored in a REAL
+  column index under their widened key (REAL affinity); covering
+  projections normalize them to REAL while fetch preserves classes.
 - `DROP INDEX` clears the definition atomically. Data is untouched;
   routed shapes fall back to full scan with identical results (covering
   `SELECT rowid` / `SELECT <indexed-col>` answer from data pages instead
@@ -43,6 +46,9 @@ AND, union for OR):
 | `body LIKE 'al%'` | Index (prefix) | Canonical shape only: single trailing `%`, non-empty stem, no `%` or `_` in the stem; TEXT indexes only (`LIKE` on integers stays on the scan path with identical results) |
 | `body IN ('a', 'b')` | Index (union) | Literal lists up to 128 members of the index's type; other members match nothing; longer lists and subquery `IN` fall back |
 | `v IN (1, 2)` | Index (union) | Same cap and semantics on INTEGER indexes |
+| `r = 1.5` | Index | REAL literal on a REAL index only (`-0.0` matches `+0.0`) |
+| `r IN (1.5, 2.5)` | Index (union) | Same cap and semantics on REAL indexes |
+| `r > 1.5`, `r BETWEEN 1.0 AND 2.0` | Index (range) | Same merge semantics on REAL indexes; `LIKE` on REAL stays on scan |
 | `v > 42`, `v >= 42`, `v < 42`, `v <= 42` | Index (range) | Open-ended bounds in the column's type; fetch-only (keys unknown) |
 | `v BETWEEN 1 AND 9` | Index (range) | Desugared to `>= AND <=`; same-column ANDs merge to one bounded scan |
 | `v > 9 AND v < 1` | Index (range, empty) | Contradictions collapse to an empty plan with zero I/O |
@@ -107,6 +113,9 @@ EXPLAIN SELECT v FROM nums WHERE v > 40;
 
 EXPLAIN SELECT v FROM nums WHERE v BETWEEN 1 AND 9;
 -- INDEX SCAN ON nums USING v (range, fetch)
+
+EXPLAIN SELECT x FROM reals WHERE x = 1.5;
+-- INDEX SCAN ON reals USING x (eq, covering)
 ```
 
 Non-single-table statements keep the legacy echo of the inner SQL.
