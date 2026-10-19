@@ -141,12 +141,14 @@ exec_create_index :: proc(
 
 	defer pager.unpin_page(t.pager, root_page.page_num)
 	init_ok := false
-	if col_type == .TEXT {
+	switch col_type {
+	case .TEXT:
 		init_ok = btree.init_text_leaf_page(root_page.data, root_page.page_num)
-	} else if col_type == .INTEGER {
+	case .INTEGER:
 		init_ok = btree.init_int_leaf_page(root_page.data, root_page.page_num)
-	} else {
+	case .REAL:
 		init_ok = btree.init_real_leaf_page(root_page.data, root_page.page_num)
+	case .BLOB:
 	}
 
 	if !init_ok {
@@ -179,7 +181,8 @@ exec_create_index :: proc(
 			btree.cursor_advance(&cursor)
 			continue
 		}
-		if col_type == .TEXT {
+		switch col_type {
+		case .TEXT:
 			if s, is_text := c.values[col_idx].(string); is_text {
 				owned, c_err := strings.clone(s, context.temp_allocator)
 				if c_err != .None {
@@ -189,12 +192,16 @@ exec_create_index :: proc(
 				}
 				append(&tpairs, Text_Bulk_Pair{text = owned, rid = c.rowid})
 			}
-		} else if col_type == .INTEGER {
+		case .INTEGER:
 			if v, is_int := c.values[col_idx].(i64); is_int {
 				append(&ipairs, Int_Bulk_Pair{val = v, rid = c.rowid})
 			}
-		} else if v, ok := index_col_real(table^, stmt.column, c.values); ok {
-			append(&rpairs, Real_Bulk_Pair{val = v, rid = c.rowid})
+		case .REAL:
+			if v, ok := index_col_real(table^, stmt.column, c.values); ok {
+				append(&rpairs, Real_Bulk_Pair{val = v, rid = c.rowid})
+			}
+		case .BLOB:
+		// BLOB columns never reach backfill; no arm.
 		}
 
 		cell.destroy(&c, context.temp_allocator)
@@ -207,7 +214,8 @@ exec_create_index :: proc(
 	if len(tpairs) + len(ipairs) + len(rpairs) > 0 {
 		raws := make([][]u8, max(len(tpairs), len(ipairs), len(rpairs)), context.temp_allocator)
 		rids := make([]types.Row_ID, len(raws), context.temp_allocator)
-		if col_type == .TEXT {
+		switch col_type {
+		case .TEXT:
 			slice.sort_by(tpairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
 				if c := cell.bytes_compare(transmute([]u8)a.text, transmute([]u8)b.text); c != 0 {
 					return c < 0
@@ -218,7 +226,7 @@ exec_create_index :: proc(
 				raws[i] = transmute([]u8)p.text
 				rids[i] = p.rid
 			}
-		} else if col_type == .INTEGER {
+		case .INTEGER:
 			slice.sort_by(ipairs[:], proc(a, b: Int_Bulk_Pair) -> bool {
 				if a.val != b.val {
 					return a.val < b.val
@@ -231,7 +239,7 @@ exec_create_index :: proc(
 				raws[i] = words[i][:]
 				rids[i] = p.rid
 			}
-		} else {
+		case .REAL:
 			slice.sort_by(rpairs[:], proc(a, b: Real_Bulk_Pair) -> bool {
 				wa := cell.real_sort_word(a.val)
 				wb := cell.real_sort_word(b.val)
@@ -247,6 +255,9 @@ exec_create_index :: proc(
 				raws[i] = words[i][:]
 				rids[i] = p.rid
 			}
+		case .BLOB:
+		// Unreachable (collect skips everything for BLOB, so the len guard
+		// above never enters); present only for exhaustiveness.
 		}
 
 		idx_tree := btree.init(t.pager, index_root)
@@ -1005,15 +1016,17 @@ commit_bulk_inserts :: proc(
 
 		idx_tree = btree.init(t.pager, def.root)
 		if btree.text_index_is_empty(&idx_tree, def.root) {
-			if def.col_type == .INTEGER {
+			switch def.col_type {
+			case .INTEGER:
 				ipairs := collect_int_pairs(table, def.column, infos)
 				idx_roots[i], ok = fanout_bulk_int(t, table, def, idx_roots[i], ipairs)
-			} else if def.col_type == .REAL {
+			case .REAL:
 				rpairs := collect_real_pairs(table, def.column, infos)
 				idx_roots[i], ok = fanout_bulk_real(t, table, def, idx_roots[i], rpairs)
-			} else {
+			case .TEXT:
 				pairs := collect_text_pairs(table, def.column, infos)
 				idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
+			case .BLOB:
 			}
 			if !ok {
 				return false, t.root, {}

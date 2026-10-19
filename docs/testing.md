@@ -65,3 +65,8 @@ on explicit request.
 - **Determinism.** `make census` must print identical numbers run to run;
   `LIMIT` without `ORDER BY` on routed queries is rowid-ordered by
   construction (candidates arrive sorted), so snapshot it freely.
+- **Debug-only asserts.** `when ODIN_DEBUG` blocks hold assertions, never
+  behavior (no logging, no allocation, no branches the release build could
+  observe). They ride the existing `-debug` test builds for free and compile
+  out of release; `contextless` procs cannot host `assert` (it needs
+  context), so invariant checks live at contextual call sites.
