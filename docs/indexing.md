@@ -43,13 +43,19 @@ AND, union for OR):
 | `body LIKE 'al%'` | Index (prefix) | Canonical shape only: single trailing `%`, non-empty stem, no `%` or `_` in the stem; TEXT indexes only (`LIKE` on integers stays on the scan path with identical results) |
 | `body IN ('a', 'b')` | Index (union) | Literal lists up to 128 members of the index's type; other members match nothing; longer lists and subquery `IN` fall back |
 | `v IN (1, 2)` | Index (union) | Same cap and semantics on INTEGER indexes |
+| `v > 42`, `v >= 42`, `v < 42`, `v <= 42` | Index (range) | Open-ended bounds in the column's type; fetch-only (keys unknown) |
+| `v BETWEEN 1 AND 9` | Index (range) | Desugared to `>= AND <=`; same-column ANDs merge to one bounded scan |
+| `v > 9 AND v < 1` | Index (range, empty) | Contradictions collapse to an empty plan with zero I/O |
+| `v = 42 AND v > 1` | Index | The Eq dominates: checked against the bound, then answered by lookup |
 | `body = 'x' AND v > 1` | Index on usable conjuncts | Full filter rechecks every candidate |
 | `title = 't' AND body = 'b'` | Indexes intersect | One candidate set per index (each member routed on its own index and type) |
 | `body = 'a' OR body = 'b'` | Indexes union | Every disjunct must be usable, else the union would be incomplete |
 | `docs.body = 'x'` | Index | Table/alias-qualified names resolve the same |
 
 Falling back (all correct via full scan): `NOT`, negated conditions,
-nested boolean groups, column-to-column comparisons, `LIKE '%pha'`,
+nested boolean groups, column-to-column comparisons, `!=`, cross-class
+ordered comparisons that need rank order (`b > 3` matches every text —
+TEXT ranks above INTEGER), `LIKE '%pha'`,
 `'a%b%'`, `'a_c%'`, bare `'%'`, OR with an unusable disjunct, IN past the
 cap, subquery `IN`.
 
@@ -61,8 +67,8 @@ answered from the index alone, without touching data pages. A bare
 `rowid` also projects generally in any position, with `ORDER BY rowid`,
 on tables with no index at all. So is
 `SELECT <indexed-col>` for Eq/In shapes (and Or thereof — the keys are
-known), in the column's type; prefix plans need the row and stay on
-fetch. A covering projection must name the routed column, and every OR
+known), in the column's type; prefix and range plans need the row and stay
+on fetch. A covering projection must name the routed column, and every OR
 member must share it — otherwise the query fetches (emitting another
 column's keys as values would be wrong). Wider projections
 fetch each candidate row and recheck the full filter. Candidates arrive
@@ -95,6 +101,12 @@ EXPLAIN SELECT v FROM nums WHERE v = 42;
 
 EXPLAIN SELECT id FROM docs WHERE title = 't' AND body = 'b';
 -- INDEX SCAN ON docs USING title, body (and, fetch)
+
+EXPLAIN SELECT v FROM nums WHERE v > 40;
+-- INDEX SCAN ON nums USING v (range, fetch)
+
+EXPLAIN SELECT v FROM nums WHERE v BETWEEN 1 AND 9;
+-- INDEX SCAN ON nums USING v (range, fetch)
 ```
 
 Non-single-table statements keep the legacy echo of the inner SQL.

@@ -200,7 +200,7 @@ exec_create_index :: proc(
 		rids := make([]types.Row_ID, len(raws), context.temp_allocator)
 		if col_type == .TEXT {
 			slice.sort_by(tpairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
-				if c := strings.compare(a.text, b.text); c != 0 {
+				if c := cell.bytes_compare(transmute([]u8)a.text, transmute([]u8)b.text); c != 0 {
 					return c < 0
 				}
 				return a.rid < b.rid
@@ -768,7 +768,7 @@ collect_text_pairs :: proc(
 	}
 
 	slice.sort_by(pairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
-		if c := strings.compare(a.text, b.text); c != 0 {
+		if c := cell.bytes_compare(transmute([]u8)a.text, transmute([]u8)b.text); c != 0 {
 			return c < 0
 		}
 		return a.rid < b.rid

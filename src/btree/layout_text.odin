@@ -194,6 +194,8 @@ text_entry_at :: proc "contextless" (
 // text_entry_compare orders (suffix,rowid) pairs: suffix BINARY, then rowid
 // numeric. Equivalent to full-text codec order iff both sides share the
 // page prefix (the writer-owned invariant) — the oracle test pins this.
+// Suffixes compare through bytes_compare (either side may be empty when an
+// entry equals the page prefix).
 @(private = "file")
 text_entry_compare :: #force_inline proc "contextless" (
 	suf: []u8,
@@ -201,7 +203,7 @@ text_entry_compare :: #force_inline proc "contextless" (
 	ts: []u8,
 	trid: types.Row_ID,
 ) -> int {
-	if r := mem.compare(suf, ts); r != 0 {
+	if r := cell.bytes_compare(suf, ts); r != 0 {
 		return r
 	}
 	if rid == trid {

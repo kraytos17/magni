@@ -311,8 +311,11 @@ or nested groups disable skipping (full scan).
 **Query planning** (`executor/index_scan.odin`, shared by the scalar and
 vector fetch paths): PK seek first (`try_pk_lookup`), then secondary-index
 routing for usable predicates on the indexed column in its own type —
-equality, canonical `LIKE 'stem%'` (TEXT only), literal `IN` (first usable
-conjunct of a flat AND chain; OR/NOT/nested/negated fall back).
+equality, canonical `LIKE 'stem%'` (TEXT only), literal `IN`, and ordered
+comparisons as fetch-only Range plans (first usable conjunct of a flat AND
+chain; OR/NOT/nested/negated fall back). Same-column ANDs merge (BETWEEN's
+`>= AND <=` becomes one bounded scan; contradictions empty without I/O;
+Eq dominates its Ranges).
 Single-column covering `SELECT rowid` answers from the index alone;
 single-column `SELECT <indexed-col>` covers Eq/In (and same-column OR)
 in the column's type, cross-column projections fetch per candidate and
@@ -728,12 +731,15 @@ fresh pages, splits, COW roots, and vacuum output. Layout, in brief:
   as data). Rowids are logical, so this is space reclamation only —
   correctness never depended on it.
 - Planner routing (Phase E, `executor/index_scan.odin`, since extended to
-  INTEGER indexes): single-table SELECT filters over the indexed column
-  route through the index in its own type — equality, canonical
-  `LIKE 'stem%'` (TEXT only; single trailing `%`, no `%`/`_` in the stem —
-  exactly where `like_match` reduces to a byte-prefix test, so candidates
-  and recheck agree by construction), and literal `IN` lists (members of
-  the index's type; cross-class/NULL members provably never match a row).
+  INTEGER indexes and Range scans): single-table SELECT filters over the
+  indexed column route through the index in its own type — equality,
+  canonical `LIKE 'stem%'` (TEXT only; single trailing `%`, no `%`/`_` in
+  the stem — exactly where `like_match` reduces to a byte-prefix test, so
+  candidates and recheck agree by construction), literal `IN` lists
+  (members of the index's type; cross-class/NULL members provably never
+  match a row), and ordered comparisons as fetch-only Range plans (one
+  descend plus a rightward leaf run with a stop key; same-column ANDs
+  merge to a single bounded scan, contradictions empty with zero I/O).
   Single-column covering `SELECT rowid` answers from the index alone (synthetic
   single-INTEGER `rowid` column through the shared `finish_select`
   tail; no user column named `rowid` may exist); single-column
@@ -1188,7 +1194,8 @@ context.allocator)`).
 - **Secondary indexes**: single-column TEXT/INTEGER indexes
   (`CREATE INDEX` / `DROP INDEX <name> [ON <table>]`, names unique per
   table), BINARY collation (text) / numeric order (int), NULL-not-indexed.
-  Routes equality and literal `IN` (up to 128 members) in the column's
+  Routes equality, literal `IN` (up to 128 members), and ordered
+  comparisons (fetch-only ranges, same-column ANDs merged) in the column's
   type, plus canonical `LIKE 'stem%'` on TEXT — plus flat-OR
   unions and multi-conjunct AND intersections across indexes. Covering
   `SELECT rowid` and `SELECT <indexed-col>` (Eq/In shapes, same-column OR);

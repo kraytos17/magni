@@ -16,6 +16,7 @@ Index_Use :: enum u8 {
 	Eq, // col = literal (text or int per index type)
 	Prefix, // col LIKE 'stem%' (canonical: single trailing %, no %/_ in stem; TEXT only)
 	In, // col IN (...) over literal members of the index's type
+	Range, // col >/</>=/<= literal (one open-ended bound, or both after AND-merge)
 	Or, // flat OR of usable same-column CONDs (union, exact)
 	And, // flat AND with 2+ usable conjuncts (intersection, needs recheck)
 }
@@ -24,20 +25,32 @@ Index_Use :: enum u8 {
 // Strings borrow the parser's arena (statement-scoped); candidates are
 // consumed synchronously, same as the dense path's temp arrays.
 // Eq/In carry the key in the arm matching col_type (eq_text/in_texts for
-// TEXT, eq_int/in_ints for INTEGER); the other arm stays zero.
+// TEXT, eq_int/in_ints for INTEGER); the other arm stays zero. Range carries
+// one bound per side in the matching arm (absent side reads open-ended);
+// range_empty marks a provably empty interval (contradictory AND-merge —
+// the btree short-circuits, zero I/O).
 // Or/And carry their member plans in subs (each member routed its own
 // index and carries its own type; column is the first sub's, display-only).
 Index_Plan :: struct {
-	use     : Index_Use,
-	root    : u32, // index root this plan reads (per-sub for Or/And)
-	column  : string, // indexed column (arena-borrowed; Or/And: first sub's)
-	col_type: types.Column_Type, // index kind (per-sub for Or/And)
-	eq_text : string, // Eq on TEXT
-	eq_int  : i64, // Eq on INTEGER
-	prefix  : string, // Prefix stem
-	in_texts: []string, // In TEXT members
-	in_ints : []i64, // In INTEGER members
-	subs    : []Index_Plan, // Or/And members (each with its own root)
+	use          : Index_Use,
+	root         : u32, // index root this plan reads (per-sub for Or/And)
+	column       : string, // indexed column (arena-borrowed; Or/And: first sub's)
+	col_type     : types.Column_Type, // index kind (per-sub for Or/And)
+	eq_text      : string, // Eq on TEXT
+	eq_int       : i64, // Eq on INTEGER
+	prefix       : string, // Prefix stem
+	in_texts     : []string, // In TEXT members
+	in_ints      : []i64, // In INTEGER members
+	range_has_lo : bool, // Range lower bound present
+	range_has_hi : bool, // Range upper bound present
+	range_lo_inc : bool, // Range lower bound inclusive (>=)
+	range_hi_inc : bool, // Range upper bound inclusive (<=)
+	range_lo_text: string, // Range lower bound on TEXT
+	range_hi_text: string, // Range upper bound on TEXT
+	range_lo_int : i64, // Range lower bound on INTEGER
+	range_hi_int : i64, // Range upper bound on INTEGER
+	range_empty  : bool, // Range provably matches nothing (AND contradiction)
+	subs         : []Index_Plan, // Or/And members (each with its own root)
 }
 
 // MAX_INDEX_IN_MEMBERS caps literal IN routing: each TEXT member is one
@@ -132,7 +145,9 @@ cond_int_rhs :: proc(cond: parser.Condition) -> (i64, bool) {
 // (membership_test guards the row side), so the member lookups are
 // complete. Subquery IN stays on the scan path (its membership materializes
 // per resolve, not per lookup). LIKE routes TEXT indexes only — prefixes
-// are meaningless on integers.
+// are meaningless on integers. Ordered comparisons route as open-ended
+// Range plans (fetch-only — keys unknown, like Prefix); != stays on the
+// scan path (a complement, not a contiguous run).
 @(private)
 index_use_of_cond :: proc(
 	index_root: u32,
@@ -248,6 +263,53 @@ index_use_of_cond :: proc(
 				in_texts = texts[:],
 			},
 			true
+	}
+	if cond.operator == .GREATER_THAN ||
+	   cond.operator == .GREATER_EQUAL ||
+	   cond.operator == .LESS_THAN ||
+	   cond.operator == .LESS_EQUAL {
+		is_lo := cond.operator == .GREATER_THAN || cond.operator == .GREATER_EQUAL
+		inc := cond.operator == .GREATER_EQUAL || cond.operator == .LESS_EQUAL
+		if col_type == .INTEGER {
+			if v, is_int := cond_int_rhs(cond); is_int {
+				rp := Index_Plan {
+					use      = .Range,
+					root     = index_root,
+					column   = index_column,
+					col_type = col_type,
+				}
+				if is_lo {
+					rp.range_has_lo = true
+					rp.range_lo_inc = inc
+					rp.range_lo_int = v
+				} else {
+					rp.range_has_hi = true
+					rp.range_hi_inc = inc
+					rp.range_hi_int = v
+				}
+				return rp, true
+			}
+			return {}, false
+		}
+		if s, is_text := cond_text_rhs(cond); is_text {
+			rp := Index_Plan {
+				use      = .Range,
+				root     = index_root,
+				column   = index_column,
+				col_type = col_type,
+			}
+			if is_lo {
+				rp.range_has_lo = true
+				rp.range_lo_inc = inc
+				rp.range_lo_text = s
+			} else {
+				rp.range_has_hi = true
+				rp.range_hi_inc = inc
+				rp.range_hi_text = s
+			}
+			return rp, true
+		}
+		return {}, false
 	}
 	return {}, false
 }
@@ -419,11 +481,351 @@ resolve_index_fetch :: proc(
 	if len(subs) == 1 {
 		return subs[0], true
 	}
+	return collapse_and_subs(subs[:])
+}
+
+// range_val_cmp orders two bound literals of one index type: numeric for
+// INTEGER, BINARY for TEXT. The file-private comparator behind AND-merge
+// (callers in one group share col_type, so one switch covers both arms).
+@(private = "file")
+range_val_cmp :: proc(
+	col_type: types.Column_Type,
+	a_text: string,
+	a_int: i64,
+	b_text: string,
+	b_int: i64,
+) -> int {
+	if col_type == .INTEGER {
+		if a_int == b_int {
+			return 0
+		}
+		return -1 if a_int < b_int else 1
+	}
+	return cell.bytes_compare(transmute([]u8)a_text, transmute([]u8)b_text)
+}
+
+// range_value_ok reports whether one literal satisfies one Range plan's
+// bounds: the Eq-dominates and In-filter checks behind AND-collapse.
+@(private = "file")
+range_value_ok :: proc(
+	col_type: types.Column_Type,
+	v_text: string,
+	v_int: i64,
+	bound: Index_Plan,
+) -> bool {
+	if bound.range_has_lo {
+		c := range_val_cmp(col_type, v_text, v_int, bound.range_lo_text, bound.range_lo_int)
+		if c < 0 || (c == 0 && !bound.range_lo_inc) {
+			return false
+		}
+	}
+	if bound.range_has_hi {
+		c := range_val_cmp(col_type, v_text, v_int, bound.range_hi_text, bound.range_hi_int)
+		if c > 0 || (c == 0 && !bound.range_hi_inc) {
+			return false
+		}
+	}
+	return true
+}
+
+// collapse_group folds one same-index AND group (2+ Eq/In/Range members)
+// into fewer, tighter plans: Eq dominates (checked against every Range
+// bound and In membership — violations empty the whole AND), In sets
+// intersect then filter by Range bounds (dropping the Ranges they imply),
+// and bare Ranges intersect to the tightest interval. Any other member
+// (Prefix) disables collapse — the group passes through to the intersect
+// path. Surviving strings borrow the input plans' arena memory.
+@(private = "file")
+collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: bool) {
+	col_type := group[0].col_type
+	is_int := col_type == .INTEGER
+	for sub in group {
+		if sub.use != .Eq && sub.use != .In && sub.use != .Range {
+			return group, false
+		}
+	}
+
+	eq_set := false
+	eq_text := ""
+	eq_int := i64(0)
+	for sub in group {
+		if sub.use != .Eq {
+			continue
+		}
+		if is_int {
+			if !eq_set {
+				eq_set, eq_int = true, sub.eq_int
+			} else if eq_int != sub.eq_int {
+				return nil, true
+			}
+		} else {
+			if !eq_set {
+				eq_set, eq_text = true, sub.eq_text
+			} else if eq_text != sub.eq_text {
+				return nil, true
+			}
+		}
+	}
+	if eq_set {
+		for sub in group {
+			#partial switch sub.use {
+			case .Range:
+				if sub.range_empty {
+					return nil, true
+				}
+				if !range_value_ok(col_type, eq_text, eq_int, sub) {
+					return nil, true
+				}
+			case .In:
+				found := false
+				if is_int {
+					for m in sub.in_ints {
+						if m == eq_int {
+							found = true
+							break
+						}
+					}
+				} else {
+					for m in sub.in_texts {
+						if m == eq_text {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					return nil, true
+				}
+			}
+		}
+
+		kept := make([dynamic]Index_Plan, 0, 1, context.temp_allocator)
+		for sub in group {
+			if sub.use == .Eq {
+				append(&kept, sub)
+				break
+			}
+		}
+		return kept[:], false
+	}
+
+	had_in := false
+	keep_ints := make([dynamic]i64, 0, 8, context.temp_allocator)
+	keep_texts := make([dynamic]string, 0, 8, context.temp_allocator)
+	for sub in group {
+		if sub.use != .In {
+			continue
+		}
+		if is_int {
+			if !had_in {
+				append(&keep_ints, ..sub.in_ints)
+			} else {
+				next := make([dynamic]i64, 0, len(keep_ints), context.temp_allocator)
+				for m in keep_ints {
+					for c in sub.in_ints {
+						if m == c {
+							append(&next, m)
+							break
+						}
+					}
+				}
+				keep_ints = next
+			}
+		} else {
+			if !had_in {
+				append(&keep_texts, ..sub.in_texts)
+			} else {
+				next := make([dynamic]string, 0, len(keep_texts), context.temp_allocator)
+				for m in keep_texts {
+					for c in sub.in_texts {
+						if m == c {
+							append(&next, m)
+							break
+						}
+					}
+				}
+				keep_texts = next
+			}
+		}
+		had_in = true
+	}
+	for sub in group {
+		if sub.use != .Range {
+			continue
+		}
+		if sub.range_empty {
+			return nil, true
+		}
+		if is_int {
+			next := make([dynamic]i64, 0, len(keep_ints), context.temp_allocator)
+			for m in keep_ints {
+				if range_value_ok(col_type, "", m, sub) {
+					append(&next, m)
+				}
+			}
+			keep_ints = next
+		} else {
+			next := make([dynamic]string, 0, len(keep_texts), context.temp_allocator)
+			for m in keep_texts {
+				if range_value_ok(col_type, m, 0, sub) {
+					append(&next, m)
+				}
+			}
+			keep_texts = next
+		}
+	}
+	if had_in {
+		if (is_int && len(keep_ints) == 0) || (!is_int && len(keep_texts) == 0) {
+			return nil, true
+		}
+		kept := Index_Plan {
+			use      = .In,
+			root     = group[0].root,
+			column   = group[0].column,
+			col_type = col_type,
+		}
+		if is_int {
+			kept.in_ints = keep_ints[:]
+		} else {
+			kept.in_texts = keep_texts[:]
+		}
+
+		out := make([dynamic]Index_Plan, 0, 1, context.temp_allocator)
+		append(&out, kept)
+		return out[:], false
+	}
+
+	merged := Index_Plan {
+		use      = .Range,
+		root     = group[0].root,
+		column   = group[0].column,
+		col_type = col_type,
+	}
+	for sub in group {
+		if sub.use != .Range {
+			continue
+		}
+		if sub.range_has_lo {
+			tighter := !merged.range_has_lo
+			if !tighter {
+				c := range_val_cmp(
+					col_type,
+					sub.range_lo_text,
+					sub.range_lo_int,
+					merged.range_lo_text,
+					merged.range_lo_int,
+				)
+				tighter = c > 0 || (c == 0 && merged.range_lo_inc && !sub.range_lo_inc)
+			}
+			if tighter {
+				merged.range_has_lo = true
+				merged.range_lo_inc = sub.range_lo_inc
+				merged.range_lo_text = sub.range_lo_text
+				merged.range_lo_int = sub.range_lo_int
+			}
+		}
+		if sub.range_has_hi {
+			tighter := !merged.range_has_hi
+			if !tighter {
+				c := range_val_cmp(
+					col_type,
+					sub.range_hi_text,
+					sub.range_hi_int,
+					merged.range_hi_text,
+					merged.range_hi_int,
+				)
+				tighter = c < 0 || (c == 0 && merged.range_hi_inc && !sub.range_hi_inc)
+			}
+			if tighter {
+				merged.range_has_hi = true
+				merged.range_hi_inc = sub.range_hi_inc
+				merged.range_hi_text = sub.range_hi_text
+				merged.range_hi_int = sub.range_hi_int
+			}
+		}
+	}
+	if merged.range_has_lo && merged.range_has_hi {
+		c := range_val_cmp(
+			col_type,
+			merged.range_lo_text,
+			merged.range_lo_int,
+			merged.range_hi_text,
+			merged.range_hi_int,
+		)
+		if c > 0 || (c == 0 && !(merged.range_lo_inc && merged.range_hi_inc)) {
+			return nil, true
+		}
+	}
+
+	out := make([dynamic]Index_Plan, 0, 1, context.temp_allocator)
+	append(&out, merged)
+	return out[:], false
+}
+
+// collapse_and_subs folds an AND's same-index Eq/In/Range members into
+// fewer, tighter plans (BETWEEN's `>= AND <=` becomes one bounded scan;
+// contradictions become an empty Range the btree short-circuits with zero
+// I/O). Groups on different indexes pass through untouched for the
+// intersect path. Single survivor returns directly so EXPLAIN names the
+// real shape ((range, fetch), not (and, fetch)).
+@(private = "file")
+collapse_and_subs :: proc(subs: []Index_Plan) -> (Index_Plan, bool) {
+	n := len(subs)
+	assign := make([]int, n, context.temp_allocator)
+	roots := make([dynamic]u32, 0, n, context.temp_allocator)
+	cols := make([dynamic]string, 0, n, context.temp_allocator)
+	ng := 0
+	for i in 0 ..< n {
+		found := -1
+		for g in 0 ..< ng {
+			if roots[g] == subs[i].root && cols[g] == subs[i].column {
+				found = g
+				break
+			}
+		}
+		if found < 0 {
+			append(&roots, subs[i].root)
+			append(&cols, subs[i].column)
+			found = ng
+			ng += 1
+		}
+		assign[i] = found
+	}
+
+	merged := make([dynamic]Index_Plan, 0, n, context.temp_allocator)
+	for g in 0 ..< ng {
+		grp := make([dynamic]Index_Plan, 0, 4, context.temp_allocator)
+		for i in 0 ..< n {
+			if assign[i] == g {
+				append(&grp, subs[i])
+			}
+		}
+		if len(grp) == 1 {
+			append(&merged, grp[0])
+			continue
+		}
+
+		plans, is_empty := collapse_group(grp[:])
+		if is_empty {
+			return Index_Plan {
+					use = .Range,
+					root = subs[0].root,
+					column = subs[0].column,
+					col_type = subs[0].col_type,
+					range_empty = true,
+				},
+				true
+		}
+		append(&merged, ..plans[:])
+	}
+	if len(merged) == 1 {
+		return merged[0], true
+	}
 	return Index_Plan {
 			use = .And,
 			column = subs[0].column,
 			col_type = subs[0].col_type,
-			subs = subs[:],
+			subs = merged[:],
 		},
 		true
 }
@@ -577,7 +979,65 @@ candidate_lookup_int_eq :: proc(
 	return true
 }
 
-// index_candidate_single runs one Eq/Prefix/In plan's btree lookups.
+// candidate_lookup_range appends one text range's rowids. Twin of
+// candidate_lookup_eq for Range plans on TEXT indexes.
+@(private = "file")
+candidate_lookup_range :: proc(
+	idx_tree: ^btree.Tree,
+	root: u32,
+	plan: Index_Plan,
+	out: ^[dynamic]types.Row_ID,
+	table_name: string,
+) -> bool {
+	found, find_err := btree.text_range_rowids(
+		idx_tree,
+		root,
+		plan.range_lo_text,
+		plan.range_hi_text,
+		plan.range_has_lo,
+		plan.range_has_hi,
+		plan.range_lo_inc,
+		plan.range_hi_inc,
+	)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table_name)
+		return false
+	}
+
+	append(out, ..found)
+	return true
+}
+
+// candidate_lookup_int_range appends one integer range's rowids. Twin of
+// candidate_lookup_range for INTEGER indexes.
+@(private = "file")
+candidate_lookup_int_range :: proc(
+	idx_tree: ^btree.Tree,
+	root: u32,
+	plan: Index_Plan,
+	out: ^[dynamic]types.Row_ID,
+	table_name: string,
+) -> bool {
+	found, find_err := btree.int_range_rowids(
+		idx_tree,
+		root,
+		plan.range_lo_int,
+		plan.range_hi_int,
+		plan.range_has_lo,
+		plan.range_has_hi,
+		plan.range_lo_inc,
+		plan.range_hi_inc,
+	)
+	if find_err != .None {
+		log.errorf("Error: Failed to search index for '%s'", table_name)
+		return false
+	}
+
+	append(out, ..found)
+	return true
+}
+
+// index_candidate_single runs one Eq/Prefix/In/Range plan's btree lookups.
 // Unsorted, may contain duplicates (IN overlap); the caller sorts. Eq/In
 // dispatch on the plan's kind (Prefix is TEXT-only by construction).
 @(private = "file")
@@ -629,6 +1089,19 @@ index_candidate_single :: proc(
 				}
 			}
 		}
+	case .Range:
+		if plan.range_empty {
+			return out, true
+		}
+		if is_int {
+			if !candidate_lookup_int_range(&idx_tree, plan.root, plan, &out, table.name) {
+				delete(out)
+				return nil, false
+			}
+		} else if !candidate_lookup_range(&idx_tree, plan.root, plan, &out, table.name) {
+			delete(out)
+			return nil, false
+		}
 	case:
 		delete(out)
 		return nil, false
@@ -662,6 +1135,8 @@ index_use_name :: proc(use: Index_Use) -> string {
 		return "prefix"
 	case .In:
 		return "in"
+	case .Range:
+		return "range"
 	case .Or:
 		return "or"
 	case .And:
@@ -847,9 +1322,9 @@ is_covering_col_select :: proc(stmt: parser.Select_Stmt, plan: Index_Plan) -> bo
 
 // covering_known_values reports whether a covering plan's output values
 // are known without touching data pages: Eq/In carry their keys; Or of
-// Eq/In unions known keys. Prefix (and And, which never reaches covering)
-// needs the row. Shared with both fetch paths and EXPLAIN so the three
-// can never disagree.
+// Eq/In unions known keys. Prefix, Range (and And, which never reaches
+// covering) need the row. Shared with both fetch paths and EXPLAIN so the
+// three can never disagree.
 @(private)
 covering_known_values :: proc(plan: Index_Plan) -> bool {
 	#partial switch plan.use {

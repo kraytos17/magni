@@ -310,6 +310,29 @@ SELECT a, b FROM t ORDER BY b;
 DROP INDEX i_a;
 SELECT a FROM t WHERE a = 7;
 """),
+    ("script_range_index", """\
+CREATE TABLE t (a INT, b TEXT);
+INSERT INTO t VALUES (10, 'x');
+INSERT INTO t VALUES (-5, 'y');
+INSERT INTO t VALUES (3, 'm');
+INSERT INTO t VALUES (10, 'z');
+INSERT INTO t VALUES (NULL, 'n');
+INSERT INTO t VALUES (7, '');
+CREATE INDEX i_a ON t (a);
+CREATE INDEX i_b ON t (b);
+SELECT a, b FROM t WHERE a > 3 ORDER BY b;
+SELECT a, b FROM t WHERE a >= 3 AND a <= 10 ORDER BY a;
+SELECT a, b FROM t WHERE a BETWEEN -5 AND 7 ORDER BY a;
+SELECT a, b FROM t WHERE a NOT BETWEEN 3 AND 10 ORDER BY a;
+SELECT a, b FROM t WHERE a > 10 AND a < 5;
+SELECT a, b FROM t WHERE a = 10 AND a > 3;
+SELECT a, b FROM t WHERE b > 'm' ORDER BY b;
+SELECT a, b FROM t WHERE b <= 'y' ORDER BY b;
+SELECT a, b FROM t WHERE b BETWEEN 'm' AND 'y' ORDER BY b;
+SELECT a, b FROM t WHERE b = '' ORDER BY b;
+SELECT a, b FROM t WHERE b > '' ORDER BY b;
+SELECT rowid FROM t WHERE a > 3 ORDER BY rowid;
+"""),
     ("script_constraints", """\
 CREATE TABLE t (id INT PRIMARY KEY, v INT DEFAULT 7, s TEXT NOT NULL, c INT CHECK (c > 0));
 INSERT INTO t (id, s, c) VALUES (1, 'a', 5);

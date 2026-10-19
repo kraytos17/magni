@@ -1371,6 +1371,274 @@ test_index_or_cross_column_values :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_index_range_int :: proc(t: ^testing.T) {
+	// Range routing on INTEGER indexes: all four operators answer fetch
+	// with exact bounds (NULLs never match); cross-class, negated, and !=
+	// stay on the scan path with identical results.
+	d := setup_db(t, "idxrangeint")
+	defer teardown_db(d, "idxrangeint")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (-5, 'y');",
+			"INSERT INTO t VALUES (3, 'm');",
+			"INSERT INTO t VALUES (NULL, 'n');",
+			"CREATE INDEX i_a ON t (a);",
+		},
+	)
+	cases := []struct {
+		sql : string,
+		want: int,
+	} {
+		{"SELECT a, b FROM t WHERE a > 3;", 1},
+		{"SELECT a, b FROM t WHERE a >= 3;", 2},
+		{"SELECT a, b FROM t WHERE a < 3;", 1},
+		{"SELECT a, b FROM t WHERE a <= -5;", 1},
+		{"SELECT a, b FROM t WHERE a > 100;", 0},
+		{"SELECT a, b FROM t WHERE a < -100;", 0},
+		{"SELECT a, b FROM t WHERE a > 'x';", 0},
+		{"SELECT a, b FROM t WHERE NOT a > 3;", 3},
+		{"SELECT a, b FROM t WHERE a != 10;", 2},
+	}
+	for c in cases {
+		free_all(context.temp_allocator)
+		q := db.query(d, c.sql)
+		testing.expect(t, q.ok, "range query succeeds")
+		if q.ok {
+			testing.expectf(t, len(q.rows) == c.want, "row count for %s", c.sql)
+		}
+	}
+	free_all(context.temp_allocator)
+
+	gt := db.query(d, "SELECT a FROM t WHERE a > 3 ORDER BY a;")
+	testing.expect(t, gt.ok, "ordered range succeeds")
+	testing.expect_value(t, len(gt.rows), 1)
+	if len(gt.rows) == 1 {
+		a, aok := gt.rows[0][0].(i64)
+		testing.expect(t, aok && a == 10, "only matching value")
+	}
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b FROM t WHERE a > 3;"),
+		"INDEX SCAN ON t USING a (range, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b FROM t WHERE a <= -5;"),
+		"INDEX SCAN ON t USING a (range, fetch)",
+	)
+}
+
+@(test)
+test_index_range_text :: proc(t: ^testing.T) {
+	// Range routing on TEXT indexes: BINARY bounds, empty string included,
+	// cross-class literals miss.
+	d := setup_db(t, "idxrangetext")
+	defer teardown_db(d, "idxrangetext")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (b TEXT, v INT);",
+			"INSERT INTO t VALUES ('x', 1);",
+			"INSERT INTO t VALUES ('m', 2);",
+			"INSERT INTO t VALUES ('', 3);",
+			"INSERT INTO t VALUES ('y', 4);",
+			"INSERT INTO t VALUES (NULL, 5);",
+			"CREATE INDEX i_b ON t (b);",
+		},
+	)
+	cases := []struct {
+		sql : string,
+		want: int,
+	} {
+		{"SELECT b FROM t WHERE b > 'm';", 2},
+		{"SELECT b FROM t WHERE b >= 'm';", 3},
+		{"SELECT b FROM t WHERE b < 'm';", 1},
+		{"SELECT b FROM t WHERE b <= 'm';", 2},
+		{"SELECT b FROM t WHERE b > '';", 3},
+		{"SELECT b FROM t WHERE b >= '';", 4},
+		// Cross-class ordered comparisons follow storage-class rank on the
+		// scan path (TEXT ranks above INTEGER, so every text matches b > 3).
+		{"SELECT b FROM t WHERE b > 3;", 4},
+		{"SELECT b FROM t WHERE b < 'a';", 1},
+	}
+	for c in cases {
+		free_all(context.temp_allocator)
+		q := db.query(d, c.sql)
+		testing.expect(t, q.ok, "range query succeeds")
+		if q.ok {
+			testing.expectf(t, len(q.rows) == c.want, "row count for %s", c.sql)
+		}
+	}
+	free_all(context.temp_allocator)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT b FROM t WHERE b > 'm';"),
+		"INDEX SCAN ON t USING b (range, fetch)",
+	)
+}
+
+@(test)
+test_index_range_between_merge :: proc(t: ^testing.T) {
+	// BETWEEN desugars to an AND of two Ranges; the merge folds it to one
+	// bounded scan (EXPLAIN names range, not and). Contradictions empty
+	// without I/O; Eq dominates its Ranges; In filters by them.
+	d := setup_db(t, "idxrangebetween")
+	defer teardown_db(d, "idxrangebetween")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (10, 'x');",
+			"INSERT INTO t VALUES (-5, 'y');",
+			"INSERT INTO t VALUES (3, 'm');",
+			"INSERT INTO t VALUES (7, 'q');",
+			"CREATE INDEX i_a ON t (a);",
+			"CREATE INDEX i_b ON t (b);",
+		},
+	)
+	cases := []struct {
+		sql : string,
+		want: int,
+	} {
+		{"SELECT a FROM t WHERE a BETWEEN 3 AND 10;", 3},
+		{"SELECT a FROM t WHERE a BETWEEN 10 AND 3;", 0},
+		{"SELECT a FROM t WHERE a NOT BETWEEN 3 AND 10;", 1},
+		{"SELECT a FROM t WHERE a > 10 AND a < 5;", 0},
+		{"SELECT a FROM t WHERE a >= 3 AND a <= 3;", 1},
+		{"SELECT a FROM t WHERE a > 3 AND a < 3;", 0},
+		{"SELECT a FROM t WHERE a = 10 AND a > 3;", 1},
+		{"SELECT a FROM t WHERE a = 10 AND a > 30;", 0},
+		{"SELECT a FROM t WHERE a IN (3, 7, 10) AND a >= 7;", 2},
+		{"SELECT a FROM t WHERE a IN (3, 7) AND a > 100;", 0},
+		{"SELECT a FROM t WHERE a = 3 AND a = 7;", 0},
+		{"SELECT b FROM t WHERE b BETWEEN 'm' AND 'y';", 4},
+	}
+	for c in cases {
+		free_all(context.temp_allocator)
+		q := db.query(d, c.sql)
+		testing.expect(t, q.ok, "between query succeeds")
+		if q.ok {
+			testing.expectf(t, len(q.rows) == c.want, "row count for %s", c.sql)
+		}
+	}
+	free_all(context.temp_allocator)
+
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a FROM t WHERE a BETWEEN 3 AND 10;"),
+		"INDEX SCAN ON t USING a (range, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a FROM t WHERE a > 10 AND a < 5;"),
+		"INDEX SCAN ON t USING a (range, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a FROM t WHERE a = 10 AND a > 3;"),
+		"INDEX SCAN ON t USING a (eq, fetch)",
+	)
+}
+
+@(test)
+test_index_range_twin :: proc(t: ^testing.T) {
+	// Differential twin: indexed t vs unindexed t2, same 400 rows. Every
+	// range shape — bounds, exclusivity, merges, unions, limits — returns
+	// identical output, proving the scan honors bounds exactly (including
+	// exclusive bounds straddling leaf boundaries).
+	d := setup_db(t, "idxrangetwin")
+	defer teardown_db(d, "idxrangetwin")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (a INT, b TEXT, v INT);") == .None, "create t")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE TABLE t2 (a INT, b TEXT, v INT);") == .None,
+		"create t2",
+	)
+	testing.expect(t, db.execute(d, "CREATE INDEX i_a ON t (a);") == .None, "index a")
+	testing.expect(t, db.execute(d, "CREATE INDEX i_b ON t (b);") == .None, "index b")
+	bodies := []string{"alpha", "bb", "alpha", "", "gamma", "m"}
+	for i in 1 ..= 400 {
+		free_all(context.temp_allocator)
+		body := bodies[(i - 1) % len(bodies)]
+		val := i % 50 - 25
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%d, '%s', %d);", val, body, i)) ==
+			.None,
+			"insert t",
+		)
+		testing.expect(
+			t,
+			db.execute(d, fmt.tprintf("INSERT INTO t2 VALUES (%d, '%s', %d);", val, body, i)) ==
+			.None,
+			"insert t2",
+		)
+	}
+	free_all(context.temp_allocator)
+
+	queries := []string {
+		"SELECT a, b, v FROM t WHERE a > 0;",
+		"SELECT a, b, v FROM t WHERE a >= 0;",
+		"SELECT a, b, v FROM t WHERE a < 0;",
+		"SELECT a, b, v FROM t WHERE a <= -25;",
+		"SELECT a, b, v FROM t WHERE a > 24;",
+		"SELECT a, b, v FROM t WHERE a BETWEEN -5 AND 5;",
+		"SELECT a, b, v FROM t WHERE a > -5 AND a < 5;",
+		"SELECT a, b, v FROM t WHERE a >= 5 AND a <= 5;",
+		"SELECT a, b, v FROM t WHERE a > 5 AND a < -5;",
+		"SELECT a, b, v FROM t WHERE a NOT BETWEEN -5 AND 5;",
+		"SELECT a, b, v FROM t WHERE a = 7 AND a > 0;",
+		"SELECT a, b, v FROM t WHERE a IN (-5, 0, 7) AND a >= 0;",
+		"SELECT a, b, v FROM t WHERE a > 0 OR a < -20;",
+		"SELECT a, b, v FROM t WHERE b > 'bb';",
+		"SELECT a, b, v FROM t WHERE b <= 'bb';",
+		"SELECT a, b, v FROM t WHERE b BETWEEN 'alpha' AND 'm';",
+		"SELECT a, b, v FROM t WHERE b > '';",
+		"SELECT a, b, v FROM t WHERE b = '';",
+		"SELECT a, b, v FROM t WHERE b <= '';",
+		"SELECT a, b, v FROM t WHERE b >= '';",
+		"SELECT a, b, v FROM t WHERE a > 0 AND v > 100;",
+		"SELECT a, b, v FROM t WHERE a > 0 LIMIT 10;",
+		"SELECT a, b, v FROM t WHERE a BETWEEN -5 AND 5 ORDER BY v DESC LIMIT 7;",
+		"SELECT rowid FROM t WHERE a > 20 ORDER BY rowid;",
+	}
+	for q in queries {
+		free_all(context.temp_allocator)
+		twin, _ := strings.replace(q, "FROM t ", "FROM t2 ", 1, context.temp_allocator)
+		a := db.query(d, q)
+		b := db.query(d, twin)
+		testing.expect(t, a.ok && b.ok, "twin queries succeed")
+		if !a.ok || !b.ok {
+			continue
+		}
+		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
+		for i in 0 ..< min(len(a.rows), len(b.rows)) {
+			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
+			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
+				testing.expect(
+					t,
+					twin_values_equal(a.rows[i][j], b.rows[i][j]),
+					"twin values match",
+				)
+			}
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+@(test)
 test_index_int_dml_fanout :: proc(t: ^testing.T) {
 	// Per-row writes maintain int indexes: single INSERTs land, UPDATEs
 	// move entries (no-op rewrites and NULL transitions included), DELETEs

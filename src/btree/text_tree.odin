@@ -21,7 +21,6 @@ package btree
 
 import "core:bytes"
 import "core:encoding/endian"
-import "core:mem"
 import "src:cell"
 import "src:pager"
 import "src:types"
@@ -37,7 +36,8 @@ Text_Insert_Result :: struct #all_or_none {
 
 // text_full_compare orders full (text,rowid) pairs: text BINARY, then
 // rowid numeric. The temp-array twin of text_entry_compare (which orders
-// prefix-shared suffixes); both reduce to the codec order.
+// prefix-shared suffixes); both reduce to the codec order. Full texts
+// compare through bytes_compare (either side may be empty).
 @(private = "file")
 text_full_compare :: #force_inline proc "contextless" (
 	a: []u8,
@@ -45,7 +45,7 @@ text_full_compare :: #force_inline proc "contextless" (
 	b: []u8,
 	br: types.Row_ID,
 ) -> int {
-	if r := mem.compare(a, b); r != 0 {
+	if r := cell.bytes_compare(a, b); r != 0 {
 		return r
 	}
 	if ar == br {
@@ -1132,7 +1132,7 @@ text_scan_leaf_run :: proc(
 			}
 
 			full := text_concat_full(page_prefix, suf)
-			raw := mem.compare(full, key)
+			raw := cell.bytes_compare(full, key)
 			if raw < 0 {
 				i += 1
 				continue
@@ -1226,6 +1226,204 @@ text_find_prefix :: proc(
 	return text_scan_leaf_run(t, leaf_id, &path, prefix, .Prefix)
 }
 
+// index_scan_range collects the rowids of every entry in [lo, hi] under the
+// tree's kind order (BINARY for text, numeric for int), with per-side
+// inclusivity. Either side may be absent (open-ended half-scan). Raw-level
+// bytes_compare orders both kinds (biased words for int), so one core serves
+// text and int; rowid tiebreaks fold into the lower bound (min rowid when
+// inclusive, max when exclusive) and value-level stop (equal-hi stops an
+// exclusive scan, is collected by an inclusive one). Per-entry bound checks
+// run on every leaf so an exclusive lo straddling a leaf boundary still
+// skips correctly; the lower bound only fast-skips the first leaf's prefix.
+// Empty ranges (lo > hi, or lo == hi without both inclusive) return empty
+// before touching pages.
+@(require_results)
+index_scan_range :: proc(
+	t: ^Tree,
+	root: u32,
+	kind: Key_Kind,
+	lo_raw: []u8,
+	hi_raw: []u8,
+	has_lo: bool,
+	has_hi: bool,
+	lo_inc: bool,
+	hi_inc: bool,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	if has_lo && has_hi {
+		if c := cell.bytes_compare(lo_raw, hi_raw); c > 0 || (c == 0 && !(lo_inc && hi_inc)) {
+			return nil, .None
+		}
+	}
+
+	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	leaf_id := u32(0)
+	if has_lo {
+		leaf, d_err := text_descend_to_leaf(t, root, kind, lo_raw, &path)
+		if d_err != .None {
+			return nil, d_err
+		}
+		leaf_id = leaf
+	} else {
+		root_node := load_node(t, root) or_return
+		if is_leaf(root_node) {
+			if !is_index_leaf_type(root_node.header.page_type) {
+				unpin_node(t, root_node)
+				return nil, .Invalid_Page_Header
+			}
+
+			leaf_id = root
+			unpin_node(t, root_node)
+		} else {
+			if !is_index_interior_type(root_node.header.page_type) {
+				unpin_node(t, root_node)
+				return nil, .Invalid_Page_Header
+			}
+
+			child, c_err := text_interior_child_at(root_node.data, Page_Id(root_node.id), 0)
+			unpin_node(t, root_node)
+			if c_err != .None {
+				return nil, c_err
+			}
+
+			append(&path, Text_Path_Item{page_id = root, child_idx = 0})
+			leaf, drill_ok := text_drill_leftmost(t, child, &path)
+			if !drill_ok {
+				return nil, .Invalid_Cell_Pointer
+			}
+			leaf_id = leaf
+		}
+	}
+
+	out := make([dynamic]types.Row_ID, 0, 8, context.temp_allocator)
+	first_round := true
+	curr := leaf_id
+	for curr != 0 {
+		node := load_node(t, curr) or_return
+		page_prefix, p_err := text_prefix(node.data, Page_Id(node.id))
+		if p_err != .None {
+			unpin_node(t, node)
+			return nil, p_err
+		}
+
+		count := int(node.header.cell_count)
+		start := 0
+		if first_round {
+			first_round = false
+			if has_lo {
+				lo_rid := min(types.Row_ID) if lo_inc else max(types.Row_ID)
+				idx, lb_err := text_lower_bound(node.data, Page_Id(node.id), lo_raw, lo_rid)
+				if lb_err != .None {
+					unpin_node(t, node)
+					return nil, lb_err
+				}
+				start = idx
+			}
+		}
+
+		stopped := false
+		i := start
+		for i < count {
+			suf, rid, k_err := text_entry_at(node.data, Page_Id(node.id), i)
+			if k_err != .None {
+				unpin_node(t, node)
+				return nil, k_err
+			}
+
+			full := text_concat_full(page_prefix, suf)
+			if has_lo {
+				if c := cell.bytes_compare(full, lo_raw); c < 0 || (c == 0 && !lo_inc) {
+					i += 1
+					continue
+				}
+			}
+			if has_hi {
+				if c := cell.bytes_compare(full, hi_raw); c > 0 || (c == 0 && !hi_inc) {
+					stopped = true
+					break
+				}
+			}
+
+			append(&out, rid)
+			i += 1
+		}
+
+		unpin_node(t, node)
+		if stopped || i < count {
+			break
+		}
+
+		next, adv_ok := text_advance_path(t, &path)
+		if !adv_ok {
+			return nil, .Invalid_Cell_Pointer
+		}
+		curr = next
+	}
+	return out[:], .None
+}
+
+// text_range_rowids returns every indexed rowid with text in [lo, hi]
+// (BINARY order, per-side inclusivity, either side open). Text-kind entry
+// point over the index_scan_range core.
+@(require_results)
+text_range_rowids :: proc(
+	t: ^Tree,
+	root: u32,
+	lo_text: string,
+	hi_text: string,
+	has_lo: bool,
+	has_hi: bool,
+	lo_inc: bool,
+	hi_inc: bool,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	lo_raw: []u8
+	hi_raw: []u8
+	if has_lo {
+		lo_raw = transmute([]u8)lo_text
+	}
+	if has_hi {
+		hi_raw = transmute([]u8)hi_text
+	}
+	return index_scan_range(t, root, .Text, lo_raw, hi_raw, has_lo, has_hi, lo_inc, hi_inc)
+}
+
+// int_range_rowids returns every indexed rowid with value in [lo, hi]
+// (numeric order, per-side inclusivity, either side open). Int-kind entry
+// point over the index_scan_range core.
+@(require_results)
+int_range_rowids :: proc(
+	t: ^Tree,
+	root: u32,
+	lo_val: i64,
+	hi_val: i64,
+	has_lo: bool,
+	has_hi: bool,
+	lo_inc: bool,
+	hi_inc: bool,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	lo_buf: [8]u8
+	hi_buf: [8]u8
+	lo_raw: []u8
+	hi_raw: []u8
+	if has_lo {
+		endian.unchecked_put_u64be(lo_buf[:], u64(lo_val ~ min(i64)))
+		lo_raw = lo_buf[:]
+	}
+	if has_hi {
+		endian.unchecked_put_u64be(hi_buf[:], u64(hi_val ~ min(i64)))
+		hi_raw = hi_buf[:]
+	}
+	return index_scan_range(t, root, .Int, lo_raw, hi_raw, has_lo, has_hi, lo_inc, hi_inc)
+}
+
 // text_node_delete_leaf_cell removes one exact (text,rowid) entry from a
 // text leaf: lower_bound, exact-match verify (suffix + rowid — a neighbor
 // with the same text but another rowid must NOT delete), slot shift, count--,
@@ -1269,7 +1467,7 @@ text_node_delete_leaf_cell :: proc(
 		}
 
 		ts := raw[len(prefix):]
-		if rid == rowid && len(suf) == len(ts) && mem.compare(suf, ts) == 0 {
+		if rid == rowid && cell.bytes_compare(suf, ts) == 0 {
 			off0 := get_page_header_offset(leaf_node.id)
 			slots_start := off0 + TEXT_LEAF_FIXED + len(prefix)
 			slot := (^Text_Slot)(raw_data(leaf_node.data[slots_start + idx * size_of(Text_Slot):]))

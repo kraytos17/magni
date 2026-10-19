@@ -1,9 +1,9 @@
 package executor
 
-import "core:bytes"
 import "core:log"
 import "core:slice"
 import "core:strings"
+import "src:cell"
 import "src:parser"
 import "src:schema"
 import "src:types"
@@ -543,11 +543,11 @@ compare_values :: proc(a: types.Value, b: types.Value) -> int {
 		}
 	case string:
 		if vb, ok := b.(string); ok {
-			return strings.compare(va, vb)
+			return cell.bytes_compare(transmute([]u8)va, transmute([]u8)vb)
 		}
 	case []u8:
 		if vb, ok := b.([]u8); ok {
-			return bytes.compare(va, vb)
+			return cell.bytes_compare(va, vb)
 		}
 	}
 	return 0

@@ -10,6 +10,23 @@ import "core:mem"
 import "src:types"
 import "src:util/varint"
 
+// bytes_compare orders two byte slices BINARY (shared-prefix order, shorter
+// sorts first). memory_compare consults data pointers before length, so
+// empty slices with mixed nil/non-nil provenance compare nonzero —
+// transmuted empty strings and zero-length allocations hit this whenever an
+// empty key, bound, or literal meets a differently-sourced empty. Length
+// first restores value semantics; non-empty slices never carry nil data,
+// so mem.compare stays exact there.
+bytes_compare :: #force_inline proc "contextless" (a, b: []u8) -> int {
+	if len(a) == 0 || len(b) == 0 {
+		if len(a) == len(b) {
+			return 0
+		}
+		return -1 if len(a) < len(b) else 1
+	}
+	return mem.compare(a, b)
+}
+
 // Cell is one row materialized in memory. values are owned when owns_data
 // (cloned by create/deserialize); otherwise they borrow page memory and
 // stay valid only while the source page is pinned.
