@@ -1,5 +1,5 @@
-// B-tree secondary-index leaf pages (LEAF_TEXT/LEAF_INT/LEAF_REAL): prefix-compressed
-// leaves shared by all index kinds (kind resolved per page).
+// B-tree secondary-index leaf pages (LEAF_TEXT/LEAF_INT/LEAF_REAL/LEAF_COMPOSITE):
+// prefix-compressed leaves shared by all index kinds (kind resolved per page).
 //
 // Scope: BINARY collation only, NULL-not-indexed (NULL rows never reach
 // these pages — DML skips them, so the format has no NULL encoding),
@@ -501,6 +501,46 @@ init_real_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool
 	return true
 }
 
+// init_composite_leaf_page zeroes and headers a fresh LEAF_COMPOSITE page:
+// identical geometry to LEAF_TEXT (shared prefix-compressed layout,
+// per-page kind from layout_for_page) with the composite page type stamped.
+@(require_results)
+init_composite_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
+	off := get_page_header_offset(page_id)
+	if len(data) < off + TEXT_LEAF_FIXED {
+		return false
+	}
+
+	mem.zero_slice(data[off:])
+	header := (^Leaf_Header)(raw_data(data[off:]))
+	header.page_type = .LEAF_COMPOSITE
+	header.first_freeblock = 0
+	header.cell_count = 0
+	header.cell_content_offset = PAGE_SIZE
+	header.fragmented_bytes = 0
+	return true
+}
+
+// init_composite_interior_page zeroes and headers a fresh
+// COMPOSITE_INTERIOR page: identical geometry to TEXT_INTERIOR with the
+// composite page type stamped.
+@(require_results)
+init_composite_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
+	off := get_page_header_offset(page_id)
+	if len(data) < off + size_of(Leaf_Header) {
+		return false
+	}
+
+	mem.zero_slice(data[off:])
+	header := (^Leaf_Header)(raw_data(data[off:]))
+	header.page_type = .COMPOSITE_INTERIOR
+	header.first_freeblock = 0
+	header.cell_count = 0
+	header.cell_content_offset = PAGE_SIZE
+	header.fragmented_bytes = 0
+	return true
+}
+
 // init_index_leaf_page zeroes and headers a fresh secondary-index leaf of
 // the tree's kind. Single choke point behind splits/vacuum/bulk fresh-page
 // allocation so a fresh page cannot stamp the wrong kind. Rowid kind refuses
@@ -514,6 +554,8 @@ init_index_leaf_page :: proc "contextless" (kind: Key_Kind, data: []u8, page_id:
 		return init_int_leaf_page(data, page_id)
 	case .Real:
 		return init_real_leaf_page(data, page_id)
+	case .Composite:
+		return init_composite_leaf_page(data, page_id)
 	case .Rowid:
 		return false
 	}
@@ -531,6 +573,8 @@ init_index_interior_page :: proc "contextless" (kind: Key_Kind, data: []u8, page
 		return init_int_interior_page(data, page_id)
 	case .Real:
 		return init_real_interior_page(data, page_id)
+	case .Composite:
+		return init_composite_interior_page(data, page_id)
 	case .Rowid:
 		return false
 	}
@@ -637,20 +681,23 @@ text_interior_sep_at :: proc "contextless" (
 
 // page_key_compare orders two full index keys under the page's own kind
 // (text codec order on text pages, int codec order on int pages, real
-// codec order on real pages).
+// codec order on real pages, framing order on composite pages).
 // Separator routing and validation compare through this — never a hardcoded
-// codec — so new index kinds extend one switch. Unknown page types fall back
+// codec — so new index kinds extend one switch. Non-index pages fall back
 // to memcmp (deterministic; callers gate page type first, so it never fires).
 @(private = "file")
 page_key_compare :: #force_inline proc "contextless" (pt: Page_Type, a: []u8, b: []u8) -> int {
-	if pt == .LEAF_TEXT || pt == .TEXT_INTERIOR {
+	switch pt {
+	case .LEAF_TEXT, .TEXT_INTERIOR:
 		return cell.text_index_compare(a, b)
-	}
-	if pt == .LEAF_INT || pt == .INT_INTERIOR {
+	case .LEAF_INT, .INT_INTERIOR:
 		return cell.int_index_compare(a, b)
-	}
-	if pt == .LEAF_REAL || pt == .REAL_INTERIOR {
+	case .LEAF_REAL, .REAL_INTERIOR:
 		return cell.real_index_compare(a, b)
+	case .LEAF_COMPOSITE, .COMPOSITE_INTERIOR:
+		return cell.composite_compare(a, b)
+	case .INTERIOR_DENSE, .LEAF_SLOTDIR:
+		return mem.compare(a, b)
 	}
 	return mem.compare(a, b)
 }
@@ -670,6 +717,8 @@ page_key_wellformed :: proc "contextless" (kind: Key_Kind, key: []u8) -> bool {
 	case .Real:
 		_, _, ok := cell.real_index_split(key)
 		return ok
+	case .Composite:
+		return cell.composite_wellformed(key)
 	case .Rowid:
 		return false
 	}

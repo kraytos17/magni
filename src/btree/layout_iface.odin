@@ -84,19 +84,20 @@ Page_Layout_VTable :: struct {
 }
 
 // Key_Kind selects the codec; the key_* procs below dispatch statically.
-// Rowid arms live here; Text, Int, and Real arms delegate to
-// cell/text_codec.odin, cell/int_codec.odin, and cell/real_codec.odin
-// (single implementation, no wrapper layer).
+// Rowid arms live here; Text, Int, Real, and Composite arms delegate to
+// their cell codecs (single implementation, no wrapper layer).
 Key_Kind :: enum u8 {
 	Rowid,
 	Text,
 	Int,
 	Real,
+	Composite,
 }
 
 // key_compare orders two ENCODED keys (-1/0/+1): numeric rowid order for
 // Rowid pages, (text BINARY, rowid) for Text pages, (value numeric, rowid)
-// for Int pages, (value numeric, rowid) for Real pages. Raw (unencoded) text is
+// for Int pages, (value numeric, rowid) for Real pages, component order
+// then rowid for Composite pages. Raw (unencoded) text is
 // not its input. One entry point on purpose: order and layout share the
 // encoding, so a second entry would be speculative duplication — split them
 // if an encoding ever divorces order from layout.
@@ -111,6 +112,8 @@ key_compare :: #force_inline proc "contextless" (kind: Key_Kind, a: []u8, b: []u
 		res = cell.int_index_compare(a, b)
 	case .Real:
 		res = cell.real_index_compare(a, b)
+	case .Composite:
+		res = cell.composite_compare(a, b)
 	}
 	return res
 }
@@ -133,6 +136,8 @@ key_shared_prefix_len :: #force_inline proc "contextless" (
 		res = cell.int_index_shared_prefix(a, b, max_cap)
 	case .Real:
 		res = cell.real_index_shared_prefix(a, b, max_cap)
+	case .Composite:
+		res = cell.composite_shared_prefix(a, b, max_cap)
 	}
 	return res
 }
@@ -141,6 +146,8 @@ key_shared_prefix_len :: #force_inline proc "contextless" (
 // Only the codec's own storage class encodes (i64 for Rowid and Int,
 // string for Text, f64 for Real); everything else — including NULL —
 // reports ok=false so the caller SKIPS the entry instead of failing the row.
+// Composite takes value tuples, which this scalar signature cannot express:
+// composite callers encode through cell.composite_encode directly.
 @(require_results)
 key_encode :: proc "contextless" (
 	kind: Key_Kind,
@@ -161,12 +168,15 @@ key_encode :: proc "contextless" (
 		n, ok = cell.int_index_encode(val, rowid, buf)
 	case .Real:
 		n, ok = cell.real_index_encode(val, rowid, buf)
+	case .Composite:
+		n, ok = 0, false
 	}
 	return n, ok
 }
 
 // key_encoded_len returns the wire length for val, or 0 when val is not
-// indexed by this codec (caller skips).
+// indexed by this codec (caller skips). Composite is always 0 here (tuple
+// arity is not expressible); composite callers use composite_encoded_len.
 key_encoded_len :: #force_inline proc "contextless" (kind: Key_Kind, val: types.Value) -> int {
 	res := 0
 	switch kind {
@@ -178,6 +188,8 @@ key_encoded_len :: #force_inline proc "contextless" (kind: Key_Kind, val: types.
 		res = cell.int_index_encoded_len(val)
 	case .Real:
 		res = cell.real_index_encoded_len(val)
+	case .Composite:
+		res = 0
 	}
 	return res
 }
@@ -684,7 +696,6 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 	if intrinsics.unlikely(hdr == nil) {
 		return {}, {}, .Invalid_Page_Header
 	}
-
 	switch hdr.page_type {
 	case .INTERIOR_DENSE:
 		return dense_u64_interior_layout(), .Rowid, .None
@@ -702,6 +713,10 @@ layout_for_page :: proc(data: []u8, id: Page_Id) -> (Page_Layout, Key_Kind, Erro
 		return prefix_leaf_layout(), .Real, .None
 	case .REAL_INTERIOR:
 		return prefix_interior_layout(), .Real, .None
+	case .LEAF_COMPOSITE:
+		return prefix_leaf_layout(), .Composite, .None
+	case .COMPOSITE_INTERIOR:
+		return prefix_interior_layout(), .Composite, .None
 	case:
 		return {}, {}, .Invalid_Page_Header
 	}

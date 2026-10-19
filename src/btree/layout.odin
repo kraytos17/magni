@@ -10,30 +10,37 @@ PAGE_SIZE :: types.PAGE_SIZE
 // Page_Type covers exactly the live on-disk encodings; layout_for_page
 // rejects any other byte loudly rather than guessing a layout.
 Page_Type :: enum u8 {
-	INTERIOR_DENSE = 6, // Interior node: dense u64/FOR keys + u32le children
-	LEAF_SLOTDIR   = 15, // Leaf node: sorted (rowid, offset) slots
-	LEAF_TEXT      = 16, // Leaf node: prefix-compressed secondary text index
-	TEXT_INTERIOR  = 17, // Interior node: full-key text separators + u32le children
-	LEAF_INT       = 18, // Leaf node: prefix-compressed secondary int index
-	INT_INTERIOR   = 19, // Interior node: full-key int separators + u32le children
-	LEAF_REAL      = 20, // Leaf node: prefix-compressed secondary real index
-	REAL_INTERIOR  = 21, // Interior node: full-key real separators + u32le children
+	INTERIOR_DENSE     = 6, // Interior node: dense u64/FOR keys + u32le children
+	LEAF_SLOTDIR       = 15, // Leaf node: sorted (rowid, offset) slots
+	LEAF_TEXT          = 16, // Leaf node: prefix-compressed secondary text index
+	TEXT_INTERIOR      = 17, // Interior node: full-key text separators + u32le children
+	LEAF_INT           = 18, // Leaf node: prefix-compressed secondary int index
+	INT_INTERIOR       = 19, // Interior node: full-key int separators + u32le children
+	LEAF_REAL          = 20, // Leaf node: prefix-compressed secondary real index
+	REAL_INTERIOR      = 21, // Interior node: full-key real separators + u32le children
+	LEAF_COMPOSITE     = 22, // Leaf node: prefix-compressed composite index
+	COMPOSITE_INTERIOR = 23, // Interior node: full-key composite separators + u32le children
 }
 
 // is_index_leaf_type / is_index_interior_type report secondary-index pages
-// (text, int, or real kind): shared prefix-compressed geometry with per-page kind
+// (text, int, real, or composite kind): shared prefix-compressed geometry with per-page kind
 // from layout_for_page. New index kinds extend these predicates, not the
 // call sites.
 @(private)
 is_index_leaf_type :: proc "contextless" (pt: Page_Type) -> bool {
-	return pt == .LEAF_TEXT || pt == .LEAF_INT || pt == .LEAF_REAL
+	return pt == .LEAF_TEXT || pt == .LEAF_INT || pt == .LEAF_REAL || pt == .LEAF_COMPOSITE
 }
 
 // is_index_interior_type reports secondary-index interior pages; see
 // is_index_leaf_type.
 @(private)
 is_index_interior_type :: proc "contextless" (pt: Page_Type) -> bool {
-	return pt == .TEXT_INTERIOR || pt == .INT_INTERIOR || pt == .REAL_INTERIOR
+	return(
+		pt == .TEXT_INTERIOR ||
+		pt == .INT_INTERIOR ||
+		pt == .REAL_INTERIOR ||
+		pt == .COMPOSITE_INTERIOR \
+	)
 }
 
 // index_kind_of_page maps a secondary-index page type to its Key_Kind for
@@ -48,6 +55,8 @@ index_kind_of_page :: proc "contextless" (pt: Page_Type) -> (Key_Kind, bool) {
 		return .Int, true
 	case .LEAF_REAL, .REAL_INTERIOR:
 		return .Real, true
+	case .LEAF_COMPOSITE, .COMPOSITE_INTERIOR:
+		return .Composite, true
 	case .INTERIOR_DENSE, .LEAF_SLOTDIR:
 		return .Text, false
 	}
@@ -93,9 +102,11 @@ page_header_size :: #force_inline proc "contextless" (page_type: Page_Type) -> i
 	     .LEAF_INT,
 	     .INT_INTERIOR,
 	     .LEAF_REAL,
-	     .REAL_INTERIOR:
-	// LEAF_TEXT/LEAF_INT/LEAF_REAL carry a variable prefix past the stock header
-	// (text_entry_area_end owns that math); TEXT_INTERIOR/INT_INTERIOR/REAL_INTERIOR
+	     .REAL_INTERIOR,
+	     .LEAF_COMPOSITE,
+	     .COMPOSITE_INTERIOR:
+	// Index leaves carry a variable prefix past the stock header
+	// (text_entry_area_end owns that math); index interiors
 	// carry children + sep slots past it (interior geometry procs own it).
 	}
 	return sz

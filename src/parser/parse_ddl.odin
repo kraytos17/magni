@@ -83,11 +83,11 @@ parse_create_table :: proc(
 		true
 }
 
-// parse_create_index parses `CREATE INDEX name ON table (column)` —
-// single-column only (one identifier; the executor additionally requires a
-// TEXT column). The caller consumed CREATE INDEX. Same arena-ownership +
-// fail-cleanup discipline as parse_create_table: partial nodes die with
-// the arena on failure.
+// parse_create_index parses `CREATE INDEX name ON table (col, ...)` — one
+// or more identifiers (multi-column stores; the executor refuses it until
+// composite writes land). The caller consumed CREATE INDEX. Same
+// arena-ownership + fail-cleanup discipline as parse_create_table: partial
+// nodes die with the arena on failure.
 @(private)
 parse_create_index :: proc(
 	p: ^Parser,
@@ -108,18 +108,32 @@ parse_create_index :: proc(
 	defer if !ok {
 		delete(table_name, allocator)
 	}
+
+	columns := make([dynamic]string, 0, 2, allocator)
+	defer if !ok {
+		for c in columns {
+			delete(c, allocator)
+		}
+		delete(columns)
+	}
 	if !expect_match(p, .LPAREN, "Expected ( after table name") {
 		return nil, false
 	}
-
-	column := parse_identifier(p, allocator) or_return
-	defer if !ok {
-		delete(column, allocator)
+	for {
+		col := parse_identifier(p, allocator) or_return
+		append(&columns, col)
+		if !match(p, .COMMA) {
+			break
+		}
 	}
-	if !expect_match(p, .RPAREN, "Expected ) after column name") {
+	if !expect_match(p, .RPAREN, "Expected ) after column names") {
 		return nil, false
 	}
-	return Create_Index_Stmt{index_name = index_name, table_name = table_name, column = column},
+	return Create_Index_Stmt {
+			index_name = index_name,
+			table_name = table_name,
+			columns = columns[:],
+		},
 		true
 }
 

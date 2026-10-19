@@ -604,3 +604,67 @@ test_update_index_root_cow :: proc(t: ^testing.T) {
 	}
 	schema.table_free(tbl2, context.temp_allocator)
 }
+
+@(test)
+test_multi_column_index_resolution :: proc(t: ^testing.T) {
+	// Joined wire names split and tag per component at load: columns and
+	// col_types resolve in order, col_type mirrors the first, and an
+	// unknown component clears the root (never routed, same as single).
+	d := setup_db(t, "idxmulticol")
+	defer teardown_db(d, "idxmulticol")
+
+	testing.expect(t, db.execute(d, "CREATE TABLE t (a INT, b TEXT, r REAL);") == .None, "create")
+	st := db.Schema_Tree(d)
+	def_root, def_ok := schema.update_index_def_cow(&st, "t", 50, "a,b", "i_ab", .INTEGER)
+	testing.expect(t, def_ok, "joined def publish succeeds")
+	if !def_ok {
+		return
+	}
+	d.schema_root_page = def_root
+
+	st1 := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st1, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	defer schema.table_free(tbl, context.temp_allocator)
+	def, has := schema.table_index(tbl, "i_ab")
+	testing.expect(t, has, "index present")
+	if !has {
+		return
+	}
+	testing.expect_value(t, def.root, u32(50))
+	testing.expect_value(t, def.column, "a,b")
+	testing.expect_value(t, def.col_type, types.Column_Type.INTEGER)
+	testing.expect(t, len(def.columns) == 2, "two columns resolve")
+	testing.expect(t, len(def.col_types) == 2, "two types resolve")
+	if len(def.columns) == 2 && len(def.col_types) == 2 {
+		testing.expect_value(t, def.columns[0], "a")
+		testing.expect_value(t, def.columns[1], "b")
+		testing.expect_value(t, def.col_types[0], types.Column_Type.INTEGER)
+		testing.expect_value(t, def.col_types[1], types.Column_Type.TEXT)
+	}
+
+	// Unknown component clears the root but keeps the names.
+	st2 := db.Schema_Tree(d)
+	bad_root, bad_ok := schema.update_index_def_cow(&st2, "t", 51, "a,missing", "i_bad", .INTEGER)
+	testing.expect(t, bad_ok, "bad def publish succeeds")
+	if !bad_ok {
+		return
+	}
+	d.schema_root_page = bad_root
+	st3 := db.Schema_Tree(d)
+	tbl3, found3 := schema.find_table(&st3, "t", context.temp_allocator)
+	testing.expect(t, found3, "table found")
+	if !found3 {
+		return
+	}
+	defer schema.table_free(tbl3, context.temp_allocator)
+	bad, has_bad := schema.table_index(tbl3, "i_bad")
+	testing.expect(t, has_bad, "bad index present")
+	if has_bad {
+		testing.expect_value(t, bad.root, u32(0))
+		testing.expect_value(t, bad.column, "a,missing")
+	}
+}

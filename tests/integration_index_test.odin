@@ -213,8 +213,18 @@ test_create_index_errors :: proc(t: ^testing.T) {
 	saved2, quiet2 := suppress_expected_errors()
 	context = quiet2
 	dup_name := db.execute(d, "CREATE INDEX i_body ON docs (body);")
+	multi := db.execute(d, "CREATE INDEX i_ab ON docs (body, id);")
 	context = restore_logger(saved2)
 	testing.expect(t, dup_name != .None, "duplicate name on same table rejected")
+	testing.expect(t, multi != .None, "multi-column refused without writes")
+	if multi != .None {
+		// Refusal publishes nothing: the name stays available.
+		testing.expect(
+			t,
+			db.execute(d, "CREATE INDEX i_ab ON docs (body);") == .None,
+			"refused name reusable",
+		)
+	}
 }
 
 @(test)
@@ -2092,28 +2102,34 @@ test_index_real_twin :: proc(t: ^testing.T) {
 		val := fmt.tprintf("%.2f", f64(i % 50 - 25) / 4.0)
 		testing.expect(
 			t,
-			db.execute(
-				d,
-				fmt.tprintf("INSERT INTO t VALUES (%s, '%s', %d);", val, body, i),
-			) ==
+			db.execute(d, fmt.tprintf("INSERT INTO t VALUES (%s, '%s', %d);", val, body, i)) ==
 			.None,
 			"insert t",
 		)
 		testing.expect(
 			t,
-			db.execute(
-				d,
-				fmt.tprintf("INSERT INTO t2 VALUES (%s, '%s', %d);", val, body, i),
-			) ==
+			db.execute(d, fmt.tprintf("INSERT INTO t2 VALUES (%s, '%s', %d);", val, body, i)) ==
 			.None,
 			"insert t2",
 		)
 	}
 	free_all(context.temp_allocator)
-	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (-0.0, 'neg', 401);") == .None, "neg zero")
-	testing.expect(t, db.execute(d, "INSERT INTO t2 VALUES (-0.0, 'neg', 401);") == .None, "neg zero twin")
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO t VALUES (-0.0, 'neg', 401);") == .None,
+		"neg zero",
+	)
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO t2 VALUES (-0.0, 'neg', 401);") == .None,
+		"neg zero twin",
+	)
 	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (NULL, 'n', 402);") == .None, "null")
-	testing.expect(t, db.execute(d, "INSERT INTO t2 VALUES (NULL, 'n', 402);") == .None, "null twin")
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO t2 VALUES (NULL, 'n', 402);") == .None,
+		"null twin",
+	)
 
 	queries := []string {
 		"SELECT r, b, v FROM t WHERE r = 1.5;",

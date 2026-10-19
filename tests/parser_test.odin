@@ -1678,7 +1678,19 @@ test_parse_create_index :: proc(t: ^testing.T) {
 	testing.expect(t, is_idx, "Expected Create_Index_Stmt variant")
 	testing.expect(t, idx_stmt.index_name == "i_body", "Wrong index name")
 	testing.expect(t, idx_stmt.table_name == "docs", "Wrong table name")
-	testing.expect(t, idx_stmt.column == "body", "Wrong column")
+	testing.expect(t, len(idx_stmt.columns) == 1 && idx_stmt.columns[0] == "body", "Wrong columns")
+
+	// Multi-column parses to a column list.
+	multi, mok, _ := parser.parse("CREATE INDEX i_ab ON t (a, b);", context.temp_allocator)
+	testing.expect(t, mok, "multi-column parses")
+	midx, mok_idx := multi.type.(parser.Create_Index_Stmt)
+	testing.expect(t, mok_idx, "multi is Create_Index_Stmt")
+	if mok_idx {
+		testing.expect(t, len(midx.columns) == 2, "two columns")
+		if len(midx.columns) == 2 {
+			testing.expect(t, midx.columns[0] == "a" && midx.columns[1] == "b", "column order")
+		}
+	}
 
 	// Lowercase folds through the keyword bucket.
 	lower, lok, _ := parser.parse("create index j on t (c);", context.temp_allocator)

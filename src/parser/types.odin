@@ -68,12 +68,13 @@ Create_Stmt :: struct {
 	unique_groups: [][]int,
 }
 
-// Create_Index_Stmt is `CREATE INDEX name ON table (column)`: single-column
-// indexes over TEXT/INTEGER/REAL columns (enforced in exec_create_index).
+// Create_Index_Stmt is `CREATE INDEX name ON table (columns)`: one or more
+// columns (single-column today end to end; multi-column parses and stores,
+// execution refuses it until composite writes land).
 Create_Index_Stmt :: struct {
 	index_name: string,
 	table_name: string,
-	column    : string,
+	columns   : []string,
 }
 
 // Foreign_Key is one REFERENCES clause: local column, referenced table,

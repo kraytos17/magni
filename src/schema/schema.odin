@@ -484,12 +484,23 @@ table_from_values :: proc(
 	if len(sr.indexes) > 0 {
 		defs := make([]types.Index_Def, len(sr.indexes), allocator)
 		for def, i in sr.indexes {
-			col_type, type_ok := schema_column_type(cols, def.column)
+			names := strings.split(def.column, ",", context.temp_allocator)
+			columns := make([]string, len(names), allocator)
+			col_types := make([]types.Column_Type, len(names), allocator)
+			all_known := true
+			for n, k in names {
+				columns[k] = strings.clone(n, allocator)
+				t, tok := schema_column_type(cols, n)
+				col_types[k] = t
+				all_known = all_known && tok
+			}
 			defs[i] = types.Index_Def {
-				root     = def.root if type_ok else 0,
-				column   = strings.clone(def.column, allocator),
-				name     = strings.clone(def.name, allocator),
-				col_type = col_type,
+				root      = def.root if all_known else 0,
+				column    = strings.clone(def.column, allocator),
+				name      = strings.clone(def.name, allocator),
+				col_type  = col_types[0],
+				columns   = columns,
+				col_types = col_types,
 			}
 		}
 		table.indexes = defs
@@ -518,6 +529,12 @@ table_free :: proc(table: types.Table, allocator := context.allocator) {
 	for def in table.indexes {
 		delete(def.column, allocator)
 		delete(def.name, allocator)
+		for c in def.columns {
+			delete(c, allocator)
+		}
+
+		delete(def.columns, allocator)
+		delete(def.col_types, allocator)
 	}
 
 	delete(table.indexes, allocator)

@@ -340,18 +340,22 @@ hash :: proc {
 	hash_values,
 }
 
-// Index_Def is one secondary index: covering column->rowid over a single
-// TEXT, INTEGER, or REAL column (kind in col_type). Names are unique per table
+// Index_Def is one secondary index: covering column->rowid over one or more
+// columns of indexable type (kinds in col_types). Names are unique per table
 // (may repeat across tables); DROP INDEX <name> needs a unique match or
-// ON <table>. col_type is always resolved, never stored: table_from_values
-// tags it from the column definition (unknown column ⇒ root cleared,
-// never routed), and creation tags it from the validated column. A zero
-// value reads .INTEGER (enum order), so no path may trust an untagged def.
+// ON <table>. column is the wire form (comma-joined names, one for the
+// single-column case); columns/col_types are always resolved, never stored:
+// table_from_values splits and tags them from the column definitions
+// (unknown column ⇒ root cleared, never routed), and creation tags them
+// from the validated columns. A zero value reads .INTEGER (enum order), so
+// no path may trust an untagged def.
 Index_Def :: struct {
-	name    : string, // index name (empty = legacy unnamed single)
-	column  : string, // indexed column name
-	root    : u32, // root page of the index (0 = none, never routed)
-	col_type: Column_Type, // indexed column type (resolved at load/creation)
+	name     : string, // index name (empty = legacy unnamed single)
+	column   : string, // indexed column names, comma-joined (wire form)
+	root     : u32, // root page of the index (0 = none, never routed)
+	col_type : Column_Type, // first column's type (resolved at load/creation)
+	columns  : []string, // all indexed columns, split from column
+	col_types: []Column_Type, // all indexed columns' types, tagged in order
 }
 
 // Table is an in-memory table definition as published in the catalog.

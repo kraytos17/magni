@@ -119,11 +119,34 @@ real_make_key :: proc(raw: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
 	return buf[:n], .None
 }
 
+// composite_make_key wraps pre-framed composite components into a full
+// index key in a temp buffer (caller-owned for the statement). raw is the
+// framed component bytes (built by the caller through
+// cell.composite_encode_raw, which owns value/type checking); the tree
+// only wraps tag + rowid and verifies framing. Malformed raws fail.
+@(private, require_results)
+composite_make_key :: proc(raw: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
+	if len(raw) == 0 {
+		return nil, .Serialization_Failed
+	}
+
+	buf := make([]u8, 1 + len(raw) + 8, context.temp_allocator)
+	buf[0] = cell.COMPOSITE_INDEX_TAG
+	copy(buf[1:], raw)
+	if !endian.put_u64(buf[1 + len(raw):], .Big, u64(i64(rowid) ~ min(i64))) {
+		return nil, .Serialization_Failed
+	}
+	if !cell.composite_wellformed(buf[:1 + len(raw) + 8]) {
+		return nil, .Serialization_Failed
+	}
+	return buf[:1 + len(raw) + 8], .None
+}
+
 // make_index_key encodes one secondary-index key for the tree's kind: text
 // bytes on text pages, the 8-byte biased word on int pages, the 8-byte
-// ordered word on real pages. Single choke point behind the
-// insert/descend/delete chains so a new kind extends one switch, not every
-// call site.
+// ordered word on real pages, pre-framed components on composite pages.
+// Single choke point behind the insert/descend/delete chains so a new kind
+// extends one switch, not every call site.
 @(private, require_results)
 make_index_key :: proc(kind: Key_Kind, raw: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
 	switch kind {
@@ -133,6 +156,8 @@ make_index_key :: proc(kind: Key_Kind, raw: []u8, rowid: types.Row_ID) -> ([]u8,
 		return int_make_key(raw, rowid)
 	case .Real:
 		return real_make_key(raw, rowid)
+	case .Composite:
+		return composite_make_key(raw, rowid)
 	case .Rowid:
 		return nil, .Unsupported_Format
 	}
@@ -977,6 +1002,88 @@ range_rowids :: proc {
 	text_range_rowids,
 	int_range_rowids,
 	real_range_rowids,
+}
+
+// Composite entries stay named (outside the groups above): composite raws
+// are []u8 like the text twin's, so overloads cannot distinguish them.
+// Callers frame values through cell.composite_encode_raw first; the tree
+// only ever sees opaque framed bytes plus rowids.
+
+// composite_insert_cow inserts one (framed,rowid) into a composite tree
+// with COW copies along the touched path. Returns the new root for the
+// caller to publish.
+@(require_results)
+composite_insert_cow :: proc(
+	t: ^Tree,
+	raw: []u8,
+	rowid: types.Row_ID,
+) -> (
+	new_root: u32,
+	err: Error,
+) {
+	return index_insert_cow(t, .Composite, raw, rowid)
+}
+
+// composite_delete_cow removes one exact (framed,rowid) entry
+// copy-on-write.
+@(require_results)
+composite_delete_cow :: proc(
+	t: ^Tree,
+	raw: []u8,
+	rowid: types.Row_ID,
+) -> (
+	new_root: u32,
+	err: Error,
+) {
+	return index_delete_cow(t, .Composite, raw, rowid)
+}
+
+// composite_find_rowids returns every indexed rowid for one exact framed
+// key, in index order.
+@(require_results)
+composite_find_rowids :: proc(
+	t: ^Tree,
+	root: u32,
+	raw: []u8,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	return index_find_rowids(t, root, .Composite, raw)
+}
+
+// composite_prefix_rowids returns every indexed rowid whose framed key
+// starts with prefix (component-prefix scan for leading-column equality):
+// descend once, collect while entries carry the prefix, stop at the first
+// greater non-prefix entry — the text_find_prefix skeleton over opaque
+// framed bytes.
+@(require_results)
+composite_prefix_rowids :: proc(
+	t: ^Tree,
+	root: u32,
+	prefix: []u8,
+) -> (
+	found: []types.Row_ID,
+	err: Error,
+) {
+	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	leaf_id, d_err := text_descend_to_leaf(t, root, .Composite, prefix, &path)
+	if d_err != .None {
+		return nil, d_err
+	}
+	return text_scan_leaf_run(t, leaf_id, &path, prefix, .Prefix)
+}
+
+// composite_insert inserts one (framed,rowid) in place (no COW).
+@(require_results)
+composite_insert :: proc(t: ^Tree, raw: []u8, rowid: types.Row_ID) -> Error {
+	return index_insert(t, .Composite, raw, rowid)
+}
+
+// composite_delete removes one exact (framed,rowid) entry in place (no COW).
+@(require_results)
+composite_delete :: proc(t: ^Tree, raw: []u8, rowid: types.Row_ID) -> Error {
+	return index_delete(t, .Composite, raw, rowid)
 }
 
 // text_find_rowids returns every indexed rowid for text, in index order.

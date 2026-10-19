@@ -576,13 +576,19 @@ vacuum_tree_kind :: proc(t: ^Tree) -> (Key_Kind, Error) {
 // empty text index (collection yielded nothing to rebuild).
 @(private = "file")
 vacuum_empty_index_root :: proc(t: ^Tree, kind: Key_Kind) -> (root: u32, err: Error) {
-	if kind == .Int {
+	switch kind {
+	case .Text:
+		return vacuum_empty_root_with(t, init_text_leaf_page)
+	case .Int:
 		return vacuum_empty_root_with(t, init_int_leaf_page)
-	}
-	if kind == .Real {
+	case .Real:
 		return vacuum_empty_root_with(t, init_real_leaf_page)
+	case .Composite:
+		return vacuum_empty_root_with(t, init_composite_leaf_page)
+	case .Rowid:
+		return vacuum_empty_root_with(t, init_text_leaf_page)
 	}
-	return vacuum_empty_root_with(t, init_text_leaf_page)
+	return 0, .Invalid_Page_Header
 }
 
 // vacuum_pack_text_leaves greedily packs collected (text, rowid) runs into

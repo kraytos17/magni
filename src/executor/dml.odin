@@ -106,9 +106,17 @@ exec_create_index :: proc(
 	}
 
 	defer schema.table_free(table^, context.temp_allocator)
-	col_idx, col_ok := schema.find_column_index(table.columns, stmt.column)
+	if len(stmt.columns) != 1 {
+		log.errorf(
+			"Error: Multi-column secondary indexes are not supported yet: %s",
+			stmt.table_name,
+		)
+		return false, t.root, {}
+	}
+
+	col_idx, col_ok := schema.find_column_index(table.columns, stmt.columns[0])
 	if !col_ok {
-		log.errorf("Error: Column does not exist: %s.%s", stmt.table_name, stmt.column)
+		log.errorf("Error: Column does not exist: %s.%s", stmt.table_name, stmt.columns[0])
 		return false, t.root, {}
 	}
 
@@ -117,7 +125,7 @@ exec_create_index :: proc(
 		log.errorf(
 			"Error: Secondary index requires a TEXT, INTEGER, or REAL column, got %s.%s",
 			stmt.table_name,
-			stmt.column,
+			stmt.columns[0],
 		)
 		return false, t.root, {}
 	}
@@ -197,7 +205,7 @@ exec_create_index :: proc(
 				append(&ipairs, Int_Bulk_Pair{val = v, rid = c.rowid})
 			}
 		case .REAL:
-			if v, ok := index_col_real(table^, stmt.column, c.values); ok {
+			if v, ok := index_col_real(table^, stmt.columns[0], c.values); ok {
 				append(&rpairs, Real_Bulk_Pair{val = v, rid = c.rowid})
 			}
 		case .BLOB:
@@ -275,7 +283,7 @@ exec_create_index :: proc(
 		t,
 		table.name,
 		index_root,
-		stmt.column,
+		stmt.columns[0],
 		stmt.index_name,
 		table.columns[col_idx].type,
 	)
@@ -288,7 +296,7 @@ exec_create_index :: proc(
 		"Created index '%s' on %s(%s) at Page %d",
 		stmt.index_name,
 		stmt.table_name,
-		stmt.column,
+		stmt.columns[0],
 		index_root,
 	)
 	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}

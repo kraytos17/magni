@@ -320,3 +320,72 @@ test_deserialize_needed_none_and_malformed :: proc(t: T) {
 	_, _, ok4 := cell.deserialize_needed(buffer, 999, needed, big_out)
 	testing.expect(t, !ok4, "OOB offset must fail")
 }
+
+@(test)
+test_composite_codec_order_and_failures :: proc(t: T) {
+	// Framing orders by component (first differing byte decides), then
+	// rowid; malformed keys order before valid ones, never equal.
+	enc := proc(vals: []types.Value, r: i64) -> []u8 {
+		b := make([]u8, 64, context.temp_allocator)
+		n, ok := cell.composite_encode(vals, {.INTEGER, .TEXT}, types.Row_ID(r), b)
+		assert(ok)
+		return b[:n]
+	}
+	mk := proc(v1: i64, v2: string) -> []types.Value {
+		out := make([]types.Value, 2, context.temp_allocator)
+		out[0] = types.value(v1)
+		out[1] = types.value(v2)
+		return out
+	}
+	testing.expect(
+		t,
+		cell.composite_compare(enc(mk(1, "b"), 0), enc(mk(2, "a"), 0)) < 0,
+		"first component decides",
+	)
+	testing.expect(
+		t,
+		cell.composite_compare(enc(mk(1, "a"), 0), enc(mk(1, "b"), 0)) < 0,
+		"second component breaks ties",
+	)
+	testing.expect(
+		t,
+		cell.composite_compare(enc(mk(1, "a"), 1), enc(mk(1, "a"), 2)) < 0,
+		"rowid tiebreak",
+	)
+	testing.expect_value(t, cell.composite_compare(enc(mk(1, "a"), 3), enc(mk(1, "a"), 3)), 0)
+	// Variable-length framing is unambiguous: ("ab","c") != ("a","bc").
+	testing.expect(
+		t,
+		cell.composite_compare(enc(mk(1, "ab"), 0), enc(mk(1, "a"), 0)) > 0,
+		"framing disambiguates",
+	)
+
+	// Unindexable components skip the whole tuple (NULL, mismatch, NaN).
+	nv := make([]types.Value, 2, context.temp_allocator)
+	nv[0] = types.value()
+	nv[1] = types.value("x")
+	testing.expect_value(t, cell.composite_encoded_len(nv, {.INTEGER, .TEXT}), 0)
+	mv := make([]types.Value, 2, context.temp_allocator)
+	mv[0] = types.value("x")
+	mv[1] = types.value("y")
+	testing.expect_value(t, cell.composite_encoded_len(mv, {.INTEGER, .TEXT}), 0)
+	nanv := make([]types.Value, 1, context.temp_allocator)
+	nanv[0] = types.value(transmute(f64)u64(0x7ff8000000000000))
+	testing.expect_value(t, cell.composite_encoded_len(nanv, {.REAL}), 0)
+	testing.expect_value(t, cell.composite_encoded_len(mk(1, "a"), {.INTEGER}), 0)
+
+	// Malformed keys fail closed, never equal to valid ones.
+	good := enc(mk(1, "a"), 0)
+	testing.expect(t, cell.composite_wellformed(good), "valid key parses")
+	testing.expect(t, !cell.composite_wellformed(good[:len(good) - 1]), "truncation fails")
+	long := make([]u8, len(good) + 1, context.temp_allocator)
+	copy(long, good)
+	long[len(good)] = 0x00
+	testing.expect(t, !cell.composite_wellformed(long), "trailing garbage fails")
+	badtag := make([]u8, len(good), context.temp_allocator)
+	copy(badtag, good)
+	badtag[0] = 0x00
+	testing.expect(t, !cell.composite_wellformed(badtag), "bad tag fails")
+	testing.expect(t, cell.composite_compare(badtag, good) < 0, "invalid orders first")
+	testing.expect(t, cell.composite_compare(good, badtag) > 0, "valid orders last")
+}
