@@ -32,7 +32,8 @@ Index_Use :: enum u8 {
 // interval (contradictory AND-merge — the btree short-circuits, zero I/O).
 // Composite carries pre-framed raws (arena-borrowed like strings):
 // comp_key for an exact full tuple, comp_prefix for a leading-column run,
-// comp_empty for a contradictory duplicate Eq. Fetch-only (covering
+// comp_empty for a contradictory duplicate Eq, comp_full for a whole-index
+// key-order scan (no WHERE). Fetch-only (covering
 // refuses Composite — tuple decomposition needs the row).
 // Or/And carry their member plans in subs (each member routed its own
 // index and carries its own type; column is the first sub's, display-only).
@@ -69,6 +70,7 @@ Index_Plan :: struct {
 	comp_has_hi  : bool, // Composite upper bound present
 	comp_lo_inc  : bool, // Composite lower bound inclusive (>=)
 	comp_hi_inc  : bool, // Composite upper bound inclusive (<=)
+	comp_full    : bool, // Composite full key-order scan (ORDER BY without WHERE)
 	subs         : []Index_Plan, // Or/And members (each with its own root)
 }
 
@@ -1880,6 +1882,23 @@ index_candidate_single :: proc(
 				return nil, false
 			}
 			append(&out, ..found)
+		} else if plan.comp_full {
+			found, find_err := btree.composite_scan_leading(
+				&idx_tree,
+				plan.root,
+				nil,
+				nil,
+				false,
+				false,
+				true,
+				true,
+			)
+			if find_err != .None {
+				log.errorf("Error: Failed to search index for '%s'", table.name)
+				delete(out)
+				return nil, false
+			}
+			append(&out, ..found)
 		} else {
 			delete(out)
 			return nil, false
@@ -2002,6 +2021,15 @@ explain_plan_text :: proc(
 				tbl_name,
 				plan_index_columns(plan, context.temp_allocator),
 				index_use_name(plan.use),
+			)
+		}
+	}
+	if _, has_wc := sel.where_clause.?; !has_wc {
+		if oplan, ok := resolve_order_scan(table^, sel, tbl_name, sel.from_alias); ok {
+			return fmt.tprintf(
+				"INDEX SCAN ON %s USING %s (order, fetch)",
+				tbl_name,
+				plan_index_columns(oplan, context.temp_allocator),
 			)
 		}
 	}
@@ -2337,9 +2365,47 @@ covering_emit_composite :: proc(
 	return true
 }
 
+// covering_order_satisfies reports whether a known-values covering plan can
+// emit rows in the statement's ORDER BY order: one ORDER BY key naming the
+// projected column over Eq/In/Or/Composite emission (bound values arrive
+// equal, In/Or members merge in key order; the ordered-input check nets
+// NULL placement). The covering gate already pins the projection.
+@(private)
+covering_order_satisfies :: proc(
+	plan: Index_Plan,
+	stmt: parser.Select_Stmt,
+	col_name: string,
+	tbl_name: string,
+	tbl_alias: string,
+) -> bool {
+	if stmt.is_distinct ||
+	   len(stmt.aggregates) != 0 ||
+	   len(stmt.group_by) != 0 ||
+	   stmt.having != nil {
+		return false
+	}
+
+	order_clause, has_o := stmt.order_by.?
+	if !has_o || len(order_clause) != 1 {
+		return false
+	}
+	#partial switch plan.use {
+	case .Eq, .In, .Or, .Composite:
+	case:
+		return false
+	}
+	if len(col_name) == 0 {
+		return false
+	}
+	return index_cond_column_ok(col_name, order_clause[0].column, tbl_name, tbl_alias)
+}
+
 // covering_pairs resolves a known-values covering plan to (rowid, value)
-// pairs, one per matching row. Sorted by rowid (scan emission order),
-// deduplicated (duplicate IN members). col is the projected column
+// pairs, one per matching row. Rowid order (scan emission order) by
+// default; ordered emits key order instead (DESC reverses) so an ORDER BY
+// on the projected column skips the sort. Deduplicated (duplicate IN
+// members) either way — same entry carries the same value, so duplicates
+// stay adjacent under both orders. col is the projected column
 // (composite nodes decode it from the framed key; scalar nodes ignore it).
 @(private = "file")
 covering_pairs :: proc(
@@ -2348,6 +2414,8 @@ covering_pairs :: proc(
 	plan: Index_Plan,
 	col: string,
 	allocator := context.allocator,
+	ordered: bool = false,
+	desc: bool = false,
 ) -> (
 	[dynamic]Covering_Pair,
 	bool,
@@ -2365,16 +2433,31 @@ covering_pairs :: proc(
 		return nil, false
 	}
 
-	slice.sort_by(out[:], proc(a, b: Covering_Pair) -> bool { return a.rid < b.rid })
+	if ordered {
+		slice.sort_by(out[:], proc(a, b: Covering_Pair) -> bool {
+			if c := compare_values(a.val, b.val); c != 0 {
+				return c < 0
+			}
+			return a.rid < b.rid
+		})
+	} else {
+		slice.sort_by(out[:], proc(a, b: Covering_Pair) -> bool { return a.rid < b.rid })
+	}
+
 	resize(
 		&out,
 		len(
 			slice.unique_proc(out[:], proc(a, b: Covering_Pair) -> bool { return a.rid == b.rid }),
 		),
 	)
+	if ordered && desc {
+		slice.reverse(out[:])
+	}
 	when ODIN_DEBUG {
-		for i in 1 ..< len(out) {
-			assert(out[i - 1].rid < out[i].rid)
+		if !ordered {
+			for i in 1 ..< len(out) {
+				assert(out[i - 1].rid < out[i].rid)
+			}
 		}
 	}
 	return out, true
@@ -2383,7 +2466,8 @@ covering_pairs :: proc(
 // fetch_covering_col answers `SELECT <indexed-col> ... WHERE <routed>`
 // straight from the index (Eq/In keys, composite bound columns, or Or
 // thereof). Same tail contract as fetch_covering_index: single column of
-// the projected type, rowid-ordered rows, caller slices LIMIT.
+// the projected type, rowid-ordered rows by default (key order when the
+// caller passes the covering_order_satisfies verdict), caller slices LIMIT.
 @(private)
 fetch_covering_col :: proc(
 	t: ^btree.Tree,
@@ -2392,13 +2476,15 @@ fetch_covering_col :: proc(
 	col_name: string,
 	from_name: string,
 	allocator := context.allocator,
+	ordered: bool = false,
+	desc: bool = false,
 ) -> (
 	[]Row_Entry,
 	[]types.Column,
 	[]Table_Col_Range,
 	bool,
 ) {
-	pairs, ok := covering_pairs(t, table, plan, col_name, allocator)
+	pairs, ok := covering_pairs(t, table, plan, col_name, allocator, ordered, desc)
 	if !ok {
 		return nil, nil, nil, false
 	}
@@ -2441,6 +2527,193 @@ fetch_covering_col :: proc(
 		col_count  = 1,
 	}
 	return rows[:], cols, ranges, true
+}
+
+// index_order_satisfies reports whether a fetch plan emits rows in the
+// statement's ORDER BY order so the later sort can skip: one ORDER BY key
+// naming the plan's column over a single-key plan (Eq/Range/Prefix), or
+// ORDER BY keys bound-or-tailing a single-run composite plan's column
+// order (exact/prefix/leading-range — bound columns arrive equal, the rest
+// continues key order from the first unbound column; the ordered-input
+// check nets NULL-marker placement and per-key NULLS overrides). Mixed ASC/DESC never
+// matches one run (reversal is exact only when every key flips).
+// Single-column runs hold no NULLs (skipped, never matched), so placement
+// there is vacuous. Unions/intersections concatenate member runs instead
+// of merging them and stay on the sort path; DISTINCT and aggregation
+// change cardinality and likewise stay sorted.
+@(private)
+index_order_satisfies :: proc(
+	plan: Index_Plan,
+	stmt: parser.Select_Stmt,
+	tbl_name: string,
+	tbl_alias: string,
+	table: ^types.Table,
+) -> bool {
+	if stmt.is_distinct ||
+	   len(stmt.aggregates) != 0 ||
+	   len(stmt.group_by) != 0 ||
+	   stmt.having != nil {
+		return false
+	}
+
+	order_clause, has_o := stmt.order_by.?
+	if !has_o || len(order_clause) == 0 {
+		return false
+	}
+	#partial switch plan.use {
+	case .Eq, .Range, .Prefix:
+		if len(order_clause) != 1 || len(plan.column) == 0 {
+			return false
+		}
+		return index_cond_column_ok(plan.column, order_clause[0].column, tbl_name, tbl_alias)
+	case .Composite:
+		if table == nil {
+			return false
+		}
+		// Mixed directions never match one run (reversal is exact only
+		// when every key flips); the sort path answers those.
+		for o in order_clause[1:] {
+			if o.desc != order_clause[0].desc {
+				return false
+			}
+		}
+		for def in table.indexes {
+			if def.root != plan.root || def.root == 0 {
+				continue
+			}
+			// Bound columns arrive equal, so ORDER BY keys naming them
+			// constrain nothing; the rest must continue the index order
+			// contiguously from the first unbound column (the bound run
+			// is the leading run: all columns when exact, empty when the
+			// plan is a leading range or provably empty).
+			run := min(len(plan.comp_columns), len(def.columns))
+			tailed := 0
+			matched := true
+			for o in order_clause {
+				bound := false
+				for c in plan.comp_columns {
+					if index_cond_column_ok(c, o.column, tbl_name, tbl_alias) {
+						bound = true
+						break
+					}
+				}
+				if bound {
+					continue
+				}
+				if run + tailed >= len(def.columns) ||
+				   !index_cond_column_ok(
+						   def.columns[run + tailed],
+						   o.column,
+						   tbl_name,
+						   tbl_alias,
+					   ) {
+					matched = false
+					break
+				}
+				tailed += 1
+			}
+			return matched
+		}
+		return false
+	case:
+		return false
+	}
+}
+
+// index_candidate_ordered runs one single-run plan's lookups in index key
+// order (no rowid sort). Single-key and single-run composite plans visit
+// each entry once, so rowids arrive unique; an adjacent-dedup guards
+// without reordering. Anything else fails closed — member runs
+// concatenate rather than merge.
+@(private = "file")
+index_candidate_ordered :: proc(
+	t: ^btree.Tree,
+	table: ^types.Table,
+	plan: Index_Plan,
+	allocator := context.allocator,
+) -> (
+	[dynamic]types.Row_ID,
+	bool,
+) {
+	#partial switch plan.use {
+	case .Eq, .Range, .Prefix, .Composite:
+	case:
+		return nil, false
+	}
+
+	out, ok := index_candidate_single(t, table, plan, allocator)
+	if !ok {
+		return nil, false
+	}
+	if len(out) > 1 {
+		w := 1
+		for r in 1 ..< len(out) {
+			if out[r] != out[r - 1] {
+				out[w] = out[r]
+				w += 1
+			}
+		}
+		resize(&out, w)
+	}
+	return out, true
+}
+
+// fetch_index_rows_ordered resolves a fetch plan's candidates in index key
+// order and rechecks the full WHERE filter preserving that order (DESC
+// reverses the key run — exact with no NULLs in the set). Same ownership,
+// stale-miss tolerance, and no-LIMIT-pushdown stance as fetch_index_rows.
+// The caller's sort skips through the ordered-input check.
+@(private)
+fetch_index_rows_ordered :: proc(
+	t: ^btree.Tree,
+	table_tree: ^btree.Tree,
+	table: ^types.Table,
+	plan: Index_Plan,
+	wc: ^parser.Where_Clause,
+	single_range: []Table_Col_Range,
+	allocator := context.allocator,
+	cache: ^schema.Table_Cache = nil,
+	desc: bool = false,
+) -> (
+	[]Row_Entry,
+	bool,
+) {
+	cands, ok := index_candidate_ordered(t, table, plan, allocator)
+	if !ok {
+		return nil, false
+	}
+
+	defer delete(cands)
+	if desc && len(cands) > 1 {
+		slice.reverse(cands[:])
+	}
+
+	ctx, ctx_ok := init_where_ctx(wc, table.columns, single_range, t, allocator, cache).?
+	if !ctx_ok {
+		log.error("Error: Could not resolve WHERE clause")
+		return nil, false
+	}
+
+	r := make([dynamic]Row_Entry, 0, len(cands), allocator)
+	for rid in cands {
+		c, find_err := btree.tree_find(table_tree, rid, allocator)
+		if find_err == .Cell_Not_Found {
+			continue
+		}
+		if find_err != .None {
+			log.errorf("Error: Failed to fetch indexed row %d", i64(rid))
+			return nil, false
+		}
+		if !evaluate_where_ctx(ctx, c.values) {
+			cell.destroy(&c, allocator)
+			continue
+		}
+
+		append(&r, Row_Entry{c.rowid, c.values})
+		c.values = nil
+		cell.destroy(&c, allocator)
+	}
+	return r[:], true
 }
 
 // fetch_index_rows resolves a fetch plan's candidates through the data tree
@@ -2497,4 +2770,173 @@ fetch_index_rows :: proc(
 		cell.destroy(&c, allocator)
 	}
 	return r[:], true
+}
+
+// resolve_order_scan routes a WHERE-less SELECT whose ORDER BY matches an
+// index's column order: one key on a single-column index, or keys
+// prefixing a composite's columns from the lead (empty bound run, one
+// shared direction). Synthesizes an open Range (single) or a full
+// Composite plan; the fetch completes index-skipped rows (NULLs,
+// unindexed classes) from the table scan, and the ordered-input check
+// nets the merge. DISTINCT, aggregates, WHERE, and mixed directions stay
+// on the scan path.
+@(private)
+resolve_order_scan :: proc(
+	table: types.Table,
+	stmt: parser.Select_Stmt,
+	tbl_name: string,
+	tbl_alias: string,
+) -> (
+	plan: Index_Plan,
+	ok: bool,
+) {
+	if stmt.is_distinct ||
+	   len(stmt.aggregates) != 0 ||
+	   len(stmt.group_by) != 0 ||
+	   stmt.having != nil {
+		return {}, false
+	}
+	if _, has_wc := stmt.where_clause.?; has_wc {
+		return {}, false
+	}
+
+	order_clause, has_o := stmt.order_by.?
+	if !has_o || len(order_clause) == 0 {
+		return {}, false
+	}
+	for o in order_clause[1:] {
+		if o.desc != order_clause[0].desc {
+			return {}, false
+		}
+	}
+	for def in table.indexes {
+		if def.root == 0 {
+			continue
+		}
+		if len(def.columns) < 2 {
+			if len(order_clause) != 1 {
+				continue
+			}
+			if index_cond_column_ok(def.column, order_clause[0].column, tbl_name, tbl_alias) {
+				return Index_Plan {
+						use = .Range,
+						root = def.root,
+						column = def.column,
+						col_type = def.col_type,
+					},
+					true
+			}
+			continue
+		}
+		if len(order_clause) > len(def.columns) {
+			continue
+		}
+
+		matched := true
+		for o, i in order_clause {
+			if !index_cond_column_ok(def.columns[i], o.column, tbl_name, tbl_alias) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return Index_Plan {
+					use = .Composite,
+					root = def.root,
+					column = def.column,
+					col_type = def.col_types[0],
+					comp_full = true,
+				},
+				true
+		}
+	}
+	return {}, false
+}
+
+// fetch_order_scan answers a WHERE-less ORDER BY over resolve_order_scan's
+// plan: the full index run in key order (DESC reverses) remapped onto one
+// table scan by rowid — no per-row point lookups. Index-skipped rows
+// (NULLs, unindexed classes) complete from the scan; the merge only
+// stands when every leftover is NULL on the first ORDER BY key (the key
+// deciding block placement, NULL block first or last per the clause),
+// otherwise the scan rows return in rowid order and the sort answers.
+// Stale index entries (no table row) skip like Cell_Not_Found; an
+// unresolvable ORDER BY key returns the scan rows so the sort fails
+// loudly exactly as today.
+@(private)
+fetch_order_scan :: proc(
+	t: ^btree.Tree,
+	table_tree: ^btree.Tree,
+	table: ^types.Table,
+	plan: Index_Plan,
+	order_clause: []parser.Order_By_Column,
+	cols: []types.Column,
+	single_range: []Table_Col_Range,
+	allocator := context.allocator,
+	cache: ^schema.Table_Cache = nil,
+	desc: bool = false,
+) -> (
+	[]Row_Entry,
+	bool,
+) {
+	cands, ok := index_candidate_ordered(t, table, plan, allocator)
+	if !ok {
+		return nil, false
+	}
+
+	defer delete(cands)
+	if desc && len(cands) > 1 {
+		slice.reverse(cands[:])
+	}
+
+	scanned, scan_err := scan_table(table_tree, table, nil, nil, t, allocator, cache, single_range)
+	if scan_err {
+		return nil, false
+	}
+
+	resolver := build_column_resolver(cols, single_range)
+	sort_indices, r_ok := resolve_sort_indices(order_clause, resolver)
+	if !r_ok || sort_indices[0] == ROWID_PROJ {
+		return scanned, true
+	}
+
+	rowmap := make(map[types.Row_ID]int, len(scanned), context.temp_allocator)
+	for row, i in scanned {
+		rowmap[row.rowid] = i
+	}
+
+	consumed := make([]bool, len(scanned), context.temp_allocator)
+	ordered := make([dynamic]Row_Entry, 0, len(scanned), context.temp_allocator)
+	leftovers := make([dynamic]Row_Entry, 0, len(scanned), context.temp_allocator)
+	for rid in cands {
+		if si, found := rowmap[rid]; found && !consumed[si] {
+			consumed[si] = true
+			append(&ordered, scanned[si])
+		}
+	}
+	for row, i in scanned {
+		if consumed[i] {
+			continue
+		}
+		if !types.is_null(row.values[sort_indices[0]]) {
+			return scanned, true
+		}
+		append(&leftovers, row)
+	}
+
+	nulls_first := order_clause[0].nulls_first
+	if !nulls_first {
+		nulls_first = desc
+	}
+
+	merged := make([dynamic]Row_Entry, 0, len(scanned), allocator)
+	if nulls_first {
+		append(&merged, ..leftovers[:])
+	}
+
+	append(&merged, ..ordered[:])
+	if !nulls_first {
+		append(&merged, ..leftovers[:])
+	}
+	return merged[:], true
 }

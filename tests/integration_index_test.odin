@@ -704,6 +704,445 @@ test_index_composite_trailing_null :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_index_order_by_key_order :: proc(t: ^testing.T) {
+	// WHERE-routed fetches on the ORDER BY column arrive in key order, so
+	// the sort skips: ASC follows the key run, DESC its reverse. Rowids
+	// insert out of key order (rowid order never matches), and the twin
+	// table without the index agrees on every shape.
+	d := setup_db(t, "idxorderby")
+	defer teardown_db(d, "idxorderby")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (3, 'c');",
+			"INSERT INTO t VALUES (1, 'a');",
+			"INSERT INTO t VALUES (2, 'b');",
+			"INSERT INTO t VALUES (5, 'e');",
+			"INSERT INTO t VALUES (4, 'd');",
+			"CREATE INDEX i_a ON t (a);",
+			"CREATE TABLE t2 (a INT, b TEXT);",
+			"INSERT INTO t2 VALUES (3, 'c');",
+			"INSERT INTO t2 VALUES (1, 'a');",
+			"INSERT INTO t2 VALUES (2, 'b');",
+			"INSERT INTO t2 VALUES (5, 'e');",
+			"INSERT INTO t2 VALUES (4, 'd');",
+			"CREATE TABLE tk (k TEXT, v INT);",
+			"INSERT INTO tk VALUES ('cherry', 1);",
+			"INSERT INTO tk VALUES ('apple', 2);",
+			"INSERT INTO tk VALUES ('banana', 3);",
+			"INSERT INTO tk VALUES ('apricot', 4);",
+			"INSERT INTO tk VALUES ('blueberry', 5);",
+			"CREATE INDEX i_k ON tk (k);",
+			"CREATE TABLE tr (r REAL, v INT);",
+			"INSERT INTO tr VALUES (2.5, 1);",
+			"INSERT INTO tr VALUES (-1.5, 2);",
+			"INSERT INTO tr VALUES (0.0, 3);",
+			"INSERT INTO tr VALUES (10.25, 4);",
+			"INSERT INTO tr VALUES (2.0, 5);",
+			"CREATE INDEX i_r ON tr (r);",
+		},
+	)
+
+	check_int :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []i64) {
+		q := db.query(d, sql)
+		testing.expect(t, q.ok, "ordered select succeeds")
+		if !q.ok {
+			return
+		}
+		testing.expect_value(t, len(q.rows), len(want))
+		for i in 0 ..< min(len(q.rows), len(want)) {
+			v, is_int := q.rows[i][0].(i64)
+			testing.expect(t, is_int, "key projects as INTEGER")
+			if is_int {
+				testing.expect_value(t, v, want[i])
+			}
+		}
+	}
+
+	check_text :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []string) {
+		q := db.query(d, sql)
+		testing.expect(t, q.ok, "ordered select succeeds")
+		if !q.ok {
+			return
+		}
+		testing.expect_value(t, len(q.rows), len(want))
+		for i in 0 ..< min(len(q.rows), len(want)) {
+			s, is_text := q.rows[i][0].(string)
+			testing.expect(t, is_text, "key projects as TEXT")
+			if is_text {
+				testing.expect_value(t, s, want[i])
+			}
+		}
+	}
+
+	asc := []i64{1, 2, 3, 4, 5}
+	desc := []i64{5, 4, 3, 2, 1}
+	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a;", asc)
+	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a DESC;", desc)
+	check_int(t, d, "SELECT a, b FROM t WHERE a >= 2 AND a <= 4 ORDER BY a;", []i64{2, 3, 4})
+	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a LIMIT 2;", []i64{1, 2})
+	check_int(t, d, "SELECT a, b FROM t WHERE a = 3 ORDER BY a;", []i64{3})
+
+	// Twin without the index agrees on every shape.
+	check_int(t, d, "SELECT a, b FROM t2 WHERE a > 0 ORDER BY a;", asc)
+	check_int(t, d, "SELECT a, b FROM t2 WHERE a > 0 ORDER BY a DESC;", desc)
+
+	// TEXT range and prefix runs arrive ordered both directions.
+	kasc := []string{"apple", "apricot", "banana", "blueberry", "cherry"}
+	kdesc := []string{"cherry", "blueberry", "banana", "apricot", "apple"}
+	check_text(t, d, "SELECT k, v FROM tk WHERE k > 'a' ORDER BY k;", kasc)
+	check_text(t, d, "SELECT k, v FROM tk WHERE k > 'a' ORDER BY k DESC;", kdesc)
+	check_text(t, d, "SELECT k, v FROM tk WHERE k LIKE 'a%' ORDER BY k;", []string{"apple", "apricot"})
+
+	check_real :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []f64) {
+		q := db.query(d, sql)
+		testing.expect(t, q.ok, "ordered select succeeds")
+		if !q.ok {
+			return
+		}
+		testing.expect_value(t, len(q.rows), len(want))
+		for i in 0 ..< min(len(q.rows), len(want)) {
+			v, is_real := q.rows[i][0].(f64)
+			testing.expect(t, is_real, "key projects as REAL")
+			if is_real {
+				testing.expect_value(t, v, want[i])
+			}
+		}
+	}
+
+	// REAL numerics (including negatives) arrive ordered both directions.
+	rasc := []f64{-1.5, 0.0, 2.0, 2.5, 10.25}
+	rdesc := []f64{10.25, 2.5, 2.0, 0.0, -1.5}
+	check_real(t, d, "SELECT r, v FROM tr WHERE r > -2.0 ORDER BY r;", rasc)
+	check_real(t, d, "SELECT r, v FROM tr WHERE r > -2.0 ORDER BY r DESC;", rdesc)
+
+	// Fail-closed shapes still sort correctly through the sort path.
+	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY b;", asc)
+	check_int(t, d, "SELECT a, b FROM t WHERE a IN (3, 1) ORDER BY a;", []i64{1, 3})
+}
+
+@(test)
+test_index_order_by_composite_covering :: proc(t: ^testing.T) {
+	// Composite single-run fetches arrive in tuple order: bound columns
+	// equal, the tail in key order. The ordered-input check nets
+	// NULL-marker placement (default NULLS LAST falls back to the sort,
+	// NULLS FIRST skips it). Covering In/Or emission merges in key order.
+	// Twins without indexes agree on every shape.
+	d := setup_db(t, "idxorderpc")
+	defer teardown_db(d, "idxorderpc")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE tc (a INT, b TEXT, v INT);",
+			"INSERT INTO tc VALUES (5, 'x', 1);",
+			"INSERT INTO tc VALUES (5, NULL, 2);",
+			"INSERT INTO tc VALUES (5, 'y', 3);",
+			"INSERT INTO tc VALUES (7, 'm', 4);",
+			"INSERT INTO tc VALUES (7, 'a', 5);",
+			"CREATE INDEX i_ab ON tc (a, b);",
+			"CREATE TABLE t2c (a INT, b TEXT, v INT);",
+			"INSERT INTO t2c VALUES (5, 'x', 1);",
+			"INSERT INTO t2c VALUES (5, NULL, 2);",
+			"INSERT INTO t2c VALUES (5, 'y', 3);",
+			"INSERT INTO t2c VALUES (7, 'm', 4);",
+			"INSERT INTO t2c VALUES (7, 'a', 5);",
+			"CREATE TABLE s (a INT, b TEXT);",
+			"INSERT INTO s VALUES (3, 'c');",
+			"INSERT INTO s VALUES (1, 'a');",
+			"INSERT INTO s VALUES (2, 'b');",
+			"INSERT INTO s VALUES (5, 'e');",
+			"INSERT INTO s VALUES (4, 'd');",
+			"CREATE INDEX i_sa ON s (a);",
+			"CREATE TABLE s2 (a INT, b TEXT);",
+			"INSERT INTO s2 VALUES (3, 'c');",
+			"INSERT INTO s2 VALUES (1, 'a');",
+			"INSERT INTO s2 VALUES (2, 'b');",
+			"INSERT INTO s2 VALUES (5, 'e');",
+			"INSERT INTO s2 VALUES (4, 'd');",
+		},
+	)
+
+	// Prefix tail ASC: NULL sorts last through the sort fallback.
+	q := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 ORDER BY b;")
+	testing.expect(t, q.ok, "prefix tail succeeds")
+	if q.ok {
+		testing.expect_value(t, len(q.rows), 3)
+		if len(q.rows) == 3 {
+			bx, okx := q.rows[0][1].(string)
+			testing.expect(t, okx && bx == "x", "x first")
+			by, oky := q.rows[1][1].(string)
+			testing.expect(t, oky && by == "y", "y second")
+			testing.expect(t, types.is_null(q.rows[2][1]), "NULL last")
+		}
+	}
+
+	// Twin agrees cell for cell.
+	tw := db.query(d, "SELECT a, b, v FROM t2c WHERE a = 5 ORDER BY b;")
+	testing.expect(t, tw.ok, "twin succeeds")
+	if q.ok && tw.ok {
+		testing.expect_value(t, len(tw.rows), len(q.rows))
+		for i in 0 ..< min(len(q.rows), len(tw.rows)) {
+			qn, tn := types.is_null(q.rows[i][1]), types.is_null(tw.rows[i][1])
+			testing.expect(t, qn == tn, "twin nulls agree")
+			if !qn && !tn {
+				testing.expect_value(t, tw.rows[i][1].(string), q.rows[i][1].(string))
+			}
+		}
+	}
+
+	// NULLS FIRST matches marker order; DESC takes the sort fallback with
+	// NULL first per the DESC default.
+	nf := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 ORDER BY b NULLS FIRST;")
+	testing.expect(t, nf.ok, "nulls first succeeds")
+	if nf.ok && len(nf.rows) == 3 {
+		testing.expect(t, types.is_null(nf.rows[0][1]), "NULL first")
+	}
+	dsc := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 ORDER BY b DESC;")
+	testing.expect(t, dsc.ok, "desc succeeds")
+	if dsc.ok && len(dsc.rows) == 3 {
+		testing.expect(t, types.is_null(dsc.rows[0][1]), "DESC NULL first")
+		by, oky := dsc.rows[1][1].(string)
+		testing.expect(t, oky && by == "y", "y second")
+	}
+
+	// Multi-key tails: bound-or-tailing the column order skips when the
+	// check agrees (NULLS FIRST matches markers), else the sort fallback
+	// answers (default NULLS LAST, all-DESC, mixed directions).
+	ab := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 ORDER BY a, b NULLS FIRST;")
+	testing.expect(t, ab.ok, "multi-key succeeds")
+	if ab.ok && len(ab.rows) == 3 {
+		testing.expect(t, types.is_null(ab.rows[0][1]), "NULL first")
+		bx, okx := ab.rows[1][1].(string)
+		testing.expect(t, okx && bx == "x", "x second")
+	}
+	abd := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 ORDER BY a, b;")
+	testing.expect(t, abd.ok, "multi-key default succeeds")
+	if abd.ok && len(abd.rows) == 3 {
+		testing.expect(t, types.is_null(abd.rows[2][1]), "NULL last")
+	}
+	add := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 ORDER BY a DESC, b DESC;")
+	testing.expect(t, add.ok, "all-desc succeeds")
+	if add.ok && len(add.rows) == 3 {
+		testing.expect(t, types.is_null(add.rows[0][1]), "DESC NULL first")
+	}
+	mix := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 ORDER BY a DESC, b;")
+	testing.expect(t, mix.ok, "mixed succeeds")
+	if mix.ok && len(mix.rows) == 3 {
+		testing.expect(t, types.is_null(mix.rows[2][1]), "mixed NULL last")
+	}
+	twab := db.query(d, "SELECT a, b, v FROM t2c WHERE a = 5 ORDER BY a, b;")
+	testing.expect(t, twab.ok && len(twab.rows) == 3, "multi-key twin agrees")
+	if abd.ok && twab.ok {
+		for i in 0 ..< min(len(abd.rows), len(twab.rows)) {
+			qn, tn := types.is_null(abd.rows[i][1]), types.is_null(twab.rows[i][1])
+			testing.expect(t, qn == tn, "twin nulls agree")
+		}
+	}
+
+	// Exact plan trivially ordered; leading range orders the lead column.
+	ex := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 AND b = 'x' ORDER BY a;")
+	testing.expect(t, ex.ok && len(ex.rows) == 1, "exact ordered")
+	lr := db.query(d, "SELECT a, b, v FROM tc WHERE a >= 5 ORDER BY a;")
+	testing.expect(t, lr.ok, "leading range succeeds")
+	if lr.ok {
+		testing.expect_value(t, len(lr.rows), 5)
+		for i in 1 ..< len(lr.rows) {
+			pa, oka := lr.rows[i - 1][0].(i64)
+			ca, okc := lr.rows[i][0].(i64)
+			testing.expect(t, oka && okc && pa <= ca, "lead ordered")
+		}
+	}
+
+	check_cov :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []i64) {
+		c := db.query(d, sql)
+		testing.expect(t, c.ok, "covering ordered succeeds")
+		if !c.ok {
+			return
+		}
+		testing.expect_value(t, len(c.rows), len(want))
+		for i in 0 ..< min(len(c.rows), len(want)) {
+			v, is_int := c.rows[i][0].(i64)
+			testing.expect(t, is_int, "key projects as INTEGER")
+			if is_int {
+				testing.expect_value(t, v, want[i])
+			}
+		}
+	}
+
+	// Covering In/Or merge in key order both directions; twins agree.
+	check_cov(t, d, "SELECT a FROM s WHERE a IN (3, 1, 5) ORDER BY a;", []i64{1, 3, 5})
+	check_cov(t, d, "SELECT a FROM s WHERE a IN (3, 1, 5) ORDER BY a DESC;", []i64{5, 3, 1})
+	check_cov(t, d, "SELECT a FROM s WHERE a = 1 OR a = 4 ORDER BY a;", []i64{1, 4})
+	check_cov(t, d, "SELECT a FROM s WHERE a = 1 OR a = 4 ORDER BY a DESC;", []i64{4, 1})
+	check_cov(t, d, "SELECT a FROM s2 WHERE a IN (3, 1, 5) ORDER BY a;", []i64{1, 3, 5})
+	check_cov(t, d, "SELECT a FROM s2 WHERE a = 1 OR a = 4 ORDER BY a DESC;", []i64{4, 1})
+}
+
+@(test)
+test_index_order_scan_no_where :: proc(t: ^testing.T) {
+	// WHERE-less ORDER BY over an index's column order arrives merged from
+	// one table scan remapped by the full key run: NULL leftovers place
+	// per the clause, non-NULL leftovers (unindexed classes) abort to the
+	// sort. Twins without indexes agree; EXPLAIN reports the order scan.
+	d := setup_db(t, "idxorderscan")
+	defer teardown_db(d, "idxorderscan")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE o (a INT, b TEXT);",
+			"INSERT INTO o VALUES (3, 'c');",
+			"INSERT INTO o VALUES (NULL, 'n1');",
+			"INSERT INTO o VALUES (1, 'a');",
+			"INSERT INTO o VALUES (2, 'b');",
+			"INSERT INTO o VALUES (NULL, 'n2');",
+			"INSERT INTO o VALUES (5, 'e');",
+			"INSERT INTO o VALUES (4, 'd');",
+			"CREATE INDEX i_oa ON o (a);",
+			"CREATE TABLE o2 (a INT, b TEXT);",
+			"INSERT INTO o2 VALUES (3, 'c');",
+			"INSERT INTO o2 VALUES (NULL, 'n1');",
+			"INSERT INTO o2 VALUES (1, 'a');",
+			"INSERT INTO o2 VALUES (2, 'b');",
+			"INSERT INTO o2 VALUES (NULL, 'n2');",
+			"INSERT INTO o2 VALUES (5, 'e');",
+			"INSERT INTO o2 VALUES (4, 'd');",
+			"CREATE TABLE oc (a INT, b TEXT, v INT);",
+			"INSERT INTO oc VALUES (5, 'x', 1);",
+			"INSERT INTO oc VALUES (NULL, 'q', 9);",
+			"INSERT INTO oc VALUES (7, 'a', 5);",
+			"INSERT INTO oc VALUES (5, 'y', 3);",
+			"CREATE INDEX i_oc ON oc (a, b);",
+			"CREATE TABLE oc2 (a INT, b TEXT, v INT);",
+			"INSERT INTO oc2 VALUES (5, 'x', 1);",
+			"INSERT INTO oc2 VALUES (NULL, 'q', 9);",
+			"INSERT INTO oc2 VALUES (7, 'a', 5);",
+			"INSERT INTO oc2 VALUES (5, 'y', 3);",
+			"CREATE TABLE xb (k TEXT, v INT);",
+			"INSERT INTO xb VALUES ('b', 1);",
+			"INSERT INTO xb VALUES (X'AB', 2);",
+			"INSERT INTO xb VALUES ('a', 3);",
+			"CREATE INDEX i_xb ON xb (k);",
+			"CREATE TABLE xb2 (k TEXT, v INT);",
+			"INSERT INTO xb2 VALUES ('b', 1);",
+			"INSERT INTO xb2 VALUES (X'AB', 2);",
+			"INSERT INTO xb2 VALUES ('a', 3);",
+		},
+	)
+
+	// ASC defaults NULLS LAST: ordered keys, NULL block tail (NULL ties
+	// keep scan order on the indexed path — membership, not position).
+	q := db.query(d, "SELECT a, b FROM o ORDER BY a;")
+	testing.expect(t, q.ok, "order scan succeeds")
+	if q.ok {
+		testing.expect_value(t, len(q.rows), 7)
+		for i in 0 ..< 5 {
+			v, is_int := q.rows[i][0].(i64)
+			testing.expect(t, is_int, "key projects as INTEGER")
+			if is_int {
+				testing.expect_value(t, v, i64(i + 1))
+			}
+		}
+		if len(q.rows) == 7 {
+			testing.expect(t, types.is_null(q.rows[5][0]), "NULL tail")
+			testing.expect(t, types.is_null(q.rows[6][0]), "NULL tail")
+		}
+	}
+
+	tw := db.query(d, "SELECT a, b FROM o2 ORDER BY a;")
+	testing.expect(t, tw.ok && len(tw.rows) == 7, "twin agrees")
+	if q.ok && tw.ok {
+		for i in 0 ..< 5 {
+			testing.expect_value(t, tw.rows[i][0].(i64), q.rows[i][0].(i64))
+		}
+		testing.expect(t, types.is_null(tw.rows[5][0]) && types.is_null(tw.rows[6][0]), "twin NULL tail")
+	}
+
+	nf := db.query(d, "SELECT a, b FROM o ORDER BY a NULLS FIRST;")
+	testing.expect(t, nf.ok, "nulls first succeeds")
+	if nf.ok && len(nf.rows) == 7 {
+		testing.expect(t, types.is_null(nf.rows[0][0]), "NULL head")
+		testing.expect(t, types.is_null(nf.rows[1][0]), "NULL head")
+		v, is_int := nf.rows[2][0].(i64)
+		testing.expect(t, is_int && v == 1, "keys follow")
+	}
+
+	dsc := db.query(d, "SELECT a, b FROM o ORDER BY a DESC;")
+	testing.expect(t, dsc.ok, "desc succeeds")
+	if dsc.ok && len(dsc.rows) == 7 {
+		testing.expect(t, types.is_null(dsc.rows[0][0]), "DESC NULL head")
+		v, is_int := dsc.rows[2][0].(i64)
+		testing.expect(t, is_int && v == 5, "keys descend")
+	}
+
+	lim := db.query(d, "SELECT a, b FROM o ORDER BY a LIMIT 3;")
+	testing.expect(t, lim.ok, "limit succeeds")
+	if lim.ok {
+		testing.expect_value(t, len(lim.rows), 3)
+		for i in 0 ..< len(lim.rows) {
+			testing.expect_value(t, lim.rows[i][0].(i64), i64(i + 1))
+		}
+	}
+
+	// Composite full run with a leading-NULL leftover.
+	c := db.query(d, "SELECT a, b, v FROM oc ORDER BY a, b;")
+	testing.expect(t, c.ok, "composite order scan succeeds")
+	if c.ok {
+		testing.expect_value(t, len(c.rows), 4)
+		if len(c.rows) == 4 {
+			testing.expect(t, types.is_null(c.rows[3][0]), "NULL lead last")
+			bx, okx := c.rows[0][1].(string)
+			testing.expect(t, okx && bx == "x", "x first")
+		}
+	}
+	c2 := db.query(d, "SELECT a, b, v FROM oc2 ORDER BY a, b;")
+	testing.expect(t, c2.ok && len(c2.rows) == 4, "composite twin agrees")
+
+	// Unindexed-class leftovers abort to the sort: blob ranks above text
+	// and both paths agree exactly.
+	x := db.query(d, "SELECT k, v FROM xb ORDER BY k;")
+	x2 := db.query(d, "SELECT k, v FROM xb2 ORDER BY k;")
+	testing.expect(t, x.ok && x2.ok, "abort pair succeeds")
+	if x.ok && x2.ok {
+		testing.expect_value(t, len(x.rows), len(x2.rows))
+		for i in 0 ..< min(len(x.rows), len(x2.rows)) {
+			xs, xok := x.rows[i][0].(string)
+			ts, tok := x2.rows[i][0].(string)
+			if xok && tok {
+				testing.expect_value(t, xs, ts)
+			} else {
+				xb, xbok := x.rows[i][0].([]u8)
+				tb, tbok := x2.rows[i][0].([]u8)
+				testing.expect(t, xbok && tbok && len(xb) == len(tb), "blob pair agrees")
+			}
+		}
+	}
+
+	// EXPLAIN pins the order scan; rowid stays a full scan.
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b FROM o ORDER BY a;"),
+		"INDEX SCAN ON o USING a (order, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b, v FROM oc ORDER BY a, b;"),
+		"INDEX SCAN ON oc USING a,b (order, fetch)",
+	)
+	testing.expect_value(
+		t,
+		explain(t, d, "EXPLAIN SELECT a, b FROM o ORDER BY rowid;"),
+		"FULL SCAN ON o",
+	)
+}
+
+@(test)
 test_index_composite_three_col :: proc(t: ^testing.T) {
 	// Three columns: full binds route exact, leading pairs route prefix,
 	// middle gaps degrade to the bound prefix (the gap rides the recheck),
@@ -796,7 +1235,11 @@ test_index_composite_twin :: proc(t: ^testing.T) {
 		db.execute(d, "INSERT INTO t2 VALUES (NULL, 'n', 401);") == .None,
 		"null twin",
 	)
-	testing.expect(t, db.execute(d, "INSERT INTO t VALUES (7, NULL, 402);") == .None, "trailing null")
+	testing.expect(
+		t,
+		db.execute(d, "INSERT INTO t VALUES (7, NULL, 402);") == .None,
+		"trailing null",
+	)
 	testing.expect(
 		t,
 		db.execute(d, "INSERT INTO t2 VALUES (7, NULL, 402);") == .None,

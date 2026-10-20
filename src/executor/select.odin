@@ -164,9 +164,53 @@ fetch_single_rows :: proc(
 		}
 		if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias);
 		   idx_ok && covering_known_values(plan) && is_covering_col_select(stmt, plan) {
-			return fetch_covering_col(t, &tbl, plan, stmt.columns[0], from_name, allocator)
+			ordered := covering_order_satisfies(
+				plan,
+				stmt,
+				stmt.columns[0],
+				tbl_name,
+				stmt.from_alias,
+			)
+
+			desc := false
+			if oc, has_o := stmt.order_by.?; has_o && len(oc) == 1 {
+				desc = oc[0].desc
+			}
+			return fetch_covering_col(
+				t,
+				&tbl,
+				plan,
+				stmt.columns[0],
+				from_name,
+				allocator,
+				ordered,
+				desc,
+			)
 		}
 		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+			if index_order_satisfies(plan, stmt, tbl_name, stmt.from_alias, &tbl) {
+				desc := false
+				if oc, has_o := stmt.order_by.?; has_o && len(oc) >= 1 {
+					desc = oc[0].desc
+				}
+
+				rows, f_ok := fetch_index_rows_ordered(
+					t,
+					&table_tree,
+					&tbl,
+					plan,
+					&wc,
+					single_range,
+					allocator,
+					cache,
+					desc,
+				)
+				if !f_ok {
+					return nil, nil, nil, false
+				}
+				return rows, tbl.columns, single_range, true
+			}
+
 			rows, f_ok := fetch_index_rows(
 				t,
 				&table_tree,
@@ -181,6 +225,32 @@ fetch_single_rows :: proc(
 				return nil, nil, nil, false
 			}
 			return rows, tbl.columns, single_range, true
+		}
+	}
+	// WHERE-less ORDER BY on indexed columns arrives in key order (NULL
+	// leftovers merged per the clause); the sort skips through its
+	// ordered-input check, else answers as today.
+	if _, has_wc := stmt.where_clause.?; !has_wc {
+		if oc, has_o := stmt.order_by.?; has_o {
+			if oplan, ok := resolve_order_scan(tbl, stmt, tbl_name, stmt.from_alias); ok {
+				odesc := oc[0].desc if len(oc) > 0 else false
+				orows, or_ok := fetch_order_scan(
+					t,
+					&table_tree,
+					&tbl,
+					oplan,
+					oc,
+					tbl.columns,
+					single_range,
+					allocator,
+					cache,
+					odesc,
+				)
+				if !or_ok {
+					return nil, nil, nil, false
+				}
+				return orows, tbl.columns, single_range, true
+			}
 		}
 	}
 

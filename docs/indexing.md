@@ -92,7 +92,21 @@ member must share it — otherwise the query fetches (emitting another
 column's keys as values would be wrong). Wider projections
 fetch each candidate row and recheck the full filter. Candidates arrive
 in rowid order, so `LIMIT` without `ORDER BY` matches the scan path
-exactly.
+exactly. When a single-key fetch (`=`, prefix, range) filters on its
+`ORDER BY` column, candidates arrive in key order instead and the sort
+skips (`DESC` reverses the run); single-run composite plans do the same
+when the `ORDER BY` keys bound-or-tail the column order (bound columns
+arrive equal, the rest continues key order from the first unbound
+column; multi-key needs one shared direction, mixed `ASC`/`DESC` stays
+on the sort — the ordered-input check nets NULL-marker placement,
+falling back to the sort when it disagrees). Covering `IN`/`OR`
+emission merges members in key order for the same skip; every other shape
+sorts as before. Without `WHERE`, an `ORDER BY` matching an index's
+column order takes a full key-order scan remapped onto one table scan
+(no per-row lookups): index-skipped rows complete the merge when all
+leftovers are `NULL` on the first key (placed first or last per the
+clause), anything else aborts to the sort — `EXPLAIN` reports
+`(order, fetch)`.
 
 ## EXPLAIN
 

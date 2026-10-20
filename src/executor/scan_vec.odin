@@ -539,6 +539,19 @@ fetch_single_rows_vec :: proc(
 		}
 		if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias);
 		   idx_ok && covering_known_values(plan) && is_covering_col_select(stmt, plan) {
+			ordered := covering_order_satisfies(
+				plan,
+				stmt,
+				stmt.columns[0],
+				tbl_name,
+				stmt.from_alias,
+			)
+
+			cdesc := false
+			if oc, has_o := stmt.order_by.?; has_o && len(oc) == 1 {
+				cdesc = oc[0].desc
+			}
+
 			crows, ccols, cranges, cok := fetch_covering_col(
 				t,
 				&tbl,
@@ -546,12 +559,36 @@ fetch_single_rows_vec :: proc(
 				stmt.columns[0],
 				from_name,
 				allocator,
+				ordered,
+				cdesc,
 			)
 
 			rows, cols, ranges, projected, ok = crows, ccols, cranges, false, cok
 			return
 		}
 		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+			if index_order_satisfies(plan, stmt, tbl_name, stmt.from_alias, &tbl) {
+				desc := false
+				if oc, has_o := stmt.order_by.?; has_o && len(oc) >= 1 {
+					desc = oc[0].desc
+				}
+
+				frows, f_ok := fetch_index_rows_ordered(
+					t,
+					&table_tree,
+					&tbl,
+					plan,
+					&wc,
+					single_range,
+					allocator,
+					cache,
+					desc,
+				)
+
+				rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
+				return
+			}
+
 			frows, f_ok := fetch_index_rows(
 				t,
 				&table_tree,
@@ -565,6 +602,31 @@ fetch_single_rows_vec :: proc(
 
 			rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
 			return
+		}
+	}
+
+	// WHERE-less ORDER BY on indexed columns arrives in key order (NULL
+	// leftovers merged per the clause); the sort skips through its
+	// ordered-input check, else answers as today.
+	if _, has_wc := stmt.where_clause.?; !has_wc {
+		if oc, has_o := stmt.order_by.?; has_o && len(oc) > 0 {
+			if oplan, ook := resolve_order_scan(tbl, stmt, tbl_name, stmt.from_alias); ook {
+				frows, f_ok := fetch_order_scan(
+					t,
+					&table_tree,
+					&tbl,
+					oplan,
+					oc,
+					tbl.columns,
+					single_range,
+					allocator,
+					cache,
+					oc[0].desc,
+				)
+
+				rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
+				return
+			}
 		}
 	}
 

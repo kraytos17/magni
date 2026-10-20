@@ -138,8 +138,73 @@ dedup_rows :: proc(rows: []Row_Entry) -> []Row_Entry {
 	return result[:]
 }
 
+// compare_sort_rows three-way-compares two entries under ORDER BY semantics
+// (DESC flips, NULL placement per clause with the DESC default). Single
+// primitive behind the sorter and the ordered-input check so an
+// index-ordered fetch can never disagree with the sort it skips.
+@(private)
+compare_sort_rows :: proc(
+	a, b: Row_Entry,
+	order_clause: []parser.Order_By_Column,
+	sort_indices: []int,
+) -> int {
+	for sort_idx, i in sort_indices {
+		if sort_idx == ROWID_PROJ {
+			if a.rowid != b.rowid {
+				if order_clause[i].desc {
+					return -1 if a.rowid > b.rowid else 1
+				}
+				return -1 if a.rowid < b.rowid else 1
+			}
+			continue
+		}
+
+		a_null := types.is_null(a.values[sort_idx])
+		b_null := types.is_null(b.values[sort_idx])
+		if a_null != b_null {
+			nulls_first := order_clause[i].nulls_first
+			if !nulls_first {
+				nulls_first = order_clause[i].desc
+			}
+			if a_null {
+				return -1 if nulls_first else 1
+			}
+			return 1 if nulls_first else -1
+		}
+		if a_null {
+			continue
+		}
+		if cmp := compare_values(a.values[sort_idx], b.values[sort_idx]); cmp != 0 {
+			if order_clause[i].desc {
+				return -cmp
+			}
+			return cmp
+		}
+	}
+	return 0
+}
+
+// rows_sort_ordered reports whether rows already satisfy the ORDER BY clause
+// (adjacent-pair check with early exit — unsorted input typically exits
+// within a few pairs, so the check is only fully paid when it pays off by
+// skipping the sort).
+@(private)
+rows_sort_ordered :: proc(
+	rows: []Row_Entry,
+	order_clause: []parser.Order_By_Column,
+	sort_indices: []int,
+) -> bool {
+	for i in 1 ..< len(rows) {
+		if compare_sort_rows(rows[i - 1], rows[i], order_clause, sort_indices) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // sort_rows orders rows by the ORDER BY clause (stable, NULL placement per
-// Order_By_Column with the DESC default). Single-integer-key sorts take
+// Order_By_Column with the DESC default). Already-ordered input returns
+// without sorting. Single-integer-key sorts take
 // the sort_rows_int_fast path; anything it rejects (non-int values)
 // falls through to the general comparator. False when a sort key won't
 // resolve.
@@ -161,6 +226,9 @@ sort_rows :: proc(
 			return false
 		}
 	}
+	if len(rows) > 1 && rows_sort_ordered(rows, order_clause, sort_indices) {
+		return true
+	}
 	if len(order_clause) == 1 && len(rows) > 1 {
 		if sort_indices[0] == ROWID_PROJ {
 			return sort_rows_rowid(rows, order_clause[0])
@@ -173,36 +241,7 @@ sort_rows :: proc(
 	sort_ctx := Sort_Ctx{order_clause, sort_indices}
 	slice.sort_by_with_data(rows, proc(a, b: Row_Entry, data: rawptr) -> bool {
 			ctx := (^Sort_Ctx)(data)
-			for sort_idx, i in ctx.sort_indices {
-				if sort_idx == ROWID_PROJ {
-					if a.rowid != b.rowid {
-						if ctx.order_clause[i].desc {
-							return a.rowid > b.rowid
-						}
-						return a.rowid < b.rowid
-					}
-					continue
-				}
-
-				a_null := types.is_null(a.values[sort_idx])
-				b_null := types.is_null(b.values[sort_idx])
-				if a_null != b_null {
-					nulls_first := ctx.order_clause[i].nulls_first
-					if !nulls_first {
-						nulls_first = ctx.order_clause[i].desc
-					}
-					return a_null == nulls_first
-				}
-
-				cmp := compare_values(a.values[sort_idx], b.values[sort_idx])
-				if cmp != 0 {
-					if ctx.order_clause[i].desc {
-						return cmp > 0
-					}
-					return cmp < 0
-				}
-			}
-			return false
+			return compare_sort_rows(a, b, ctx.order_clause, ctx.sort_indices) < 0
 		}, &sort_ctx)
 	return true
 }
