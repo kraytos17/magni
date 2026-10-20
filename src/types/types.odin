@@ -54,6 +54,11 @@ Serial_Type :: enum u64 {
 	// >= 13 (odd): TEXT with length (N-13)/2
 }
 
+// SERIAL_BLOB_BASE / SERIAL_TEXT_BASE are the length-carrying serial
+// origins: BLOB serials run even from 12, TEXT odd from 13.
+SERIAL_BLOB_BASE :: 12
+SERIAL_TEXT_BASE :: 13
+
 // Column_Type is the declared SQL type of a column.
 Column_Type :: enum u8 {
 	INTEGER,
@@ -218,10 +223,11 @@ value_to_string :: proc(
 // code: fixed widths for the primitive codes, (N-12)/2 for BLOB and
 // (N-13)/2 for TEXT length-carrying codes. valid=false for unknown codes.
 serial_type_content_size :: proc(serial: u64) -> (size: int, valid: bool) {
-	if serial >= 12 {
+	if serial >= SERIAL_BLOB_BASE {
 		// BLOB (even): length = (N-12)/2
 		// TEXT (odd):  length = (N-13)/2
-		return int((serial - 12) / 2) if serial % 2 == 0 else int((serial - 13) / 2), true
+		return int((serial - SERIAL_BLOB_BASE) / 2) if serial % 2 == 0 else int((serial - SERIAL_TEXT_BASE) / 2),
+			true
 	}
 
 	switch Serial_Type(serial) {

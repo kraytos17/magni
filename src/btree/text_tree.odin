@@ -133,7 +133,7 @@ composite_make_key :: proc(raw: []u8, rowid: types.Row_ID) -> ([]u8, Error) {
 	buf := make([]u8, 1 + len(raw) + 8, context.temp_allocator)
 	buf[0] = cell.COMPOSITE_INDEX_TAG
 	copy(buf[1:], raw)
-	if !endian.put_u64(buf[1 + len(raw):], .Big, u64(i64(rowid) ~ min(i64))) {
+	if !endian.put_u64(buf[1 + len(raw):], .Big, rowid_bias_encode(rowid)) {
 		return nil, .Serialization_Failed
 	}
 	if !cell.composite_wellformed(buf[:1 + len(raw) + 8]) {
@@ -962,7 +962,7 @@ text_insert_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 @(require_results)
 int_insert_cow :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> (new_root: u32, err: Error) {
 	wbuf: [8]u8
-	endian.unchecked_put_u64be(wbuf[:], u64(val ~ min(i64)))
+	endian.unchecked_put_u64be(wbuf[:], cell.int_bias_word(val))
 	return index_insert_cow(t, .Int, wbuf[:], rowid)
 }
 
@@ -1066,7 +1066,7 @@ composite_prefix_rowids :: proc(
 	found: []types.Row_ID,
 	err: Error,
 ) {
-	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	path := new_text_path()
 	leaf_id, d_err := text_descend_to_leaf(t, root, .Composite, prefix, &path)
 	if d_err != .None {
 		return nil, d_err
@@ -1100,6 +1100,12 @@ composite_delete :: proc(t: ^Tree, raw: []u8, rowid: types.Row_ID) -> Error {
 Text_Path_Item :: struct {
 	page_id  : u32,
 	child_idx: int,
+}
+
+// new_text_path returns an empty descent path (temp-owned).
+@(private = "file")
+new_text_path :: proc() -> [dynamic]Text_Path_Item {
+	return make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
 }
 
 // Text_Scan_Mode selects the leaf-run match rule: exact text equality or
@@ -1342,7 +1348,7 @@ index_find_rowids :: proc(
 	found: []types.Row_ID,
 	err: Error,
 ) {
-	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	path := new_text_path()
 	leaf_id, d_err := text_descend_to_leaf(t, root, kind, raw, &path)
 	if d_err != .None {
 		return nil, d_err
@@ -1362,7 +1368,7 @@ text_find_rowids :: proc(t: ^Tree, root: u32, text: []u8) -> (found: []types.Row
 @(require_results)
 int_find_rowids :: proc(t: ^Tree, root: u32, val: i64) -> (found: []types.Row_ID, err: Error) {
 	wbuf: [8]u8
-	endian.unchecked_put_u64be(wbuf[:], u64(val ~ min(i64)))
+	endian.unchecked_put_u64be(wbuf[:], cell.int_bias_word(val))
 	return index_find_rowids(t, root, .Int, wbuf[:])
 }
 
@@ -1394,7 +1400,7 @@ text_find_prefix :: proc(
 	found: []types.Row_ID,
 	err: Error,
 ) {
-	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	path := new_text_path()
 	leaf_id, d_err := text_descend_to_leaf(t, root, .Text, prefix, &path)
 	if d_err != .None {
 		return nil, d_err
@@ -1476,7 +1482,7 @@ index_scan_range :: proc(
 		}
 	}
 
-	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	path := new_text_path()
 	leaf_id := u32(0)
 	if has_lo {
 		leaf, d_err := text_descend_to_leaf(t, root, kind, lo_raw, &path)
@@ -1620,7 +1626,7 @@ composite_scan_leading :: proc(
 		}
 	}
 
-	path := make([dynamic]Text_Path_Item, 0, 8, context.temp_allocator)
+	path := new_text_path()
 	leaf_id := u32(0)
 	if has_lo {
 		leaf, d_err := text_descend_to_leaf(t, root, .Composite, lo, &path)
@@ -1758,11 +1764,11 @@ int_range_rowids :: proc(
 	lo_raw: []u8
 	hi_raw: []u8
 	if has_lo {
-		endian.unchecked_put_u64be(lo_buf[:], u64(lo_val ~ min(i64)))
+		endian.unchecked_put_u64be(lo_buf[:], cell.int_bias_word(lo_val))
 		lo_raw = lo_buf[:]
 	}
 	if has_hi {
-		endian.unchecked_put_u64be(hi_buf[:], u64(hi_val ~ min(i64)))
+		endian.unchecked_put_u64be(hi_buf[:], cell.int_bias_word(hi_val))
 		hi_raw = hi_buf[:]
 	}
 	return index_scan_range(t, root, .Int, lo_raw, hi_raw, has_lo, has_hi, lo_inc, hi_inc)
@@ -1873,9 +1879,9 @@ text_node_delete_leaf_cell :: proc(
 			u16(cell_sz),
 			&leaf_node.header.first_freeblock,
 		)
-	} else if cell_sz > 0 && cell_sz < 255 {
+	} else if cell_sz > 0 && cell_sz < MAX_FRAGMENT_BYTES {
 		leaf_node.header.fragmented_bytes = u8(
-			min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), 255),
+			min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), MAX_FRAGMENT_BYTES),
 		)
 	}
 
@@ -1949,7 +1955,7 @@ text_delete :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 @(require_results)
 int_delete :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> Error {
 	wbuf: [8]u8
-	endian.unchecked_put_u64be(wbuf[:], u64(val ~ min(i64)))
+	endian.unchecked_put_u64be(wbuf[:], cell.int_bias_word(val))
 	return index_delete(t, .Int, wbuf[:], rowid)
 }
 
@@ -2073,7 +2079,7 @@ text_delete_cow :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> (new_root:
 @(require_results)
 int_delete_cow :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> (new_root: u32, err: Error) {
 	wbuf: [8]u8
-	endian.unchecked_put_u64be(wbuf[:], u64(val ~ min(i64)))
+	endian.unchecked_put_u64be(wbuf[:], cell.int_bias_word(val))
 	return index_delete_cow(t, .Int, wbuf[:], rowid)
 }
 
@@ -2163,7 +2169,7 @@ text_insert :: proc(t: ^Tree, text: []u8, rowid: types.Row_ID) -> Error {
 @(require_results)
 int_insert :: proc(t: ^Tree, val: i64, rowid: types.Row_ID) -> Error {
 	wbuf: [8]u8
-	endian.unchecked_put_u64be(wbuf[:], u64(val ~ min(i64)))
+	endian.unchecked_put_u64be(wbuf[:], cell.int_bias_word(val))
 	return index_insert(t, .Int, wbuf[:], rowid)
 }
 

@@ -27,6 +27,36 @@ bytes_compare :: #force_inline proc "contextless" (a, b: []u8) -> int {
 	return mem.compare(a, b)
 }
 
+// int_bias_word returns the order-preserving biased word for an i64: XOR
+// the sign bit so unsigned byte order equals signed numeric order. The
+// value-side twin of btree's rowid_bias_encode (cell cannot import btree);
+// the two must stay the same XOR — index order depends on it.
+int_bias_word :: #force_inline proc "contextless" (v: i64) -> u64 {
+	return u64(v ~ min(i64))
+}
+
+// shared_prefix_bytes returns the common byte-prefix length of a and b,
+// clamped to min(max_cap, len(a), len(b)); negative cap yields 0. The byte
+// loop behind the per-kind shared-prefix procs (text keeps its own word
+// fast path, same tail result); every index below is in range because cap
+// is clamped to both lengths first.
+shared_prefix_bytes :: #force_inline proc "contextless" (
+	a: []u8,
+	b: []u8,
+	max_cap: int,
+) -> int {
+	cap := min(max_cap, len(a), len(b))
+	if cap <= 0 {
+		return 0
+	}
+
+	n := 0
+	#no_bounds_check for n < cap && a[n] == b[n] {
+		n += 1
+	}
+	return n
+}
+
 // Cell is one row materialized in memory. values are owned when owns_data
 // (cloned by create/deserialize); otherwise they borrow page memory and
 // stay valid only while the source page is pinned.

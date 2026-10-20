@@ -7,6 +7,15 @@ import "src:types"
 
 PAGE_SIZE :: types.PAGE_SIZE
 
+// MAX_CELLS_PER_PAGE caps cells per page (u16 cell_count).
+MAX_CELLS_PER_PAGE :: int(max(u16))
+
+// DENSE_MAX_DELTA caps FOR-page key spans (u32 deltas from base).
+DENSE_MAX_DELTA :: u64(max(u32))
+
+// MAX_FRAGMENT_BYTES caps accumulated fragmented bytes (u8 field).
+MAX_FRAGMENT_BYTES :: 255
+
 // Page_Type covers exactly the live on-disk encodings; layout_for_page
 // rejects any other byte loudly rather than guessing a layout.
 Page_Type :: enum u8 {

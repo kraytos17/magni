@@ -241,7 +241,7 @@ exec_create_index :: proc(
 			})
 			words := make([][8]u8, len(ipairs), context.temp_allocator)
 			for p, i in ipairs {
-				endian.unchecked_put_u64be(words[i][:], u64(p.val ~ min(i64)))
+				endian.unchecked_put_u64be(words[i][:], cell.int_bias_word(p.val))
 				raws[i] = words[i][:]
 				rids[i] = p.rid
 			}
@@ -269,7 +269,7 @@ exec_create_index :: proc(
 		idx_tree := btree.init(t.pager, index_root)
 		new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
 		if build_err != .None {
-			log.errorf("Error: Failed to bulk index '%s' on %s", stmt.index_name, stmt.table_name)
+			log_create_index_fail(stmt.index_name, stmt.table_name)
 			return false, t.root, {}
 		}
 		if new_root != 0 {
@@ -417,7 +417,7 @@ exec_create_composite_index :: proc(
 		idx_tree := btree.init(t.pager, index_root)
 		new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
 		if build_err != .None {
-			log.errorf("Error: Failed to bulk index '%s' on %s", stmt.index_name, stmt.table_name)
+			log_create_index_fail(stmt.index_name, stmt.table_name)
 			return false, t.root, {}
 		}
 		if new_root != 0 {
@@ -467,7 +467,7 @@ exec_drop_index :: proc(
 	if qual, has_qual := stmt.table_name.?; has_qual {
 		table, found := schema.find_table_cached(t, qual, nil)
 		if !found {
-			log.errorf("Error: Table not found: %s", qual)
+			log_table_not_found(qual)
 			return false, t.root, {}
 		}
 
@@ -1064,7 +1064,7 @@ fanout_bulk_text :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, build_err := btree.build_sorted_text_index(&idx_tree, texts, rids)
 	if build_err != .None {
-		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		log_bulk_index_fail(table.name)
 		return index_root, false
 	}
 	if new_root == 0 {
@@ -1095,7 +1095,7 @@ fanout_bulk_int :: proc(
 	raws := make([][]u8, len(pairs), context.temp_allocator)
 	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
 	for p, i in pairs {
-		endian.unchecked_put_u64be(words[i][:], u64(p.val ~ min(i64)))
+		endian.unchecked_put_u64be(words[i][:], cell.int_bias_word(p.val))
 		raws[i] = words[i][:]
 		rids[i] = p.rid
 	}
@@ -1103,7 +1103,7 @@ fanout_bulk_int :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
 	if build_err != .None {
-		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		log_bulk_index_fail(table.name)
 		return index_root, false
 	}
 	if new_root == 0 {
@@ -1142,7 +1142,7 @@ fanout_bulk_real :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
 	if build_err != .None {
-		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		log_bulk_index_fail(table.name)
 		return index_root, false
 	}
 	if new_root == 0 {
@@ -1289,7 +1289,7 @@ fanout_bulk_composite :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
 	if build_err != .None {
-		log.errorf("Error: Failed to bulk index rows for '%s'", table.name)
+		log_bulk_index_fail(table.name)
 		return index_root, false
 	}
 	if new_root == 0 {
@@ -2442,7 +2442,7 @@ apply_deletes :: proc(
 @(private)
 exec_drop :: proc(t: ^btree.Tree, stmt: parser.Drop_Stmt) -> (bool, u32, Mutated_Table_Info) {
 	if !schema.table_exists(t, stmt.table_name) {
-		log.errorf("Error: Table not found: %s", stmt.table_name)
+		log_table_not_found(stmt.table_name)
 		return false, t.root, {}
 	}
 
@@ -2471,7 +2471,7 @@ exec_insert_cow :: proc(
 ) {
 	table, found := schema.find_table_cached(t, stmt.table_name, cache)
 	if !found {
-		log.errorf("Error: Table not found: %s", stmt.table_name)
+		log_table_not_found(stmt.table_name)
 		return false, t.root, {}
 	}
 	return exec_insert_impl(t, table^, stmt, cache, pending)
@@ -2491,7 +2491,7 @@ exec_update_cow :: proc(
 ) {
 	table, found := schema.find_table_cached(t, stmt.table_name, cache)
 	if !found {
-		log.errorf("Error: Table not found: %s", stmt.table_name)
+		log_table_not_found(stmt.table_name)
 		return false, t.root, {}
 	}
 	return exec_update_impl(t, table^, stmt, cache, pending)
@@ -2511,7 +2511,7 @@ exec_delete_cow :: proc(
 ) {
 	table, found := schema.find_table_cached(t, stmt.table_name, cache)
 	if !found {
-		log.errorf("Error: Table not found: %s", stmt.table_name)
+		log_table_not_found(stmt.table_name)
 		return false, t.root, {}
 	}
 	return exec_delete_impl(t, table^, stmt, cache, pending)
@@ -2692,7 +2692,7 @@ fanout_delete_text :: proc(
 			return index_root, true
 		}
 
-		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
+		log_deindex_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
@@ -2719,7 +2719,7 @@ fanout_delete_int :: proc(
 			return index_root, true
 		}
 
-		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
+		log_deindex_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
@@ -2746,7 +2746,7 @@ fanout_delete_real :: proc(
 			return index_root, true
 		}
 
-		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
+		log_deindex_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
@@ -2773,7 +2773,7 @@ fanout_delete_composite :: proc(
 			return index_root, true
 		}
 
-		log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table.name)
+		log_deindex_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
@@ -2976,7 +2976,7 @@ fanout_insert_text :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, ins_err := btree.insert_cow(&idx_tree, transmute([]u8)text, rowid)
 	if ins_err != .None {
-		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
+		log_index_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
@@ -2998,7 +2998,7 @@ fanout_insert_int :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, ins_err := btree.insert_cow(&idx_tree, val, rowid)
 	if ins_err != .None {
-		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
+		log_index_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
@@ -3020,7 +3020,7 @@ fanout_insert_real :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, ins_err := btree.insert_cow(&idx_tree, val, rowid)
 	if ins_err != .None {
-		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
+		log_index_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true
@@ -3043,7 +3043,7 @@ fanout_insert_composite :: proc(
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, ins_err := btree.composite_insert_cow(&idx_tree, raw, rowid)
 	if ins_err != .None {
-		log.errorf("Error: Failed to index row %d for '%s'", rowid, table.name)
+		log_index_row_fail(rowid, table.name)
 		return index_root, false
 	}
 	return new_root, true

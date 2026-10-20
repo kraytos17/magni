@@ -13,11 +13,11 @@ import "src:types"
 read_page_into :: proc(p: ^Pager, slot: ^Page_Slot, page_num: u32) -> bool {
 	ws := &p.wal_state
 	if fo, ok := ws.txn_index[page_num]; ok {
-		_, read_err := os.read_at(ws.file, slot._data_buf[:], fo + types.WAL_FRAME_HEADER_SIZE)
+		_, read_err := os.read_at(ws.file, slot._data_buf[:], wal_page_offset(fo))
 		if read_err == nil { return true }
 	}
 	if fo, ok := ws.page_index[page_num]; ok {
-		_, read_err := os.read_at(ws.file, slot._data_buf[:], fo + types.WAL_FRAME_HEADER_SIZE)
+		_, read_err := os.read_at(ws.file, slot._data_buf[:], wal_page_offset(fo))
 		if read_err == nil { return true }
 	}
 

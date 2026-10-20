@@ -616,7 +616,7 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 		}
 	}
 	if has_fo {
-		_, read_err := os.read_at(ws.file, slot._data_buf[:], fo + types.WAL_FRAME_HEADER_SIZE)
+		_, read_err := os.read_at(ws.file, slot._data_buf[:], wal_page_offset(fo))
 		if read_err == nil {
 			slot.page.page_num = page_num; slot.page.pin_count = 1; slot.page.dirty = false
 			cache_insert(p, page_num, slot)
@@ -640,6 +640,20 @@ get_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 	return &slot.page, .None
 }
 
+// alloc_fill_slot zeroes a fresh slot for page_num and publishes it
+// (dirty, cached, bitmap set, file extended). Call under the alloc lock —
+// both extending paths hold it, so bitmap/file_len stay atomic. Freelist
+// reuse must not extend the file and keeps its own tail.
+@(private = "file")
+alloc_fill_slot :: proc(p: ^Pager, slot: ^Page_Slot, page_num: u32) {
+	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
+	slot.page.page_num = page_num; slot.page.pin_count = 1
+	mark_slot_dirty(p, slot)
+	cache_insert(p, page_num, slot)
+	p.file_len += i64(p.page_size)
+	bit_array.set(&p.page_bitmap, page_num, true, p.allocator)
+}
+
 // Allocate a new page (from freelist or extending the file). Returns a pinned,
 // dirty page zeroed to DATABASE_HEADER_SIZE. Caller must unpin when done.
 allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
@@ -654,14 +668,7 @@ allocate_page :: proc(p: ^Pager) -> (^Page, Error) {
 	}
 
 	new_page_num := u32(p.file_len / i64(p.page_size)) + 1
-	mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
-	slot.page.page_num = new_page_num; slot.page.pin_count = 1
-
-	mark_slot_dirty(p, slot)
-	cache_insert(p, new_page_num, slot)
-
-	p.file_len += i64(p.page_size)
-	bit_array.set(&p.page_bitmap, new_page_num, true, p.allocator)
+	alloc_fill_slot(p, slot, new_page_num)
 	return &slot.page, .None
 }
 
@@ -687,14 +694,7 @@ get_or_allocate_page :: proc(p: ^Pager, page_num: u32) -> (^Page, Error) {
 			return nil, .Cache_Full
 		}
 
-		mem.set(raw_data(slot._data_buf[:]), 0, types.DATABASE_HEADER_SIZE)
-		slot.page.page_num = page_num; slot.page.pin_count = 1
-
-		mark_slot_dirty(p, slot)
-		cache_insert(p, page_num, slot)
-
-		p.file_len += i64(p.page_size)
-		bit_array.set(&p.page_bitmap, page_num, true, p.allocator)
+		alloc_fill_slot(p, slot, page_num)
 		return &slot.page, .None
 	}
 	return nil, .Page_Not_Found

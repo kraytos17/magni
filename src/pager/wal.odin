@@ -30,6 +30,26 @@ WAL_Frame_Header :: struct #packed {
 
 WAL_FORMAT_VERSION :: 2
 
+// wal_new_salts derives fresh header salts from wall-clock nanoseconds.
+@(private = "file")
+wal_new_salts :: proc() -> (u32, u32) {
+	nsec := u64(time.to_unix_nanoseconds(time.now()))
+	b1 := transmute([8]u8)nsec
+	b2 := transmute([8]u8)(nsec + 1)
+	return u32(hash.fnv64a(b1[:])), u32(hash.fnv64a(b2[:]))
+}
+
+// wal_fill_header serializes the WAL header for salt1/salt2 into buf.
+@(private = "file")
+wal_fill_header :: proc(buf: ^[types.WAL_HEADER_SIZE]u8, salt1, salt2: u32) {
+	header := (^WAL_Header)(raw_data(buf[:]))
+	copy(header.magic[:], types.WAL_MAGIC)
+	header.format_version = u32le(WAL_FORMAT_VERSION)
+	header.page_size = u32le(types.PAGE_SIZE)
+	header.salt1 = u32le(salt1)
+	header.salt2 = u32le(salt2)
+}
+
 // WAL_COMMIT_PAGE marks commit-marker frames: page_num 0 with a nonzero
 // db_size_after. The marker test lives here (not inline at the three scan
 // sites) so wal_abort_txn, wal_checkpoint, and wal_recover share one
@@ -173,20 +193,10 @@ wal_open :: proc(p: ^Pager, db_path: string) -> Error {
 		}
 	}
 
-	nsec := u64(time.to_unix_nanoseconds(time.now()))
-	b1 := transmute([8]u8)nsec
-	b2 := transmute([8]u8)(nsec + 1)
-	ws.salt1 = u32(hash.fnv64a(b1[:]))
-	ws.salt2 = u32(hash.fnv64a(b2[:]))
+	ws.salt1, ws.salt2 = wal_new_salts()
 
 	buf: [types.WAL_HEADER_SIZE]u8
-	header := (^WAL_Header)(raw_data(buf[:]))
-	copy(header.magic[:], types.WAL_MAGIC)
-
-	header.format_version = u32le(WAL_FORMAT_VERSION)
-	header.page_size = u32le(types.PAGE_SIZE)
-	header.salt1 = u32le(ws.salt1)
-	header.salt2 = u32le(ws.salt2)
+	wal_fill_header(&buf, ws.salt1, ws.salt2)
 	_, write_err := os.write_at(wal_file, buf[:], 0)
 	if write_err != nil {
 		return .IO_Error
@@ -405,7 +415,7 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 		}
 
 		page_data: [types.PAGE_SIZE]u8
-		_, data_err := os.read_at(ws.file, page_data[:], offset + types.WAL_FRAME_HEADER_SIZE)
+		_, data_err := os.read_at(ws.file, page_data[:], wal_page_offset(offset))
 		if data_err != nil {
 			break
 		}
@@ -425,20 +435,10 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 
 	clear(&ws.page_index)
 	ws.frame_count = 0
-	nsec := u64(time.to_unix_nanoseconds(time.now()))
-	b1 := transmute([8]u8)nsec
-	b2 := transmute([8]u8)(nsec + 1)
-	ws.salt1 = u32(hash.fnv64a(b1[:]))
-	ws.salt2 = u32(hash.fnv64a(b2[:]))
+	ws.salt1, ws.salt2 = wal_new_salts()
 
 	buf: [types.WAL_HEADER_SIZE]u8
-	header := (^WAL_Header)(raw_data(buf[:]))
-	copy(header.magic[:], types.WAL_MAGIC)
-
-	header.format_version = u32le(WAL_FORMAT_VERSION)
-	header.page_size = u32le(types.PAGE_SIZE)
-	header.salt1 = u32le(ws.salt1)
-	header.salt2 = u32le(ws.salt2)
+	wal_fill_header(&buf, ws.salt1, ws.salt2)
 	_, write_err := os.write_at(ws.file, buf[:], 0)
 	if write_err != nil {
 		return .IO_Error
@@ -455,6 +455,12 @@ wal_checkpoint :: proc(p: ^Pager) -> Error {
 Page_Offset :: struct {
 	page_num: u32,
 	offset  : i64,
+}
+
+// wal_page_offset returns the file offset of a frame's page payload.
+@(private)
+wal_page_offset :: proc(frame_off: i64) -> i64 {
+	return frame_off + types.WAL_FRAME_HEADER_SIZE
 }
 
 // wal_recover replays a leftover WAL into the main file at open: scans the
@@ -512,7 +518,7 @@ collect_valid_frames :: proc(ws: ^Wal_State, file_size: i64) -> ([dynamic]Page_O
 		fh := (^WAL_Frame_Header)(raw_data(fh_buf[:]))^
 		if u32(fh.checksum1) != 0 || u32(fh.checksum2) != 0 {
 			page_buf: [types.PAGE_SIZE]u8
-			_, data_err := os.read_at(ws.file, page_buf[:], offset + types.WAL_FRAME_HEADER_SIZE)
+			_, data_err := os.read_at(ws.file, page_buf[:], wal_page_offset(offset))
 			if data_err != nil {
 				break
 			}
@@ -544,7 +550,7 @@ replay_frames :: proc(p: ^Pager, valid_frames: []Page_Offset) {
 		}
 
 		page_data: [types.PAGE_SIZE]u8
-		_, data_err := os.read_at(ws.file, page_data[:], fo.offset + types.WAL_FRAME_HEADER_SIZE)
+		_, data_err := os.read_at(ws.file, page_data[:], wal_page_offset(fo.offset))
 		if data_err != nil {
 			continue
 		}

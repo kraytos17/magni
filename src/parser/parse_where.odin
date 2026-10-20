@@ -286,9 +286,7 @@ parse_primary :: proc(p: ^Parser, allocator: mem.Allocator) -> (^Where_Node, boo
 	p.nest_depth += 1
 	defer p.nest_depth -= 1
 	if p.nest_depth > MAX_PARSE_NESTING {
-		if p.err_msg == "" {
-			p.err_msg = "Expression nesting too deep"
-		}
+		err_set_once(p, "Expression nesting too deep")
 		return nil, false
 	}
 	if between_node, between_status := try_parse_between(p, allocator);
@@ -374,9 +372,7 @@ parse_condition :: proc(p: ^Parser, allocator: mem.Allocator) -> (cond: Conditio
 			return {}, false
 		}
 	case:
-		if p.err_msg == "" {
-			p.err_msg = "Expected comparison operator in WHERE condition"
-		}
+		err_set_once(p, "Expected comparison operator in WHERE condition")
 		condition_cleanup(&cond, allocator)
 		return {}, false
 	}
@@ -487,9 +483,7 @@ cleanup_in_values :: proc(in_vals: ^[dynamic]types.Value, allocator: mem.Allocat
 @(private = "file")
 parse_is_null_condition :: proc(p: ^Parser, cond: ^Condition) -> bool {
 	if cond.negated {
-		if p.err_msg == "" {
-			p.err_msg = "Expected NULL after IS"
-		}
+		err_set_once(p, "Expected NULL after IS")
 		return false
 	}
 

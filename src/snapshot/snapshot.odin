@@ -52,15 +52,45 @@ Snapshot_State :: enum u8 {
 	ABANDONED = 2,
 }
 
+// enum_from_u8 validates raw header bytes against E's range, falling back
+// on invalid values (callers pick a fallback that never equals .COMMITTED).
+@(private)
+enum_from_u8 :: proc(v: u8, $E: typeid, fallback: E) -> E {
+	if v < u8(len(E)) {
+		return E(v)
+	}
+	return fallback
+}
+
+// micros_now returns wall-clock microseconds for header timestamps.
+@(private)
+micros_now :: proc() -> u64 {
+	return u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO)
+}
+
+// checked_page pins page_num and verifies its magic prefix, or fails
+// (unpinning on the magic path). Caller defers the unpin on success;
+// data borrows the pinned page. One prologue for the refs/manifest
+// readers instead of six hand-rolled copies.
+@(private)
+checked_page :: proc(p: ^pager.Pager, page_num: u32, magic: string) -> (data: []u8, ok: bool) {
+	page, err := pager.get_page(p, page_num)
+	if err != .None {
+		return nil, false
+	}
+	if len(page.data) < len(magic) || string(page.data[:len(magic)]) != magic {
+		pager.unpin_page(p, page_num)
+		return nil, false
+	}
+	return page.data, true
+}
+
 // snapshot_operation_from_u8 validates raw header bytes. Unchecked casts
 // turn corrupt headers into garbage names; invalid values fall back to
 // UNKNOWN (display) and can never equal .COMMITTED (decisions).
 @(private)
 snapshot_operation_from_u8 :: proc(v: u8) -> Snapshot_Operation {
-	if v < u8(len(Snapshot_Operation)) {
-		return Snapshot_Operation(v)
-	}
-	return .UNKNOWN
+	return enum_from_u8(v, Snapshot_Operation, Snapshot_Operation.UNKNOWN)
 }
 
 // snapshot_state_from_u8 validates raw header bytes. Invalid values fall
@@ -68,10 +98,7 @@ snapshot_operation_from_u8 :: proc(v: u8) -> Snapshot_Operation {
 // skipped by every committed-only decision path by construction.
 @(private)
 snapshot_state_from_u8 :: proc(v: u8) -> Snapshot_State {
-	if v < u8(len(Snapshot_State)) {
-		return Snapshot_State(v)
-	}
-	return .PENDING
+	return enum_from_u8(v, Snapshot_State, Snapshot_State.PENDING)
 }
 
 TAG_OFFSET :: HEADER_PREFIX_SIZE + MAX_HEADERS_PER_PAGE * size_of(Snapshot_Header)
@@ -150,7 +177,7 @@ create :: proc(
 				copy(h.magic[:], SNAPSHOT_MAGIC)
 				h.snapshot_id = snapshot_id
 				h.timestamp =
-					timestamp if timestamp != 0 else u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO)
+					timestamp if timestamp != 0 else micros_now()
 
 				h.schema_root = schema_root
 				h.manifest_page = manifest_page
@@ -181,7 +208,7 @@ create :: proc(
 	h.snapshot_id = snapshot_id
 	h.prev_snapshot = prev_snapshot
 	h.timestamp =
-		timestamp if timestamp != 0 else u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO)
+		timestamp if timestamp != 0 else micros_now()
 
 	h.schema_root = schema_root
 	h.manifest_page = manifest_page

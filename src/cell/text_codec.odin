@@ -72,7 +72,7 @@ text_index_encode :: proc "contextless" (
 	buf[4] = u8(n)
 	copy(buf[5:], s)
 
-	w := u64(i64(rowid) ~ min(i64))
+	w := int_bias_word(i64(rowid))
 	off := 5 + n
 	endian.unchecked_put_u64be(buf[off:off + 8], w)
 	return need, true
@@ -80,7 +80,8 @@ text_index_encode :: proc "contextless" (
 
 // text_index_decode parses key bytes back into (text borrow, rowid).
 // The text slice borrows src — valid while the page is pinned only.
-// Exact-length match: truncation or trailing garbage fails.
+// Exact-length match: truncation or trailing garbage fails (checked here;
+// tag, floor length, and length sanity via text_index_split).
 @(require_results)
 text_index_decode :: proc "contextless" (
 	src: []u8,
@@ -89,22 +90,16 @@ text_index_decode :: proc "contextless" (
 	rowid: types.Row_ID,
 	ok: bool,
 ) {
-	if intrinsics.unlikely(len(src) < TEXT_INDEX_MIN_LEN) {
+	t, w, sok := text_index_split(src)
+	if !sok {
 		return "", 0, false
 	}
-	if intrinsics.unlikely(src[0] != TEXT_INDEX_TAG) {
-		return "", 0, false
-	}
-
-	n := int(endian.unchecked_get_u32be(src[1:5]))
-	if intrinsics.unlikely(n < 0 || TEXT_INDEX_PREFIX_LEN + n + TEXT_INDEX_ROWID_LEN != len(src)) {
+	if intrinsics.unlikely(TEXT_INDEX_PREFIX_LEN + len(t) + TEXT_INDEX_ROWID_LEN != len(src)) {
 		return "", 0, false
 	}
 
-	off := TEXT_INDEX_PREFIX_LEN + n
-	w := endian.unchecked_get_u64be(src[off:off + 8])
-	text = string(src[TEXT_INDEX_PREFIX_LEN:TEXT_INDEX_PREFIX_LEN + n])
 	rowid = types.Row_ID(i64(w) ~ min(i64))
+	text = string(t)
 	ok = true
 	return
 }
@@ -203,10 +198,8 @@ text_index_shared_prefix :: #force_inline proc "contextless" (
 			}
 			n += 8
 		}
-		for n < cap && a[n] == b[n] {
-			n += 1
-		}
 	}
+	n += shared_prefix_bytes(a[n:], b[n:], cap - n)
 	return n
 }
 

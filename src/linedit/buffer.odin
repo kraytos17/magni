@@ -180,14 +180,20 @@ lb_to_string :: proc(lb: ^Line_Buffer, allocator := context.allocator) -> string
 	return s
 }
 
-// lb_clear empties the buffer and drops the undo stack (fresh line).
-lb_clear :: proc(lb: ^Line_Buffer) {
-	clear(&lb.runes)
-	lb.cursor = 0
+// lb_drop_undo frees every undo snapshot and empties the stack.
+@(private = "file")
+lb_drop_undo :: proc(lb: ^Line_Buffer) {
 	for s in lb.undo_stack {
 		delete(s.runes)
 	}
 	clear(&lb.undo_stack)
+}
+
+// lb_clear empties the buffer and drops the undo stack (fresh line).
+lb_clear :: proc(lb: ^Line_Buffer) {
+	clear(&lb.runes)
+	lb.cursor = 0
+	lb_drop_undo(lb)
 }
 
 // lb_set replaces the buffer wholesale (history recall, completion
@@ -200,10 +206,7 @@ lb_set :: proc(lb: ^Line_Buffer, s: string) {
 
 	lb.cursor = len(lb.runes)
 	// lb_set is a reset, not an edit — clear undo stack too
-	for u in lb.undo_stack {
-		delete(u.runes)
-	}
-	clear(&lb.undo_stack)
+	lb_drop_undo(lb)
 }
 
 // lb_len reports the rune count.

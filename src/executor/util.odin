@@ -10,6 +10,43 @@ import "src:parser"
 import "src:schema"
 import "src:types"
 
+// One spelling per log verb: every candidate-lookup, fan-out, and DDL
+// site reports through these so the strings cannot skew.
+@(private)
+log_index_search_fail :: proc(table_name: string) {
+	log.errorf("Error: Failed to search index for '%s'", table_name)
+}
+
+// log_index_row_fail reports a per-row index write failure.
+@(private)
+log_index_row_fail :: proc(rowid: types.Row_ID, table_name: string) {
+	log.errorf("Error: Failed to index row %d for '%s'", rowid, table_name)
+}
+
+// log_deindex_row_fail reports a per-row index delete failure.
+@(private)
+log_deindex_row_fail :: proc(rowid: types.Row_ID, table_name: string) {
+	log.errorf("Error: Failed to de-index row %d for '%s'", rowid, table_name)
+}
+
+// log_bulk_index_fail reports a bulk index build failure.
+@(private)
+log_bulk_index_fail :: proc(table_name: string) {
+	log.errorf("Error: Failed to bulk index rows for '%s'", table_name)
+}
+
+// log_create_index_fail reports a CREATE INDEX build failure.
+@(private)
+log_create_index_fail :: proc(index_name, table_name: string) {
+	log.errorf("Error: Failed to bulk index '%s' on %s", index_name, table_name)
+}
+
+// log_table_not_found reports an unknown table reference.
+@(private)
+log_table_not_found :: proc(name: string) {
+	log.errorf("Error: Table not found: %s", name)
+}
+
 // Column_Resolver resolves column names to absolute indices within a query's
 // combined column array. Build it once per statement (from the combined
 // columns + per-table ranges) and reuse it for every condition, ORDER BY,

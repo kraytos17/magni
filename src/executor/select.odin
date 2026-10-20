@@ -473,7 +473,7 @@ exec_select_single_data :: proc(
 
 	table, found := schema.find_table_cached(t, tbl_name, cache)
 	if !found {
-		log.errorf("Error: Table not found: %s", tbl_name)
+		log_table_not_found(tbl_name)
 		return nil, nil, false
 	}
 

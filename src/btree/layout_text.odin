@@ -290,7 +290,7 @@ text_build_from_sorted :: proc "contextless" (
 	if len(rowids) != n {
 		return .Invalid_Bounds
 	}
-	if n > int(max(u16)) {
+	if n > MAX_CELLS_PER_PAGE {
 		return .Page_Full
 	}
 
@@ -581,6 +581,13 @@ init_index_interior_page :: proc "contextless" (kind: Key_Kind, data: []u8, page
 	return false
 }
 
+// text_interior_fixed is the fixed byte span of an n-separator text
+// interior page (header + children + slots, before separator bytes).
+@(private = "file")
+text_interior_fixed :: #force_inline proc "contextless" (off0: int, n: int) -> int {
+	return off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
+}
+
 // text_interior_children_off is the absolute offset of child[0].
 // -1 on any header fault (callers fail closed, never index garbage).
 @(private = "file")
@@ -598,7 +605,7 @@ text_interior_children_off :: #force_inline proc "contextless" (
 	}
 
 	off0 := get_page_header_offset(u32(id))
-	end := off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
+	end := text_interior_fixed(off0, n)
 	if end > len(data) {
 		return -1
 	}
@@ -680,24 +687,15 @@ text_interior_sep_at :: proc "contextless" (
 }
 
 // page_key_compare orders two full index keys under the page's own kind
-// (text codec order on text pages, int codec order on int pages, real
-// codec order on real pages, framing order on composite pages).
-// Separator routing and validation compare through this — never a hardcoded
+// via key_compare (the single codec dispatch, same arms). Separator
+// routing and validation compare through this — never a hardcoded
 // codec — so new index kinds extend one switch. Non-index pages fall back
 // to memcmp (deterministic; callers gate page type first, so it never fires).
 @(private = "file")
 page_key_compare :: #force_inline proc "contextless" (pt: Page_Type, a: []u8, b: []u8) -> int {
-	switch pt {
-	case .LEAF_TEXT, .TEXT_INTERIOR:
-		return cell.text_index_compare(a, b)
-	case .LEAF_INT, .INT_INTERIOR:
-		return cell.int_index_compare(a, b)
-	case .LEAF_REAL, .REAL_INTERIOR:
-		return cell.real_index_compare(a, b)
-	case .LEAF_COMPOSITE, .COMPOSITE_INTERIOR:
-		return cell.composite_compare(a, b)
-	case .INTERIOR_DENSE, .LEAF_SLOTDIR:
-		return mem.compare(a, b)
+	kind, kok := index_kind_of_page(pt)
+	if kok {
+		return key_compare(kind, a, b)
 	}
 	return mem.compare(a, b)
 }
@@ -805,7 +803,7 @@ text_interior_build_from_sorted :: proc "contextless" (
 	if len(children) != n + 1 {
 		return .Invalid_Bounds
 	}
-	if n > int(max(u16)) {
+	if n > MAX_CELLS_PER_PAGE {
 		return .Page_Full
 	}
 
@@ -821,7 +819,7 @@ text_interior_build_from_sorted :: proc "contextless" (
 	}
 
 	off0 := get_page_header_offset(u32(id))
-	total := off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
+	total := text_interior_fixed(off0, n)
 	for i in 0 ..< n {
 		if !page_key_wellformed(kind, keys[i]) {
 			return .Cell_Deserialize_Failed
@@ -883,12 +881,12 @@ text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error 
 
 	n := int(hdr.cell_count)
 	off0 := get_page_header_offset(u32(id))
-	if off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot) > len(data) {
+	if text_interior_fixed(off0, n) > len(data) {
 		return .Cell_Deserialize_Failed
 	}
 
 	cco := int(hdr.cell_content_offset)
-	entry_end := off0 + size_of(Leaf_Header) + (n + 1) * 4 + n * size_of(Text_Slot)
+	entry_end := text_interior_fixed(off0, n)
 	if cco < entry_end || cco > PAGE_SIZE {
 		return .Cell_Deserialize_Failed
 	}

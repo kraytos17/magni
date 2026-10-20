@@ -56,24 +56,23 @@ int_index_encode :: proc "contextless" (
 	}
 
 	buf[0] = INT_INDEX_TAG
-	endian.unchecked_put_u64be(buf[1:9], u64(v ~ min(i64)))
-	endian.unchecked_put_u64be(buf[9:17], u64(i64(rowid) ~ min(i64)))
+	endian.unchecked_put_u64be(buf[1:9], int_bias_word(v))
+	endian.unchecked_put_u64be(buf[9:17], int_bias_word(i64(rowid)))
 	return INT_INDEX_LEN, true
 }
 
 // int_index_decode parses key bytes back into (value, rowid).
-// Exact-length match: truncation or trailing garbage fails.
+// Exact-length match: truncation or trailing garbage fails (checked here;
+// tag and floor length via int_index_split, the shared primitive).
 @(require_results)
 int_index_decode :: proc "contextless" (src: []u8) -> (val: i64, rowid: types.Row_ID, ok: bool) {
 	if intrinsics.unlikely(len(src) != INT_INDEX_LEN) {
 		return 0, 0, false
 	}
-	if intrinsics.unlikely(src[0] != INT_INDEX_TAG) {
+	w, r, sok := int_index_split(src)
+	if !sok {
 		return 0, 0, false
 	}
-
-	w := endian.unchecked_get_u64be(src[1:9])
-	r := endian.unchecked_get_u64be(src[9:17])
 	return i64(w) ~ min(i64), types.Row_ID(i64(r) ~ min(i64)), true
 }
 
@@ -130,14 +129,5 @@ int_index_shared_prefix :: #force_inline proc "contextless" (
 	b: []u8,
 	max_cap: int,
 ) -> int {
-	cap := min(max_cap, len(a), len(b))
-	if cap <= 0 {
-		return 0
-	}
-
-	n := 0
-	#no_bounds_check for n < cap && a[n] == b[n] {
-		n += 1
-	}
-	return n
+	return shared_prefix_bytes(a, b, max_cap)
 }

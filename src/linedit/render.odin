@@ -43,12 +43,10 @@ rune_width :: proc(r: rune) -> int {
 	return 1
 }
 
-// redraw repaints the prompt + buffer and repositions the hardware cursor:
-// move up past the previous render, clear down, wrap-aware print, then
-// cursor back to (row, col) from visual widths. Unknown width falls back
-// to 80 columns.
+// begin_frame handles a pending resize and resolves the repaint width
+// (80 fallback). Callers keep their own move-up accounting.
 @(private)
-redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
+begin_frame :: proc(ed: ^Editor) -> int {
 	t := &ed.term
 	if t.window_resized {
 		terminal_query_size(t)
@@ -59,32 +57,39 @@ redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 	if cols <= 0 {
 		cols = 80
 	}
+	return cols
+}
+
+// paint_wrapped prints s with wrap at cols, advancing col past the paint.
+@(private)
+paint_wrapped :: proc(s: $S, cols: int, col: ^int) {
+	for r in s {
+		w := rune_width(r)
+		if col^ + w > cols {
+			fmt.fprint(os.stdout, "\r\n")
+			col^ = 0
+		}
+
+		fmt.fprintf(os.stdout, "%c", r)
+		col^ += w
+	}
+}
+
+// redraw repaints the prompt + buffer and repositions the hardware cursor:
+// move up past the previous render, clear down, wrap-aware print, then
+// cursor back to (row, col) from visual widths. Unknown width falls back
+// to 80 columns.
+@(private)
+redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
+	cols := begin_frame(ed)
 	if ed.prev_render_rows > 1 {
 		fmt.fprintf(os.stdout, "\x1b[%dA", ed.prev_render_rows - 1)
 	}
 
 	fmt.fprint(os.stdout, "\r\x1b[J")
 	col := 0
-	for r in prompt {
-		w := rune_width(r)
-		if col + w > cols {
-			fmt.fprint(os.stdout, "\r\n")
-			col = 0
-		}
-
-		fmt.fprintf(os.stdout, "%c", r)
-		col += w
-	}
-	for r in lb.runes {
-		w := rune_width(r)
-		if col + w > cols {
-			fmt.fprint(os.stdout, "\r\n")
-			col = 0
-		}
-
-		fmt.fprintf(os.stdout, "%c", r)
-		col += w
-	}
+	paint_wrapped(prompt, cols, &col)
+	paint_wrapped(lb.runes, cols, &col)
 
 	fmt.fprint(os.stdout, "\r")
 	cursor_vis := 0
@@ -123,16 +128,7 @@ redraw :: proc(ed: ^Editor, prompt: string, lb: ^Line_Buffer) {
 // extends, the main render.
 @(private)
 render_search_overlay :: proc(ed: ^Editor, search_prompt: string, matched: string) {
-	t := &ed.term
-	if t.window_resized {
-		terminal_query_size(t)
-		t.window_resized = false
-	}
-
-	cols := t.width
-	if cols <= 0 {
-		cols = 80
-	}
+	cols := begin_frame(ed)
 
 	rows := ed.prev_search_rows if ed.prev_search_rows > 0 else ed.prev_render_rows
 	if rows > 1 {

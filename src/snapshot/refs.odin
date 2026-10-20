@@ -2,9 +2,7 @@ package snapshot
 
 import "core:hash"
 import "core:mem"
-import "core:time"
 import "src:pager"
-import "src:types"
 
 // Named refs (branches/tags) plus the restore undo log share one page:
 //
@@ -26,6 +24,43 @@ REFS_LOG_OFFSET     :: 24
 REFS_LOG_SIZE       :: 64 * size_of(Ref_Log_Entry)
 REFS_ENTRIES_OFFSET :: REFS_LOG_OFFSET + REFS_LOG_SIZE
 MAX_LOG_ENTRIES     :: 64
+
+// Header field accessors (entry count, log count/next): one spelling for
+// the raw-cast offsets so the header layout cannot skew per call site.
+@(private = "file")
+refs_entry_count :: proc(data: []u8) -> u32 {
+	return (^u32)(raw_data(data[len(REFS_MAGIC):]))^
+}
+
+// refs_set_entry_count writes the entry-count header.
+@(private = "file")
+refs_set_entry_count :: proc(data: []u8, n: u32) {
+	(^u32)(raw_data(data[len(REFS_MAGIC):]))^ = n
+}
+
+// refs_log_count reads the log-count header.
+@(private = "file")
+refs_log_count :: proc(data: []u8) -> u32 {
+	return (^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^
+}
+
+// refs_set_log_count writes the log-count header.
+@(private = "file")
+refs_set_log_count :: proc(data: []u8, n: u32) {
+	(^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^ = n
+}
+
+// refs_log_next reads the log-next header.
+@(private = "file")
+refs_log_next :: proc(data: []u8) -> u32 {
+	return (^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^
+}
+
+// refs_set_log_next writes the log-next header.
+@(private = "file")
+refs_set_log_next :: proc(data: []u8, n: u32) {
+	(^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^ = n
+}
 
 // Ref_Kind distinguishes branch refs (move on commit/restore) from tag
 // refs (fixed labels).
@@ -70,12 +105,12 @@ create_refs_page :: proc(p: ^pager.Pager) -> u32 {
 	data := page.data
 	copy(data[:], REFS_MAGIC)
 
-	(^u32)(raw_data(data[len(REFS_MAGIC):]))^ = 0
+	refs_set_entry_count(data, 0)
 	// Zero the undo-log counters too: allocate_page only zeroes the file
 	// header area, so a recycled buffer could otherwise misplace the first
 	// log_push (or panic the slice on a garbage log_next).
-	(^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^ = 0
-	(^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^ = 0
+	refs_set_log_count(data, 0)
+	refs_set_log_next(data, 0)
 	pager.mark_dirty(p, page.page_num)
 	return page.page_num
 }
@@ -92,23 +127,18 @@ set_ref :: proc(
 	kind: Ref_Kind,
 	is_protected: bool,
 ) -> bool {
-	page, err := pager.get_page(p, refs_page)
-	if err != .None {
+	data, ok := checked_page(p, refs_page, REFS_MAGIC)
+	if !ok {
 		return false
 	}
 
 	defer pager.unpin_page(p, refs_page)
-	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
-		return false
-	}
 
-	offset := len(REFS_MAGIC)
-	count := (^u32)(raw_data(data[offset:]))^
+	count := refs_entry_count(data)
 	// Entries live past the undo-log ring (REFS_ENTRIES_OFFSET), never in
 	// the header gap: the ring at [24, ...) would collide with entries
 	// packed at 21.
-	offset = REFS_ENTRIES_OFFSET
+	offset := REFS_ENTRIES_OFFSET
 	name_hash := hash.fnv64a(transmute([]u8)name)
 	for _ in 0 ..< count {
 		entry := (^Ref_Entry)(raw_data(data[offset:]))
@@ -138,7 +168,7 @@ set_ref :: proc(
 	mem.copy_non_overlapping(raw_data(data[offset:]), &entry, size_of(Ref_Entry))
 	offset += size_of(Ref_Entry)
 	copy(data[offset:], transmute([]u8)name)
-	(^u32)(raw_data(data[len(REFS_MAGIC):]))^ = count + 1
+	refs_set_entry_count(data, count + 1)
 
 	pager.mark_dirty(p, refs_page)
 	return true
@@ -153,19 +183,15 @@ get_ref :: proc(p: ^pager.Pager, refs_page: u32, name: string) -> (snapshot_id: 
 		return 0, false
 	}
 
-	page, err := pager.get_page(p, refs_page)
-	if err != .None {
+	data, ok := checked_page(p, refs_page, REFS_MAGIC)
+	if !ok {
 		return 0, false
 	}
 
 	defer pager.unpin_page(p, refs_page)
-	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
-		return 0, false
-	}
 
 	offset := REFS_ENTRIES_OFFSET // entries live past the undo-log ring
-	count := (^u32)(raw_data(data[len(REFS_MAGIC):]))^
+	count := refs_entry_count(data)
 	target_hash := hash.fnv64a(transmute([]u8)name)
 	for _ in 0 ..< count {
 		entry := (^Ref_Entry)(raw_data(data[offset:]))^
@@ -188,19 +214,15 @@ list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocato
 		return nil
 	}
 
-	page, err := pager.get_page(p, refs_page)
-	if err != .None {
+	data, ok := checked_page(p, refs_page, REFS_MAGIC)
+	if !ok {
 		return nil
 	}
 
 	defer pager.unpin_page(p, refs_page)
-	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
-		return nil
-	}
 
 	offset := REFS_ENTRIES_OFFSET // entries live past the undo-log ring
-	count := (^u32)(raw_data(data[len(REFS_MAGIC):]))^
+	count := refs_entry_count(data)
 	entries := make([]Ref_Entry, count, allocator)
 	for i in 0 ..< count {
 		entry := (^Ref_Entry)(raw_data(data[offset:]))^
@@ -216,31 +238,27 @@ list_refs :: proc(p: ^pager.Pager, refs_page: u32, allocator := context.allocato
 // capped) — rollforward history is bounded, not an error. False only on
 // unreadable pages or bad magic.
 log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
-	page, err := pager.get_page(p, refs_page)
-	if err != .None {
+	data, ok := checked_page(p, refs_page, REFS_MAGIC)
+	if !ok {
 		return false
 	}
 
 	defer pager.unpin_page(p, refs_page)
-	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
-		return false
-	}
 
-	log_count := (^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^
-	log_next := (^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^
+	log_count := refs_log_count(data)
+	log_next := refs_log_next(data)
 	entry := Ref_Log_Entry {
 		snapshot_id = snapshot_id,
-		timestamp   = u64(time.to_unix_nanoseconds(time.now()) / types.NANOS_PER_MICRO),
+		timestamp   = micros_now(),
 	}
 
 	log_offset := REFS_LOG_OFFSET + int(log_next) * size_of(Ref_Log_Entry)
 	mem.copy_non_overlapping(raw_data(data[log_offset:]), &entry, size_of(Ref_Log_Entry))
 	if log_count < MAX_LOG_ENTRIES {
-		(^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^ = log_count + 1
+		refs_set_log_count(data, log_count + 1)
 	}
 
-	(^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^ = (log_next + 1) % MAX_LOG_ENTRIES
+	refs_set_log_next(data, (log_next + 1) % MAX_LOG_ENTRIES)
 	pager.mark_dirty(p, refs_page)
 	return true
 }
@@ -251,19 +269,15 @@ log_push :: proc(p: ^pager.Pager, refs_page: u32, snapshot_id: u64) -> bool {
 // count and log_next retreat, so consecutive pops walk back correctly; the
 // slot bytes are left in place for the next push to overwrite.
 log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool) {
-	page, err := pager.get_page(p, refs_page)
-	if err != .None {
+	data, pok := checked_page(p, refs_page, REFS_MAGIC)
+	if !pok {
 		return 0, false
 	}
 
 	defer pager.unpin_page(p, refs_page)
-	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
-		return 0, false
-	}
 
-	log_count := int((^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^)
-	log_next := int((^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^)
+	log_count := int(refs_log_count(data))
+	log_next := int(refs_log_next(data))
 	if log_count == 0 {
 		return 0, false
 	}
@@ -279,8 +293,8 @@ log_pop :: proc(p: ^pager.Pager, refs_page: u32) -> (snapshot_id: u64, ok: bool)
 	off := REFS_LOG_OFFSET + ring_idx * size_of(Ref_Log_Entry)
 	entry := (^Ref_Log_Entry)(raw_data(data[off:]))^
 
-	(^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^ = u32(log_count - 1)
-	(^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^ = u32(ring_idx)
+	refs_set_log_count(data, u32(log_count - 1))
+	refs_set_log_next(data, u32(ring_idx))
 	pager.mark_dirty(p, refs_page)
 	return entry.snapshot_id, true
 }
@@ -302,19 +316,15 @@ log_read_range :: proc(
 	}
 
 	s_idx := max(start_idx, 0)
-	page, err := pager.get_page(p, refs_page)
-	if err != .None {
+	data, ok := checked_page(p, refs_page, REFS_MAGIC)
+	if !ok {
 		return nil
 	}
 
 	defer pager.unpin_page(p, refs_page)
-	data := page.data
-	if string(data[:len(REFS_MAGIC)]) != REFS_MAGIC {
-		return nil
-	}
 
-	log_count := int((^u32)(raw_data(data[len(REFS_MAGIC) + 4:]))^)
-	log_next := int((^u32)(raw_data(data[len(REFS_MAGIC) + 8:]))^)
+	log_count := int(refs_log_count(data))
+	log_next := int(refs_log_next(data))
 	if s_idx >= log_count {
 		return nil
 	}

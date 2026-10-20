@@ -155,7 +155,7 @@ composite_encode_raw :: proc "contextless" (
 			}
 		case .INTEGER:
 			tag = INT_INDEX_TAG
-			w := u64(v.(i64) ~ min(i64))
+			w := int_bias_word(v.(i64))
 			endian.unchecked_put_u64be(
 				buf[pos + COMPOSITE_COMP_HDR_LEN:pos + COMPOSITE_COMP_HDR_LEN + 8],
 				w,
@@ -207,7 +207,7 @@ composite_encode :: proc "contextless" (
 		return 0, false
 	}
 
-	endian.unchecked_put_u64be(buf[1 + raw_n:1 + raw_n + 8], u64(i64(rowid) ~ min(i64)))
+	endian.unchecked_put_u64be(buf[1 + raw_n:1 + raw_n + 8], int_bias_word(i64(rowid)))
 	return n, true
 }
 
@@ -282,16 +282,7 @@ composite_shared_prefix :: #force_inline proc "contextless" (
 	b: []u8,
 	max_cap: int,
 ) -> int {
-	cap := min(max_cap, len(a), len(b))
-	if cap <= 0 {
-		return 0
-	}
-
-	n := 0
-	#no_bounds_check for n < cap && a[n] == b[n] {
-		n += 1
-	}
-	return n
+	return shared_prefix_bytes(a, b, max_cap)
 }
 
 // composite_decode_col extracts the idx-th component of a framed key

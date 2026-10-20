@@ -99,6 +99,15 @@ read_key :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 	}
 }
 
+// expect_tilde consumes one byte and reports whether it is '~' (CSI number
+// terminator). Timing-sensitive: the read blocks, so call sites keep their
+// exact call order; a failed read is not '~'.
+@(private = "file")
+expect_tilde :: proc(fd: posix.FD) -> bool {
+	b, _ := read_byte(fd)
+	return b == '~'
+}
+
 // read_escape_sequence decodes CSI/SS3 sequences (arrows, Home/End/Delete,
 // bracketed-paste markers). A lone ESC (no follow-up within 80ms) reads as
 // .Escape; anything unrecognized also falls back to .Escape (extra bytes
@@ -139,18 +148,15 @@ read_escape_sequence :: proc(fd: posix.FD) -> (ev: Key_Event, ok: bool) {
 		case 'F':
 			return Key_Event{key = .End}, true
 		case '3':
-			b3, _ := read_byte(fd)
-			if b3 == '~' {
+			if expect_tilde(fd) {
 				return Key_Event{key = .Delete}, true
 			}
 		case '1':
-			b3, _ := read_byte(fd)
-			if b3 == '~' {
+			if expect_tilde(fd) {
 				return Key_Event{key = .Home}, true
 			}
 		case '4':
-			b3, _ := read_byte(fd)
-			if b3 == '~' {
+			if expect_tilde(fd) {
 				return Key_Event{key = .End}, true
 			}
 		case '2':

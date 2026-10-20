@@ -106,16 +106,12 @@ find_in_manifest :: proc(
 		return 0, false
 	}
 
-	page, err := pager.get_page(p, manifest_page)
-	if err != .None {
+	data, mok := checked_page(p, manifest_page, MANIFEST_MAGIC)
+	if !mok {
 		return 0, false
 	}
 
 	defer pager.unpin_page(p, manifest_page)
-	data := page.data
-	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
-		return 0, false
-	}
 
 	offset := len(MANIFEST_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += size_of(u32)
@@ -145,16 +141,12 @@ load_manifest :: proc(
 		return nil
 	}
 
-	page, err := pager.get_page(p, manifest_page)
-	if err != .None {
+	data, ok := checked_page(p, manifest_page, MANIFEST_MAGIC)
+	if !ok {
 		return nil
 	}
 
 	defer pager.unpin_page(p, manifest_page)
-	data := page.data
-	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
-		return nil
-	}
 
 	offset := len(MANIFEST_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += size_of(u32)
@@ -183,16 +175,12 @@ load_manifest_tables :: proc(
 		return {}, {}, true
 	}
 
-	page, err := pager.get_page(p, manifest_page)
-	if err != .None {
+	data, mok := checked_page(p, manifest_page, MANIFEST_MAGIC)
+	if !mok {
 		return {}, {}, false
 	}
 
 	defer pager.unpin_page(p, manifest_page)
-	data := page.data
-	if string(data[:len(MANIFEST_MAGIC)]) != MANIFEST_MAGIC {
-		return {}, {}, false
-	}
 
 	offset := len(MANIFEST_MAGIC)
 	count := (^u32)(raw_data(data[offset:]))^; offset += size_of(u32)

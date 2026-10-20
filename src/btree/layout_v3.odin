@@ -244,7 +244,7 @@ dense_choose_encoding :: #force_inline proc "contextless" (
 	}
 
 	diff := u64(i64(max_v) - i64(min_v))
-	if diff <= u64(max(u32)) {
+	if diff <= DENSE_MAX_DELTA {
 		return true, rowid_bias_encode(min_v)
 	}
 	return false, 0
@@ -273,7 +273,7 @@ dense_build_from_sorted :: proc "contextless" (
 	if len(children) != n + 1 {
 		return .Invalid_Bounds
 	}
-	if n > int(max(u16)) {
+	if n > MAX_CELLS_PER_PAGE {
 		return .Page_Full
 	}
 
@@ -309,7 +309,7 @@ dense_build_from_sorted :: proc "contextless" (
 		if use_for {
 			// Per-key guard: endpoints chose the encoding, but only this
 			// proves every key fits (unsorted input must fail, not wrap).
-			if biased < base || biased - base > u64(max(u32)) {
+			if biased < base || biased - base > DENSE_MAX_DELTA {
 				return .Cell_Deserialize_Failed
 			}
 			if !endian.put_u32(data[keys_off + i * kwidth:], .Little, u32(biased - base)) {
@@ -490,7 +490,7 @@ validate_dense_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error
 			return .Cell_Deserialize_Failed
 		}
 		if u16(h.flags) & u16(DENSE_FLAG_FOR) != 0 {
-			if biased < u64(h.base) || biased - u64(h.base) > u64(max(u32)) {
+			if biased < u64(h.base) || biased - u64(h.base) > DENSE_MAX_DELTA {
 				return .Cell_Deserialize_Failed
 			}
 		}

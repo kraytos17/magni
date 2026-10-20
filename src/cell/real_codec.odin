@@ -31,11 +31,8 @@ REAL_INDEX_TAG :: u8(0x46)
 REAL_INDEX_LEN :: 1 + 8 + 8 // tag + ordered value + biased rowid
 #assert(REAL_INDEX_LEN == 17)
 
-// REAL_NEG_ZERO is the only input real_sort_word rewrites (-0.0 → +0.0).
-@(private = "file")
-REAL_NEG_ZERO :: u64(0x8000000000000000)
-
-// REAL_SIGN is the IEEE-754 binary64 sign bit, the pivot of the transform.
+// REAL_SIGN is the IEEE-754 binary64 sign bit: the pivot of the transform
+// and the -0.0 marker real_sort_word rewrites to +0.0.
 @(private = "file")
 REAL_SIGN :: u64(0x8000000000000000)
 
@@ -45,7 +42,7 @@ REAL_SIGN :: u64(0x8000000000000000)
 // the caller's to exclude (real_index_encodable), never normalized here.
 real_sort_word :: #force_inline proc "contextless" (v: f64) -> u64 {
 	u := transmute(u64)v
-	if u == REAL_NEG_ZERO {
+	if u == REAL_SIGN {
 		u = 0
 	}
 	if u & REAL_SIGN != 0 {
@@ -95,22 +92,22 @@ real_index_encode :: proc "contextless" (
 
 	buf[0] = REAL_INDEX_TAG
 	endian.unchecked_put_u64be(buf[1:9], real_sort_word(v))
-	endian.unchecked_put_u64be(buf[9:17], u64(i64(rowid) ~ min(i64)))
+	endian.unchecked_put_u64be(buf[9:17], int_bias_word(i64(rowid)))
 	return REAL_INDEX_LEN, true
 }
 
 // real_index_decode parses key bytes back into (value, rowid).
-// Exact-length match: truncation or trailing garbage fails.
+// Exact-length match: truncation or trailing garbage fails (checked here;
+// tag and floor length via real_index_split, the shared primitive).
 @(require_results)
 real_index_decode :: proc "contextless" (src: []u8) -> (val: f64, rowid: types.Row_ID, ok: bool) {
 	if intrinsics.unlikely(len(src) != REAL_INDEX_LEN) {
 		return 0, 0, false
 	}
-	if intrinsics.unlikely(src[0] != REAL_INDEX_TAG) {
+	_, r, sok := real_index_split(src)
+	if !sok {
 		return 0, 0, false
 	}
-
-	r := endian.unchecked_get_u64be(src[9:17])
 	return real_index_decode_value(src[1:9]), types.Row_ID(i64(r) ~ min(i64)), true
 }
 
@@ -180,14 +177,5 @@ real_index_shared_prefix :: #force_inline proc "contextless" (
 	b: []u8,
 	max_cap: int,
 ) -> int {
-	cap := min(max_cap, len(a), len(b))
-	if cap <= 0 {
-		return 0
-	}
-
-	n := 0
-	#no_bounds_check for n < cap && a[n] == b[n] {
-		n += 1
-	}
-	return n
+	return shared_prefix_bytes(a, b, max_cap)
 }

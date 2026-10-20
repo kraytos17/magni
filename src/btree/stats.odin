@@ -43,6 +43,31 @@ attach_stats :: proc(t: ^Tree) {
 	p.free_stats = free_stats_proc
 }
 
+// stat_grow extends a per-page cache array to cover page_id, filling new
+// slots with the array's uncached sentinel, and returns the index. The
+// index must be used in a separate statement: indexing with this call
+// inline snapshots the pre-grow header and traps.
+@(private = "file")
+stat_grow :: proc(arr: ^[dynamic]$T, page_id: u32, fill: T) -> int {
+	idx := int(page_id)
+	if idx >= len(arr) {
+		old := len(arr)
+		resize(arr, idx + 1)
+		slice.fill(arr[old:], fill)
+	}
+	return idx
+}
+
+// stat_reset marks a page's cached entry as uncached (bounds-guarded;
+// never grows the array — eviction/free of a page we never tracked is a
+// no-op).
+@(private = "file")
+stat_reset :: proc(arr: ^[dynamic]$T, page_id: u32, sentinel: T) {
+	if idx := int(page_id); idx < len(arr) {
+		arr[idx] = sentinel
+	}
+}
+
 // stats_row_count_get returns the cached row count for page_id, if present.
 @(private)
 stats_row_count_get :: proc(s: ^Stats, page_id: u32) -> (int, bool) {
@@ -58,12 +83,7 @@ stats_row_count_get :: proc(s: ^Stats, page_id: u32) -> (int, bool) {
 // slots initialized to the -1 sentinel) as needed.
 @(private)
 stats_row_count_set :: proc(s: ^Stats, page_id: u32, count: int) {
-	idx := int(page_id)
-	if idx >= len(s.row_counts) {
-		old := len(s.row_counts)
-		resize(&s.row_counts, idx + 1)
-		slice.fill(s.row_counts[old:], -1)
-	}
+	idx := stat_grow(&s.row_counts, page_id, -1)
 	s.row_counts[idx] = count
 }
 
@@ -83,12 +103,7 @@ stats_range_get :: proc(s: ^Stats, page_id: u32) -> (pager.Page_Int_Range, bool)
 // slots initialized to nil) as needed.
 @(private)
 stats_range_set :: proc(s: ^Stats, page_id: u32, r: pager.Page_Int_Range) {
-	idx := int(page_id)
-	if idx >= len(s.page_int_ranges) {
-		old := len(s.page_int_ranges)
-		resize(&s.page_int_ranges, idx + 1)
-		slice.fill(s.page_int_ranges[old:], nil)
-	}
+	idx := stat_grow(&s.page_int_ranges, page_id, nil)
 	s.page_int_ranges[idx] = r
 }
 
@@ -96,17 +111,13 @@ stats_range_set :: proc(s: ^Stats, page_id: u32, r: pager.Page_Int_Range) {
 // never grows the array — eviction/free of a page we never tracked is a no-op).
 @(private)
 stats_row_count_reset :: proc(s: ^Stats, page_id: u32) {
-	if int(page_id) < len(s.row_counts) {
-		s.row_counts[page_id] = -1
-	}
+	stat_reset(&s.row_counts, page_id, -1)
 }
 
 // stats_range_reset marks a page's cached range as uncached (bounds-guarded).
 @(private)
 stats_range_reset :: proc(s: ^Stats, page_id: u32) {
-	if int(page_id) < len(s.page_int_ranges) {
-		s.page_int_ranges[page_id] = nil
-	}
+	stat_reset(&s.page_int_ranges, page_id, nil)
 }
 
 // on_evict_stats clears a page's cached stats when the pager evicts or frees

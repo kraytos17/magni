@@ -23,6 +23,15 @@ COL_BLOB_VERSION :: 1
 // grouped tables use this version.
 COL_BLOB_GROUPS_VERSION :: 2
 
+// Packed column-flag bits in the per-column header byte (low 3 bits are
+// the Column_Type tag).
+COL_TYPE_MASK     :: 0x07
+COL_FLAG_NOT_NULL :: 0x08
+COL_FLAG_PK       :: 0x10
+COL_FLAG_CHECK    :: 0x20
+COL_FLAG_DEFAULT  :: 0x40
+COL_FLAG_UNIQUE   :: 0x80
+
 // serialize_columns_to_blob encodes a column list per the layout above.
 // The size estimate and the writes must agree (no length prefix for the
 // blob itself) — caller stores the returned slice into a schema row.
@@ -78,19 +87,19 @@ serialize_columns_to_blob :: proc(
 		copy(blob[offset:], col.name); offset += len(col.name)
 		packed := u8(col.type)
 		if col.not_null {
-			packed |= 0x08
+			packed |= COL_FLAG_NOT_NULL
 		}
 		if col.pk {
-			packed |= 0x10
+			packed |= COL_FLAG_PK
 		}
 		if _, has := col.check_expr.?; has {
-			packed |= 0x20
+			packed |= COL_FLAG_CHECK
 		}
 		if _, has := col.default_value.?; has {
-			packed |= 0x40
+			packed |= COL_FLAG_DEFAULT
 		}
 		if col.unique {
-			packed |= 0x80
+			packed |= COL_FLAG_UNIQUE
 		}
 
 		blob[offset] = packed; offset += 1
@@ -163,20 +172,19 @@ deserialize_columns :: proc(
 		offset += 1
 		col := types.Column {
 			name     = strings.clone(name_str, allocator),
-			type     = types.Column_Type(packed & 0x07),
-			not_null = (packed & 0x08) != 0,
-			pk       = (packed & 0x10) != 0,
-			unique   = (packed & 0x80) != 0,
+			type     = types.Column_Type(packed & COL_TYPE_MASK),
+			not_null = (packed & COL_FLAG_NOT_NULL) != 0,
+			pk       = (packed & COL_FLAG_PK) != 0,
+			unique   = (packed & COL_FLAG_UNIQUE) != 0,
 		}
-
-		if (packed & 0x40) != 0 {
+		if (packed & COL_FLAG_DEFAULT) != 0 {
 			def_val, def_ok := deserialize_value_from_blob(blob, &offset, allocator)
 			if !def_ok {
 				return nil, nil, false
 			}
 			col.default_value = def_val
 		}
-		if (packed & 0x20) != 0 {
+		if (packed & COL_FLAG_CHECK) != 0 {
 			chk_len, _, chk_ok := varint.decode(blob, offset)
 			if !chk_ok || chk_len == 0 {
 				return nil, nil, false

@@ -520,9 +520,9 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 	case f64:
 		return u64(types.Serial_Type.FLOAT64)
 	case string:
-		return u64(len(val) * 2 + 13)
+		return u64(len(val) * 2 + types.SERIAL_TEXT_BASE)
 	case []u8:
-		return u64(len(val) * 2 + 12)
+		return u64(len(val) * 2 + types.SERIAL_BLOB_BASE)
 	case:
 		return u64(types.Serial_Type.NULL)
 	}
@@ -530,8 +530,12 @@ serial_type_for_value :: proc(v: types.Value) -> u64 {
 
 // is_text_serial reports whether serial encodes TEXT (odd, >= 13).
 @(private = "file")
-is_text_serial :: proc(serial: u64) -> bool { return serial >= 13 && (serial % 2 != 0) }
+is_text_serial :: proc(serial: u64) -> bool {
+	return serial >= types.SERIAL_TEXT_BASE && (serial % 2 != 0)
+}
 
 // is_blob_serial reports whether serial encodes BLOB (even, >= 12).
 @(private = "file")
-is_blob_serial :: proc(serial: u64) -> bool { return serial >= 12 && (serial % 2 == 0) }
+is_blob_serial :: proc(serial: u64) -> bool {
+	return serial >= types.SERIAL_BLOB_BASE && (serial % 2 == 0)
+}

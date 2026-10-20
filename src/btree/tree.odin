@@ -1058,9 +1058,9 @@ delete_from_leaf :: proc(t: ^Tree, leaf_node: ^Node, key: types.Row_ID) -> Error
 			u16(cell_sz),
 			&leaf_node.header.first_freeblock,
 		)
-	} else if cell_sz > 0 && cell_sz < 255 {
+	} else if cell_sz > 0 && cell_sz < MAX_FRAGMENT_BYTES {
 		leaf_node.header.fragmented_bytes = u8(
-			min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), 255),
+			min(u16(leaf_node.header.fragmented_bytes) + u16(cell_sz), MAX_FRAGMENT_BYTES),
 		)
 	}
 

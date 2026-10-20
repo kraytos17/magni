@@ -1606,7 +1606,7 @@ candidate_lookup_text_eq :: proc(
 ) -> bool {
 	found, find_err := btree.find_rowids(idx_tree, root, transmute([]u8)text)
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table_name)
+		log_index_search_fail(table_name)
 		return false
 	}
 
@@ -1626,7 +1626,7 @@ candidate_lookup_int_eq :: proc(
 ) -> bool {
 	found, find_err := btree.find_rowids(idx_tree, root, val)
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table_name)
+		log_index_search_fail(table_name)
 		return false
 	}
 
@@ -1643,8 +1643,10 @@ candidate_lookup_eq :: proc {
 	candidate_lookup_real_eq,
 }
 
-// candidate_lookup_range appends one text range's rowids. Twin of
-// candidate_lookup_eq for Range plans on TEXT indexes.
+// candidate_lookup_range appends one range's rowids for Range plans,
+// selecting the bound arms by the plan's kind (one switch: the three
+// btree overloads take differently-typed bounds, so the arm selection
+// lives here and the call site stays a single call).
 @(private = "file")
 candidate_lookup_range :: proc(
 	idx_tree: ^btree.Tree,
@@ -1653,47 +1655,45 @@ candidate_lookup_range :: proc(
 	out: ^[dynamic]types.Row_ID,
 	table_name: string,
 ) -> bool {
-	found, find_err := btree.range_rowids(
-		idx_tree,
-		root,
-		plan.range_lo_text,
-		plan.range_hi_text,
-		plan.range_has_lo,
-		plan.range_has_hi,
-		plan.range_lo_inc,
-		plan.range_hi_inc,
-	)
-	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table_name)
-		return false
+	found: []types.Row_ID
+	find_err: btree.Error
+	switch plan.col_type {
+	case .INTEGER:
+		found, find_err = btree.range_rowids(
+			idx_tree,
+			root,
+			plan.range_lo_int,
+			plan.range_hi_int,
+			plan.range_has_lo,
+			plan.range_has_hi,
+			plan.range_lo_inc,
+			plan.range_hi_inc,
+		)
+	case .REAL:
+		found, find_err = btree.range_rowids(
+			idx_tree,
+			root,
+			plan.range_lo_real,
+			plan.range_hi_real,
+			plan.range_has_lo,
+			plan.range_has_hi,
+			plan.range_lo_inc,
+			plan.range_hi_inc,
+		)
+	case .TEXT, .BLOB:
+		found, find_err = btree.range_rowids(
+			idx_tree,
+			root,
+			plan.range_lo_text,
+			plan.range_hi_text,
+			plan.range_has_lo,
+			plan.range_has_hi,
+			plan.range_lo_inc,
+			plan.range_hi_inc,
+		)
 	}
-
-	append(out, ..found)
-	return true
-}
-
-// candidate_lookup_int_range appends one integer range's rowids. Twin of
-// candidate_lookup_range for INTEGER indexes.
-@(private = "file")
-candidate_lookup_int_range :: proc(
-	idx_tree: ^btree.Tree,
-	root: u32,
-	plan: Index_Plan,
-	out: ^[dynamic]types.Row_ID,
-	table_name: string,
-) -> bool {
-	found, find_err := btree.range_rowids(
-		idx_tree,
-		root,
-		plan.range_lo_int,
-		plan.range_hi_int,
-		plan.range_has_lo,
-		plan.range_has_hi,
-		plan.range_lo_inc,
-		plan.range_hi_inc,
-	)
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table_name)
+		log_index_search_fail(table_name)
 		return false
 	}
 
@@ -1713,36 +1713,7 @@ candidate_lookup_real_eq :: proc(
 ) -> bool {
 	found, find_err := btree.find_rowids(idx_tree, root, val)
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table_name)
-		return false
-	}
-
-	append(out, ..found)
-	return true
-}
-
-// candidate_lookup_real_range appends one real range's rowids. Twin of
-// candidate_lookup_int_range for REAL indexes.
-@(private = "file")
-candidate_lookup_real_range :: proc(
-	idx_tree: ^btree.Tree,
-	root: u32,
-	plan: Index_Plan,
-	out: ^[dynamic]types.Row_ID,
-	table_name: string,
-) -> bool {
-	found, find_err := btree.range_rowids(
-		idx_tree,
-		root,
-		plan.range_lo_real,
-		plan.range_hi_real,
-		plan.range_has_lo,
-		plan.range_has_hi,
-		plan.range_lo_inc,
-		plan.range_hi_inc,
-	)
-	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table_name)
+		log_index_search_fail(table_name)
 		return false
 	}
 
@@ -1788,7 +1759,7 @@ index_candidate_single :: proc(
 		found, find_err := btree.text_find_prefix(&idx_tree, plan.root, transmute([]u8)plan.prefix)
 
 		if find_err != .None {
-			log.errorf("Error: Failed to search index for '%s'", table.name)
+			log_index_search_fail(table.name)
 			delete(out)
 			return nil, false
 		}
@@ -1821,22 +1792,9 @@ index_candidate_single :: proc(
 		if plan.range_empty {
 			return out, true
 		}
-		switch plan.col_type {
-		case .INTEGER:
-			if !candidate_lookup_int_range(&idx_tree, plan.root, plan, &out, table.name) {
-				delete(out)
-				return nil, false
-			}
-		case .REAL:
-			if !candidate_lookup_real_range(&idx_tree, plan.root, plan, &out, table.name) {
-				delete(out)
-				return nil, false
-			}
-		case .TEXT, .BLOB:
-			if !candidate_lookup_range(&idx_tree, plan.root, plan, &out, table.name) {
-				delete(out)
-				return nil, false
-			}
+		if !candidate_lookup_range(&idx_tree, plan.root, plan, &out, table.name) {
+			delete(out)
+			return nil, false
 		}
 	case .Composite:
 		// Fetch-only: exact full-tuple lookup, leading-column prefix
@@ -1848,7 +1806,7 @@ index_candidate_single :: proc(
 		if plan.comp_key != nil {
 			found, find_err := btree.composite_find_rowids(&idx_tree, plan.root, plan.comp_key)
 			if find_err != .None {
-				log.errorf("Error: Failed to search index for '%s'", table.name)
+				log_index_search_fail(table.name)
 				delete(out)
 				return nil, false
 			}
@@ -1860,7 +1818,7 @@ index_candidate_single :: proc(
 				plan.comp_prefix,
 			)
 			if find_err != .None {
-				log.errorf("Error: Failed to search index for '%s'", table.name)
+				log_index_search_fail(table.name)
 				delete(out)
 				return nil, false
 			}
@@ -1877,7 +1835,7 @@ index_candidate_single :: proc(
 				plan.comp_hi_inc,
 			)
 			if find_err != .None {
-				log.errorf("Error: Failed to search index for '%s'", table.name)
+				log_index_search_fail(table.name)
 				delete(out)
 				return nil, false
 			}
@@ -1894,7 +1852,7 @@ index_candidate_single :: proc(
 				true,
 			)
 			if find_err != .None {
-				log.errorf("Error: Failed to search index for '%s'", table.name)
+				log_index_search_fail(table.name)
 				delete(out)
 				return nil, false
 			}
@@ -1948,6 +1906,15 @@ index_use_name :: proc(use: Index_Use) -> string {
 	return "unknown"
 }
 
+// EXPLAIN plan vocabulary: one spelling per access path, next to
+// index_use_name so the output strings cannot skew.
+EXPLAIN_PK_SEEK     :: "PK SEEK ON %s"
+EXPLAIN_ROWID_SEEK  :: "ROWID SEEK ON %s"
+EXPLAIN_INDEX_COVER :: "INDEX SCAN ON %s USING %s (%s, covering)"
+EXPLAIN_INDEX_FETCH :: "INDEX SCAN ON %s USING %s (%s, fetch)"
+EXPLAIN_INDEX_ORDER :: "INDEX SCAN ON %s USING %s (order, fetch)"
+EXPLAIN_FULL_SCAN   :: "FULL SCAN ON %s"
+
 // explain_plan_text renders the access decision for EXPLAIN <select>: PK
 // SEEK, INDEX SCAN (shape + covering/fetch), or FULL SCAN — in the same
 // order the fetch path tries them (PK, covering, fetch, scan), so the
@@ -1985,21 +1952,21 @@ explain_plan_text :: proc(
 	}
 	if wc, has_wc := sel.where_clause.?; has_wc {
 		if _, seek_ok := try_pk_lookup(table^, wc, tbl_name, sel.from_alias); seek_ok {
-			return fmt.tprintf("PK SEEK ON %s", tbl_name)
+			return fmt.tprintf(EXPLAIN_PK_SEEK, tbl_name)
 		}
 
 		visible := sel.from_alias if sel.from_alias != "" else tbl_name
 		if _, seek_ok := try_rowid_lookup(table^, wc, visible); seek_ok {
-			return fmt.tprintf("ROWID SEEK ON %s", tbl_name)
+			return fmt.tprintf(EXPLAIN_ROWID_SEEK, tbl_name)
 		}
 		if _, chain_ok := try_rowid_chain_seek(table^, wc, visible); chain_ok {
-			return fmt.tprintf("ROWID SEEK ON %s", tbl_name)
+			return fmt.tprintf(EXPLAIN_ROWID_SEEK, tbl_name)
 		}
 		if is_covering_rowid_select(sel, table.columns) {
 			if plan, idx_ok := resolve_index_covering(table^, wc, tbl_name, sel.from_alias);
 			   idx_ok {
 				return fmt.tprintf(
-					"INDEX SCAN ON %s USING %s (%s, covering)",
+					EXPLAIN_INDEX_COVER,
 					tbl_name,
 					plan_index_columns(plan, context.temp_allocator),
 					index_use_name(plan.use),
@@ -2009,7 +1976,7 @@ explain_plan_text :: proc(
 		if plan, idx_ok := resolve_index_covering(table^, wc, tbl_name, sel.from_alias);
 		   idx_ok && covering_known_values(plan) && is_covering_col_select(sel, plan) {
 			return fmt.tprintf(
-				"INDEX SCAN ON %s USING %s (%s, covering)",
+				EXPLAIN_INDEX_COVER,
 				tbl_name,
 				plan_index_columns(plan, context.temp_allocator),
 				index_use_name(plan.use),
@@ -2017,7 +1984,7 @@ explain_plan_text :: proc(
 		}
 		if plan, idx_ok := resolve_index_fetch(table^, wc, tbl_name, sel.from_alias); idx_ok {
 			return fmt.tprintf(
-				"INDEX SCAN ON %s USING %s (%s, fetch)",
+				EXPLAIN_INDEX_FETCH,
 				tbl_name,
 				plan_index_columns(plan, context.temp_allocator),
 				index_use_name(plan.use),
@@ -2027,13 +1994,13 @@ explain_plan_text :: proc(
 	if _, has_wc := sel.where_clause.?; !has_wc {
 		if oplan, ok := resolve_order_scan(table^, sel, tbl_name, sel.from_alias); ok {
 			return fmt.tprintf(
-				"INDEX SCAN ON %s USING %s (order, fetch)",
+				EXPLAIN_INDEX_ORDER,
 				tbl_name,
 				plan_index_columns(oplan, context.temp_allocator),
 			)
 		}
 	}
-	return fmt.tprintf("FULL SCAN ON %s", tbl_name)
+	return fmt.tprintf(EXPLAIN_FULL_SCAN, tbl_name)
 }
 
 // is_covering_rowid_select reports whether the statement is literally
@@ -2186,7 +2153,7 @@ covering_emit_text_eq :: proc(
 	idx_tree := btree.init(t.pager, root)
 	found, find_err := btree.find_rowids(&idx_tree, root, transmute([]u8)text)
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table.name)
+		log_index_search_fail(table.name)
 		return false
 	}
 	for rid in found {
@@ -2209,7 +2176,7 @@ covering_emit_int_eq :: proc(
 	idx_tree := btree.init(t.pager, root)
 	found, find_err := btree.find_rowids(&idx_tree, root, val)
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table.name)
+		log_index_search_fail(table.name)
 		return false
 	}
 	for rid in found {
@@ -2235,7 +2202,7 @@ covering_emit_real_eq :: proc(
 	idx_tree := btree.init(t.pager, root)
 	found, find_err := btree.find_rowids(&idx_tree, root, val)
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table.name)
+		log_index_search_fail(table.name)
 		return false
 	}
 
@@ -2356,7 +2323,7 @@ covering_emit_composite :: proc(
 	}
 
 	if find_err != .None {
-		log.errorf("Error: Failed to search index for '%s'", table.name)
+		log_index_search_fail(table.name)
 		return false
 	}
 	for rid in found {

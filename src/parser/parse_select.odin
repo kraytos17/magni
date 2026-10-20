@@ -757,9 +757,7 @@ parse_select :: proc(
 	p.nest_depth += 1
 	defer p.nest_depth -= 1
 	if p.nest_depth > MAX_PARSE_NESTING {
-		if p.err_msg == "" {
-			p.err_msg = "Query nesting too deep"
-		}
+		err_set_once(p, "Query nesting too deep")
 		return {}, false
 	}
 

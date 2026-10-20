@@ -228,6 +228,9 @@ rowid_shared_prefix_len :: #force_inline proc "contextless" (
 }
 
 @(private = "file")
+ROWID_INDEX_TAG :: u8(0x52) // 'R': reserves tag space for composite keys
+
+@(private = "file")
 ROWID_INDEX_ENCODED_LEN :: 9 // tag + 8-byte biased word
 #assert(ROWID_INDEX_ENCODED_LEN == 1 + 8)
 
@@ -241,7 +244,7 @@ rowid_encode :: proc "contextless" (val: types.Value, _: types.Row_ID, buf: []u8
 		return 0, false
 	}
 
-	buf[0] = 0x52 // 'R': rowid tag, reserves tag space for composite keys
+	buf[0] = ROWID_INDEX_TAG
 	w := rowid_encode_u64(types.Row_ID(v))
 	endian.unchecked_put_u64be(buf[1:ROWID_INDEX_ENCODED_LEN], w)
 	return ROWID_INDEX_ENCODED_LEN, true
@@ -276,7 +279,7 @@ dense_separator_insert :: proc "contextless" (
 	}
 
 	bk := rowid_bias_encode(key)
-	if use_for && intrinsics.unlikely(bk < base || bk - base > u64(max(u32))) {
+	if use_for && intrinsics.unlikely(bk < base || bk - base > DENSE_MAX_DELTA) {
 		return .Page_Full
 	}
 

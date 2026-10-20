@@ -15,9 +15,16 @@ import "src:pager"
 
 SKIP_FORMAT_MAGIC :: u32(0x4B495054)
 
+// SKIP_HDR_SIZE is the skip-page header: magic, entry count, column index
+// (3 × u32le).
+SKIP_HDR_SIZE   :: 12
+SKIP_MAGIC_OFF  :: 0
+SKIP_COUNT_OFF  :: 4
+SKIP_COLUMN_OFF :: 8
+
 // MAX_SKIP_ENTRIES bounds one skip page: the 12-byte header plus packed
 // entries must fit in PAGE_SIZE. Larger zone sets are merged down before write.
-MAX_SKIP_ENTRIES :: (PAGE_SIZE - 12) / size_of(Skip_Entry)
+MAX_SKIP_ENTRIES :: (PAGE_SIZE - SKIP_HDR_SIZE) / size_of(Skip_Entry)
 
 // Skip_Op selects how a skip-index range bound is derived from a comparison
 // operator. Only these operators can be safely answered from the zone-map
@@ -279,15 +286,15 @@ write_skip_page :: proc(t: ^Tree, entries: []Skip_Entry, col_index: int) -> (Ski
 	}
 
 	n := len(entries)
-	if 12 + n * size_of(Skip_Entry) > PAGE_SIZE {
+	if SKIP_HDR_SIZE + n * size_of(Skip_Entry) > PAGE_SIZE {
 		return {}, .Page_Full
 	}
 
-	data := page.data[:12 + n * size_of(Skip_Entry)]
-	endian.unchecked_put_u32le(data[0:4], SKIP_FORMAT_MAGIC)
-	endian.unchecked_put_u32le(data[4:8], u32(n))
-	endian.unchecked_put_u32le(data[8:12], u32(col_index))
-	copy(data[12:], transmute([]byte)entries)
+	data := page.data[:SKIP_HDR_SIZE + n * size_of(Skip_Entry)]
+	endian.unchecked_put_u32le(data[SKIP_MAGIC_OFF:SKIP_MAGIC_OFF + 4], SKIP_FORMAT_MAGIC)
+	endian.unchecked_put_u32le(data[SKIP_COUNT_OFF:SKIP_COUNT_OFF + 4], u32(n))
+	endian.unchecked_put_u32le(data[SKIP_COLUMN_OFF:SKIP_COLUMN_OFF + 4], u32(col_index))
+	copy(data[SKIP_HDR_SIZE:], transmute([]byte)entries)
 
 	pager.mark_dirty(t.pager, page.page_num)
 	pager.unpin_page(t.pager, page.page_num)
@@ -299,25 +306,25 @@ write_skip_page :: proc(t: ^Tree, entries: []Skip_Entry, col_index: int) -> (Ski
 // The slice borrows the caller's pinned page (same lifetime rule as the
 // inline guards it replaces — unpin after last use).
 parse_skip_entries :: proc(data: []u8, col_index: int) -> ([]Skip_Entry, bool) {
-	if len(data) < 12 {
+	if len(data) < SKIP_HDR_SIZE {
 		return nil, false
 	}
 
-	magic := endian.unchecked_get_u32le(data[0:4])
+	magic := endian.unchecked_get_u32le(data[SKIP_MAGIC_OFF:SKIP_MAGIC_OFF + 4])
 	if magic != SKIP_FORMAT_MAGIC {
 		return nil, false
 	}
 
-	count := int(endian.unchecked_get_u32le(data[4:8]))
-	if int(endian.unchecked_get_u32le(data[8:12])) != col_index {
+	count := int(endian.unchecked_get_u32le(data[SKIP_COUNT_OFF:SKIP_COUNT_OFF + 4]))
+	if int(endian.unchecked_get_u32le(data[SKIP_COLUMN_OFF:SKIP_COLUMN_OFF + 4])) != col_index {
 		return nil, false
 	}
 
-	need := 12 + count * size_of(Skip_Entry)
+	need := SKIP_HDR_SIZE + count * size_of(Skip_Entry)
 	if len(data) < need {
 		return nil, false
 	}
-	return transmute([]Skip_Entry)data[12:need], true
+	return transmute([]Skip_Entry)data[SKIP_HDR_SIZE:need], true
 }
 
 // query_skip_index_range returns a conservative page window [start, end] for

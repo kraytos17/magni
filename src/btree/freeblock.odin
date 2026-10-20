@@ -9,28 +9,37 @@ package btree
 
 FREEBLOCK_HDR_SIZE :: 4
 
+FREEBLOCK_NEXT_OFF :: 0
+FREEBLOCK_SIZE_OFF :: 2
+
+// freeblock_field returns the u16le header field at off + field.
+@(private = "file")
+freeblock_field :: proc(data: []u8, off: u16, field: u16) -> ^u16le {
+	return (^u16le)(raw_data(data[int(off) + int(field):]))
+}
+
 // freeblock_read_next returns the next-block offset stored at off.
 @(private = "file")
 freeblock_read_next :: proc(data: []u8, off: u16) -> u16le {
-	return (^u16le)(raw_data(data[int(off):]))^
+	return freeblock_field(data, off, FREEBLOCK_NEXT_OFF)^
 }
 
 // freeblock_read_size returns the total block size stored at off.
 @(private = "file")
 freeblock_read_size :: proc(data: []u8, off: u16) -> u16le {
-	return (^u16le)(raw_data(data[int(off) + 2:]))^
+	return freeblock_field(data, off, FREEBLOCK_SIZE_OFF)^
 }
 
 // freeblock_write_next stores the next-block offset at off.
 @(private = "file")
 freeblock_write_next :: proc(data: []u8, off: u16, next: u16le) {
-	(^u16le)(raw_data(data[int(off):]))^ = next
+	freeblock_field(data, off, FREEBLOCK_NEXT_OFF)^ = next
 }
 
 // freeblock_write_size stores the total block size at off.
 @(private = "file")
 freeblock_write_size :: proc(data: []u8, off: u16, sz: u16le) {
-	(^u16le)(raw_data(data[int(off) + 2:]))^ = sz
+	freeblock_field(data, off, FREEBLOCK_SIZE_OFF)^ = sz
 }
 
 // freeblock_insert inserts a freed cell (offset + size) into the chain at

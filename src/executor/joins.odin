@@ -1,6 +1,5 @@
 package executor
 
-import "core:log"
 import "core:slice"
 import "src:btree"
 import "src:parser"
@@ -228,7 +227,7 @@ resolve_from_source :: proc(
 	if tbl_name, is_table := stmt.from.(string); is_table {
 		info, found := schema.find_table_cached(t, tbl_name, cache)
 		if !found {
-			log.errorf("Error: Table not found: %s", tbl_name)
+			log_table_not_found(tbl_name)
 			return false
 		}
 
@@ -270,7 +269,7 @@ resolve_join_source :: proc(
 	if jt_name, is_table := join.source.(string); is_table {
 		info, found := schema.find_table_cached(t, jt_name, cache)
 		if !found {
-			log.errorf("Error: Table not found: %s", jt_name)
+			log_table_not_found(jt_name)
 			return false
 		}
 

@@ -10,13 +10,20 @@ package parser
 
 import "core:strings"
 
+// set_err_once records the first parse error (later errors never
+// overwrite it). The void arm of err for productions that fail with their
+// own return shape.
+err_set_once :: proc(p: ^Parser, msg: string) {
+	if p.err_msg == "" {
+		p.err_msg = msg
+	}
+}
+
 // err records the first parse error (later errors never overwrite it) and
 // fails the current production. Every syntax failure funnels through here
 // so messages stay first-fault, not cascading.
 err :: proc(p: ^Parser, msg: string) -> (Statement_Variant, bool) {
-	if p.err_msg == "" {
-		p.err_msg = msg
-	}
+	err_set_once(p, msg)
 	return nil, false
 }
 
@@ -28,9 +35,7 @@ expect_match :: proc(p: ^Parser, tt: Token_Type, msg: string) -> bool {
 	if match(p, tt) {
 		return true
 	}
-	if p.err_msg == "" {
-		p.err_msg = msg
-	}
+	err_set_once(p, msg)
 	return false
 }
 
@@ -183,16 +188,12 @@ parse :: proc(sql: string, allocator := context.allocator) -> (Statement, bool, 
 			sql = strings.clone(inner, allocator),
 		}; success = true
 	case:
-		if parser.err_msg == "" {
-			parser.err_msg = "Unexpected token"
-		}
+		err_set_once(&parser, "Unexpected token")
 		return {}, false, parser.err_msg
 	}
 
 	if !success {
-		if parser.err_msg == "" {
-			parser.err_msg = "Syntax error"
-		}
+		err_set_once(&parser, "Syntax error")
 		return {}, false, parser.err_msg
 	}
 	return Statement{type = variant, sql = strings.clone(sql, allocator)}, true, ""
