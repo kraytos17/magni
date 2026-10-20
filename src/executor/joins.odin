@@ -2,6 +2,7 @@ package executor
 
 import "core:slice"
 import "src:btree"
+import "src:cell"
 import "src:parser"
 import "src:schema"
 import "src:types"
@@ -303,8 +304,9 @@ resolve_join_source :: proc(
 	return false
 }
 
-// execute_single_join runs one JOIN clause: materializes the right side,
-// picks hash vs nested-loop, and returns the combined rows.
+// execute_single_join runs one JOIN clause: tries the index nested-loop
+// probe first (no inner materialization), then materializes the right
+// side and picks hash vs nested-loop. Returns the combined rows.
 @(private = "file")
 execute_single_join :: proc(
 	t: ^btree.Tree,
@@ -316,6 +318,10 @@ execute_single_join :: proc(
 	cache: ^schema.Table_Cache = nil,
 ) -> []Row_Entry {
 	new_rows := make([dynamic]Row_Entry, context.temp_allocator)
+	if try_index_nlj(jb, jc, info_idx, rows, &new_rows) {
+		return new_rows[:]
+	}
+
 	right_rows: []Row_Entry
 	if vt, is_vt := jb.ctxs[info_idx].info.virtual.?; is_vt {
 		right_rows = vt.rows
@@ -336,6 +342,406 @@ execute_single_join :: proc(
 		nested_loop_join(jb, jc, info_idx, rows, right_rows, &new_rows)
 	}
 	return new_rows[:]
+}
+
+// try_index_nlj attempts the index nested-loop path for equi-joins whose
+// inner columns carry a usable secondary index: one index probe per outer
+// row instead of materializing the whole inner side. Single COND uses a
+// single-column index (or a composite led by the column); an AND of
+// EQUALS conjuncts uses a composite index covering the leading run, full
+// tuple preferred. Every probed pair is verified with the same ON filter the nested-loop path uses, so the probe is an index-narrowed NLJ
+// by construction — it can only skip pairs NLJ would reject, never change
+// which pairs match. NULL keys never probe (same as both key
+// fingerprints). Returns false to fall through to the materializing
+// paths. RIGHT JOIN stays out: unmatched inner rows need a full inner
+// enumeration the probe never performs.
+@(private = "file")
+try_index_nlj :: proc(
+	jb: ^Join_Build,
+	jc: parser.Join_Clause,
+	info_idx: int,
+	rows: []Row_Entry,
+	new_rows: ^[dynamic]Row_Entry,
+) -> bool {
+	if jc.join_type == .RIGHT {
+		return false
+	}
+
+	is_left := jc.join_type == .LEFT
+	right_col_count := jb.ctxs[info_idx].range.col_count
+	pairs, keys_ok := collect_join_keys(jb, jc, info_idx)
+	if !keys_ok {
+		return false
+	}
+
+	defer delete(pairs)
+	if _, is_vt := jb.ctxs[info_idx].info.virtual.?; is_vt {
+		return false
+	}
+
+	inner_table := jb.ctxs[info_idx].info.table
+	probe, has_probe := make_join_probe(inner_table, pairs[:])
+	if !has_probe {
+		return false
+	}
+
+	defer delete(probe.outer_idx)
+	// Strict key-type gate over every outer key up front: a mid-loop
+	// mismatch could not fall back (rows already emitted), so any
+	// heterogeneous-or-foreign key declines the whole probe. BLOB indexes
+	// stay out (no probe overload expresses them).
+	for outer_row in rows {
+		for comp, i in probe.outer_idx {
+			key := outer_row.values[comp]
+			if types.is_null(key) {
+				continue
+			}
+			if !join_key_matches_index(key, probe.def.col_types[i]) {
+				return false
+			}
+		}
+	}
+
+	filter, filter_ok := init_join_filter(jb, jc)
+	if !filter_ok {
+		return false
+	}
+
+	inner_tree := &jb.ctxs[info_idx].info.tree
+	idx_tree := btree.init(inner_tree.pager, probe.def.root)
+	for outer_row in rows {
+		if probe_row_has_null(outer_row, probe.outer_idx[:]) {
+			if is_left {
+				join_emit_null_row(outer_row, right_col_count, new_rows)
+			}
+			continue
+		}
+
+		found, probe_ok := probe_candidates(&idx_tree, probe, outer_row.values)
+		if !probe_ok {
+			log_index_search_fail(inner_table.name)
+			clear(new_rows)
+			return false
+		}
+
+		matched := false
+		for rid in found {
+			c, find_row_err := btree.tree_find(inner_tree, rid, context.temp_allocator)
+			if find_row_err == .Cell_Not_Found {
+				continue
+			}
+			if find_row_err != .None {
+				log_index_search_fail(inner_table.name)
+				clear(new_rows)
+				return false
+			}
+
+			try_join_match(outer_row, c.values, filter, new_rows, &matched)
+			cell.destroy(&c, context.temp_allocator)
+		}
+		if is_left && !matched {
+			join_emit_null_row(outer_row, right_col_count, new_rows)
+		}
+	}
+	return true
+}
+
+// Join_Key_Pair is one equi-conjunct oriented outer→inner: the absolute
+// outer index into the combined row and the inner-relative table position.
+Join_Key_Pair :: struct {
+	outer_idx: int,
+	inner_pos: int,
+}
+
+// collect_join_keys splits the ON clause into equi-conjuncts (one COND,
+// or an AND of CONDs) and orients each outer→inner, resolving both sides
+// through the join resolver. Per-conjunct orientation may differ
+// (a.x = b.x AND b.y = a.y). Anything else — OR/NOT, non-EQUALS,
+// negated, literal RHS, unresolvable, or out-of-range sides (same
+// multi-JOIN/junk guard as the hash path) — declines the probe.
+@(private = "file")
+collect_join_keys :: proc(
+	jb: ^Join_Build,
+	jc: parser.Join_Clause,
+	info_idx: int,
+) -> (
+	pairs: [dynamic]Join_Key_Pair,
+	ok: bool,
+) {
+	on_cl, has_on := jc.on_clause.?
+	if !has_on || on_cl.root == nil {
+		return nil, false
+	}
+
+	nodes: []^parser.Where_Node
+	single := make([]^parser.Where_Node, 1, context.temp_allocator)
+	multi := make([dynamic]^parser.Where_Node, 0, 4, context.temp_allocator)
+	#partial switch on_cl.root.kind {
+	case .COND:
+		single[0] = on_cl.root
+		nodes = single
+	case .AND:
+		for child in on_cl.root.children {
+			if child.kind != .COND {
+				return nil, false
+			}
+			append(&multi, child)
+		}
+		if len(multi) == 0 {
+			return nil, false
+		}
+		nodes = multi[:]
+	case:
+		return nil, false
+	}
+
+	right_adjust := jb.ctxs[info_idx].range.start_col
+	lcc := jb.ctxs[info_idx - 1].range.col_count
+	rcc := jb.ctxs[info_idx].range.col_count
+	in_left := proc(idx, lcc: int) -> bool {
+		return idx >= 0 && idx < lcc
+	}
+	in_inner := proc(idx, adjust, rcc: int) -> bool {
+		return idx >= adjust && idx < adjust + rcc
+	}
+
+	pairs = make([dynamic]Join_Key_Pair, 0, len(nodes), context.temp_allocator)
+	for node in nodes {
+		cond := node.cond
+		if cond.negated || cond.operator != .EQUALS {
+			return nil, false
+		}
+
+		rhs_str, is_col := cond.rhs.(string)
+		if !is_col {
+			return nil, false
+		}
+
+		a_idx, a_ok := resolve(jb.resolver, cond.column)
+		b_idx, b_ok := resolve(jb.resolver, rhs_str)
+		if !a_ok || !b_ok {
+			return nil, false
+		}
+		switch {
+		case in_left(a_idx, lcc) && in_inner(b_idx, right_adjust, rcc):
+			append(&pairs, Join_Key_Pair{a_idx, b_idx - right_adjust})
+		case in_left(b_idx, lcc) && in_inner(a_idx, right_adjust, rcc):
+			append(&pairs, Join_Key_Pair{b_idx, a_idx - right_adjust})
+		case:
+			return nil, false
+		}
+	}
+	return pairs, true
+}
+
+// Join_Probe is one executable probe: the index def plus the absolute
+// outer indexes in def column order (length 1 for single-column).
+Join_Probe :: struct {
+	def      : types.Index_Def,
+	outer_idx: [dynamic]int,
+}
+
+// make_join_probe maps key pairs onto a usable index: a single pair takes
+// a rooted single-column index on its column, else a composite index led
+// by it (prefix probe); several pairs take a rooted composite index whose
+// leading columns they cover — full coverage preferred, else the longest
+// leading prefix (first catalog match wins ties). Unbound trailing
+// columns ride the pair verification, exactly like the fetch recheck.
+@(private = "file")
+make_join_probe :: proc(
+	inner_table: types.Table,
+	pairs: []Join_Key_Pair,
+) -> (
+	probe: Join_Probe,
+	ok: bool,
+) {
+	if len(pairs) == 1 {
+		col_name := inner_table.columns[pairs[0].inner_pos].name
+		for d in inner_table.indexes {
+			if d.root != 0 &&
+			   len(d.columns) == 1 &&
+			   len(d.col_types) == 1 &&
+			   d.columns[0] == col_name {
+				outer_idx := make([dynamic]int, 1, context.temp_allocator)
+				outer_idx[0] = pairs[0].outer_idx
+				return Join_Probe{d, outer_idx}, true
+			}
+		}
+		for d in inner_table.indexes {
+			if d.root != 0 &&
+			   len(d.columns) >= 2 &&
+			   len(d.col_types) == len(d.columns) &&
+			   d.columns[0] == col_name {
+				outer_idx := make([dynamic]int, 1, context.temp_allocator)
+				outer_idx[0] = pairs[0].outer_idx
+				return Join_Probe{d, outer_idx}, true
+			}
+		}
+		return {}, false
+	}
+
+	by_name := make(map[string]int, len(pairs), context.temp_allocator)
+	for p, i in pairs {
+		by_name[inner_table.columns[p.inner_pos].name] = i
+	}
+
+	best: Join_Probe
+	best_k := 0
+	for d in inner_table.indexes {
+		if d.root == 0 || len(d.columns) < 2 || len(d.col_types) != len(d.columns) {
+			continue
+		}
+		// Leading run bound by the pairs; stop at the first gap (only a
+		// leading prefix frames).
+		k := 0
+		for col in d.columns {
+			if _, bound := by_name[col]; !bound {
+				break
+			}
+			k += 1
+		}
+		if k == 0 {
+			continue
+		}
+		if k == len(d.columns) {
+			outer_idx := make([dynamic]int, k, context.temp_allocator)
+			for col, i in d.columns {
+				outer_idx[i] = pairs[by_name[col]].outer_idx
+			}
+			return Join_Probe{d, outer_idx}, true
+		}
+		if k > best_k {
+			best_k = k
+			outer_idx := make([dynamic]int, k, context.temp_allocator)
+			for col, i in d.columns[:k] {
+				outer_idx[i] = pairs[by_name[col]].outer_idx
+			}
+			if best.outer_idx != nil {
+				delete(best.outer_idx)
+			}
+			best = Join_Probe{d, outer_idx}
+		}
+	}
+	if best_k > 0 {
+		return best, true
+	}
+	return {}, false
+}
+
+// probe_row_has_null reports whether any probe component is NULL (NULL
+// never joins, so the row skips probing and null-extends on LEFT).
+@(private = "file")
+probe_row_has_null :: proc(outer_row: Row_Entry, outer_idx: []int) -> bool {
+	for comp in outer_idx {
+		if types.is_null(outer_row.values[comp]) {
+			return true
+		}
+	}
+	return false
+}
+
+// probe_candidates returns every indexed rowid matching one outer row's
+// key tuple: the scalar overload for single-column probes, a framed
+// full-tuple composite lookup when every index column is bound, else a
+// framed leading-prefix scan (unbound trailing columns ride the pair
+// verification). False on any lookup or framing failure (caller fails
+// closed); the caller gates types up front so the assertions below are
+// provably safe.
+@(private = "file")
+probe_candidates :: proc(
+	idx_tree: ^btree.Tree,
+	probe: Join_Probe,
+	values: []types.Value,
+) -> (
+	found: []types.Row_ID,
+	ok: bool,
+) {
+	if len(probe.outer_idx) == 1 && len(probe.def.columns) == 1 {
+		key := values[probe.outer_idx[0]]
+		hits, find_err := probe_index_key(idx_tree, probe.def, key)
+		if find_err != .None {
+			return nil, false
+		}
+		return hits, true
+	}
+
+	k := len(probe.outer_idx)
+	tuple := make([]types.Value, k, context.temp_allocator)
+	for comp, i in probe.outer_idx {
+		tuple[i] = values[comp]
+	}
+
+	need := cell.composite_encoded_len(tuple, probe.def.col_types[:k])
+	if need == 0 {
+		return nil, false
+	}
+
+	buf := make([]u8, need, context.temp_allocator)
+	wn, wok := cell.composite_encode_raw(tuple, probe.def.col_types[:k], buf)
+	if !wok {
+		return nil, false
+	}
+	if k == len(probe.def.columns) {
+		hits, find_err := btree.composite_find_rowids(idx_tree, probe.def.root, buf[:wn])
+		if find_err != .None {
+			return nil, false
+		}
+		return hits, true
+	}
+
+	hits, scan_err := btree.composite_prefix_rowids(idx_tree, probe.def.root, buf[:wn])
+	if scan_err != .None {
+		return nil, false
+	}
+	return hits, true
+}
+
+// join_key_matches_index reports whether a non-NULL join key probes the
+// index's codec exactly: the runtime storage class must equal the index
+// column type. Anything else (widened numerics, foreign classes) declines
+// the probe so the hash/NLJ paths decide with their own semantics.
+@(private = "file")
+join_key_matches_index :: proc(key: types.Value, col_type: types.Column_Type) -> bool {
+	switch col_type {
+	case .INTEGER:
+		_, ok := key.(i64)
+		return ok
+	case .REAL:
+		_, ok := key.(f64)
+		return ok
+	case .TEXT:
+		_, ok := key.(string)
+		return ok
+	case .BLOB:
+		return false
+	}
+	return false
+}
+
+// probe_index_key returns every indexed rowid for one join key, dispatching
+// the find_rowids overload by the index column type. The caller gates key
+// types up front, so the assertions below are provably safe.
+@(private = "file")
+probe_index_key :: proc(
+	idx_tree: ^btree.Tree,
+	def: types.Index_Def,
+	key: types.Value,
+) -> (
+	found: []types.Row_ID,
+	err: btree.Error,
+) {
+	switch def.col_type {
+	case .INTEGER:
+		return btree.find_rowids(idx_tree, def.root, key.(i64))
+	case .REAL:
+		return btree.find_rowids(idx_tree, def.root, key.(f64))
+	case .TEXT:
+		s, _ := key.(string)
+		return btree.find_rowids(idx_tree, def.root, transmute([]u8)s)
+	case .BLOB:
+		return nil, .None
+	}
+	return nil, .None
 }
 
 // try_hash_join attempts the hash-join fast path for single-COND equi-joins

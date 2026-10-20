@@ -1300,3 +1300,356 @@ test_vector_scan_differential :: proc(t: ^testing.T) {
 	}
 	os.unset_env("MAGNI_VECTOR")
 }
+
+// Index-NLJ P0 pins: indexed equi-joins must return hash-identical rows
+// (today via the hash path; the probe must preserve every row below).
+// All queries carry ORDER BY so the pins are path-agnostic about emission
+// order; each has a no-index twin proving the baseline is route-independent.
+@(test)
+test_integration_join_indexed_inner_int :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinidxint")
+	defer teardown_db(d, "joinidxint")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT, name TEXT);",
+			"CREATE TABLE b (id INT, val TEXT);",
+			"INSERT INTO a VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol'), (NULL, 'Null');",
+			"INSERT INTO b VALUES (1, 'X'), (1, 'X2'), (3, 'Z'), (9, 'Orphan');",
+			"CREATE INDEX i_b_id ON b (id);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT b.val FROM a INNER JOIN b ON a.id = b.id ORDER BY b.val;",
+		[]string{"X", "X2", "Z"},
+		"indexed int inner join matches",
+	)
+	check_col(
+		t,
+		d,
+		"SELECT a.name FROM a INNER JOIN b ON a.id = b.id ORDER BY a.name;",
+		[]string{"Alice", "Alice", "Carol"},
+		"indexed int inner join fan-out matches",
+	)
+}
+
+@(test)
+test_integration_join_indexed_inner_text :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinidxtext")
+	defer teardown_db(d, "joinidxtext")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT, k TEXT);",
+			"CREATE TABLE b (k TEXT, v INT);",
+			"INSERT INTO a VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma');",
+			"INSERT INTO b VALUES ('alpha', 10), ('alpha', 11), ('beta', 20);",
+			"CREATE INDEX i_b_k ON b (k);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a INNER JOIN b ON a.k = b.k ORDER BY v;",
+		[]i64{10, 11, 20},
+		"indexed text inner join matches",
+	)
+}
+
+@(test)
+test_integration_join_indexed_left_outer :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinidxleft")
+	defer teardown_db(d, "joinidxleft")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT);",
+			"CREATE TABLE b (id INT, val TEXT);",
+			"INSERT INTO a VALUES (1), (2), (NULL);",
+			"INSERT INTO b VALUES (1, 'X');",
+			"CREATE INDEX i_b_id ON b (id);",
+		},
+	)
+	// Unmatched (2) and NULL-key rows must null-extend, exactly like the
+	// hash/NLJ outer paths.
+	q := db.query(d, "SELECT val FROM a LEFT JOIN b ON a.id = b.id ORDER BY a.id;")
+	testing.expect(t, q.ok, "indexed left join succeeds")
+	testing.expect_value(t, len(q.rows), 3)
+	if len(q.rows) == 3 {
+		v, is_str := q.rows[0][0].(string)
+		testing.expect(t, is_str && v == "X", "matched row renders")
+		_, is_null1 := q.rows[1][0].(types.Null)
+		_, is_null2 := q.rows[2][0].(types.Null)
+		testing.expect(t, is_null1 && is_null2, "unmatched rows null-extend")
+	}
+}
+
+@(test)
+test_integration_join_indexed_empty_inner :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinidxempty")
+	defer teardown_db(d, "joinidxempty")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT);",
+			"CREATE TABLE b (id INT, val TEXT);",
+			"INSERT INTO a VALUES (1), (2);",
+			"CREATE INDEX i_b_id ON b (id);",
+		},
+	)
+	q := db.query(d, "SELECT b.val FROM a INNER JOIN b ON a.id = b.id;")
+	testing.expect(t, q.ok, "empty inner join succeeds")
+	testing.expect_value(t, len(q.rows), 0)
+
+	ql := db.query(d, "SELECT b.val FROM a LEFT JOIN b ON a.id = b.id ORDER BY a.id;")
+	testing.expect(t, ql.ok, "empty inner left join succeeds")
+	testing.expect_value(t, len(ql.rows), 2)
+}
+
+@(test)
+test_integration_join_indexed_chained :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinidxchain")
+	defer teardown_db(d, "joinidxchain")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT);",
+			"CREATE TABLE b (id INT, aid INT);",
+			"CREATE TABLE c (bid INT, w TEXT);",
+			"INSERT INTO a VALUES (1), (2);",
+			"INSERT INTO b VALUES (10, 1), (20, 2);",
+			"INSERT INTO c VALUES (10, 'x'), (20, 'y'), (10, 'x2');",
+			"CREATE INDEX i_c_bid ON c (bid);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT w FROM a JOIN b ON a.id = b.aid JOIN c ON b.id = c.bid ORDER BY w;",
+		[]string{"x", "x2", "y"},
+		"indexed chained join matches",
+	)
+}
+
+// Index-NLJ composite P0 pins: multi-conjunct equi-joins over a composite
+// index must return NLJ-identical rows (today via NLJ; the composite probe
+// must preserve every row below, including partial-match exclusion).
+@(test)
+test_integration_join_composite_index :: proc(t: ^testing.T) {
+	d := setup_db(t, "joincomp")
+	defer teardown_db(d, "joincomp")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (x INT, y INT, w TEXT);",
+			"CREATE TABLE b (x INT, y INT, v TEXT);",
+			"INSERT INTO a VALUES (1, 1, 'a11'), (1, 2, 'a12'), (2, 1, 'a21');",
+			"INSERT INTO b VALUES (1, 1, 'hit'), (1, 1, 'hit2'), (1, 9, 'miss'), (9, 1, 'miss2');",
+			"CREATE INDEX i_b_xy ON b (x, y);",
+		},
+	)
+	// Partial matches (1,9), (9,1) must not join; full match fans out.
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a INNER JOIN b ON a.x = b.x AND a.y = b.y ORDER BY v;",
+		[]string{"hit", "hit2"},
+		"composite indexed join matches with fan-out",
+	)
+}
+
+@(test)
+test_integration_join_composite_left :: proc(t: ^testing.T) {
+	d := setup_db(t, "joincompleft")
+	defer teardown_db(d, "joincompleft")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (x INT, y INT);",
+			"CREATE TABLE b (x INT, y INT, v TEXT);",
+			"INSERT INTO a VALUES (1, 1), (1, 2), (NULL, 1);",
+			"INSERT INTO b VALUES (1, 1, 'hit');",
+			"CREATE INDEX i_b_xy ON b (x, y);",
+		},
+	)
+	q := db.query(d, "SELECT v FROM a LEFT JOIN b ON a.x = b.x AND a.y = b.y ORDER BY a.x, a.y;")
+	testing.expect(t, q.ok, "composite left join succeeds")
+	testing.expect_value(t, len(q.rows), 3)
+	if len(q.rows) == 3 {
+		v, is_str := q.rows[0][0].(string)
+		testing.expect(t, is_str && v == "hit", "full match renders")
+		_, n1 := q.rows[1][0].(types.Null)
+		_, n2 := q.rows[2][0].(types.Null)
+		testing.expect(t, n1 && n2, "partial and null keys null-extend")
+	}
+}
+
+@(test)
+test_integration_join_composite_mixed_orientation :: proc(t: ^testing.T) {
+	d := setup_db(t, "joincomporient")
+	defer teardown_db(d, "joincomporient")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (x INT, y INT);",
+			"CREATE TABLE b (x INT, y INT, v TEXT);",
+			"INSERT INTO a VALUES (1, 2);",
+			"INSERT INTO b VALUES (1, 2, 'hit'), (2, 1, 'miss');",
+			"CREATE INDEX i_b_xy ON b (x, y);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a INNER JOIN b ON a.x = b.x AND b.y = a.y ORDER BY v;",
+		[]string{"hit"},
+		"mixed-orientation composite join matches",
+	)
+}
+
+// Index-NLJ composite-prefix P0 pins: a single conjunct on a composite
+// index's leading column (or a leading prefix of it) must probe the
+// prefix run — rows NLJ-identical, non-matching leads excluded.
+@(test)
+test_integration_join_composite_prefix_lead :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinprefix")
+	defer teardown_db(d, "joinprefix")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (x INT);",
+			"CREATE TABLE b (x INT, y INT, v TEXT);",
+			"INSERT INTO a VALUES (1), (2);",
+			"INSERT INTO b VALUES (1, 1, 'a'), (1, 2, 'b'), (3, 3, 'miss');",
+			"CREATE INDEX i_b_xy ON b (x, y);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a INNER JOIN b ON a.x = b.x ORDER BY v;",
+		[]string{"a", "b"},
+		"composite lead-column prefix probe matches",
+	)
+}
+
+@(test)
+test_integration_join_composite_prefix_two_of_three :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinprefix23")
+	defer teardown_db(d, "joinprefix23")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (x INT, y INT);",
+			"CREATE TABLE b (x INT, y INT, z INT, v TEXT);",
+			"INSERT INTO a VALUES (1, 1), (1, 2);",
+			"INSERT INTO b VALUES (1, 1, 1, 'hit'), (1, 1, 2, 'hit2'), (1, 9, 1, 'miss'), (2, 2, 2, 'miss2');",
+			"CREATE INDEX i_b_xyz ON b (x, y, z);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a INNER JOIN b ON a.x = b.x AND a.y = b.y ORDER BY v;",
+		[]string{"hit", "hit2"},
+		"two-of-three prefix probe matches with fan-out",
+	)
+}
+
+// Index-NLJ routing P0 pins: USING desugars to AND-of-equalities and
+// self-joins resolve through aliases — both must reach the probe with
+// NLJ-identical rows.
+@(test)
+test_integration_join_using_single :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinusing")
+	defer teardown_db(d, "joinusing")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT, w TEXT);",
+			"CREATE TABLE b (id INT, v TEXT);",
+			"INSERT INTO a VALUES (1, 'a1'), (2, 'a2');",
+			"INSERT INTO b VALUES (1, 'b1'), (1, 'b1x'), (3, 'b3');",
+			"CREATE INDEX i_b_id ON b (id);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a JOIN b USING (id) ORDER BY v;",
+		[]string{"b1", "b1x"},
+		"using single-col routes with fan-out",
+	)
+}
+
+@(test)
+test_integration_join_using_composite :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinusingcomp")
+	defer teardown_db(d, "joinusingcomp")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (x INT, y INT);",
+			"CREATE TABLE b (x INT, y INT, v TEXT);",
+			"INSERT INTO a VALUES (1, 1), (1, 2);",
+			"INSERT INTO b VALUES (1, 1, 'hit'), (1, 9, 'miss');",
+			"CREATE INDEX i_b_xy ON b (x, y);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a JOIN b USING (x, y) ORDER BY v;",
+		[]string{"hit"},
+		"using composite routes with exclusion",
+	)
+}
+
+@(test)
+test_integration_join_self_join_aliased :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinself")
+	defer teardown_db(d, "joinself")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE e (id INT, mgr INT, name TEXT);",
+			"INSERT INTO e VALUES (1, 0, 'boss'), (2, 1, 'a'), (3, 1, 'b'), (4, 2, 'c');",
+			"CREATE INDEX i_e_mgr ON e (mgr);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT r.name FROM e AS m JOIN e AS r ON m.id = r.mgr ORDER BY r.name;",
+		[]string{"a", "b", "c"},
+		"aliased self-join routes through the probe",
+	)
+}
