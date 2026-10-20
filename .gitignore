@@ -7,8 +7,8 @@ __pycache__
 
 # AFL++ fuzzing seeds (generated; single source of truth is the generator
 # scripts in fuzz/generators/ — hand seeds plus promoted tables).
-fuzz/corpus/*
-fuzz/corpus_exec/
+fuzz/corpus
+fuzz/corpus_exec
 
 # AFL++ runtime outputs (generated)
 fuzz/corpus_grown/
