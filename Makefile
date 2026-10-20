@@ -24,7 +24,7 @@ ROLES ?=
 .PHONY: perf census census-check
 .PHONY: fuzz-build fuzz-test fuzz-exec-build fuzz-exec-test
 .PHONY: fuzz-corpus fuzz-exec-corpus fuzz-cov fuzz-run fuzz-campaign fuzz-status fuzz-stop
-.PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-one-exec fuzz-grammar-test fuzz-minimize
+.PHONY: fuzz-promote fuzz-clean fuzz-one fuzz-one-exec fuzz-grammar-test fuzz-minimize fuzz-showmap
 .PHONY: help
 
 all: build ## default: build debug binary
@@ -43,7 +43,7 @@ rebuild: clean build ## clean and rebuild debug
 clean: ## remove target/debug + target/release only
 	@python3 magni.py clean
 
-clean-all: clean fuzz-clean ## remove target/ + fuzz artifacts (afl-output, corpus pycache)
+clean-all: clean fuzz-clean ## remove target/ + fuzz artifacts
 
 test: ## run all Odin tests (debug)
 	@python3 magni.py test
@@ -138,11 +138,14 @@ fuzz-status: ## show per-worker fuzzer_stats
 fuzz-stop: ## pkill afl-fuzz
 	@python3 magni.py fuzz stop
 
-fuzz-clean: ## remove fuzz artifacts (out dir, target/fuzz*, min, cmin.map, pycache)
+fuzz-clean: ## remove fuzz artifacts (out dir, target/fuzz*, min, cmin.map)
 	@python3 magni.py clean --fuzz-only
 
-fuzz-promote: ## merge grown queue → update promoted tables (MIN=1 to minimize, TEST=1 for full gate, EXEC=1 for exec pool)
-	@python3 magni.py corpus promote $(if $(filter 1,$(MIN)),--minimize) $(if $(filter 1,$(TEST)),--test) $(if $(filter 1,$(EXEC)),--exec)
+fuzz-promote: ## merge grown queue → update promoted tables (MIN=1 to minimize, TEST=1 for full gate, EXEC=1 for exec pool, DRY=1 for dry-run)
+	@python3 magni.py corpus promote $(if $(filter 1,$(MIN)),--minimize) $(if $(filter 1,$(TEST)),--test) $(if $(filter 1,$(EXEC)),--exec) $(if $(filter 1,$(DRY)),--dry-run)
+
+fuzz-showmap: ## show coverage tuples for current corpus (EXEC=1 for exec pool)
+	@python3 magni.py fuzz showmap $(if $(filter 1,$(EXEC)),--exec)
 
 fuzz-minimize: ## cmin + monster purge, rewrite promoted set (EXEC=1 for exec pool)
 	@python3 magni.py corpus minimize $(if $(filter 1,$(EXEC)),--exec)
