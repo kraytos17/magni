@@ -81,11 +81,8 @@ test_integration_cross_session_snapshots :: proc(t: ^testing.T) {
 		d,
 		{"CREATE TABLE t (id INT);", "INSERT INTO t VALUES (1);", "INSERT INTO t VALUES (2);"},
 	)
-	db.close(d)
-
-	d2, open_err := db.open(fmt.tprintf("test_int_%s.db", name))
+	d2, _ := reopen_db(t, d, name, "Re-open should succeed")
 	defer teardown_db(d2, name)
-	testing.expect(t, open_err == .None, "Re-open should succeed")
 
 	ok := db.execute(d2, "SELECT * FROM t AS OF SNAPSHOT 1;") == .None
 	testing.expect(t, ok, "Cross-session time-travel should succeed")
@@ -275,9 +272,7 @@ test_integration_checkpoint_reclaims_wal :: proc(t: ^testing.T) {
 	}
 
 	testing.expect(t, admin.checkpoint(d) == .None, "checkpoint succeeds")
-	db.close(d)
-	d2, open_err := db.open(fmt.tprintf("test_int_ckpt.db"))
-	testing.expect(t, open_err == .None, "reopen after checkpoint")
+	d2, _ := reopen_db(t, d, "ckpt", "reopen after checkpoint")
 	defer teardown_db(d2, "ckpt")
 
 	q := db.query(d2, "SELECT COUNT(*) FROM t;")
@@ -298,11 +293,7 @@ test_integration_wal_auto_checkpoint :: proc(t: ^testing.T) {
 	defer os.remove(filename)
 	defer os.remove(wal_path)
 
-	d, open_err := db.open(filename, db.Open_Config{wal_size_threshold = 2})
-	testing.expect(t, open_err == .None, "open with wal_size_threshold")
-	if open_err != .None {
-		return
-	}
+	d := setup_db_with_config(t, "walauto", db.Open_Config{wal_size_threshold = 2})
 
 	db.execute(d, "CREATE TABLE t (id INT);")
 	for i in 1 ..= 20 {
@@ -344,11 +335,7 @@ test_integration_snapshot_batch_config :: proc(t: ^testing.T) {
 	defer os.remove(filename)
 	defer os.remove(wal_name)
 
-	d, open_err := db.open(filename, db.Open_Config{snapshot_batch_threshold = 3})
-	testing.expect(t, open_err == .None, "open with snapshot_batch_threshold")
-	if open_err != .None {
-		return
-	}
+	d := setup_db_with_config(t, "snapcfg", db.Open_Config{snapshot_batch_threshold = 3})
 	defer db.close(d)
 
 	testing.expect_value(t, d.snapshot_batch_threshold, 3)
@@ -667,10 +654,8 @@ test_integration_vacuum :: proc(t: ^testing.T) {
 	testing.expect_value(t, r3.rows[0][0].(i64), i64(4000))
 
 	// The vacuumed state must survive a close/reopen.
-	db.close(d)
-	d2, open_err := db.open(fmt.tprintf("test_int_vacuum.db"))
-	testing.expect(t, open_err == .None, "reopen after vacuum")
-	if open_err == .None {
+	d2, open_ok := reopen_db(t, d, "vacuum", "reopen after vacuum")
+	if open_ok {
 		defer teardown_db(d2, "vacuum")
 		r4 := db.query(d2, "SELECT COUNT(*) AS n FROM t;")
 		testing.expect(t, r4.ok, "count after reopen")
@@ -721,10 +706,8 @@ test_integration_random_delete_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, r4.rows[0][0].(i64), i64(0))
 
 	// The state must survive a close/reopen.
-	db.close(d)
-	d2, open_err := db.open(fmt.tprintf("test_int_delround.db"))
-	testing.expect(t, open_err == .None, "reopen after deletes")
-	if open_err == .None {
+	d2, open_ok := reopen_db(t, d, "delround", "reopen after deletes")
+	if open_ok {
 		defer teardown_db(d2, "delround")
 		r5 := db.query(d2, "SELECT COUNT(*) AS n FROM t;")
 		testing.expect(t, r5.ok, "count after reopen")
@@ -778,10 +761,8 @@ test_integration_delete_then_vacuum :: proc(t: ^testing.T) {
 	testing.expect_value(t, r2.rows[0][1].(i64), i64(1000))
 
 	// Reopen must preserve the vacuumed state.
-	db.close(d)
-	d2, open_err := db.open(fmt.tprintf("test_int_delvac.db"))
-	testing.expect(t, open_err == .None, "reopen after vacuum")
-	if open_err == .None {
+	d2, open_ok := reopen_db(t, d, "delvac", "reopen after vacuum")
+	if open_ok {
 		defer teardown_db(d2, "delvac")
 		r3 := db.query(d2, "SELECT v FROM t WHERE id = 1000;")
 		testing.expect(t, r3.ok, "survivor after reopen")

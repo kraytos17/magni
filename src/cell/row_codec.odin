@@ -148,6 +148,50 @@ decode_row_prefix :: proc(
 	return rowid_val, hdr, pos + n3, true
 }
 
+// decode_serial_header reads header_size bytes of serial-type varints at
+// pos into stack (spilling to a temp array past its length). Returns the
+// serials slice (stack-backed or spilled), the count, and the next
+// position. Bounds-checked throughout (untrusted page bytes); callers keep
+// their proven-index annotations on the consumption loops. force_inline:
+// one call per decoded row on the scan hot path.
+decode_serial_header :: #force_inline proc(
+	src: []u8,
+	pos: int,
+	header_size: int,
+	stack: []u64,
+	spill: ^[dynamic]u64,
+) -> (
+	serials: []u64,
+	count: int,
+	next: int,
+	ok: bool,
+) {
+	serial_count := 0
+	end := pos + header_size
+	cur := pos
+	for cur < end {
+		st, n, stok := varint.decode(src, cur)
+		if !stok {
+			return nil, 0, cur, false
+		}
+		if serial_count < len(stack) {
+			stack[serial_count] = st
+		} else {
+			if spill^ == nil {
+				spill^ = make([dynamic]u64, 0, 16, context.temp_allocator)
+				append(spill, ..stack[:])
+			}
+			append(spill, st)
+		}
+		serial_count += 1
+		cur += n
+	}
+	if spill^ == nil {
+		return stack[:serial_count], serial_count, cur, true
+	}
+	return spill^[:], serial_count, cur, true
+}
+
 // decode_row_values materializes one value per serial type into the
 // caller-owned result_values (len == serial_count), advancing past each
 // payload. TEXT/BLOB honor zero_copy (borrow vs clone). Bounds: every
@@ -242,34 +286,26 @@ deserialize :: proc(
 		return {}, 0, false
 	}
 
-	header_start := pos
 	// Stack scratch covers every user row; wider rows (schema catalog
 	// rows past one index) spill the whole header to temp. The header
 	// loop stays bounds-checked (untrusted page bytes); consumption
 	// loops below keep their proven-index annotations.
 	serial_stack: [types.MAX_COLS]u64
 	serial_spill: [dynamic]u64
+	serials: []u64
 	serial_count := 0
-	for pos < header_start + int(header_size) {
-		st, n4, ok_st := varint.decode(src, pos)
-		if !ok_st {
-			return {}, 0, false
-		}
-		if serial_count < types.MAX_COLS {
-			serial_stack[serial_count] = st
-		} else {
-			if serial_spill == nil {
-				serial_spill = make([dynamic]u64, 0, 16, context.temp_allocator)
-				append(&serial_spill, ..serial_stack[:])
-			}
-			append(&serial_spill, st)
-		}
-
-		serial_count += 1
-		pos += n4
+	header_ok := false
+	serials, serial_count, pos, header_ok = decode_serial_header(
+		src,
+		pos,
+		int(header_size),
+		serial_stack[:],
+		&serial_spill,
+	)
+	if !header_ok {
+		return {}, 0, false
 	}
 
-	serials := serial_stack[:] if serial_spill == nil else serial_spill[:]
 	result_values := make([]types.Value, serial_count, alloc)
 	success := false
 	defer if !success && !config.zero_copy {
@@ -328,53 +364,31 @@ deserialize_needed :: proc(
 		return 0, 0, false
 	}
 
-	pos := offset
-	_, n, ok_payload := varint.decode(src, pos)
-	if !ok_payload {
+	rowid_val, header_size, pos, prefix_ok := decode_row_prefix(src, offset)
+	if !prefix_ok {
 		return 0, 0, false
 	}
 
-	pos += n
-	rowid_val, n2, ok_rowid := varint.decode(src, pos)
-	if !ok_rowid {
-		return 0, 0, false
-	}
-
-	pos += n2
-	header_size, n3, ok_header := varint.decode(src, pos)
-	if !ok_header {
-		return 0, 0, false
-	}
-
-	pos += n3
-	header_start := pos
 	// Stack scratch covers every user row; wider rows (schema catalog
 	// rows past one index) spill the whole header to temp. The header
 	// loop stays bounds-checked (untrusted page bytes); consumption
 	// loops below keep their proven-index annotations.
 	serial_stack: [types.MAX_COLS]u64
 	serial_spill: [dynamic]u64
+	serials: []u64
 	serial_count := 0
-	for pos < header_start + int(header_size) {
-		st, n4, ok_st := varint.decode(src, pos)
-		if !ok_st {
-			return 0, 0, false
-		}
-		if serial_count < types.MAX_COLS {
-			serial_stack[serial_count] = st
-		} else {
-			if serial_spill == nil {
-				serial_spill = make([dynamic]u64, 0, 16, context.temp_allocator)
-				append(&serial_spill, ..serial_stack[:])
-			}
-			append(&serial_spill, st)
-		}
-
-		serial_count += 1
-		pos += n4
+	header_ok := false
+	serials, serial_count, pos, header_ok = decode_serial_header(
+		src,
+		pos,
+		int(header_size),
+		serial_stack[:],
+		&serial_spill,
+	)
+	if !header_ok {
+		return 0, 0, false
 	}
 
-	serials := serial_stack[:] if serial_spill == nil else serial_spill[:]
 	if len(out_values) < serial_count {
 		return 0, 0, false
 	}

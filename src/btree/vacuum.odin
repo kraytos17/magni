@@ -591,6 +591,60 @@ vacuum_empty_index_root :: proc(t: ^Tree, kind: Key_Kind) -> (root: u32, err: Er
 	return 0, .Invalid_Page_Header
 }
 
+// pack_text_leaf_range builds one leaf from raws[i:e+1] under kind and
+// returns its handle (min/max keys from the run endpoints). Pages arrive
+// dirty from allocation and are marked again here (belt-and-braces, like
+// the dense builders — persistence must never hinge on the allocator
+// alone). init_err selects the init-failure code: the two callers map it
+// differently (backfill reports page-full, vacuum reports header faults).
+@(private = "file")
+pack_text_leaf_range :: proc(
+	t: ^Tree,
+	kind: Key_Kind,
+	raws: [][]u8,
+	rids: []types.Row_ID,
+	i, e: int,
+	init_err: Error,
+) -> (
+	handle: Text_Node_Handle,
+	err: Error,
+) {
+	page, a_err := pager.allocate_page(t.pager)
+	if a_err != .None {
+		return {}, .Page_Full
+	}
+	if !init_index_leaf_page(kind, page.data, page.page_num) {
+		pager.unpin_page(t.pager, page.page_num)
+		return {}, init_err
+	}
+	if b_err := text_build_from_sorted(
+		page.data,
+		Page_Id(page.page_num),
+		raws[i:e + 1],
+		rids[i:e + 1],
+	); b_err != .None {
+		pager.unpin_page(t.pager, page.page_num)
+		return {}, b_err
+	}
+
+	max_key, m_err := make_index_key(kind, raws[e], rids[e])
+	if m_err != .None {
+		pager.unpin_page(t.pager, page.page_num)
+		return {}, m_err
+	}
+
+	min_key, n_err := make_index_key(kind, raws[i], rids[i])
+	if n_err != .None {
+		pager.unpin_page(t.pager, page.page_num)
+		return {}, n_err
+	}
+
+	page_id := page.page_num
+	pager.mark_dirty(t.pager, page_id)
+	pager.unpin_page(t.pager, page_id)
+	return Text_Node_Handle{id = page_id, min_key = min_key, max_key = max_key}, .None
+}
+
 // vacuum_pack_text_leaves greedily packs collected (text, rowid) runs into
 // fresh leaves, extending each chunk while it measures to fit. A lone
 // oversize entry fails the build loudly (same as primary).
@@ -618,39 +672,11 @@ vacuum_pack_text_leaves :: proc(
 			e += 1
 		}
 
-		page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None {
-			return nil, .Page_Full
+		handle, h_err := pack_text_leaf_range(t, kind, raws[:], rids[:], i, e, .Invalid_Page_Header)
+		if h_err != .None {
+			return nil, h_err
 		}
-		if !init_index_leaf_page(kind, page.data, page.page_num) {
-			pager.unpin_page(t.pager, page.page_num)
-			return nil, .Invalid_Page_Header
-		}
-		if b_err := text_build_from_sorted(
-			page.data,
-			Page_Id(page.page_num),
-			raws[i:e + 1],
-			rids[i:e + 1],
-		); b_err != .None {
-			pager.unpin_page(t.pager, page.page_num)
-			return nil, b_err
-		}
-
-		max_key, m_err := make_index_key(kind, raws[e], rids[e])
-		if m_err != .None {
-			pager.unpin_page(t.pager, page.page_num)
-			return nil, m_err
-		}
-
-		min_key, n_err := make_index_key(kind, raws[i], rids[i])
-		if n_err != .None {
-			pager.unpin_page(t.pager, page.page_num)
-			return nil, n_err
-		}
-
-		page_id := page.page_num
-		pager.unpin_page(t.pager, page_id)
-		append(&handles, Text_Node_Handle{id = page_id, min_key = min_key, max_key = max_key})
+		append(&handles, handle)
 		i = e + 1
 	}
 	return handles, .None
@@ -723,6 +749,7 @@ vacuum_build_text_interiors :: proc(
 			}
 
 			page_id := page.page_num
+			pager.mark_dirty(t.pager, page_id)
 			pager.unpin_page(t.pager, page_id)
 			append(
 				&next,
@@ -867,40 +894,11 @@ build_sorted_text_index :: proc(
 			e += 1
 		}
 
-		page, a_err := pager.allocate_page(t.pager)
-		if a_err != .None {
-			return 0, .Page_Full
+		handle, h_err := pack_text_leaf_range(t, kind, raws, rids, i, e, .Page_Full)
+		if h_err != .None {
+			return 0, h_err
 		}
-		if !init_index_leaf_page(kind, page.data, page.page_num) {
-			pager.unpin_page(t.pager, page.page_num)
-			return 0, .Page_Full
-		}
-		if b_err := text_build_from_sorted(
-			page.data,
-			Page_Id(page.page_num),
-			raws[i:e + 1],
-			rids[i:e + 1],
-		); b_err != .None {
-			pager.unpin_page(t.pager, page.page_num)
-			return 0, b_err
-		}
-
-		max_key, m_err := make_index_key(kind, raws[e], rids[e])
-		if m_err != .None {
-			pager.unpin_page(t.pager, page.page_num)
-			return 0, m_err
-		}
-
-		min_key, n_err := make_index_key(kind, raws[i], rids[i])
-		if n_err != .None {
-			pager.unpin_page(t.pager, page.page_num)
-			return 0, n_err
-		}
-
-		page_id := page.page_num
-		pager.mark_dirty(t.pager, page_id)
-		pager.unpin_page(t.pager, page_id)
-		append(&handles, Text_Node_Handle{id = page_id, min_key = min_key, max_key = max_key})
+		append(&handles, handle)
 		i = e + 1
 	}
 	if len(handles) == 1 {

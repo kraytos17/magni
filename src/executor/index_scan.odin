@@ -1915,6 +1915,95 @@ EXPLAIN_INDEX_FETCH :: "INDEX SCAN ON %s USING %s (%s, fetch)"
 EXPLAIN_INDEX_ORDER :: "INDEX SCAN ON %s USING %s (order, fetch)"
 EXPLAIN_FULL_SCAN   :: "FULL SCAN ON %s"
 
+// Single_Route_Kind names the shared single-table access decision.
+Single_Route_Kind :: enum u8 {
+	Scan, // full scan tail
+	Pk_Seek, // PK equality seek
+	Rowid_Seek, // rowid equality seek
+	Rowid_Chain, // AND-chain rowid seek (incl. contradictory empty)
+	Covering_Rowid, // SELECT rowid from the index
+	Covering_Col, // SELECT indexed column from the index
+	Fetch, // index candidates through the data tree
+	Order_Scan, // WHERE-less full key-order scan
+}
+
+// Single_Route is one resolved single-table access: the decision plus its
+// payloads, computed once and carried (execution never re-resolves). The
+// scalar fetch, the vector fetch, and EXPLAIN share resolve_single_route,
+// so the three can never disagree on which path answers a query. Payloads
+// borrow statement/arena memory like every other plan and are consumed
+// synchronously.
+Single_Route :: struct {
+	kind   : Single_Route_Kind,
+	plan   : Index_Plan, // Covering_Rowid/Covering_Col/Fetch/Order_Scan
+	rowid  : types.Row_ID, // Pk_Seek/Rowid_Seek
+	chain  : Rowid_Seek, // Rowid_Chain
+	ordered: bool, // Fetch/Covering_Col: emit in key order
+	desc   : bool, // ordered direction
+}
+
+// resolve_single_route runs the single-table routing ladder once, in fetch
+// order (PK, rowid, chain, covering, fetch, order scan, scan), stopping at
+// the first hit. Pure planner work over the table def and statement (no
+// I/O; temporaries on the temp allocator); the tag is a stack value with
+// no heap cost, so hoisting the decision is free against execution.
+@(private)
+resolve_single_route :: proc(
+	tbl: types.Table,
+	stmt: parser.Select_Stmt,
+	tbl_name: string,
+	tbl_alias: string,
+) -> Single_Route {
+	if wc, has_wc := stmt.where_clause.?; has_wc {
+		from_name := stmt.from_alias if stmt.from_alias != "" else tbl_name
+		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
+			return {kind = .Pk_Seek, rowid = rowid}
+		}
+		if rowid, seek_ok := try_rowid_lookup(tbl, wc, from_name); seek_ok {
+			return {kind = .Rowid_Seek, rowid = rowid}
+		}
+		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, from_name); chain_ok {
+			return {kind = .Rowid_Chain, chain = rs}
+		}
+		if is_covering_rowid_select(stmt, tbl.columns) {
+			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+				return {kind = .Covering_Rowid, plan = plan}
+			}
+		}
+		if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias);
+		   idx_ok && covering_known_values(plan) && is_covering_col_select(stmt, plan) {
+			ordered := covering_order_satisfies(
+				plan,
+				stmt,
+				stmt.columns[0],
+				tbl_name,
+				stmt.from_alias,
+			)
+
+			desc := false
+			if oc, has_o := stmt.order_by.?; has_o && len(oc) == 1 {
+				desc = oc[0].desc
+			}
+			return {kind = .Covering_Col, plan = plan, ordered = ordered, desc = desc}
+		}
+		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
+			ordered := index_order_satisfies(plan, stmt, tbl_name, stmt.from_alias, tbl)
+			desc := false
+			if oc, has_o := stmt.order_by.?; has_o && len(oc) >= 1 {
+				desc = oc[0].desc
+			}
+			return {kind = .Fetch, plan = plan, ordered = ordered, desc = desc}
+		}
+		return {kind = .Scan}
+	}
+	if oc, has_o := stmt.order_by.?; has_o && len(oc) > 0 {
+		if oplan, ok := resolve_order_scan(tbl, stmt, tbl_name, stmt.from_alias); ok {
+			return {kind = .Order_Scan, plan = oplan, desc = oc[0].desc}
+		}
+	}
+	return {kind = .Scan}
+}
+
 // explain_plan_text renders the access decision for EXPLAIN <select>: PK
 // SEEK, INDEX SCAN (shape + covering/fetch), or FULL SCAN — in the same
 // order the fetch path tries them (PK, covering, fetch, scan), so the
@@ -1950,55 +2039,35 @@ explain_plan_text :: proc(
 	if !found {
 		return echo
 	}
-	if wc, has_wc := sel.where_clause.?; has_wc {
-		if _, seek_ok := try_pk_lookup(table^, wc, tbl_name, sel.from_alias); seek_ok {
-			return fmt.tprintf(EXPLAIN_PK_SEEK, tbl_name)
-		}
 
-		visible := sel.from_alias if sel.from_alias != "" else tbl_name
-		if _, seek_ok := try_rowid_lookup(table^, wc, visible); seek_ok {
-			return fmt.tprintf(EXPLAIN_ROWID_SEEK, tbl_name)
-		}
-		if _, chain_ok := try_rowid_chain_seek(table^, wc, visible); chain_ok {
-			return fmt.tprintf(EXPLAIN_ROWID_SEEK, tbl_name)
-		}
-		if is_covering_rowid_select(sel, table.columns) {
-			if plan, idx_ok := resolve_index_covering(table^, wc, tbl_name, sel.from_alias);
-			   idx_ok {
-				return fmt.tprintf(
-					EXPLAIN_INDEX_COVER,
-					tbl_name,
-					plan_index_columns(plan, context.temp_allocator),
-					index_use_name(plan.use),
-				)
-			}
-		}
-		if plan, idx_ok := resolve_index_covering(table^, wc, tbl_name, sel.from_alias);
-		   idx_ok && covering_known_values(plan) && is_covering_col_select(sel, plan) {
-			return fmt.tprintf(
-				EXPLAIN_INDEX_COVER,
-				tbl_name,
-				plan_index_columns(plan, context.temp_allocator),
-				index_use_name(plan.use),
-			)
-		}
-		if plan, idx_ok := resolve_index_fetch(table^, wc, tbl_name, sel.from_alias); idx_ok {
-			return fmt.tprintf(
-				EXPLAIN_INDEX_FETCH,
-				tbl_name,
-				plan_index_columns(plan, context.temp_allocator),
-				index_use_name(plan.use),
-			)
-		}
-	}
-	if _, has_wc := sel.where_clause.?; !has_wc {
-		if oplan, ok := resolve_order_scan(table^, sel, tbl_name, sel.from_alias); ok {
-			return fmt.tprintf(
-				EXPLAIN_INDEX_ORDER,
-				tbl_name,
-				plan_index_columns(oplan, context.temp_allocator),
-			)
-		}
+	route := resolve_single_route(table^, sel, tbl_name, sel.from_alias)
+	switch route.kind {
+	case .Pk_Seek:
+		return fmt.tprintf(EXPLAIN_PK_SEEK, tbl_name)
+	case .Rowid_Seek, .Rowid_Chain:
+		return fmt.tprintf(EXPLAIN_ROWID_SEEK, tbl_name)
+	case .Covering_Rowid, .Covering_Col:
+		return fmt.tprintf(
+			EXPLAIN_INDEX_COVER,
+			tbl_name,
+			plan_index_columns(route.plan, context.temp_allocator),
+			index_use_name(route.plan.use),
+		)
+	case .Fetch:
+		return fmt.tprintf(
+			EXPLAIN_INDEX_FETCH,
+			tbl_name,
+			plan_index_columns(route.plan, context.temp_allocator),
+			index_use_name(route.plan.use),
+		)
+	case .Order_Scan:
+		return fmt.tprintf(
+			EXPLAIN_INDEX_ORDER,
+			tbl_name,
+			plan_index_columns(route.plan, context.temp_allocator),
+		)
+	case .Scan:
+		return fmt.tprintf(EXPLAIN_FULL_SCAN, tbl_name)
 	}
 	return fmt.tprintf(EXPLAIN_FULL_SCAN, tbl_name)
 }
@@ -2514,7 +2583,7 @@ index_order_satisfies :: proc(
 	stmt: parser.Select_Stmt,
 	tbl_name: string,
 	tbl_alias: string,
-	table: ^types.Table,
+	table: types.Table,
 ) -> bool {
 	if stmt.is_distinct ||
 	   len(stmt.aggregates) != 0 ||
@@ -2534,9 +2603,6 @@ index_order_satisfies :: proc(
 		}
 		return index_cond_column_ok(plan.column, order_clause[0].column, tbl_name, tbl_alias)
 	case .Composite:
-		if table == nil {
-			return false
-		}
 		// Mixed directions never match one run (reversal is exact only
 		// when every key flips); the sort path answers those.
 		for o in order_clause[1:] {
@@ -2625,72 +2691,16 @@ index_candidate_ordered :: proc(
 	return out, true
 }
 
-// fetch_index_rows_ordered resolves a fetch plan's candidates in index key
-// order and rechecks the full WHERE filter preserving that order (DESC
-// reverses the key run — exact with no NULLs in the set). Same ownership,
-// stale-miss tolerance, and no-LIMIT-pushdown stance as fetch_index_rows.
-// The caller's sort skips through the ordered-input check.
-@(private)
-fetch_index_rows_ordered :: proc(
-	t: ^btree.Tree,
-	table_tree: ^btree.Tree,
-	table: ^types.Table,
-	plan: Index_Plan,
-	wc: ^parser.Where_Clause,
-	single_range: []Table_Col_Range,
-	allocator := context.allocator,
-	cache: ^schema.Table_Cache = nil,
-	desc: bool = false,
-) -> (
-	[]Row_Entry,
-	bool,
-) {
-	cands, ok := index_candidate_ordered(t, table, plan, allocator)
-	if !ok {
-		return nil, false
-	}
-
-	defer delete(cands)
-	if desc && len(cands) > 1 {
-		slice.reverse(cands[:])
-	}
-
-	ctx, ctx_ok := init_where_ctx(wc, table.columns, single_range, t, allocator, cache).?
-	if !ctx_ok {
-		log.error("Error: Could not resolve WHERE clause")
-		return nil, false
-	}
-
-	r := make([dynamic]Row_Entry, 0, len(cands), allocator)
-	for rid in cands {
-		c, find_err := btree.tree_find(table_tree, rid, allocator)
-		if find_err == .Cell_Not_Found {
-			continue
-		}
-		if find_err != .None {
-			log.errorf("Error: Failed to fetch indexed row %d", i64(rid))
-			return nil, false
-		}
-		if !evaluate_where_ctx(ctx, c.values) {
-			cell.destroy(&c, allocator)
-			continue
-		}
-
-		append(&r, Row_Entry{c.rowid, c.values})
-		c.values = nil
-		cell.destroy(&c, allocator)
-	}
-	return r[:], true
-}
-
 // fetch_index_rows resolves a fetch plan's candidates through the data tree
 // and rechecks the FULL WHERE filter per row (mandatory: the index only
 // promises the usable conjunct). Stale misses are tolerated-and-skipped
 // (same stance as delete's missing-entry tolerance); btree errors fail
 // loudly. Ownership follows the scan loop: values transfer to the entry
 // and the deferred destroy is disarmed. No LIMIT pushdown: all candidates
-// materialize and the caller's tails slice — candidates arrive in rowid
-// order, so the slice matches the scan path exactly.
+// materialize and the caller's tails slice. Unordered candidates arrive in
+// rowid order, so the slice matches the scan path exactly; ordered
+// candidates arrive in index key order (DESC reverses the run) and the
+// caller's sort skips through the ordered-input check.
 @(private)
 fetch_index_rows :: proc(
 	t: ^btree.Tree,
@@ -2701,16 +2711,28 @@ fetch_index_rows :: proc(
 	single_range: []Table_Col_Range,
 	allocator := context.allocator,
 	cache: ^schema.Table_Cache = nil,
+	ordered: bool = false,
+	desc: bool = false,
 ) -> (
 	[]Row_Entry,
 	bool,
 ) {
-	cands, ok := index_candidate_rowids(t, table, plan, allocator)
+	cands: [dynamic]types.Row_ID
+	ok := false
+	if ordered {
+		cands, ok = index_candidate_ordered(t, table, plan, allocator)
+	} else {
+		cands, ok = index_candidate_rowids(t, table, plan, allocator)
+	}
 	if !ok {
 		return nil, false
 	}
 
 	defer delete(cands)
+	if ordered && desc && len(cands) > 1 {
+		slice.reverse(cands[:])
+	}
+
 	ctx, ctx_ok := init_where_ctx(wc, table.columns, single_range, t, allocator, cache).?
 	if !ctx_ok {
 		log.error("Error: Could not resolve WHERE clause")

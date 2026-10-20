@@ -30,6 +30,41 @@ teardown_db :: proc(db_handle: ^db.Database, name: string) {
 	clean_db_files(filename)
 }
 
+// setup_db_with_config opens a database like setup_db but with an explicit
+// open config (WAL/snapshot thresholds). Pair with teardown_db, which
+// recomputes the same name.
+setup_db_with_config :: proc(
+	t: ^testing.T,
+	name: string,
+	config: db.Open_Config,
+) -> ^db.Database {
+	mute_test_logging()
+	filename := db_filename("test_int_", name)
+	clean_db_files(filename)
+
+	database, open_err := db.open(filename, config)
+	testing.expect(t, open_err == .None, "Failed to open database")
+	return database
+}
+
+// reopen_db closes d and reopens the same test database for close/reopen
+// durability checks (caller defers teardown_db on success). msg names the
+// reopen point; ok=false preserves the caller's guard flow.
+reopen_db :: proc(
+	t: ^testing.T,
+	d: ^db.Database,
+	name: string,
+	msg: string,
+) -> (
+	reopened: ^db.Database,
+	ok: bool,
+) {
+	db.close(d)
+	db2, open_err := db.open(db_filename("test_int_", name))
+	testing.expect(t, open_err == .None, msg)
+	return db2, open_err == .None
+}
+
 @(test)
 test_integration_basic_create_and_insert :: proc(t: ^testing.T) {
 	d := setup_db(t, "basic_crud")

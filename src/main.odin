@@ -130,42 +130,16 @@ resolve_log_level :: proc(verbose: bool, v: bool, level_str: string) -> log.Leve
 	return .Info
 }
 
-// print_help prints the REPL dot-command reference. It duplicates the
-// command list dispatched in repl.odin by hand — adding a dot-command
-// requires updating both (no shared table; see repl.odin).
+// print_help prints the REPL dot-command reference from DOT_COMMANDS
+// (single source of truth — adding a command needs only a table row;
+// entries without help text, like .quit, don't render). Flag usage below
+// is lead-binary specific, so it stays hand-written.
 @(private)
 print_help :: proc() {
-	fmt.println("Commands:")
-	fmt.println("  .tables                   List all tables")
-	fmt.println("  .schema                   Show CREATE TABLE statements")
-	fmt.println("  .debug_schema             Show low-level schema details")
-	fmt.println("  .desc <table>             Describe table columns")
-	fmt.println("  .dump <table>             Dump all rows")
-	fmt.println("  .blob hex|size            Show BLOBs as hex literals or size")
-	fmt.println("  .stats                    Database statistics")
-	fmt.println("  .integrity                Verify all B-trees")
-	fmt.println("  .checkpoint               Flush pages + garbage collect")
-	fmt.println("  .tree_page <n>            Print B-tree page structure")
-	fmt.println("  .snapshot_debug           Show verbose snapshot chain dump")
-	fmt.println()
-	fmt.println("Transactions:")
-	fmt.println("  .begin                    Begin a transaction")
-	fmt.println("  .commit                   Commit the current transaction")
-	fmt.println("  .rollback                 Roll back the current transaction")
-	fmt.println()
-	fmt.println("Snapshots:")
-	fmt.println("  .snapshots                Show snapshot chain")
-	fmt.println("  .snapdiff <a> <b>         Diff two snapshots")
-	fmt.println("  .snapshot tag <id> <lbl>  Tag a snapshot")
-	fmt.println("  .snapshot restore <id>    Restore to a snapshot")
-	fmt.println("  .expire [keep]            Expire old snapshots (default 100)")
-	fmt.println("  .rollforward              Advance to latest snapshot")
-	fmt.println()
-	fmt.println("General:")
-	fmt.println("  .version                  Print version")
-	fmt.println("  .exit / .quit             Exit")
-	fmt.println("  .help                     This message")
-	fmt.println()
+	print_help_section("Commands:", .Commands)
+	print_help_section("Transactions:", .Transactions)
+	print_help_section("Snapshots:", .Snapshots)
+	print_help_section("General:", .General)
 	fmt.println("Flags:")
 	fmt.println("  --version                 Print version and exit")
 	fmt.println("  --stop-on-error           Exit on first SQL error in script mode")
@@ -173,4 +147,18 @@ print_help :: proc() {
 	fmt.println("  --log-level <level>       Set log level: debug, info, warn, error")
 	fmt.println()
 	fmt.println("See README.md or ARCH.md for SQL reference.")
+}
+
+// print_help_section prints one help group: header, aligned rows, blank
+// line. Row labels pad to the same column the hand-written help used.
+@(private)
+print_help_section :: proc(header: string, section: Dot_Section) {
+	fmt.println(header)
+	for cmd in DOT_COMMANDS {
+		if cmd.section != section || len(cmd.help) == 0 {
+			continue
+		}
+		fmt.printf("  %-26s%s\n", cmd.help_label, cmd.help)
+	}
+	fmt.println()
 }

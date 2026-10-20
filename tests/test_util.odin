@@ -13,7 +13,9 @@ import "core:testing"
 import "src:btree"
 import "src:db"
 import "src:executor"
+import "src:pager"
 import "src:parser"
+import "src:schema"
 import "src:types"
 
 // suppress_expected_errors / restore_logger let a test silence log output while
@@ -158,6 +160,139 @@ run_db_setup :: proc(t: ^testing.T, d: ^db.Database, setup: []string) {
 // rows matter, use db.query directly and assert on q.ok / q.rows.
 must_db_execute :: proc(t: ^testing.T, d: ^db.Database, sql: string) {
 	testing.expect(t, db.execute(d, sql) == .None, "statement must succeed")
+}
+
+// check_col runs sql and asserts the first projected column equals want
+// element-wise (msg names the query under test). One generic behind the
+// per-type column asserts; the type assertion still pins the storage
+// class (covering REAL must come back f64, not widened int).
+check_col :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []$T, msg: string) {
+	q := db.query(d, sql)
+	testing.expect(t, q.ok, msg)
+	if !q.ok {
+		return
+	}
+	testing.expect_value(t, len(q.rows), len(want))
+	for i in 0 ..< min(len(q.rows), len(want)) {
+		v, is_col := q.rows[i][0].(T)
+		testing.expect(t, is_col, msg)
+		if is_col {
+			testing.expect_value(t, v, want[i])
+		}
+	}
+}
+
+// explain renders one EXPLAIN statement to its plan string through the
+// executor directly (shared by every EXPLAIN pin).
+explain :: proc(t: ^testing.T, d: ^db.Database, sql: string) -> string {
+	st := db.Schema_Tree(d)
+	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
+	if !parse_ok {
+		testing.expect(t, false, "explain parses")
+		return ""
+	}
+	res := executor.Result{}
+	exec_ok, _, _ := executor.execute(&st, stmt, &res, nil, nil)
+	if !exec_ok {
+		testing.expect(t, false, "explain executes")
+		return ""
+	}
+	if len(res.rows) != 1 || len(res.rows[0].values) != 1 {
+		testing.expect(t, false, "explain yields one plan row")
+		return ""
+	}
+	plan_text, is_text := res.rows[0].values[0].(string)
+	if !is_text {
+		testing.expect(t, false, "plan row is TEXT")
+		return ""
+	}
+	return strings.clone(plan_text, context.temp_allocator)
+}
+
+// assert_twin runs each query and its table-swapped twin, demanding
+// identical output (success, row counts, widths, values with NULL-safe
+// equality). One harness behind the per-file twin loops; swap_from/to is
+// the table-name swap ("docs"/"docs2", "FROM t "/"FROM t2 ").
+assert_twin :: proc(t: ^testing.T, d: ^db.Database, queries: []string, swap_from, swap_to: string) {
+	for q in queries {
+		free_all(context.temp_allocator)
+		twin, _ := strings.replace(q, swap_from, swap_to, 1, context.temp_allocator)
+		a := db.query(d, q)
+		b := db.query(d, twin)
+		testing.expect(t, a.ok && b.ok, "twin queries succeed")
+		if !a.ok || !b.ok {
+			continue
+		}
+		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
+		for i in 0 ..< min(len(a.rows), len(b.rows)) {
+			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
+			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
+				testing.expect(
+					t,
+					twin_values_equal(a.rows[i][j], b.rows[i][j]),
+					"twin values match",
+				)
+			}
+		}
+	}
+	free_all(context.temp_allocator)
+}
+
+// INDEX_BODIES is the shared 5-body workload distribution (one empty
+// string exercises empty-key paths). One spelling so body lists cannot
+// skew per call site; the 6-body variant in real tests stays local.
+INDEX_BODIES :: []string{"alpha", "bb", "alpha", "", "gamma"}
+
+// workload_expect builds the oracle map and loads the bodies workload,
+// returning the owned map (caller defers destroy_expect).
+workload_expect :: proc(
+	t: ^testing.T,
+	d: ^db.Database,
+	bodies: []string,
+	n: int,
+) -> map[string][dynamic]i64 {
+	expect := make(map[string][dynamic]i64, context.allocator)
+	index_workload(t, d, bodies, n, &expect)
+	return expect
+}
+
+// open_test_pager opens a pager on an owned file and asserts it is usable.
+// Pair with destroy_test_pager. One helper behind the executor/schema/
+// pager/WAL env twins (prefix keeps test files isolated).
+open_test_pager :: proc(t: ^testing.T, prefix, name: string) -> (^pager.Pager, string) {
+	mute_test_logging()
+	filename := mint_db_filename(prefix, name)
+	clean_db_files(filename)
+
+	p, err := pager.open(filename)
+	testing.expect(t, err == .None, "Failed to open pager")
+	testing.expect(t, p != nil, "Pager should not be nil")
+	return p, filename
+}
+
+// destroy_test_pager closes the pager and removes the database, its WAL
+// sidecar, and the owned filename.
+destroy_test_pager :: proc(p: ^pager.Pager, filename: string) {
+	_ = pager.close(p)
+	drop_db_files(filename)
+}
+
+// boot_schema_catalog allocates a slotdir schema root on p and boots the
+// schema catalog, returning its tree.
+boot_schema_catalog :: proc(t: ^testing.T, p: ^pager.Pager) -> btree.Tree {
+	schema_page, alloc_err := pager.allocate_page(p)
+	testing.expect(t, alloc_err == .None, "Failed to allocate schema page")
+	// Schema roots are slotdir post-flip, matching what production creators write.
+	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
+		testing.fail_now(t, "Failed to init slotdir schema page")
+	}
+	pager.mark_dirty(p, schema_page.page_num)
+	pager.unpin_page(p, schema_page.page_num)
+
+	tree := btree.init(p, schema_page.page_num)
+	ok := schema.init(&tree)
+	testing.expect(t, ok, "Failed to init schema")
+	return tree
 }
 
 // must_tree_insert inserts one row and demands .None. Collapses the

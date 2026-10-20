@@ -558,17 +558,8 @@ text_absorb_child_split :: proc(
 		old_sep := seps[idx]
 		seps[idx] = split_key
 		children[idx] = child_result.new_page
-		nseps := make([dynamic][]u8, 0, len(seps) + 1, context.temp_allocator)
-		append(&nseps, ..seps[:idx + 1])
-		append(&nseps, old_sep)
-		append(&nseps, ..seps[idx + 1:])
-
-		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
-		append(&nchildren, ..children[:idx + 1])
-		append(&nchildren, child_result.right_page)
-		append(&nchildren, ..children[idx + 1:])
-
-		seps, children = nseps, nchildren
+		seps = splice_insert(seps, idx, old_sep)
+		children = splice_insert(children, idx, child_result.right_page)
 		split_key = old_sep
 	}
 

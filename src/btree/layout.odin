@@ -3,6 +3,7 @@
 // writers store little-endian fields explicitly.
 package btree
 
+import "base:intrinsics"
 import "src:types"
 
 PAGE_SIZE :: types.PAGE_SIZE
@@ -15,6 +16,17 @@ DENSE_MAX_DELTA :: u64(max(u32))
 
 // MAX_FRAGMENT_BYTES caps accumulated fragmented bytes (u8 field).
 MAX_FRAGMENT_BYTES :: 255
+
+// splice_insert returns arr with old inserted after position idx (growing
+// by one). Shared absorb splice behind the dense and text interior child
+// splits; temp-owned like its callers' scratch arrays.
+splice_insert :: proc(arr: [dynamic]$T, idx: int, old: T, allocator := context.temp_allocator) -> [dynamic]T {
+	out := make([dynamic]T, 0, len(arr) + 1, allocator)
+	append(&out, ..arr[:idx + 1])
+	append(&out, old)
+	append(&out, ..arr[idx + 1:])
+	return out
+}
 
 // Page_Type covers exactly the live on-disk encodings; layout_for_page
 // rejects any other byte loudly rather than guessing a layout.
@@ -38,6 +50,34 @@ Page_Type :: enum u8 {
 @(private)
 is_index_leaf_type :: proc "contextless" (pt: Page_Type) -> bool {
 	return pt == .LEAF_TEXT || pt == .LEAF_INT || pt == .LEAF_REAL || pt == .LEAF_COMPOSITE
+}
+
+// require_index_leaf returns the page header when data holds an index leaf
+// at page_id, else nil. Shared header+type gate behind the index leaf
+// entry readers; callers fail closed with their own shape.
+require_index_leaf :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Page_Header {
+	hdr := get_header(data, page_id)
+	if hdr == nil {
+		return nil
+	}
+	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
+		return nil
+	}
+	return hdr
+}
+
+// require_index_interior returns the page header when data holds an index
+// interior at page_id, else nil. Twin of require_index_leaf for the
+// interior entry readers.
+require_index_interior :: #force_inline proc "contextless" (data: []u8, page_id: u32) -> ^Page_Header {
+	hdr := get_header(data, page_id)
+	if hdr == nil {
+		return nil
+	}
+	if intrinsics.unlikely(!is_index_interior_type(hdr.page_type)) {
+		return nil
+	}
+	return hdr
 }
 
 // is_index_interior_type reports secondary-index interior pages; see

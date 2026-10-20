@@ -10,9 +10,7 @@ import "src:admin"
 import "src:btree"
 import "src:cell"
 import "src:db"
-import "src:executor"
 import "src:pager"
-import "src:parser"
 import "src:schema"
 import "src:types"
 
@@ -746,82 +744,34 @@ test_index_order_by_key_order :: proc(t: ^testing.T) {
 		},
 	)
 
-	check_int :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []i64) {
-		q := db.query(d, sql)
-		testing.expect(t, q.ok, "ordered select succeeds")
-		if !q.ok {
-			return
-		}
-		testing.expect_value(t, len(q.rows), len(want))
-		for i in 0 ..< min(len(q.rows), len(want)) {
-			v, is_int := q.rows[i][0].(i64)
-			testing.expect(t, is_int, "key projects as INTEGER")
-			if is_int {
-				testing.expect_value(t, v, want[i])
-			}
-		}
-	}
-
-	check_text :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []string) {
-		q := db.query(d, sql)
-		testing.expect(t, q.ok, "ordered select succeeds")
-		if !q.ok {
-			return
-		}
-		testing.expect_value(t, len(q.rows), len(want))
-		for i in 0 ..< min(len(q.rows), len(want)) {
-			s, is_text := q.rows[i][0].(string)
-			testing.expect(t, is_text, "key projects as TEXT")
-			if is_text {
-				testing.expect_value(t, s, want[i])
-			}
-		}
-	}
-
 	asc := []i64{1, 2, 3, 4, 5}
 	desc := []i64{5, 4, 3, 2, 1}
-	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a;", asc)
-	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a DESC;", desc)
-	check_int(t, d, "SELECT a, b FROM t WHERE a >= 2 AND a <= 4 ORDER BY a;", []i64{2, 3, 4})
-	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a LIMIT 2;", []i64{1, 2})
-	check_int(t, d, "SELECT a, b FROM t WHERE a = 3 ORDER BY a;", []i64{3})
+	check_col(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a;", asc, "ordered select succeeds")
+	check_col(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a DESC;", desc, "ordered select succeeds")
+	check_col(t, d, "SELECT a, b FROM t WHERE a >= 2 AND a <= 4 ORDER BY a;", []i64{2, 3, 4}, "ordered select succeeds")
+	check_col(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY a LIMIT 2;", []i64{1, 2}, "ordered select succeeds")
+	check_col(t, d, "SELECT a, b FROM t WHERE a = 3 ORDER BY a;", []i64{3}, "ordered select succeeds")
 
 	// Twin without the index agrees on every shape.
-	check_int(t, d, "SELECT a, b FROM t2 WHERE a > 0 ORDER BY a;", asc)
-	check_int(t, d, "SELECT a, b FROM t2 WHERE a > 0 ORDER BY a DESC;", desc)
+	check_col(t, d, "SELECT a, b FROM t2 WHERE a > 0 ORDER BY a;", asc, "ordered select succeeds")
+	check_col(t, d, "SELECT a, b FROM t2 WHERE a > 0 ORDER BY a DESC;", desc, "ordered select succeeds")
 
 	// TEXT range and prefix runs arrive ordered both directions.
 	kasc := []string{"apple", "apricot", "banana", "blueberry", "cherry"}
 	kdesc := []string{"cherry", "blueberry", "banana", "apricot", "apple"}
-	check_text(t, d, "SELECT k, v FROM tk WHERE k > 'a' ORDER BY k;", kasc)
-	check_text(t, d, "SELECT k, v FROM tk WHERE k > 'a' ORDER BY k DESC;", kdesc)
-	check_text(t, d, "SELECT k, v FROM tk WHERE k LIKE 'a%' ORDER BY k;", []string{"apple", "apricot"})
-
-	check_real :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []f64) {
-		q := db.query(d, sql)
-		testing.expect(t, q.ok, "ordered select succeeds")
-		if !q.ok {
-			return
-		}
-		testing.expect_value(t, len(q.rows), len(want))
-		for i in 0 ..< min(len(q.rows), len(want)) {
-			v, is_real := q.rows[i][0].(f64)
-			testing.expect(t, is_real, "key projects as REAL")
-			if is_real {
-				testing.expect_value(t, v, want[i])
-			}
-		}
-	}
+	check_col(t, d, "SELECT k, v FROM tk WHERE k > 'a' ORDER BY k;", kasc, "ordered select succeeds")
+	check_col(t, d, "SELECT k, v FROM tk WHERE k > 'a' ORDER BY k DESC;", kdesc, "ordered select succeeds")
+	check_col(t, d, "SELECT k, v FROM tk WHERE k LIKE 'a%' ORDER BY k;", []string{"apple", "apricot"}, "ordered select succeeds")
 
 	// REAL numerics (including negatives) arrive ordered both directions.
 	rasc := []f64{-1.5, 0.0, 2.0, 2.5, 10.25}
 	rdesc := []f64{10.25, 2.5, 2.0, 0.0, -1.5}
-	check_real(t, d, "SELECT r, v FROM tr WHERE r > -2.0 ORDER BY r;", rasc)
-	check_real(t, d, "SELECT r, v FROM tr WHERE r > -2.0 ORDER BY r DESC;", rdesc)
+	check_col(t, d, "SELECT r, v FROM tr WHERE r > -2.0 ORDER BY r;", rasc, "ordered select succeeds")
+	check_col(t, d, "SELECT r, v FROM tr WHERE r > -2.0 ORDER BY r DESC;", rdesc, "ordered select succeeds")
 
 	// Fail-closed shapes still sort correctly through the sort path.
-	check_int(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY b;", asc)
-	check_int(t, d, "SELECT a, b FROM t WHERE a IN (3, 1) ORDER BY a;", []i64{1, 3})
+	check_col(t, d, "SELECT a, b FROM t WHERE a > 0 ORDER BY b;", asc, "ordered select succeeds")
+	check_col(t, d, "SELECT a, b FROM t WHERE a IN (3, 1) ORDER BY a;", []i64{1, 3}, "ordered select succeeds")
 }
 
 @(test)
@@ -881,19 +831,13 @@ test_index_order_by_composite_covering :: proc(t: ^testing.T) {
 		}
 	}
 
-	// Twin agrees cell for cell.
-	tw := db.query(d, "SELECT a, b, v FROM t2c WHERE a = 5 ORDER BY b;")
-	testing.expect(t, tw.ok, "twin succeeds")
-	if q.ok && tw.ok {
-		testing.expect_value(t, len(tw.rows), len(q.rows))
-		for i in 0 ..< min(len(q.rows), len(tw.rows)) {
-			qn, tn := types.is_null(q.rows[i][1]), types.is_null(tw.rows[i][1])
-			testing.expect(t, qn == tn, "twin nulls agree")
-			if !qn && !tn {
-				testing.expect_value(t, tw.rows[i][1].(string), q.rows[i][1].(string))
-			}
-		}
-	}
+	assert_twin(
+		t,
+		d,
+		[]string{"SELECT a, b, v FROM tc WHERE a = 5 ORDER BY b;"},
+		"FROM tc ",
+		"FROM t2c ",
+	)
 
 	// NULLS FIRST matches marker order; DESC takes the sort fallback with
 	// NULL first per the DESC default.
@@ -935,14 +879,13 @@ test_index_order_by_composite_covering :: proc(t: ^testing.T) {
 	if mix.ok && len(mix.rows) == 3 {
 		testing.expect(t, types.is_null(mix.rows[2][1]), "mixed NULL last")
 	}
-	twab := db.query(d, "SELECT a, b, v FROM t2c WHERE a = 5 ORDER BY a, b;")
-	testing.expect(t, twab.ok && len(twab.rows) == 3, "multi-key twin agrees")
-	if abd.ok && twab.ok {
-		for i in 0 ..< min(len(abd.rows), len(twab.rows)) {
-			qn, tn := types.is_null(abd.rows[i][1]), types.is_null(twab.rows[i][1])
-			testing.expect(t, qn == tn, "twin nulls agree")
-		}
-	}
+	assert_twin(
+		t,
+		d,
+		[]string{"SELECT a, b, v FROM tc WHERE a = 5 ORDER BY a, b;"},
+		"FROM tc ",
+		"FROM t2c ",
+	)
 
 	// Exact plan trivially ordered; leading range orders the lead column.
 	ex := db.query(d, "SELECT a, b, v FROM tc WHERE a = 5 AND b = 'x' ORDER BY a;")
@@ -958,29 +901,13 @@ test_index_order_by_composite_covering :: proc(t: ^testing.T) {
 		}
 	}
 
-	check_cov :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []i64) {
-		c := db.query(d, sql)
-		testing.expect(t, c.ok, "covering ordered succeeds")
-		if !c.ok {
-			return
-		}
-		testing.expect_value(t, len(c.rows), len(want))
-		for i in 0 ..< min(len(c.rows), len(want)) {
-			v, is_int := c.rows[i][0].(i64)
-			testing.expect(t, is_int, "key projects as INTEGER")
-			if is_int {
-				testing.expect_value(t, v, want[i])
-			}
-		}
-	}
-
 	// Covering In/Or merge in key order both directions; twins agree.
-	check_cov(t, d, "SELECT a FROM s WHERE a IN (3, 1, 5) ORDER BY a;", []i64{1, 3, 5})
-	check_cov(t, d, "SELECT a FROM s WHERE a IN (3, 1, 5) ORDER BY a DESC;", []i64{5, 3, 1})
-	check_cov(t, d, "SELECT a FROM s WHERE a = 1 OR a = 4 ORDER BY a;", []i64{1, 4})
-	check_cov(t, d, "SELECT a FROM s WHERE a = 1 OR a = 4 ORDER BY a DESC;", []i64{4, 1})
-	check_cov(t, d, "SELECT a FROM s2 WHERE a IN (3, 1, 5) ORDER BY a;", []i64{1, 3, 5})
-	check_cov(t, d, "SELECT a FROM s2 WHERE a = 1 OR a = 4 ORDER BY a DESC;", []i64{4, 1})
+	check_col(t, d, "SELECT a FROM s WHERE a IN (3, 1, 5) ORDER BY a;", []i64{1, 3, 5}, "covering ordered succeeds")
+	check_col(t, d, "SELECT a FROM s WHERE a IN (3, 1, 5) ORDER BY a DESC;", []i64{5, 3, 1}, "covering ordered succeeds")
+	check_col(t, d, "SELECT a FROM s WHERE a = 1 OR a = 4 ORDER BY a;", []i64{1, 4}, "covering ordered succeeds")
+	check_col(t, d, "SELECT a FROM s WHERE a = 1 OR a = 4 ORDER BY a DESC;", []i64{4, 1}, "covering ordered succeeds")
+	check_col(t, d, "SELECT a FROM s2 WHERE a IN (3, 1, 5) ORDER BY a;", []i64{1, 3, 5}, "covering ordered succeeds")
+	check_col(t, d, "SELECT a FROM s2 WHERE a = 1 OR a = 4 ORDER BY a DESC;", []i64{4, 1}, "covering ordered succeeds")
 }
 
 @(test)
@@ -1055,14 +982,13 @@ test_index_order_scan_no_where :: proc(t: ^testing.T) {
 		}
 	}
 
-	tw := db.query(d, "SELECT a, b FROM o2 ORDER BY a;")
-	testing.expect(t, tw.ok && len(tw.rows) == 7, "twin agrees")
-	if q.ok && tw.ok {
-		for i in 0 ..< 5 {
-			testing.expect_value(t, tw.rows[i][0].(i64), q.rows[i][0].(i64))
-		}
-		testing.expect(t, types.is_null(tw.rows[5][0]) && types.is_null(tw.rows[6][0]), "twin NULL tail")
-	}
+	assert_twin(
+		t,
+		d,
+		[]string{"SELECT a, b FROM o ORDER BY a;"},
+		"FROM o ",
+		"FROM o2 ",
+	)
 
 	nf := db.query(d, "SELECT a, b FROM o ORDER BY a NULLS FIRST;")
 	testing.expect(t, nf.ok, "nulls first succeeds")
@@ -1101,28 +1027,23 @@ test_index_order_scan_no_where :: proc(t: ^testing.T) {
 			testing.expect(t, okx && bx == "x", "x first")
 		}
 	}
-	c2 := db.query(d, "SELECT a, b, v FROM oc2 ORDER BY a, b;")
-	testing.expect(t, c2.ok && len(c2.rows) == 4, "composite twin agrees")
+	assert_twin(
+		t,
+		d,
+		[]string{"SELECT a, b, v FROM oc ORDER BY a, b;"},
+		"FROM oc ",
+		"FROM oc2 ",
+	)
 
 	// Unindexed-class leftovers abort to the sort: blob ranks above text
 	// and both paths agree exactly.
-	x := db.query(d, "SELECT k, v FROM xb ORDER BY k;")
-	x2 := db.query(d, "SELECT k, v FROM xb2 ORDER BY k;")
-	testing.expect(t, x.ok && x2.ok, "abort pair succeeds")
-	if x.ok && x2.ok {
-		testing.expect_value(t, len(x.rows), len(x2.rows))
-		for i in 0 ..< min(len(x.rows), len(x2.rows)) {
-			xs, xok := x.rows[i][0].(string)
-			ts, tok := x2.rows[i][0].(string)
-			if xok && tok {
-				testing.expect_value(t, xs, ts)
-			} else {
-				xb, xbok := x.rows[i][0].([]u8)
-				tb, tbok := x2.rows[i][0].([]u8)
-				testing.expect(t, xbok && tbok && len(xb) == len(tb), "blob pair agrees")
-			}
-		}
-	}
+	assert_twin(
+		t,
+		d,
+		[]string{"SELECT k, v FROM xb ORDER BY k;"},
+		"FROM xb ",
+		"FROM xb2 ",
+	)
 
 	// EXPLAIN pins the order scan; rowid stays a full scan.
 	testing.expect_value(
@@ -1140,6 +1061,65 @@ test_index_order_scan_no_where :: proc(t: ^testing.T) {
 		explain(t, d, "EXPLAIN SELECT a, b FROM o ORDER BY rowid;"),
 		"FULL SCAN ON o",
 	)
+}
+
+@(test)
+test_index_vacuum_persists_across_reopen :: proc(t: ^testing.T) {
+	// Vacuum-rebuilt secondary pages must persist to disk: close/reopen
+	// drops the cache, so pages the rebuild never marked dirty would read
+	// stale. Queries the index after reopen against the oracle (root must
+	// change, proving a rebuild actually ran).
+	d := setup_db(t, "idxvacpersist")
+
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, v INT);",
+			"CREATE INDEX i_body ON docs (body);",
+		},
+	)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
+	defer destroy_expect(&expect)
+
+	st0 := db.Schema_Tree(d)
+	tbl0, _ := schema.find_table(&st0, "docs", context.temp_allocator)
+	root_before := index_root_of(t, tbl0, "i_body")
+	testing.expect(t, root_before > 0, "index present before vacuum")
+	testing.expect(t, admin.vacuum(d) == .None, "vacuum succeeds")
+
+	st1 := db.Schema_Tree(d)
+	tbl1, found1 := schema.find_table(&st1, "docs", context.temp_allocator)
+	testing.expect(t, found1, "table found after vacuum")
+	if found1 {
+		testing.expect(t, index_root_of(t, tbl1, "i_body") != root_before, "rebuild moved the root")
+	}
+
+	db.close(d)
+	d2, open_err := db.open(db_filename("test_int_", "idxvacpersist"))
+	testing.expect(t, open_err == .None, "reopen succeeds")
+	if open_err != .None {
+		return
+	}
+	defer teardown_db(d2, "idxvacpersist")
+
+	for body in INDEX_BODIES {
+		free_all(context.temp_allocator)
+		q := db.query(d2, fmt.tprintf("SELECT rowid FROM docs WHERE body = '%s' ORDER BY rowid;", body))
+		testing.expect(t, q.ok, "post-reopen index query succeeds")
+		if !q.ok {
+			continue
+		}
+		want := expect[body]
+		testing.expect_value(t, len(q.rows), len(want))
+		for i in 0 ..< min(len(q.rows), len(want)) {
+			v, is_int := q.rows[i][0].(i64)
+			if is_int {
+				testing.expect_value(t, v, want[i])
+			}
+		}
+	}
 }
 
 @(test)
@@ -1270,28 +1250,7 @@ test_index_composite_twin :: proc(t: ^testing.T) {
 		"SELECT a, b, v FROM t WHERE a = 7 ORDER BY v;",
 		"SELECT b FROM t WHERE a = 7 ORDER BY v;",
 	}
-	for q in queries {
-		free_all(context.temp_allocator)
-		twin, _ := strings.replace(q, "FROM t ", "FROM t2 ", 1, context.temp_allocator)
-		a := db.query(d, q)
-		b := db.query(d, twin)
-		testing.expect(t, a.ok && b.ok, "twin queries succeed")
-		if !a.ok || !b.ok {
-			continue
-		}
-		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
-		for i in 0 ..< min(len(a.rows), len(b.rows)) {
-			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
-			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
-				testing.expect(
-					t,
-					twin_values_equal(a.rows[i][j], b.rows[i][j]),
-					"twin values match",
-				)
-			}
-		}
-	}
-	free_all(context.temp_allocator)
+	assert_twin(t, d, queries, "FROM t ", "FROM t2 ")
 }
 
 @(test)
@@ -1691,9 +1650,8 @@ test_index_insert_autocommit :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 25)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 25, &expect)
 	verify_text_index(t, d, "docs", expect)
 }
 
@@ -1716,9 +1674,8 @@ test_index_insert_txn :: proc(t: ^testing.T) {
 		"create index",
 	)
 	testing.expect(t, db.execute(d, "BEGIN;") == .None, "begin")
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 25)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 25, &expect)
 	testing.expect(t, db.execute(d, "COMMIT;") == .None, "commit")
 	verify_text_index(t, d, "docs", expect)
 }
@@ -1818,9 +1775,8 @@ test_index_delete :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, []string{"a", "bb", "a", "c"}, 12)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"a", "bb", "a", "c"}, 12, &expect)
 
 	testing.expect(t, db.execute(d, "DELETE FROM docs WHERE id = 3;") == .None, "pk delete")
 	index_oracle_del(&expect, "a", 3)
@@ -1852,9 +1808,8 @@ test_index_txn_rollback_mixed :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, []string{"a", "bb", "a", "c"}, 12)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"a", "bb", "a", "c"}, 12, &expect)
 	verify_text_index(t, d, "docs", expect)
 
 	st0 := db.Schema_Tree(d)
@@ -1904,9 +1859,8 @@ test_index_vacuum_after_delete :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 60, &expect)
 
 	st0 := db.Schema_Tree(d)
 	tbl0, _ := schema.find_table(&st0, "docs", context.temp_allocator)
@@ -2316,29 +2270,12 @@ test_index_select_eq_covering :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 60, &expect)
 
-	check_covering :: proc(t: ^testing.T, d: ^db.Database, sql: string, want: []i64) {
-		q := db.query(d, sql)
-		testing.expect(t, q.ok, "covering select succeeds")
-		if !q.ok {
-			return
-		}
-		testing.expect_value(t, len(q.rows), len(want))
-		for i in 0 ..< min(len(q.rows), len(want)) {
-			v, is_int := q.rows[i][0].(i64)
-			testing.expect(t, is_int, "rowid projects as INTEGER")
-			if is_int {
-				testing.expect_value(t, v, want[i])
-			}
-		}
-	}
-
-	check_covering(t, d, "SELECT rowid FROM docs WHERE body = 'alpha';", expect["alpha"][:])
-	check_covering(t, d, "SELECT rowid FROM docs WHERE docs.body = 'bb';", expect["bb"][:])
-	check_covering(t, d, "SELECT rowid FROM docs WHERE body = '';", expect[""][:])
+	check_col(t, d, "SELECT rowid FROM docs WHERE body = 'alpha';", expect["alpha"][:], "covering select succeeds")
+	check_col(t, d, "SELECT rowid FROM docs WHERE docs.body = 'bb';", expect["bb"][:], "covering select succeeds")
+	check_col(t, d, "SELECT rowid FROM docs WHERE body = '';", expect[""][:], "covering select succeeds")
 
 	// Missing key: zero rows, success (same shape as a scan miss).
 	miss := db.query(d, "SELECT rowid FROM docs WHERE body = 'nope';")
@@ -2414,9 +2351,8 @@ test_index_select_eq_fallback :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 60, &expect)
 
 	// Non-covering projection over an indexed equality: full rows, exact set.
 	full := db.query(d, "SELECT id, body FROM docs WHERE body = 'alpha';")
@@ -3142,28 +3078,7 @@ test_index_range_twin :: proc(t: ^testing.T) {
 		"SELECT a, b, v FROM t WHERE a BETWEEN -5 AND 5 ORDER BY v DESC LIMIT 7;",
 		"SELECT rowid FROM t WHERE a > 20 ORDER BY rowid;",
 	}
-	for q in queries {
-		free_all(context.temp_allocator)
-		twin, _ := strings.replace(q, "FROM t ", "FROM t2 ", 1, context.temp_allocator)
-		a := db.query(d, q)
-		b := db.query(d, twin)
-		testing.expect(t, a.ok && b.ok, "twin queries succeed")
-		if !a.ok || !b.ok {
-			continue
-		}
-		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
-		for i in 0 ..< min(len(a.rows), len(b.rows)) {
-			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
-			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
-				testing.expect(
-					t,
-					twin_values_equal(a.rows[i][j], b.rows[i][j]),
-					"twin values match",
-				)
-			}
-		}
-	}
-	free_all(context.temp_allocator)
+	assert_twin(t, d, queries, "FROM t ", "FROM t2 ")
 }
 
 @(test)
@@ -3480,28 +3395,7 @@ test_index_real_twin :: proc(t: ^testing.T) {
 		"SELECT r, b, v FROM t WHERE r = 1;",
 		"SELECT r, b, v FROM t WHERE r LIKE '1%';",
 	}
-	for q in queries {
-		free_all(context.temp_allocator)
-		twin, _ := strings.replace(q, "FROM t ", "FROM t2 ", 1, context.temp_allocator)
-		a := db.query(d, q)
-		b := db.query(d, twin)
-		testing.expect(t, a.ok && b.ok, "twin queries succeed")
-		if !a.ok || !b.ok {
-			continue
-		}
-		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
-		for i in 0 ..< min(len(a.rows), len(b.rows)) {
-			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
-			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
-				testing.expect(
-					t,
-					twin_values_equal(a.rows[i][j], b.rows[i][j]),
-					"twin values match",
-				)
-			}
-		}
-	}
-	free_all(context.temp_allocator)
+	assert_twin(t, d, queries, "FROM t ", "FROM t2 ")
 }
 
 @(test)
@@ -3575,9 +3469,8 @@ test_index_select_prefix_covering :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 60, &expect)
 
 	// Oracle union for a stem: every indexed text carrying it, rowid-sorted.
 	union_for_stem :: proc(expect: map[string][dynamic]i64, stem: string) -> [dynamic]i64 {
@@ -3660,9 +3553,8 @@ test_index_select_fetch :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 60, &expect)
 
 	// Equality fetch: full rows, exact set, values intact.
 	full := db.query(d, "SELECT id, body, v FROM docs WHERE body = 'alpha';")
@@ -3775,7 +3667,7 @@ test_index_select_fetch_matches_scan :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	bodies := []string{"alpha", "bb", "alpha", "", "gamma"}
+	bodies := INDEX_BODIES
 	for i in 1 ..= 60 {
 		free_all(context.temp_allocator)
 		body := bodies[(i - 1) % len(bodies)]
@@ -3805,28 +3697,7 @@ test_index_select_fetch_matches_scan :: proc(t: ^testing.T) {
 		"SELECT id FROM docs WHERE body = 'missing';",
 		"SELECT id FROM docs WHERE body LIKE 'z%';",
 	}
-	for q in queries {
-		free_all(context.temp_allocator)
-		twin, _ := strings.replace(q, "docs", "docs2", 1, context.temp_allocator)
-		a := db.query(d, q)
-		b := db.query(d, twin)
-		testing.expect(t, a.ok && b.ok, "twin queries succeed")
-		if !a.ok || !b.ok {
-			continue
-		}
-		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
-		for i in 0 ..< min(len(a.rows), len(b.rows)) {
-			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
-			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
-				testing.expect(
-					t,
-					twin_values_equal(a.rows[i][j], b.rows[i][j]),
-					"twin values match",
-				)
-			}
-		}
-	}
-	free_all(context.temp_allocator)
+	assert_twin(t, d, queries, "docs", "docs2")
 }
 
 @(test)
@@ -3846,9 +3717,8 @@ test_index_select_in :: proc(t: ^testing.T) {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 60, &expect)
 
 	// Covering IN: union, rowid-sorted.
 	inq := db.query(d, "SELECT rowid FROM docs WHERE body IN ('alpha', 'bb');")
@@ -3933,33 +3803,6 @@ test_index_select_fetch_in_txn :: proc(t: ^testing.T) {
 	if gone.ok {
 		testing.expect_value(t, len(gone.rows), 0)
 	}
-}
-
-// explain renders one EXPLAIN statement to its plan string through the
-// executor directly (shared with test_index_explain).
-explain :: proc(t: ^testing.T, d: ^db.Database, sql: string) -> string {
-	st := db.Schema_Tree(d)
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	if !parse_ok {
-		testing.expect(t, false, "explain parses")
-		return ""
-	}
-	res := executor.Result{}
-	exec_ok, _, _ := executor.execute(&st, stmt, &res, nil, nil)
-	if !exec_ok {
-		testing.expect(t, false, "explain executes")
-		return ""
-	}
-	if len(res.rows) != 1 || len(res.rows[0].values) != 1 {
-		testing.expect(t, false, "explain yields one plan row")
-		return ""
-	}
-	plan_text, is_text := res.rows[0].values[0].(string)
-	if !is_text {
-		testing.expect(t, false, "plan row is TEXT")
-		return ""
-	}
-	return strings.clone(plan_text, context.temp_allocator)
 }
 
 @(test)

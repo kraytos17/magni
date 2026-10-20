@@ -38,13 +38,8 @@ exec_create :: proc(
 		return false, t.root, {}
 	}
 
-	root_page, err := pager.allocate_page(t.pager)
-	for err == .None && (root_page.page_num == 1 || root_page.page_num == t.root) {
-		pager.mark_dirty(t.pager, root_page.page_num)
-		pager.unpin_page(t.pager, root_page.page_num)
-		root_page, err = pager.allocate_page(t.pager)
-	}
-	if err != .None {
+	root_page, alloc_ok := alloc_data_root(t)
+	if !alloc_ok {
 		log.error("Error: Failed to allocate table root page")
 		return false, t.root, {}
 	}
@@ -82,6 +77,113 @@ exec_create :: proc(
 
 	log.infof("Created table '%s' at Page %d", stmt.table_name, root_page.page_num)
 	return true, new_root, Mutated_Table_Info{name = stmt.table_name, root = root_page.page_num}
+}
+
+// alloc_data_root allocates a table/index root page, skipping page 1 and
+// the schema root (neither can host one). False when allocation fails;
+// the caller logs its own root kind.
+@(private)
+alloc_data_root :: proc(t: ^btree.Tree) -> (root_page: ^pager.Page, ok: bool) {
+	page, err := pager.allocate_page(t.pager)
+	for err == .None && (page.page_num == 1 || page.page_num == t.root) {
+		pager.mark_dirty(t.pager, page.page_num)
+		pager.unpin_page(t.pager, page.page_num)
+		page, err = pager.allocate_page(t.pager)
+	}
+	if err != .None {
+		return nil, false
+	}
+	return page, true
+}
+
+// start_build_scan opens a backfill cursor over the caller's data tree
+// (the cursor borrows it, so ownership stays at the call site). False
+// when the scan cannot start.
+@(private)
+start_build_scan :: proc(data_tree: ^btree.Tree) -> (cursor: btree.Cursor, ok: bool) {
+	c, c_err := btree.cursor_start(data_tree)
+	if c_err != .None {
+		log.error("Error: Failed to scan table for index build")
+		return {}, false
+	}
+	return c, true
+}
+
+// build_backfilled_index bulk-builds raws/rids under index_root (the kind
+// is inferred from the pre-stamped root), adopting a new root when the
+// build splits. False on build failure.
+@(private)
+build_backfilled_index :: proc(
+	t: ^btree.Tree,
+	index_root: u32,
+	raws: [][]u8,
+	rids: []types.Row_ID,
+	index_name: string,
+	table_name: string,
+) -> (
+	root: u32,
+	ok: bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
+	if build_err != .None {
+		log_create_index_fail(index_name, table_name)
+		return 0, false
+	}
+	if new_root != 0 {
+		return new_root, true
+	}
+	return index_root, true
+}
+
+// publish_index_def registers root + column atomically (readers never see
+// a half index) and reports the build. False when registration fails.
+@(private)
+publish_index_def :: proc(
+	t: ^btree.Tree,
+	table_name: string,
+	column: string,
+	index_name: string,
+	col_type: types.Column_Type,
+	index_root: u32,
+) -> (
+	schema_root: u32,
+	info: Mutated_Table_Info,
+	ok: bool,
+) {
+	new_schema_root, reg_ok := schema.update_index_def_cow(
+		t,
+		table_name,
+		index_root,
+		column,
+		index_name,
+		col_type,
+	)
+	if !reg_ok {
+		log.error("Error: Failed to register index in schema")
+		return 0, {}, false
+	}
+
+	log.infof(
+		"Created index '%s' on %s(%s) at Page %d",
+		index_name,
+		table_name,
+		column,
+		index_root,
+	)
+	return new_schema_root, Mutated_Table_Info{name = table_name, root = index_root}, true
+}
+
+// index_name_taken reports whether index_name exists on the table.
+@(private)
+index_name_taken :: proc(table: types.Table, table_name, index_name: string) -> bool {
+	for def in table.indexes {
+		if def.name == index_name {
+			log.errorf("Error: Index already exists on %s: %s", table_name, index_name)
+			return true
+		}
+	}
+	return false
 }
 
 // exec_create_index implements `CREATE INDEX name ON table (column)` —
@@ -127,20 +229,12 @@ exec_create_index :: proc(
 		)
 		return false, t.root, {}
 	}
-	for def in table.indexes {
-		if def.name == stmt.index_name {
-			log.errorf("Error: Index already exists on %s: %s", stmt.table_name, stmt.index_name)
-			return false, t.root, {}
-		}
+	if index_name_taken(table^, stmt.table_name, stmt.index_name) {
+		return false, t.root, {}
 	}
 
-	root_page, err := pager.allocate_page(t.pager)
-	for err == .None && (root_page.page_num == 1 || root_page.page_num == t.root) {
-		pager.mark_dirty(t.pager, root_page.page_num)
-		pager.unpin_page(t.pager, root_page.page_num)
-		root_page, err = pager.allocate_page(t.pager)
-	}
-	if err != .None {
+	root_page, alloc_ok := alloc_data_root(t)
+	if !alloc_ok {
 		log.error("Error: Failed to allocate index root page")
 		return false, t.root, {}
 	}
@@ -165,9 +259,8 @@ exec_create_index :: proc(
 	pager.mark_dirty(t.pager, root_page.page_num)
 	index_root := root_page.page_num
 	data_tree := btree.init(t.pager, table.root_page)
-	cursor, c_err := btree.cursor_start(&data_tree)
-	if c_err != .None {
-		log.error("Error: Failed to scan table for index build")
+	cursor, scan_ok := start_build_scan(&data_tree)
+	if !scan_ok {
 		return false, t.root, {}
 	}
 
@@ -266,38 +359,32 @@ exec_create_index :: proc(
 		// above never enters); present only for exhaustiveness.
 		}
 
-		idx_tree := btree.init(t.pager, index_root)
-		new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
-		if build_err != .None {
-			log_create_index_fail(stmt.index_name, stmt.table_name)
+		built_root, build_ok := build_backfilled_index(
+			t,
+			index_root,
+			raws,
+			rids,
+			stmt.index_name,
+			stmt.table_name,
+		)
+		if !build_ok {
 			return false, t.root, {}
 		}
-		if new_root != 0 {
-			index_root = new_root
-		}
+		index_root = built_root
 	}
 
-	new_schema_root, ok := schema.update_index_def_cow(
+	new_schema_root, info, pub_ok := publish_index_def(
 		t,
 		table.name,
-		index_root,
 		stmt.columns[0],
 		stmt.index_name,
 		table.columns[col_idx].type,
-	)
-	if !ok {
-		log.error("Error: Failed to register index in schema")
-		return false, t.root, {}
-	}
-
-	log.infof(
-		"Created index '%s' on %s(%s) at Page %d",
-		stmt.index_name,
-		stmt.table_name,
-		stmt.columns[0],
 		index_root,
 	)
-	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}
+	if !pub_ok {
+		return false, t.root, {}
+	}
+	return true, new_schema_root, info
 }
 
 // exec_create_composite_index implements `CREATE INDEX name ON table (a, b,
@@ -339,11 +426,8 @@ exec_create_composite_index :: proc(
 	}
 
 	joined := strings.join(stmt.columns, ",", context.temp_allocator)
-	for def in table.indexes {
-		if def.name == stmt.index_name {
-			log.errorf("Error: Index already exists on %s: %s", stmt.table_name, stmt.index_name)
-			return false, t.root, {}
-		}
+	if index_name_taken(table, stmt.table_name, stmt.index_name) {
+		return false, t.root, {}
 	}
 
 	def := types.Index_Def {
@@ -354,13 +438,8 @@ exec_create_composite_index :: proc(
 		col_types = col_types,
 	}
 
-	root_page, err := pager.allocate_page(t.pager)
-	for err == .None && (root_page.page_num == 1 || root_page.page_num == t.root) {
-		pager.mark_dirty(t.pager, root_page.page_num)
-		pager.unpin_page(t.pager, root_page.page_num)
-		root_page, err = pager.allocate_page(t.pager)
-	}
-	if err != .None {
+	root_page, alloc_ok := alloc_data_root(t)
+	if !alloc_ok {
 		log.error("Error: Failed to allocate index root page")
 		return false, t.root, {}
 	}
@@ -374,9 +453,8 @@ exec_create_composite_index :: proc(
 	pager.mark_dirty(t.pager, root_page.page_num)
 	index_root := root_page.page_num
 	data_tree := btree.init(t.pager, table.root_page)
-	cursor, c_err := btree.cursor_start(&data_tree)
-	if c_err != .None {
-		log.error("Error: Failed to scan table for index build")
+	cursor, scan_ok := start_build_scan(&data_tree)
+	if !scan_ok {
 		return false, t.root, {}
 	}
 
@@ -414,38 +492,32 @@ exec_create_composite_index :: proc(
 			rids[i] = p.rid
 		}
 
-		idx_tree := btree.init(t.pager, index_root)
-		new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
-		if build_err != .None {
-			log_create_index_fail(stmt.index_name, stmt.table_name)
+		built_root, build_ok := build_backfilled_index(
+			t,
+			index_root,
+			raws,
+			rids,
+			stmt.index_name,
+			stmt.table_name,
+		)
+		if !build_ok {
 			return false, t.root, {}
 		}
-		if new_root != 0 {
-			index_root = new_root
-		}
+		index_root = built_root
 	}
 
-	new_schema_root, ok := schema.update_index_def_cow(
+	new_schema_root, info, pub_ok := publish_index_def(
 		t,
 		table.name,
-		index_root,
 		joined,
 		stmt.index_name,
 		col_types[0],
-	)
-	if !ok {
-		log.error("Error: Failed to register index in schema")
-		return false, t.root, {}
-	}
-
-	log.infof(
-		"Created index '%s' on %s(%s) at Page %d",
-		stmt.index_name,
-		stmt.table_name,
-		joined,
 		index_root,
 	)
-	return true, new_schema_root, Mutated_Table_Info{name = stmt.table_name, root = index_root}
+	if !pub_ok {
+		return false, t.root, {}
+	}
+	return true, new_schema_root, info
 }
 
 // exec_drop_index implements `DROP INDEX name [ON table]` — resolves the
@@ -957,24 +1029,62 @@ Composite_Bulk_Pair :: struct {
 	rid: types.Row_ID,
 }
 
-// collect_text_pairs projects one index's text values out of sorted infos,
-// skipping exactly what the per-row fan-out skips (same index_col_text
-// predicate, so NULLs and non-TEXT values never reach the index either way).
+// Bulk_Pair is one indexable (encoded key bytes, rowid) for bulk builds.
+// Keys arrive in codec order (binary for text, biased words for int, sort
+// words for real), so one byte-wise sort serves every kind; the per-row
+// fan-out twin keeps typed pairs because it encodes per row instead.
+Bulk_Pair :: struct {
+	raw: []u8,
+	rid: types.Row_ID,
+}
+
+// collect_bulk_pairs projects one index's values out of sorted infos as
+// encoded raws, skipping exactly what the per-row fan-out skips (same
+// index_col_* predicates: NULLs, mismatched classes, and NaN never reach
+// the index either way; integers in REAL positions arrive widened). Word
+// raws pack into one flat buffer (fixed size, never reallocated), so no
+// entry can dangle; text raws borrow infos like the typed twins did.
 @(private = "file")
-collect_text_pairs :: proc(
+collect_bulk_pairs :: proc(
 	table: types.Table,
 	column: string,
 	infos: []Insert_Row_Info,
-) -> [dynamic]Text_Bulk_Pair {
-	pairs := make([dynamic]Text_Bulk_Pair, 0, len(infos), context.temp_allocator)
-	for info in infos {
-		if text, ok := index_col_text(table, column, info.values); ok {
-			append(&pairs, Text_Bulk_Pair{text = text, rid = info.row_id})
+	col_type: types.Column_Type,
+) -> [dynamic]Bulk_Pair {
+	pairs := make([dynamic]Bulk_Pair, 0, len(infos), context.temp_allocator)
+	switch col_type {
+	case .TEXT:
+		for info in infos {
+			if text, ok := index_col_text(table, column, info.values); ok {
+				append(&pairs, Bulk_Pair{raw = transmute([]u8)text, rid = info.row_id})
+			}
 		}
+	case .INTEGER:
+		flat := make([]u8, 8 * len(infos), context.temp_allocator)
+		n := 0
+		for info in infos {
+			if v, ok := index_col_int(table, column, info.values); ok {
+				endian.unchecked_put_u64be(flat[8 * n:8 * n + 8], cell.int_bias_word(v))
+				append(&pairs, Bulk_Pair{raw = flat[8 * n:8 * n + 8], rid = info.row_id})
+				n += 1
+			}
+		}
+	case .REAL:
+		flat := make([]u8, 8 * len(infos), context.temp_allocator)
+		n := 0
+		for info in infos {
+			if v, ok := index_col_real(table, column, info.values); ok {
+				endian.unchecked_put_u64be(flat[8 * n:8 * n + 8], cell.real_sort_word(v))
+				append(&pairs, Bulk_Pair{raw = flat[8 * n:8 * n + 8], rid = info.row_id})
+				n += 1
+			}
+		}
+	case .BLOB:
+		// BLOB columns never index; callers keep the empty root.
 	}
 
-	slice.sort_by(pairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
-		if c := cell.bytes_compare(transmute([]u8)a.text, transmute([]u8)b.text); c != 0 {
+	slice.sort_by(pairs[:], proc(a, b: Bulk_Pair) -> bool {
+		if c := cell.bytes_compare(a.raw, b.raw); c != 0 {
 			return c < 0
 		}
 		return a.rid < b.rid
@@ -982,70 +1092,18 @@ collect_text_pairs :: proc(
 	return pairs
 }
 
-// collect_int_pairs projects one index's integer values out of sorted infos,
-// skipping exactly what the per-row fan-out will skip (same index_col_int
-// predicate, so NULLs and non-integers never reach the index either way).
+// fanout_bulk_sorted builds one fresh index bottom-up from sorted raw
+// pairs (codec order, then rowid). The caller gates on emptiness; zero
+// pairs keep the existing root (nothing to index, same as the loop
+// inserting nothing). The bulk builder infers the kind from the
+// pre-stamped root.
 @(private = "file")
-collect_int_pairs :: proc(
-	table: types.Table,
-	column: string,
-	infos: []Insert_Row_Info,
-) -> [dynamic]Int_Bulk_Pair {
-	pairs := make([dynamic]Int_Bulk_Pair, 0, len(infos), context.temp_allocator)
-	for info in infos {
-		if v, ok := index_col_int(table, column, info.values); ok {
-			append(&pairs, Int_Bulk_Pair{val = v, rid = info.row_id})
-		}
-	}
-
-	slice.sort_by(pairs[:], proc(a, b: Int_Bulk_Pair) -> bool {
-		if a.val != b.val {
-			return a.val < b.val
-		}
-		return a.rid < b.rid
-	})
-	return pairs
-}
-
-// collect_real_pairs projects one index's real values out of sorted infos,
-// skipping exactly what the per-row fan-out will skip (same index_col_real
-// predicate, so NULLs, NaN, and non-numerics never reach the index either
-// way; integers arrive widened).
-@(private = "file")
-collect_real_pairs :: proc(
-	table: types.Table,
-	column: string,
-	infos: []Insert_Row_Info,
-) -> [dynamic]Real_Bulk_Pair {
-	pairs := make([dynamic]Real_Bulk_Pair, 0, len(infos), context.temp_allocator)
-	for info in infos {
-		if v, ok := index_col_real(table, column, info.values); ok {
-			append(&pairs, Real_Bulk_Pair{val = v, rid = info.row_id})
-		}
-	}
-
-	slice.sort_by(pairs[:], proc(a, b: Real_Bulk_Pair) -> bool {
-		wa := cell.real_sort_word(a.val)
-		wb := cell.real_sort_word(b.val)
-		if wa != wb {
-			return wa < wb
-		}
-		return a.rid < b.rid
-	})
-	return pairs
-}
-
-// fanout_bulk_text builds one fresh text index bottom-up from sorted pairs
-// (codec order: text bytes, then rowid). The caller gates on emptiness;
-// zero pairs keep the existing root (nothing to index, same as the loop
-// inserting nothing).
-@(private = "file")
-fanout_bulk_text :: proc(
+fanout_bulk_sorted :: proc(
 	t: ^btree.Tree,
 	table: types.Table,
 	def: types.Index_Def,
 	index_root: u32,
-	pairs: [dynamic]Text_Bulk_Pair,
+	pairs: [dynamic]Bulk_Pair,
 ) -> (
 	u32,
 	bool,
@@ -1054,88 +1112,10 @@ fanout_bulk_text :: proc(
 		return index_root, true
 	}
 
-	texts := make([][]u8, len(pairs), context.temp_allocator)
-	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
-	for p, i in pairs {
-		texts[i] = transmute([]u8)p.text
-		rids[i] = p.rid
-	}
-
-	idx_tree := btree.init(t.pager, index_root)
-	new_root, build_err := btree.build_sorted_text_index(&idx_tree, texts, rids)
-	if build_err != .None {
-		log_bulk_index_fail(table.name)
-		return index_root, false
-	}
-	if new_root == 0 {
-		return index_root, true
-	}
-	return new_root, true
-}
-
-// fanout_bulk_int builds one fresh int index bottom-up from sorted pairs
-// (codec order: biased value, then rowid). Same empty contract as the text
-// twin; the bulk builder infers INT from the pre-stamped root.
-@(private = "file")
-fanout_bulk_int :: proc(
-	t: ^btree.Tree,
-	table: types.Table,
-	def: types.Index_Def,
-	index_root: u32,
-	pairs: [dynamic]Int_Bulk_Pair,
-) -> (
-	u32,
-	bool,
-) {
-	if len(pairs) == 0 {
-		return index_root, true
-	}
-
-	words := make([][8]u8, len(pairs), context.temp_allocator)
 	raws := make([][]u8, len(pairs), context.temp_allocator)
 	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
 	for p, i in pairs {
-		endian.unchecked_put_u64be(words[i][:], cell.int_bias_word(p.val))
-		raws[i] = words[i][:]
-		rids[i] = p.rid
-	}
-
-	idx_tree := btree.init(t.pager, index_root)
-	new_root, build_err := btree.build_sorted_text_index(&idx_tree, raws, rids)
-	if build_err != .None {
-		log_bulk_index_fail(table.name)
-		return index_root, false
-	}
-	if new_root == 0 {
-		return index_root, true
-	}
-	return new_root, true
-}
-
-// fanout_bulk_real builds one fresh real index bottom-up from sorted pairs
-// (codec order: sort word, then rowid). Same empty contract as the int
-// twin; the bulk builder infers REAL from the pre-stamped root.
-@(private = "file")
-fanout_bulk_real :: proc(
-	t: ^btree.Tree,
-	table: types.Table,
-	def: types.Index_Def,
-	index_root: u32,
-	pairs: [dynamic]Real_Bulk_Pair,
-) -> (
-	u32,
-	bool,
-) {
-	if len(pairs) == 0 {
-		return index_root, true
-	}
-
-	words := make([][8]u8, len(pairs), context.temp_allocator)
-	raws := make([][]u8, len(pairs), context.temp_allocator)
-	rids := make([]types.Row_ID, len(pairs), context.temp_allocator)
-	for p, i in pairs {
-		endian.unchecked_put_u64be(words[i][:], cell.real_sort_word(p.val))
-		raws[i] = words[i][:]
+		raws[i] = p.raw
 		rids[i] = p.rid
 	}
 
@@ -1329,18 +1309,8 @@ commit_bulk_inserts :: proc(
 				cpairs := collect_composite_pairs(table, def, infos)
 				idx_roots[i], ok = fanout_bulk_composite(t, table, def, idx_roots[i], cpairs)
 			} else {
-				switch def.col_type {
-				case .INTEGER:
-					ipairs := collect_int_pairs(table, def.column, infos)
-					idx_roots[i], ok = fanout_bulk_int(t, table, def, idx_roots[i], ipairs)
-				case .REAL:
-					rpairs := collect_real_pairs(table, def.column, infos)
-					idx_roots[i], ok = fanout_bulk_real(t, table, def, idx_roots[i], rpairs)
-				case .TEXT:
-					pairs := collect_text_pairs(table, def.column, infos)
-					idx_roots[i], ok = fanout_bulk_text(t, table, def, idx_roots[i], pairs)
-				case .BLOB:
-				}
+				pairs := collect_bulk_pairs(table, def.column, infos, def.col_type)
+				idx_roots[i], ok = fanout_bulk_sorted(t, table, def, idx_roots[i], pairs)
 			}
 
 			if !ok {
@@ -1944,6 +1914,45 @@ pending_reoverlay :: proc(t: ^btree.Tree, pending: ^Pending_Roots, cache: ^schem
 	}
 }
 
+// resolve_pk_or_chain resolves a mutation's target rowid: PK equality
+// first, then an AND-chain rowid seek (recheck armed when the chain leaves
+// a rest filter, installed into filt). empty short-circuits to zero rows
+// (caller logs its verb); ok=false fails the mutation loudly.
+@(private = "file")
+resolve_pk_or_chain :: proc(
+	tbl: types.Table,
+	table_name: string,
+	filter: Maybe(parser.Where_Clause),
+	filt: ^Mutation_Filter,
+) -> (
+	rid: types.Row_ID,
+	recheck: bool,
+	empty: bool,
+	ok: bool,
+) {
+	target_rowid, pk_ok := pk_target_rowid(tbl, table_name, filter)
+	if !pk_ok {
+		if filt_clause, has_f := filter.?; has_f {
+			if rs, chain_ok := try_rowid_chain_seek(
+				tbl,
+				filt_clause,
+				table_name,
+				context.temp_allocator,
+			); chain_ok {
+				if rs.empty {
+					return 0, false, true, true
+				}
+
+				filt.filter = rs.rest
+				return rs.rid, rs.rest.root != nil, false, true
+			}
+			return 0, false, false, false
+		}
+		return 0, false, false, false
+	}
+	return target_rowid, false, false, true
+}
+
 // update_by_pk handles the PK fast path. Returns handled=false to fall
 // through to the full scan when no usable PK lookup exists.
 @(private = "file")
@@ -1959,33 +1968,18 @@ update_by_pk :: proc(
 	root: u32,
 	info: Mutated_Table_Info,
 ) {
-	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
-	recheck := false
-	if !pk_ok {
-		if filt, has_f := plan.filter.?; has_f {
-			if rs, chain_ok := try_rowid_chain_seek(
-				plan.tbl,
-				filt,
-				plan.table_name,
-				context.temp_allocator,
-			); chain_ok {
-				if rs.empty {
-					log.info("Updated 0 rows.")
-					return true, true, t.root, {}
-				}
-
-				target_rowid, pk_ok = rs.rid, true
-				plan.filt.filter = rs.rest
-				recheck = rs.rest.root != nil
-			} else {
-				return false, false, 0, {}
-			}
-		} else {
-			return false, false, 0, {}
-		}
-	}
-	if !pk_ok {
+	target_rowid, recheck, empty, rok := resolve_pk_or_chain(
+		plan.tbl,
+		plan.table_name,
+		plan.filter,
+		&plan.filt,
+	)
+	if !rok {
 		return false, false, 0, {}
+	}
+	if empty {
+		log.info("Updated 0 rows.")
+		return true, true, t.root, {}
 	}
 
 	c, find_err := btree.tree_find(table_tree, target_rowid, context.temp_allocator)
@@ -2240,33 +2234,18 @@ delete_by_pk :: proc(
 	root: u32,
 	info: Mutated_Table_Info,
 ) {
-	target_rowid, pk_ok := pk_target_rowid(plan.tbl, plan.table_name, plan.filter)
-	recheck := false
-	if !pk_ok {
-		if filt, has_f := plan.filter.?; has_f {
-			if rs, chain_ok := try_rowid_chain_seek(
-				plan.tbl,
-				filt,
-				plan.table_name,
-				context.temp_allocator,
-			); chain_ok {
-				if rs.empty {
-					log.info("Deleted 0 rows.")
-					return true, true, t.root, {}
-				}
-
-				target_rowid, pk_ok = rs.rid, true
-				plan.filt.filter = rs.rest
-				recheck = rs.rest.root != nil
-			} else {
-				return false, false, 0, {}
-			}
-		} else {
-			return false, false, 0, {}
-		}
-	}
-	if !pk_ok {
+	target_rowid, recheck, empty, rok := resolve_pk_or_chain(
+		plan.tbl,
+		plan.table_name,
+		plan.filter,
+		&plan.filt,
+	)
+	if !rok {
 		return false, false, 0, {}
+	}
+	if empty {
+		log.info("Deleted 0 rows.")
+		return true, true, t.root, {}
 	}
 	if recheck {
 		c, find_err := btree.tree_find(table_tree, target_rowid, context.temp_allocator)

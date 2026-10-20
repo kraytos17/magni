@@ -47,6 +47,15 @@ log_table_not_found :: proc(name: string) {
 	log.errorf("Error: Table not found: %s", name)
 }
 
+// has_order_by reports whether the statement carries an ORDER BY clause.
+@(private)
+has_order_by :: proc(stmt: parser.Select_Stmt) -> bool {
+	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
+		return true
+	}
+	return false
+}
+
 // Column_Resolver resolves column names to absolute indices within a query's
 // combined column array. Build it once per statement (from the combined
 // columns + per-table ranges) and reuse it for every condition, ORDER BY,

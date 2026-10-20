@@ -1,6 +1,6 @@
 // Index routing tests: each query runs against indexed docs and unindexed
-// docs2 (table name swapped) and must return identical output. Twin setup
-// and comparison live in routing_twin_setup/routing_twin below.
+// docs2 (table name swapped) and must return identical output via
+// assert_twin. Twin setup lives in routing_twin_setup below.
 package tests
 
 import "core:fmt"
@@ -27,7 +27,7 @@ routing_twin_setup :: proc(t: ^testing.T, name: string) -> ^db.Database {
 		db.execute(d, "CREATE INDEX i_body ON docs (body);") == .None,
 		"create index",
 	)
-	bodies := []string{"alpha", "bb", "alpha", "", "gamma"}
+	bodies := INDEX_BODIES
 	for i in 1 ..= 60 {
 		free_all(context.temp_allocator)
 		body := bodies[(i - 1) % len(bodies)]
@@ -48,33 +48,6 @@ routing_twin_setup :: proc(t: ^testing.T, name: string) -> ^db.Database {
 	return d
 }
 
-// routing_twin runs each query against indexed docs and unindexed docs2
-// (table name swapped) and demands identical output.
-routing_twin :: proc(t: ^testing.T, d: ^db.Database, queries: []string) {
-	for q in queries {
-		free_all(context.temp_allocator)
-		twin, _ := strings.replace(q, "docs", "docs2", 1, context.temp_allocator)
-		a := db.query(d, q)
-		b := db.query(d, twin)
-		testing.expect(t, a.ok && b.ok, "twin queries succeed")
-		if !a.ok || !b.ok {
-			continue
-		}
-		testing.expectf(t, len(a.rows) == len(b.rows), "twin row counts match for %s", q)
-		for i in 0 ..< min(len(a.rows), len(b.rows)) {
-			testing.expect(t, len(a.rows[i]) == len(b.rows[i]), "twin widths match")
-			for j in 0 ..< min(len(a.rows[i]), len(b.rows[i])) {
-				testing.expect(
-					t,
-					twin_values_equal(a.rows[i][j], b.rows[i][j]),
-					"twin values match",
-				)
-			}
-		}
-	}
-	free_all(context.temp_allocator)
-}
-
 @(test)
 test_index_or_union :: proc(t: ^testing.T) {
 	// Flat OR of usable same-column disjuncts unions candidate sets
@@ -85,12 +58,12 @@ test_index_or_union :: proc(t: ^testing.T) {
 
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'a' OR body = 'b';"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'a' OR body = 'b';"),
 		"INDEX SCAN ON docs USING body (or, fetch)",
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(
+		explain(
 			t,
 			d,
 			"EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha' OR body IN ('bb', 'gamma');",
@@ -111,7 +84,7 @@ test_index_or_union :: proc(t: ^testing.T) {
 			break
 		}
 	}
-	routing_twin(
+	assert_twin(
 		t,
 		d,
 		[]string {
@@ -126,6 +99,8 @@ test_index_or_union :: proc(t: ^testing.T) {
 			"SELECT id FROM docs WHERE (body = 'alpha' OR body = 'bb') AND v > 1;",
 			"SELECT id FROM docs WHERE body = 'alpha' OR body LIKE '%pha';",
 		},
+		"docs",
+		"docs2",
 	)
 }
 
@@ -138,7 +113,7 @@ test_index_and_intersect :: proc(t: ^testing.T) {
 
 	testing.expect_value(
 		t,
-		drop_index_plan(
+		explain(
 			t,
 			d,
 			"EXPLAIN SELECT id FROM docs WHERE body LIKE 'a%' AND body IN ('alpha', 'bb');",
@@ -147,10 +122,10 @@ test_index_and_intersect :: proc(t: ^testing.T) {
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'alpha' AND v > 1;"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'alpha' AND v > 1;"),
 		"INDEX SCAN ON docs USING body (eq, fetch)",
 	)
-	routing_twin(
+	assert_twin(
 		t,
 		d,
 		[]string {
@@ -161,6 +136,8 @@ test_index_and_intersect :: proc(t: ^testing.T) {
 			"SELECT id FROM docs WHERE body = 'alpha' AND body = 'bb';",
 			"SELECT id FROM docs WHERE body LIKE 'a%' AND v > 1 AND body IN ('alpha', 'gamma');",
 		},
+		"docs",
+		"docs2",
 	)
 }
 
@@ -188,7 +165,7 @@ test_index_in_cap :: proc(t: ^testing.T) {
 
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE body IN ('alpha', 'bb');"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE body IN ('alpha', 'bb');"),
 		"INDEX SCAN ON docs USING body (in, fetch)",
 	)
 	over := build_in(129)
@@ -198,8 +175,8 @@ test_index_in_cap :: proc(t: ^testing.T) {
 	// NOTE: no delete — fmt.tprintf's backing must not be heap-freed
 	// (tracker flags it); temp reclaims at scope end.
 	over_explain := fmt.tprintf("EXPLAIN %s", over)
-	testing.expect_value(t, drop_index_plan(t, d, over_explain), "FULL SCAN ON docs")
-	routing_twin(t, d, []string{over, q128})
+	testing.expect_value(t, explain(t, d, over_explain), "FULL SCAN ON docs")
+	assert_twin(t, d, []string{over, q128}, "docs", "docs2")
 }
 
 @(test)
@@ -211,20 +188,20 @@ test_index_covering_col :: proc(t: ^testing.T) {
 
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT body FROM docs WHERE body = 'alpha';"),
+		explain(t, d, "EXPLAIN SELECT body FROM docs WHERE body = 'alpha';"),
 		"INDEX SCAN ON docs USING body (eq, covering)",
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT body FROM docs WHERE body = 'a' OR body = 'bb';"),
+		explain(t, d, "EXPLAIN SELECT body FROM docs WHERE body = 'a' OR body = 'bb';"),
 		"INDEX SCAN ON docs USING body (or, covering)",
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT body FROM docs WHERE body LIKE 'a%';"),
+		explain(t, d, "EXPLAIN SELECT body FROM docs WHERE body LIKE 'a%';"),
 		"INDEX SCAN ON docs USING body (prefix, fetch)",
 	)
-	routing_twin(
+	assert_twin(
 		t,
 		d,
 		[]string {
@@ -237,6 +214,8 @@ test_index_covering_col :: proc(t: ^testing.T) {
 			"SELECT body AS b FROM docs WHERE body = 'gamma';",
 			"SELECT body FROM docs WHERE body = 'missing';",
 		},
+		"docs",
+		"docs2",
 	)
 }
 
@@ -271,18 +250,18 @@ test_multi_index :: proc(t: ^testing.T) {
 	// Both route independently.
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE title = 't1';"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE title = 't1';"),
 		"INDEX SCAN ON docs USING title (eq, fetch)",
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'beta';"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'beta';"),
 		"INDEX SCAN ON docs USING body (eq, fetch)",
 	)
 	// AND across the two indexes intersects.
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE title = 't1' AND body = 'beta';"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE title = 't1' AND body = 'beta';"),
 		"INDEX SCAN ON docs USING title, body (and, fetch)",
 	)
 	got := db.query(d, "SELECT id FROM docs WHERE title = 't1' AND body = 'beta' ORDER BY id;")
@@ -310,12 +289,12 @@ test_multi_index :: proc(t: ^testing.T) {
 	testing.expect(t, db.execute(d, "DROP INDEX i_body;") == .None, "drop body index")
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE title = 't1';"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE title = 't1';"),
 		"INDEX SCAN ON docs USING title (eq, fetch)",
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'beta';"),
+		explain(t, d, "EXPLAIN SELECT id FROM docs WHERE body = 'beta';"),
 		"FULL SCAN ON docs",
 	)
 	got3 := db.query(d, "SELECT id FROM docs WHERE title = 't1' ORDER BY id;")
@@ -431,7 +410,7 @@ test_index_bulk_text_matches_loop :: proc(t: ^testing.T) {
 		"SELECT id FROM docs WHERE body LIKE 'a%';",
 		"SELECT COUNT(*) FROM docs;",
 	}
-	routing_twin(t, d, queries)
+	assert_twin(t, d, queries, "docs", "docs2")
 }
 
 @(test)

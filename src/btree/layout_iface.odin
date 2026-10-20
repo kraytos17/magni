@@ -102,20 +102,7 @@ Key_Kind :: enum u8 {
 // encoding, so a second entry would be speculative duplication — split them
 // if an encoding ever divorces order from layout.
 key_compare :: #force_inline proc "contextless" (kind: Key_Kind, a: []u8, b: []u8) -> int {
-	res := 0
-	switch kind {
-	case .Rowid:
-		res = mem.compare(a, b)
-	case .Text:
-		res = cell.text_index_compare(a, b)
-	case .Int:
-		res = cell.int_index_compare(a, b)
-	case .Real:
-		res = cell.real_index_compare(a, b)
-	case .Composite:
-		res = cell.composite_compare(a, b)
-	}
-	return res
+	return KEY_CODECS[kind].compare(a, b)
 }
 
 // key_shared_prefix_len returns the common byte prefix of a,b capped at
@@ -126,28 +113,61 @@ key_shared_prefix_len :: #force_inline proc "contextless" (
 	b: []u8,
 	max_cap: int,
 ) -> int {
-	res := 0
-	switch kind {
-	case .Rowid:
-		res = rowid_shared_prefix_len(a, b, max_cap)
-	case .Text:
-		res = cell.text_index_shared_prefix(a, b, max_cap)
-	case .Int:
-		res = cell.int_index_shared_prefix(a, b, max_cap)
-	case .Real:
-		res = cell.real_index_shared_prefix(a, b, max_cap)
-	case .Composite:
-		res = cell.composite_shared_prefix(a, b, max_cap)
-	}
-	return res
+	return KEY_CODECS[kind].shared_prefix(a, b, max_cap)
 }
 
-// key_encode maps (value,rowid) -> key bytes, returning bytes written.
-// Only the codec's own storage class encodes (i64 for Rowid and Int,
-// string for Text, f64 for Real); everything else — including NULL —
-// reports ok=false so the caller SKIPS the entry instead of failing the row.
-// Composite takes value tuples, which this scalar signature cannot express:
-// composite callers encode through cell.composite_encode directly.
+// Key_Encode_Fn encodes one (value, rowid) key into buf.
+Key_Encode_Fn :: proc "contextless" (val: types.Value, rowid: types.Row_ID, buf: []u8) -> (int, bool)
+
+// Key_Len_Fn returns one value's wire length (0 when not indexed).
+Key_Len_Fn :: proc "contextless" (val: types.Value) -> int
+
+// Key_Compare_Fn three-way-orders two encoded keys.
+Key_Compare_Fn :: proc "contextless" (a: []u8, b: []u8) -> int
+
+// Key_Prefix_Fn returns the common byte-prefix length, capped.
+Key_Prefix_Fn :: proc "contextless" (a: []u8, b: []u8, max_cap: int) -> int
+
+// Key_Codec is one kind's codec entry points. The table below replaces
+// four parallel kind switches (encode, length, compare, prefix) with one
+// row each; the key_* forwarders keep stable names for the iface tests.
+// Cold dispatch only — per-probe hot paths call cell codecs directly, so
+// the table costs no inlining on any hot chain.
+Key_Codec :: struct {
+	encode:        Key_Encode_Fn,
+	encoded_len:   Key_Len_Fn,
+	compare:       Key_Compare_Fn,
+	shared_prefix: Key_Prefix_Fn,
+}
+
+// key_encode_none refuses composite tuples under the scalar signature;
+// key_len_zero reports the composite arity gap. Table stubs, not branches.
+@(private = "file")
+key_encode_none :: proc "contextless" (val: types.Value, rowid: types.Row_ID, buf: []u8) -> (int, bool) {
+	return 0, false
+}
+
+// key_len_zero reports the composite arity gap (see key_encode_none).
+@(private = "file")
+key_len_zero :: proc "contextless" (val: types.Value) -> int {
+	return 0
+}
+
+// KEY_CODECS is the per-kind codec table, indexed by Key_Kind.
+@(private = "file")
+KEY_CODECS := [Key_Kind]Key_Codec {
+	.Rowid     = {rowid_encode, rowid_encoded_len, mem.compare, rowid_shared_prefix_len},
+	.Text      = {cell.text_index_encode, cell.text_index_encoded_len, cell.text_index_compare, cell.text_index_shared_prefix},
+	.Int       = {cell.int_index_encode, cell.int_index_encoded_len, cell.int_index_compare, cell.int_index_shared_prefix},
+	.Real      = {cell.real_index_encode, cell.real_index_encoded_len, cell.real_index_compare, cell.real_index_shared_prefix},
+	.Composite = {key_encode_none, key_len_zero, cell.composite_compare, cell.composite_shared_prefix},
+}
+// key_encode maps (value,rowid) -> key bytes via the codec table, returning
+// bytes written. Only the codec's own storage class encodes; everything
+// else — including NULL — reports ok=false so the caller SKIPS the entry
+// instead of failing the row. Composite takes value tuples, which this
+// scalar signature cannot express: composite callers encode through
+// cell.composite_encode directly.
 @(require_results)
 key_encode :: proc "contextless" (
 	kind: Key_Kind,
@@ -158,40 +178,15 @@ key_encode :: proc "contextless" (
 	int,
 	bool,
 ) {
-	n, ok := 0, false
-	switch kind {
-	case .Rowid:
-		n, ok = rowid_encode(val, rowid, buf)
-	case .Text:
-		n, ok = cell.text_index_encode(val, rowid, buf)
-	case .Int:
-		n, ok = cell.int_index_encode(val, rowid, buf)
-	case .Real:
-		n, ok = cell.real_index_encode(val, rowid, buf)
-	case .Composite:
-		n, ok = 0, false
-	}
-	return n, ok
+	return KEY_CODECS[kind].encode(val, rowid, buf)
 }
 
-// key_encoded_len returns the wire length for val, or 0 when val is not
-// indexed by this codec (caller skips). Composite is always 0 here (tuple
-// arity is not expressible); composite callers use composite_encoded_len.
+// key_encoded_len returns the wire length for val via the codec table, or
+// 0 when val is not indexed by this codec (caller skips). Composite is
+// always 0 here (tuple arity is not expressible); composite callers use
+// composite_encoded_len.
 key_encoded_len :: #force_inline proc "contextless" (kind: Key_Kind, val: types.Value) -> int {
-	res := 0
-	switch kind {
-	case .Rowid:
-		res = rowid_encoded_len(val)
-	case .Text:
-		res = cell.text_index_encoded_len(val)
-	case .Int:
-		res = cell.int_index_encoded_len(val)
-	case .Real:
-		res = cell.real_index_encoded_len(val)
-	case .Composite:
-		res = 0
-	}
-	return res
+	return KEY_CODECS[kind].encoded_len(val)
 }
 
 // ---- Rowid codec arms (primary keys) --------------------------------------

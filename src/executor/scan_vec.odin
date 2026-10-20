@@ -470,10 +470,7 @@ fetch_single_rows_vec :: proc(
 ) {
 	tbl := table
 	table_tree := btree.init(t.pager, tbl.root_page)
-	has_order := false
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		has_order = true
-	}
+	has_order := has_order_by(stmt)
 
 	pushable := limit_pushable(stmt, has_order)
 	max_rows := stmt.limit if pushable else nil
@@ -482,152 +479,101 @@ fetch_single_rows_vec :: proc(
 		{table_name = from_name, start_col = 0, col_count = len(tbl.columns)},
 	}
 
-	if wc, has_wc := stmt.where_clause.?; has_wc {
-		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
-			srows, scols, sranges, sok := seek_single_row(
-				&table_tree,
-				rowid,
-				tbl.columns,
-				single_range,
-				allocator,
-			)
+	route := resolve_single_route(tbl, stmt, tbl_name, stmt.from_alias)
+	switch route.kind {
+	case .Pk_Seek, .Rowid_Seek:
+		srows, scols, sranges, sok := seek_single_row(
+			&table_tree,
+			route.rowid,
+			tbl.columns,
+			single_range,
+			allocator,
+		)
 
-			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
+		rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
+		return
+	case .Rowid_Chain:
+		if route.chain.empty {
+			rows, cols, ranges, projected, ok =
+				make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, false, true
 			return
 		}
-		if rowid, seek_ok := try_rowid_lookup(tbl, wc, from_name); seek_ok {
-			srows, scols, sranges, sok := seek_single_row(
-				&table_tree,
-				rowid,
-				tbl.columns,
-				single_range,
-				allocator,
-			)
 
-			rows, cols, ranges, projected, ok = srows, scols, sranges, false, sok
+		frows, f_ok := seek_rowid_filtered(
+			t,
+			&table_tree,
+			tbl,
+			route.chain,
+			single_range,
+			allocator,
+		)
+		if !f_ok {
+			rows, cols, ranges, projected, ok = nil, nil, nil, false, false
 			return
 		}
-		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, from_name, allocator); chain_ok {
-			if rs.empty {
-				rows, cols, ranges, projected, ok =
-					make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, false, true
-				return
-			}
 
-			frows, f_ok := seek_rowid_filtered(t, &table_tree, tbl, rs, single_range, allocator)
-			if !f_ok {
-				rows, cols, ranges, projected, ok = nil, nil, nil, false, false
-				return
-			}
+		rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, true
+		return
+	case .Covering_Rowid:
+		crows, ccols, cranges, cok := fetch_covering_index(
+			t,
+			&tbl,
+			route.plan,
+			from_name,
+			allocator,
+		)
 
-			rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, true
-			return
-		}
-		if is_covering_rowid_select(stmt, tbl.columns) {
-			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
-				crows, ccols, cranges, cok := fetch_covering_index(
-					t,
-					&tbl,
-					plan,
-					from_name,
-					allocator,
-				)
+		rows, cols, ranges, projected, ok = crows, ccols, cranges, false, cok
+		return
+	case .Covering_Col:
+		crows, ccols, cranges, cok := fetch_covering_col(
+			t,
+			&tbl,
+			route.plan,
+			stmt.columns[0],
+			from_name,
+			allocator,
+			route.ordered,
+			route.desc,
+		)
 
-				rows, cols, ranges, projected, ok = crows, ccols, cranges, false, cok
-				return
-			}
-		}
-		if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias);
-		   idx_ok && covering_known_values(plan) && is_covering_col_select(stmt, plan) {
-			ordered := covering_order_satisfies(
-				plan,
-				stmt,
-				stmt.columns[0],
-				tbl_name,
-				stmt.from_alias,
-			)
+		rows, cols, ranges, projected, ok = crows, ccols, cranges, false, cok
+		return
+	case .Fetch:
+		wc, _ := stmt.where_clause.?
+		frows, f_ok := fetch_index_rows(
+			t,
+			&table_tree,
+			&tbl,
+			route.plan,
+			&wc,
+			single_range,
+			allocator,
+			cache,
+			route.ordered,
+			route.desc,
+		)
 
-			cdesc := false
-			if oc, has_o := stmt.order_by.?; has_o && len(oc) == 1 {
-				cdesc = oc[0].desc
-			}
+		rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
+		return
+	case .Order_Scan:
+		oc, _ := stmt.order_by.?
+		frows, f_ok := fetch_order_scan(
+			t,
+			&table_tree,
+			&tbl,
+			route.plan,
+			oc,
+			tbl.columns,
+			single_range,
+			allocator,
+			cache,
+			route.desc,
+		)
 
-			crows, ccols, cranges, cok := fetch_covering_col(
-				t,
-				&tbl,
-				plan,
-				stmt.columns[0],
-				from_name,
-				allocator,
-				ordered,
-				cdesc,
-			)
-
-			rows, cols, ranges, projected, ok = crows, ccols, cranges, false, cok
-			return
-		}
-		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
-			if index_order_satisfies(plan, stmt, tbl_name, stmt.from_alias, &tbl) {
-				desc := false
-				if oc, has_o := stmt.order_by.?; has_o && len(oc) >= 1 {
-					desc = oc[0].desc
-				}
-
-				frows, f_ok := fetch_index_rows_ordered(
-					t,
-					&table_tree,
-					&tbl,
-					plan,
-					&wc,
-					single_range,
-					allocator,
-					cache,
-					desc,
-				)
-
-				rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
-				return
-			}
-
-			frows, f_ok := fetch_index_rows(
-				t,
-				&table_tree,
-				&tbl,
-				plan,
-				&wc,
-				single_range,
-				allocator,
-				cache,
-			)
-
-			rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
-			return
-		}
-	}
-
-	// WHERE-less ORDER BY on indexed columns arrives in key order (NULL
-	// leftovers merged per the clause); the sort skips through its
-	// ordered-input check, else answers as today.
-	if _, has_wc := stmt.where_clause.?; !has_wc {
-		if oc, has_o := stmt.order_by.?; has_o && len(oc) > 0 {
-			if oplan, ook := resolve_order_scan(tbl, stmt, tbl_name, stmt.from_alias); ook {
-				frows, f_ok := fetch_order_scan(
-					t,
-					&table_tree,
-					&tbl,
-					oplan,
-					oc,
-					tbl.columns,
-					single_range,
-					allocator,
-					cache,
-					oc[0].desc,
-				)
-
-				rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
-				return
-			}
-		}
+		rows, cols, ranges, projected, ok = frows, tbl.columns, single_range, false, f_ok
+		return
+	case .Scan:
 	}
 
 	vrows, out_cols, vproj, scan_err := scan_table_vec(

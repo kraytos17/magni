@@ -28,33 +28,14 @@ make_where_clause :: proc(cond: parser.Condition) -> parser.Where_Clause {
 // setup_executor_env opens a pager, initializes a slotdir schema root, and
 // boots the schema catalog. Pair with teardown_executor_env.
 setup_executor_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
-	mute_test_logging()
-	filename := mint_db_filename("test_exec_", test_name)
-	clean_db_files(filename)
-
-	p, err := pager.open(filename)
-	testing.expect(t, err == .None, "Failed to open pager")
-
-	schema_page, alloc_err := pager.allocate_page(p)
-	testing.expect(t, alloc_err == .None, "Failed to allocate schema page")
-	// Schema roots are slotdir post-flip, matching what production creators write.
-	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
-		testing.fail_now(t, "Failed to init slotdir schema page")
-	}
-	pager.mark_dirty(p, schema_page.page_num)
-	pager.unpin_page(p, schema_page.page_num)
-
-	tree := btree.init(p, schema_page.page_num)
-	ok := schema.init(&tree)
-	testing.expect(t, ok, "Failed to init schema")
-	return tree, filename
+	p, filename := open_test_pager(t, "test_exec_", test_name)
+	return boot_schema_catalog(t, p), filename
 }
 
 // teardown_executor_env closes the pager and removes the database, its WAL
 // sidecar, and the owned filename.
 teardown_executor_env :: proc(tree: btree.Tree, filename: string) {
-	pager.close(tree.pager)
-	drop_db_files(filename)
+	destroy_test_pager(tree.pager, filename)
 }
 
 // make_create_stmt builds a canned users-like CREATE (id/name/score) for

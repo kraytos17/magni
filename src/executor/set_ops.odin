@@ -40,6 +40,32 @@ union_all_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 	append(a, ..b)
 }
 
+// fp_find_equal probes a fingerprint row index for a values-equal row,
+// skipping consumed members. Returns the matched row position, or -1.
+// Shared probe+verify core behind the set ops: fingerprint-only matching
+// would merge distinct rows on hash collision.
+@(private = "file")
+fp_find_equal :: proc(
+	index: ^Fp_Buckets,
+	rows: []Row_Entry,
+	fp: u64,
+	vals: []types.Value,
+	consumed: []bool = nil,
+) -> int {
+	if h, has := fp_buckets_probe(index, fp); has {
+		for n := h; n != -1; n = index.next[n] {
+			i := index.rows[n]
+			if consumed != nil && consumed[i] {
+				continue
+			}
+			if values_equal_full(vals, rows[i].values) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 // union_op appends b to a, deduplicating the combined result (distinct rows kept once).
 // Uses fingerprint buckets with values_equal verification (same pattern as
 // intersect/except) — a bare map[u64]bool would silently drop distinct rows
@@ -61,16 +87,7 @@ union_op :: proc(a: ^[dynamic]Row_Entry, b: []Row_Entry) {
 	}
 	for r in b {
 		fp := row_fingerprint(r.values)
-		is_dup := false
-		if h, has := fp_buckets_probe(&index, fp); has {
-			for n := h; n != -1; n = index.next[n] {
-				if values_equal_full(r.values, a^[index.rows[n]].values) {
-					is_dup = true
-					break
-				}
-			}
-		}
-		if is_dup {
+		if fp_find_equal(&index, a^[:], fp, r.values) >= 0 {
 			continue
 		}
 
@@ -90,14 +107,8 @@ intersect :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
-		fp := row_fingerprint(ra.values)
-		if h, has := fp_buckets_probe(&index, fp); has {
-			for n := h; n != -1; n = index.next[n] {
-				if values_equal_full(ra.values, b[index.rows[n]].values) {
-					append(&out, ra)
-					break
-				}
-			}
+		if fp_find_equal(&index, b, row_fingerprint(ra.values), ra.values) >= 0 {
+			append(&out, ra)
 		}
 	}
 	return dedup_rows(out[:])
@@ -118,21 +129,10 @@ intersect_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	consumed := make([]bool, len(b), context.temp_allocator)
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
-		fp := row_fingerprint(ra.values)
-		h, has := fp_buckets_probe(&seen_b, fp)
-		if !has {
-			continue
-		}
-		for n := h; n != -1; n = seen_b.next[n] {
-			bi := seen_b.rows[n]
-			if consumed[bi] {
-				continue
-			}
-			if values_equal_full(ra.values, b[bi].values) {
-				consumed[bi] = true
-				append(&out, ra)
-				break
-			}
+		if bi := fp_find_equal(&seen_b, b, row_fingerprint(ra.values), ra.values, consumed);
+		   bi >= 0 {
+			consumed[bi] = true
+			append(&out, ra)
 		}
 	}
 	return out[:]
@@ -149,17 +149,7 @@ except :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
-		fp := row_fingerprint(ra.values)
-		found := false
-		if h, has := fp_buckets_probe(&index, fp); has {
-			for n := h; n != -1; n = index.next[n] {
-				if values_equal_full(ra.values, b[index.rows[n]].values) {
-					found = true
-					break
-				}
-			}
-		}
-		if !found {
+		if fp_find_equal(&index, b, row_fingerprint(ra.values), ra.values) < 0 {
 			append(&out, ra)
 		}
 	}
@@ -180,24 +170,12 @@ except_all :: proc(a: []Row_Entry, b: []Row_Entry) -> []Row_Entry {
 	consumed := make([]bool, len(b), context.temp_allocator)
 	out := make([dynamic]Row_Entry, context.temp_allocator)
 	for ra in a {
-		fp := row_fingerprint(ra.values)
-		skipped := false
-		if h, has := fp_buckets_probe(&seen_b, fp); has {
-			for n := h; n != -1; n = seen_b.next[n] {
-				bi := seen_b.rows[n]
-				if consumed[bi] {
-					continue
-				}
-				if values_equal_full(ra.values, b[bi].values) {
-					consumed[bi] = true
-					skipped = true
-					break
-				}
-			}
+		if bi := fp_find_equal(&seen_b, b, row_fingerprint(ra.values), ra.values, consumed);
+		   bi >= 0 {
+			consumed[bi] = true
+			continue
 		}
-		if !skipped {
-			append(&out, ra)
-		}
+		append(&out, ra)
 	}
 	return out[:]
 }
@@ -311,16 +289,7 @@ exec_compound_data :: proc(
 			return nil, nil, false
 		}
 	}
-	if limit, has_limit := compound.limit.?; has_limit {
-		off := u64(0)
-		if o, has_off := compound.offset.?; has_off {
-			off = o
-		}
-
-		start := int(min(off, u64(len(rows))))
-		end := int(min(off + limit, u64(len(rows))))
-		rows = rows[start:end]
-	}
+	rows = apply_limit_offset(compound.limit, compound.offset, rows)
 	return rows, acc_cols, true
 }
 

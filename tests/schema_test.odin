@@ -14,34 +14,14 @@ import "src:types"
 // setup_schema_env opens a pager, initializes a slotdir schema root, and
 // boots the schema catalog on it. Pair with teardown_schema_env.
 setup_schema_env :: proc(t: ^testing.T, test_name: string) -> (btree.Tree, string) {
-	mute_test_logging()
-	safe_filename := mint_db_filename("test_schema_", test_name)
-	clean_db_files(safe_filename)
-
-	p, err := pager.open(safe_filename)
-	testing.expect(t, err == nil, "Failed to open pager")
-
-	schema_page, aerr := pager.allocate_page(p)
-	testing.expect(t, aerr == .None, "Failed to allocate schema page")
-	// Schema roots are slotdir post-flip, matching what production creators write.
-	if !btree.init_slot_leaf_page(schema_page.data, schema_page.page_num) {
-		testing.fail_now(t, "Failed to init slotdir schema page")
-	}
-
-	pager.mark_dirty(p, schema_page.page_num)
-	pager.unpin_page(p, schema_page.page_num)
-
-	tree := btree.init(p, schema_page.page_num)
-	ok := schema.init(&tree)
-	testing.expect(t, ok, "Failed to init schema B-Tree")
-	return tree, safe_filename
+	p, filename := open_test_pager(t, "test_schema_", test_name)
+	return boot_schema_catalog(t, p), filename
 }
 
 // teardown_schema_env closes the pager and removes the database, its WAL
 // sidecar, and the owned filename.
 teardown_schema_env :: proc(tree: btree.Tree, filename: string) {
-	_ = pager.close(tree.pager)
-	drop_db_files(filename)
+	destroy_test_pager(tree.pager, filename)
 }
 
 @(test)

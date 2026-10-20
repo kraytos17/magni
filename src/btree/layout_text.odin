@@ -54,10 +54,11 @@ Text_Slot :: struct #packed {
 }
 #assert(size_of(Text_Slot) == 4)
 
-// init_text_leaf_page zeroes and headers a fresh LEAF_TEXT page.
-// Same short-buffer contract as init_slot_leaf_page.
-@(require_results)
-init_text_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
+// init_leaf_as zeroes and headers a fresh secondary-index leaf page of
+// the given kind. Shared core behind the per-kind leaf shims (test-pinned
+// names, setup_tree_with proc values); the kind tag is the only difference.
+@(private = "file")
+init_leaf_as :: proc "contextless" (pt: Page_Type, data: []u8, page_id: u32) -> bool {
 	off := get_page_header_offset(page_id)
 	if len(data) < off + TEXT_LEAF_FIXED {
 		return false
@@ -65,12 +66,39 @@ init_text_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 
 	mem.zero_slice(data[off:])
 	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .LEAF_TEXT
+	header.page_type = pt
 	header.first_freeblock = 0
 	header.cell_count = 0
 	header.cell_content_offset = PAGE_SIZE
 	header.fragmented_bytes = 0
 	return true
+}
+
+// init_interior_as zeroes and headers a fresh secondary-index interior page
+// of the given kind. Shared core behind the per-kind interior shims; the
+// kind tag is the only difference.
+@(private = "file")
+init_interior_as :: proc "contextless" (pt: Page_Type, data: []u8, page_id: u32) -> bool {
+	off := get_page_header_offset(page_id)
+	if len(data) < off + size_of(Leaf_Header) {
+		return false
+	}
+
+	mem.zero_slice(data[off:])
+	header := (^Leaf_Header)(raw_data(data[off:]))
+	header.page_type = pt
+	header.first_freeblock = 0
+	header.cell_count = 0
+	header.cell_content_offset = PAGE_SIZE
+	header.fragmented_bytes = 0
+	return true
+}
+
+// init_text_leaf_page zeroes and headers a fresh LEAF_TEXT page.
+// Same short-buffer contract as init_slot_leaf_page.
+@(require_results)
+init_text_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
+	return init_leaf_as(.LEAF_TEXT, data, page_id)
 }
 
 // init_int_leaf_page zeroes and headers a fresh LEAF_INT page: identical
@@ -78,30 +106,15 @@ init_text_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
 // from layout_for_page) with the int page type stamped.
 @(require_results)
 init_int_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + TEXT_LEAF_FIXED {
-		return false
-	}
-
-	mem.zero_slice(data[off:])
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .LEAF_INT
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	return true
+	return init_leaf_as(.LEAF_INT, data, page_id)
 }
 
 // text_entry_area_end is where the slot array ends (cells must start at or
 // past it). Error source for corrupt prefix_len/count — callers fail closed.
 @(require_results)
 text_entry_area_end :: proc "contextless" (data: []u8, id: Page_Id) -> (int, Error) {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_leaf(data, u32(id))
 	if hdr == nil {
-		return 0, .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return 0, .Invalid_Page_Header
 	}
 
@@ -121,11 +134,8 @@ text_entry_area_end :: proc "contextless" (data: []u8, id: Page_Id) -> (int, Err
 // text_prefix returns the page's shared prefix (borrowed — dies on move).
 @(require_results)
 text_prefix :: proc "contextless" (data: []u8, id: Page_Id) -> ([]u8, Error) {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_leaf(data, u32(id))
 	if hdr == nil {
-		return nil, .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return nil, .Invalid_Page_Header
 	}
 
@@ -154,11 +164,8 @@ text_entry_at :: proc "contextless" (
 	rowid: types.Row_ID,
 	err: Error,
 ) {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_leaf(data, u32(id))
 	if hdr == nil {
-		return nil, 0, .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return nil, 0, .Invalid_Page_Header
 	}
 	if intrinsics.unlikely(i < 0 || i >= int(hdr.cell_count)) {
@@ -226,11 +233,8 @@ text_lower_bound :: proc "contextless" (
 	int,
 	Error,
 ) {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_leaf(data, u32(id))
 	if hdr == nil {
-		return 0, .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return 0, .Invalid_Page_Header
 	}
 
@@ -375,11 +379,8 @@ text_build_from_sorted :: proc "contextless" (
 // reconstructs) — writers own content, the validator owns structure.
 @(require_results)
 text_validate_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_leaf(data, u32(id))
 	if hdr == nil {
-		return .Invalid_Page_Header
-	}
-	if !is_index_leaf_type(hdr.page_type) {
 		return .Invalid_Page_Header
 	}
 
@@ -428,38 +429,14 @@ text_validate_leaf :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
 // Same short-buffer contract as init_text_leaf_page.
 @(require_results)
 init_text_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Leaf_Header) {
-		return false
-	}
-
-	mem.zero_slice(data[off:])
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .TEXT_INTERIOR
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	return true
+	return init_interior_as(.TEXT_INTERIOR, data, page_id)
 }
 
 // init_int_interior_page zeroes and headers a fresh INT_INTERIOR page:
 // identical geometry to TEXT_INTERIOR with the int page type stamped.
 @(require_results)
 init_int_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Leaf_Header) {
-		return false
-	}
-
-	mem.zero_slice(data[off:])
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .INT_INTERIOR
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	return true
+	return init_interior_as(.INT_INTERIOR, data, page_id)
 }
 
 // init_real_leaf_page zeroes and headers a fresh LEAF_REAL page: identical
@@ -467,38 +444,14 @@ init_int_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool 
 // from layout_for_page) with the real page type stamped.
 @(require_results)
 init_real_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + TEXT_LEAF_FIXED {
-		return false
-	}
-
-	mem.zero_slice(data[off:])
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .LEAF_REAL
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	return true
+	return init_leaf_as(.LEAF_REAL, data, page_id)
 }
 
 // init_real_interior_page zeroes and headers a fresh REAL_INTERIOR page:
 // identical geometry to TEXT_INTERIOR with the real page type stamped.
 @(require_results)
 init_real_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Leaf_Header) {
-		return false
-	}
-
-	mem.zero_slice(data[off:])
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .REAL_INTERIOR
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	return true
+	return init_interior_as(.REAL_INTERIOR, data, page_id)
 }
 
 // init_composite_leaf_page zeroes and headers a fresh LEAF_COMPOSITE page:
@@ -506,19 +459,7 @@ init_real_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool
 // per-page kind from layout_for_page) with the composite page type stamped.
 @(require_results)
 init_composite_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + TEXT_LEAF_FIXED {
-		return false
-	}
-
-	mem.zero_slice(data[off:])
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .LEAF_COMPOSITE
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	return true
+	return init_leaf_as(.LEAF_COMPOSITE, data, page_id)
 }
 
 // init_composite_interior_page zeroes and headers a fresh
@@ -526,19 +467,7 @@ init_composite_leaf_page :: proc "contextless" (data: []u8, page_id: u32) -> boo
 // composite page type stamped.
 @(require_results)
 init_composite_interior_page :: proc "contextless" (data: []u8, page_id: u32) -> bool {
-	off := get_page_header_offset(page_id)
-	if len(data) < off + size_of(Leaf_Header) {
-		return false
-	}
-
-	mem.zero_slice(data[off:])
-	header := (^Leaf_Header)(raw_data(data[off:]))
-	header.page_type = .COMPOSITE_INTERIOR
-	header.first_freeblock = 0
-	header.cell_count = 0
-	header.cell_content_offset = PAGE_SIZE
-	header.fragmented_bytes = 0
-	return true
+	return init_interior_as(.COMPOSITE_INTERIOR, data, page_id)
 }
 
 // init_index_leaf_page zeroes and headers a fresh secondary-index leaf of
@@ -596,11 +525,8 @@ text_interior_children_off :: #force_inline proc "contextless" (
 	id: Page_Id,
 	n: int,
 ) -> int {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_interior(data, u32(id))
 	if hdr == nil {
-		return -1
-	}
-	if !is_index_interior_type(hdr.page_type) {
 		return -1
 	}
 
@@ -616,11 +542,8 @@ text_interior_children_off :: #force_inline proc "contextless" (
 // rightmost child — same contract as the vtable child_at).
 @(require_results)
 text_interior_child_at :: proc "contextless" (data: []u8, id: Page_Id, i: int) -> (u32, Error) {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_interior(data, u32(id))
 	if hdr == nil {
-		return 0, .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_interior_type(hdr.page_type)) {
 		return 0, .Invalid_Page_Header
 	}
 
@@ -648,11 +571,8 @@ text_interior_sep_at :: proc "contextless" (
 	key: []u8,
 	err: Error,
 ) {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_interior(data, u32(id))
 	if hdr == nil {
-		return nil, .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_interior_type(hdr.page_type)) {
 		return nil, .Invalid_Page_Header
 	}
 
@@ -871,11 +791,8 @@ text_interior_build_from_sorted :: proc "contextless" (
 // Never rejects a page text_interior_build_from_sorted can produce.
 @(require_results)
 text_validate_interior :: proc "contextless" (data: []u8, id: Page_Id) -> Error {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_interior(data, u32(id))
 	if hdr == nil {
-		return .Invalid_Page_Header
-	}
-	if !is_index_interior_type(hdr.page_type) {
 		return .Invalid_Page_Header
 	}
 
@@ -925,11 +842,8 @@ text_slot_insert :: proc "contextless" (
 	off: int,
 	elen: int,
 ) -> Error {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_leaf(data, u32(id))
 	if hdr == nil {
-		return .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return .Invalid_Page_Header
 	}
 
@@ -977,11 +891,8 @@ text_interior_child_store :: proc "contextless" (
 	idx: int,
 	child: u32,
 ) -> Error {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_interior(data, u32(id))
 	if hdr == nil {
-		return .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_interior_type(hdr.page_type)) {
 		return .Invalid_Page_Header
 	}
 
@@ -1005,11 +916,8 @@ text_interior_child_store :: proc "contextless" (
 // (the caller reclaims the cell).
 @(require_results)
 text_slot_delete :: proc "contextless" (data: []u8, id: Page_Id, idx: int) -> Error {
-	hdr := get_header(data, u32(id))
+	hdr := require_index_leaf(data, u32(id))
 	if hdr == nil {
-		return .Invalid_Page_Header
-	}
-	if intrinsics.unlikely(!is_index_leaf_type(hdr.page_type)) {
 		return .Invalid_Page_Header
 	}
 

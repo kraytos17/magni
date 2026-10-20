@@ -598,17 +598,8 @@ handle_interior_child_split :: proc(
 		old_sep := keys[idx]
 		keys[idx] = insert_key
 		children[idx] = child_result.new_page
-		nkeys := make([dynamic]types.Row_ID, 0, len(keys) + 1, context.temp_allocator)
-		append(&nkeys, ..keys[:idx + 1])
-		append(&nkeys, old_sep)
-		append(&nkeys, ..keys[idx + 1:])
-
-		nchildren := make([dynamic]u32, 0, len(children) + 1, context.temp_allocator)
-		append(&nchildren, ..children[:idx + 1])
-		append(&nchildren, child_result.right_page)
-		append(&nchildren, ..children[idx + 1:])
-
-		keys, children = nkeys, nchildren
+		keys = splice_insert(keys, idx, old_sep)
+		children = splice_insert(children, idx, child_result.right_page)
 		insert_key = old_sep
 	}
 

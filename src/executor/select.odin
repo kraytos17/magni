@@ -125,10 +125,7 @@ fetch_single_rows :: proc(
 ) {
 	tbl := table
 	table_tree := btree.init(t.pager, tbl.root_page)
-	has_order := false
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		has_order = true
-	}
+	has_order := has_order_by(stmt)
 
 	// LIMIT pushdown is only valid for plain row-returning scans; see
 	// limit_pushable for the rule (shared with the vector fetch path).
@@ -139,119 +136,77 @@ fetch_single_rows :: proc(
 		{table_name = from_name, start_col = 0, col_count = len(tbl.columns)},
 	}
 
-	if wc, has_wc := stmt.where_clause.?; has_wc {
-		if rowid, seek_ok := try_pk_lookup(tbl, wc, tbl_name, stmt.from_alias); seek_ok {
-			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
+	route := resolve_single_route(tbl, stmt, tbl_name, stmt.from_alias)
+	switch route.kind {
+	case .Pk_Seek, .Rowid_Seek:
+		return seek_single_row(&table_tree, route.rowid, tbl.columns, single_range, allocator)
+	case .Rowid_Chain:
+		if route.chain.empty {
+			return make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, true
 		}
-		if rowid, seek_ok := try_rowid_lookup(tbl, wc, from_name); seek_ok {
-			return seek_single_row(&table_tree, rowid, tbl.columns, single_range, allocator)
-		}
-		if rs, chain_ok := try_rowid_chain_seek(tbl, wc, from_name, allocator); chain_ok {
-			if rs.empty {
-				return make([dynamic]Row_Entry, allocator)[:], tbl.columns, single_range, true
-			}
 
-			frows, f_ok := seek_rowid_filtered(t, &table_tree, tbl, rs, single_range, allocator)
-			if !f_ok {
-				return nil, nil, nil, false
-			}
-			return frows, tbl.columns, single_range, true
+		frows, f_ok := seek_rowid_filtered(
+			t,
+			&table_tree,
+			tbl,
+			route.chain,
+			single_range,
+			allocator,
+		)
+		if !f_ok {
+			return nil, nil, nil, false
 		}
-		if is_covering_rowid_select(stmt, tbl.columns) {
-			if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
-				return fetch_covering_index(t, &tbl, plan, from_name, allocator)
-			}
+		return frows, tbl.columns, single_range, true
+	case .Covering_Rowid:
+		return fetch_covering_index(t, &tbl, route.plan, from_name, allocator)
+	case .Covering_Col:
+		return fetch_covering_col(
+			t,
+			&tbl,
+			route.plan,
+			stmt.columns[0],
+			from_name,
+			allocator,
+			route.ordered,
+			route.desc,
+		)
+	case .Fetch:
+		wc, _ := stmt.where_clause.?
+		rows, f_ok := fetch_index_rows(
+			t,
+			&table_tree,
+			&tbl,
+			route.plan,
+			&wc,
+			single_range,
+			allocator,
+			cache,
+			route.ordered,
+			route.desc,
+		)
+		if !f_ok {
+			return nil, nil, nil, false
 		}
-		if plan, idx_ok := resolve_index_covering(tbl, wc, tbl_name, stmt.from_alias);
-		   idx_ok && covering_known_values(plan) && is_covering_col_select(stmt, plan) {
-			ordered := covering_order_satisfies(
-				plan,
-				stmt,
-				stmt.columns[0],
-				tbl_name,
-				stmt.from_alias,
-			)
-
-			desc := false
-			if oc, has_o := stmt.order_by.?; has_o && len(oc) == 1 {
-				desc = oc[0].desc
-			}
-			return fetch_covering_col(
-				t,
-				&tbl,
-				plan,
-				stmt.columns[0],
-				from_name,
-				allocator,
-				ordered,
-				desc,
-			)
+		return rows, tbl.columns, single_range, true
+	case .Order_Scan:
+		oc, _ := stmt.order_by.?
+		orows, or_ok := fetch_order_scan(
+			t,
+			&table_tree,
+			&tbl,
+			route.plan,
+			oc,
+			tbl.columns,
+			single_range,
+			allocator,
+			cache,
+			route.desc,
+		)
+		if !or_ok {
+			return nil, nil, nil, false
 		}
-		if plan, idx_ok := resolve_index_fetch(tbl, wc, tbl_name, stmt.from_alias); idx_ok {
-			if index_order_satisfies(plan, stmt, tbl_name, stmt.from_alias, &tbl) {
-				desc := false
-				if oc, has_o := stmt.order_by.?; has_o && len(oc) >= 1 {
-					desc = oc[0].desc
-				}
-
-				rows, f_ok := fetch_index_rows_ordered(
-					t,
-					&table_tree,
-					&tbl,
-					plan,
-					&wc,
-					single_range,
-					allocator,
-					cache,
-					desc,
-				)
-				if !f_ok {
-					return nil, nil, nil, false
-				}
-				return rows, tbl.columns, single_range, true
-			}
-
-			rows, f_ok := fetch_index_rows(
-				t,
-				&table_tree,
-				&tbl,
-				plan,
-				&wc,
-				single_range,
-				allocator,
-				cache,
-			)
-			if !f_ok {
-				return nil, nil, nil, false
-			}
-			return rows, tbl.columns, single_range, true
-		}
-	}
-	// WHERE-less ORDER BY on indexed columns arrives in key order (NULL
-	// leftovers merged per the clause); the sort skips through its
-	// ordered-input check, else answers as today.
-	if _, has_wc := stmt.where_clause.?; !has_wc {
-		if oc, has_o := stmt.order_by.?; has_o {
-			if oplan, ok := resolve_order_scan(tbl, stmt, tbl_name, stmt.from_alias); ok {
-				odesc := oc[0].desc if len(oc) > 0 else false
-				orows, or_ok := fetch_order_scan(
-					t,
-					&table_tree,
-					&tbl,
-					oplan,
-					oc,
-					tbl.columns,
-					single_range,
-					allocator,
-					cache,
-					odesc,
-				)
-				if !or_ok {
-					return nil, nil, nil, false
-				}
-				return orows, tbl.columns, single_range, true
-			}
-		}
+		return orows, tbl.columns, single_range, true
+	case .Scan:
 	}
 
 	rows, scan_err := scan_table(
@@ -478,10 +433,7 @@ exec_select_single_data :: proc(
 	}
 
 	table_tree := btree.init(t.pager, table.root_page)
-	has_order := false
-	if order_clause, has_o := stmt.order_by.?; has_o && len(order_clause) > 0 {
-		has_order = true
-	}
+	has_order := has_order_by(stmt)
 	// Fast path: SELECT COUNT(*) FROM table (exactly one projected column, no
 	// WHERE, GROUP BY, DISTINCT, ORDER BY, LIMIT). See is_count_star_query.
 	if is_count_star_query(stmt, has_order) {
@@ -538,7 +490,7 @@ finish_select :: proc(
 			out = dedup_rows(out)
 		}
 
-		out = apply_limit_offset(stmt, out)
+		out = apply_limit_offset(stmt.limit, stmt.offset, out)
 		return out, cols, true
 	}
 
@@ -588,7 +540,7 @@ finish_select :: proc(
 		out = dedup_rows(out)
 	}
 
-	out = apply_limit_offset(stmt, out)
+	out = apply_limit_offset(stmt.limit, stmt.offset, out)
 	return out, proj_cols, true
 }
 
@@ -613,26 +565,27 @@ finish_projected :: proc(
 		out = dedup_rows(out)
 	}
 
-	out = apply_limit_offset(stmt, out)
+	out = apply_limit_offset(stmt.limit, stmt.offset, out)
 	return out, proj_cols, true
 }
 
 // apply_limit_offset slices rows to [offset, offset+limit). No LIMIT clause
-// leaves the rows untouched.
+// leaves the rows untouched. Takes the bare clauses so SELECT and compound
+// tails share one slicer.
 @(private)
-apply_limit_offset :: proc(stmt: parser.Select_Stmt, out: []Row_Entry) -> []Row_Entry {
-	limit, has_limit := stmt.limit.?
+apply_limit_offset :: proc(limit: Maybe(u64), offset: Maybe(u64), out: []Row_Entry) -> []Row_Entry {
+	lim, has_limit := limit.?
 	if !has_limit {
 		return out
 	}
 
 	off := u64(0)
-	if o, has_off := stmt.offset.?; has_off {
+	if o, has_off := offset.?; has_off {
 		off = o
 	}
 
 	start := int(min(off, u64(len(out))))
-	end := int(min(off + limit, u64(len(out))))
+	end := int(min(off + lim, u64(len(out))))
 	return out[start:end]
 }
 

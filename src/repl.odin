@@ -106,9 +106,10 @@ complete_sql_ident :: proc(word: string, user_data: rawptr, allocator: mem.Alloc
 	return cands[:]
 }
 
-// repl_submit appends a line to the pending statement; a ;-terminated line
-// runs the buffered SQL (history first), reports errors canonically, and
-// resets the buffer for the next statement.
+// repl_submit runs a ;-terminated buffered statement (history first),
+// reports errors canonically, and resets the buffer for the next
+// statement. The loop already appended every line including this one, so
+// nothing is written here.
 @(private = "file")
 repl_submit :: proc(
 	database: ^db.Database,
@@ -117,8 +118,6 @@ repl_submit :: proc(
 	line: string,
 	trimmed: string,
 ) {
-	strings.write_string(query_buffer, line)
-	strings.write_byte(query_buffer, '\n')
 	if strings.has_suffix(trimmed, ";") {
 		full_sql := strings.to_string(query_buffer^)
 		linedit.history_add(&ed.history, strings.trim_space(full_sql))
@@ -201,11 +200,23 @@ Dot_Match :: enum u8 {
 	Prefix,
 }
 
+// Dot_Section groups dot-commands for .help output (Commands,
+// Transactions, Snapshots, General — same headings print_help used).
+Dot_Section :: enum u8 {
+	Commands,
+	Transactions,
+	Snapshots,
+	General,
+}
+
 Dot_Command :: struct {
-	name   : string,
-	match  : Dot_Match,
-	handler: Dot_Handler,
-	usage  : string,
+	name      : string,
+	match     : Dot_Match,
+	handler   : Dot_Handler,
+	usage     : string,
+	section   : Dot_Section, // .help group
+	help_label: string, // display form (".dump <table>", not ".dump ")
+	help      : string, // one-line description; "" renders nothing (.quit)
 }
 
 // .exit/.quit: the only handler returning exit=true.
@@ -232,9 +243,7 @@ dot_cmd_version :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command)
 // .tables: lists catalog tables via admin.
 @(private = "file")
 dot_cmd_tables :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
-	if err := admin.list_tables(database); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	}
+	report_result(admin.list_tables(database))
 	return false
 }
 
@@ -302,9 +311,7 @@ dot_cmd_tree_page :: proc(
 	if len(parts) == 2 {
 		page_num, num_ok := dot_uint_arg(parts, 1)
 		if num_ok {
-			if err := admin.print_tree_page(database, u32(page_num)); err != .None {
-				log.errorf("%s", db.db_error_string(err))
-			}
+			report_result(admin.print_tree_page(database, u32(page_num)))
 		}
 	} else {
 		fmt.println(cmd.usage)
@@ -509,7 +516,7 @@ dot_cmd_snapshot_restore :: proc(
 }
 
 // .expire [keep]: reclaims snapshots older than the newest keep (default
-// 100). keep parses as SIGNED (negatives reach the clamp in
+// DEFAULT_KEEP). keep parses as SIGNED (negatives reach the clamp in
 // expire_snapshots_impl); unparsable input keeps the default silently.
 @(private = "file")
 dot_cmd_expire :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) -> (exit: bool) {
@@ -534,9 +541,7 @@ dot_cmd_rollforward :: proc(
 ) -> (
 	exit: bool,
 ) {
-	if err := db.rollforward(database); err != .None {
-		log.errorf("%s", db.db_error_string(err))
-	}
+	report_result(db.rollforward(database))
 	return false
 }
 
@@ -598,36 +603,37 @@ dot_cmd_blob :: proc(database: ^db.Database, args: string, cmd: ^Dot_Command) ->
 	return false
 }
 
-// Exact-match commands (full input line must equal name).
-@(private = "file")
+// Exact-match commands (full input line must equal name). Package-visible:
+// print_help renders reference rows from the same table.
+@(private)
 DOT_COMMANDS := []Dot_Command {
-	{".exit", .Exact, dot_cmd_exit, ""},
-	{".quit", .Exact, dot_cmd_exit, ""},
-	{".help", .Exact, dot_cmd_help, ""},
-	{".version", .Exact, dot_cmd_version, ""},
-	{".tables", .Exact, dot_cmd_tables, ""},
-	{".schema", .Exact, dot_cmd_schema, ""},
-	{".debug_schema", .Exact, dot_cmd_debug_schema, ""},
-	{".tree_page", .Exact, dot_cmd_tree_page, "Usage: .tree_page <page_num>"},
-	{".snapshot_debug", .Exact, dot_cmd_snapshot_debug, ""},
-	{".stats", .Exact, dot_cmd_stats, ""},
-	{".begin", .Exact, dot_cmd_begin, ""},
-	{".commit", .Exact, dot_cmd_commit, ""},
-	{".rollback", .Exact, dot_cmd_rollback, ""},
-	{".snapshots", .Exact, dot_cmd_snapshots, ""},
-	{".snapdiff", .Exact, dot_cmd_snapdiff, "Usage: .snapdiff <older_id> <newer_id>"},
-	{".checkpoint", .Exact, dot_cmd_checkpoint, ""},
-	{".vacuum", .Exact, dot_cmd_vacuum, ""},
-	{".integrity", .Exact, dot_cmd_integrity, ""},
-	{".pager_stats", .Exact, dot_cmd_pager_stats, ""},
-	{".pager_layout", .Exact, dot_cmd_pager_layout, ""},
-	{".rollforward", .Exact, dot_cmd_rollforward, ""},
-	{".blob", .Exact, dot_cmd_blob, "Usage: .blob [hex|size]"},
-	{".snapshot tag ", .Prefix, dot_cmd_snapshot_tag, "Usage: .snapshot tag <id> <label>"},
-	{".snapshot restore ", .Prefix, dot_cmd_snapshot_restore, "Usage: .snapshot restore <id>"},
-	{".expire", .Prefix, dot_cmd_expire, ""},
-	{".dump ", .Prefix, dot_cmd_dump, "Usage: .dump <table_name>"},
-	{".desc ", .Prefix, dot_cmd_desc, "Usage: .desc <table_name>"},
+	{".tables", .Exact, dot_cmd_tables, "", .Commands, ".tables", "List all tables"},
+	{".schema", .Exact, dot_cmd_schema, "", .Commands, ".schema", "Show CREATE TABLE statements"},
+	{".debug_schema", .Exact, dot_cmd_debug_schema, "", .Commands, ".debug_schema", "Show low-level schema details"},
+	{".blob", .Exact, dot_cmd_blob, "Usage: .blob [hex|size]", .Commands, ".blob hex|size", "Show BLOBs as hex literals or size"},
+	{".stats", .Exact, dot_cmd_stats, "", .Commands, ".stats", "Database statistics"},
+	{".integrity", .Exact, dot_cmd_integrity, "", .Commands, ".integrity", "Verify all B-trees"},
+	{".checkpoint", .Exact, dot_cmd_checkpoint, "", .Commands, ".checkpoint", "Flush pages + garbage collect"},
+	{".vacuum", .Exact, dot_cmd_vacuum, "", .Commands, ".vacuum", "Rebuild into packed pages"},
+	{".tree_page", .Exact, dot_cmd_tree_page, "Usage: .tree_page <page_num>", .Commands, ".tree_page <n>", "Print B-tree page structure"},
+	{".snapshot_debug", .Exact, dot_cmd_snapshot_debug, "", .Commands, ".snapshot_debug", "Show verbose snapshot chain dump"},
+	{".pager_stats", .Exact, dot_cmd_pager_stats, "", .Commands, ".pager_stats", "Print the pager's hot-path counters"},
+	{".pager_layout", .Exact, dot_cmd_pager_layout, "", .Commands, ".pager_layout", "Print pager struct sizes/alignments"},
+	{".begin", .Exact, dot_cmd_begin, "", .Transactions, ".begin", "Begin a transaction"},
+	{".commit", .Exact, dot_cmd_commit, "", .Transactions, ".commit", "Commit the current transaction"},
+	{".rollback", .Exact, dot_cmd_rollback, "", .Transactions, ".rollback", "Roll back the current transaction"},
+	{".snapshots", .Exact, dot_cmd_snapshots, "", .Snapshots, ".snapshots", "Show snapshot chain"},
+	{".snapdiff", .Exact, dot_cmd_snapdiff, "Usage: .snapdiff <older_id> <newer_id>", .Snapshots, ".snapdiff <a> <b>", "Diff two snapshots"},
+	{".rollforward", .Exact, dot_cmd_rollforward, "", .Snapshots, ".rollforward", "Advance to latest snapshot"},
+	{".version", .Exact, dot_cmd_version, "", .General, ".version", "Print version"},
+	{".exit", .Exact, dot_cmd_exit, "", .General, ".exit / .quit", "Exit"},
+	{".quit", .Exact, dot_cmd_exit, "", .General, "", ""},
+	{".help", .Exact, dot_cmd_help, "", .General, ".help", "This message"},
+	{".snapshot tag ", .Prefix, dot_cmd_snapshot_tag, "Usage: .snapshot tag <id> <label>", .Snapshots, ".snapshot tag <id> <lbl>", "Tag a snapshot"},
+	{".snapshot restore ", .Prefix, dot_cmd_snapshot_restore, "Usage: .snapshot restore <id>", .Snapshots, ".snapshot restore <id>", "Restore to a snapshot"},
+	{".expire", .Prefix, dot_cmd_expire, "", .Snapshots, ".expire [keep]", "Expire old snapshots (default 20)"},
+	{".dump ", .Prefix, dot_cmd_dump, "Usage: .dump <table_name>", .Commands, ".dump <table>", "Dump all rows"},
+	{".desc ", .Prefix, dot_cmd_desc, "Usage: .desc <table_name>", .Commands, ".desc <table>", "Describe table columns"},
 }
 
 // handle_dot_command dispatches one dot-command line: exact entries match

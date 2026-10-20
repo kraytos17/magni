@@ -14,21 +14,13 @@ import "src:types"
 // create_test_pager_env opens a pager on an owned file and asserts it is
 // usable. Pair with destroy_test_pager_env.
 create_test_pager_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
-	mute_test_logging()
-	filename := mint_db_filename("test_pager_", test_name)
-	clean_db_files(filename)
-
-	p, err := pager.open(filename)
-	testing.expect(t, err == .None, "Failed to open pager")
-	testing.expect(t, p != nil, "Pager should not be nil")
-	return p, filename
+	return open_test_pager(t, "test_pager_", test_name)
 }
 
 // destroy_test_pager_env closes the pager and removes the database, its
 // WAL sidecar, and the owned filename.
 destroy_test_pager_env :: proc(p: ^pager.Pager, filename: string) {
-	_ = pager.close(p)
-	drop_db_files(filename)
+	destroy_test_pager(p, filename)
 }
 
 @(test)
@@ -228,21 +220,13 @@ test_allocate_page_zero_fails :: proc(t: ^testing.T) {
 // create_test_wal_env is create_test_pager_env with WAL-sidecar naming
 // ("test_wal_"). Pair with destroy_test_wal_env.
 create_test_wal_env :: proc(t: ^testing.T, test_name: string) -> (^pager.Pager, string) {
-	mute_test_logging()
-	filename := mint_db_filename("test_wal_", test_name)
-	clean_db_files(filename)
-
-	p, err := pager.open(filename)
-	testing.expect(t, err == .None, "WAL: Failed to open pager with WAL")
-	testing.expect(t, p != nil, "WAL: Pager should not be nil")
-	return p, filename
+	return open_test_pager(t, "test_wal_", test_name)
 }
 
 // destroy_test_wal_env closes the pager and removes the database, its
 // WAL sidecar, and the owned filename.
 destroy_test_wal_env :: proc(p: ^pager.Pager, filename: string) {
-	_ = pager.close(p)
-	drop_db_files(filename)
+	destroy_test_pager(p, filename)
 }
 
 @(test)

@@ -4,10 +4,7 @@ import "core:fmt"
 import "core:log"
 import "core:sync"
 import "src:executor"
-import "src:pager"
-import "src:schema"
 import "src:snapshot"
-import "src:types"
 
 // Reclaim_Decision explains an expire call's fate. Skips stay .None
 // (warned no-ops, never errors) so existing flows that expire mid-txn keep
@@ -108,6 +105,20 @@ snapshot_tag :: proc(db: ^Database, snapshot_id: u64, tag: string) -> DB_Error {
 	return .None
 }
 
+// adopt_snapshot points the database at an adopted snapshot page: MAIN,
+// latest, and schema root follow, the header persists through the WAL,
+// and the verb names the operation for the user. Shared tail behind
+// restore (undo-log push first) and rollforward (pop first) so the two
+// can never adopt differently.
+@(private)
+adopt_snapshot :: proc(db: ^Database, page: u32, id: u64, schema_root: u32, verb: string) {
+	record_main_ref(db, id)
+	db.latest_snapshot = page
+	db.schema_root_page = schema_root
+	wal_update_header(db)
+	fmt.printf("%s to snapshot %d (schema root %d)\n", verb, id, schema_root)
+}
+
 // snapshot_restore points the database at an earlier snapshot: pushes the
 // current MAIN ref onto the undo log, repoints MAIN, and adopts the
 // snapshot's schema root + latest_snapshot, then persists the header
@@ -135,12 +146,7 @@ snapshot_restore :: proc(db: ^Database, snapshot_id: u64) -> DB_Error {
 		snapshot.log_push(db.pager, db.refs_page, current_id)
 	}
 
-	record_main_ref(db, snapshot_id)
-	db.latest_snapshot = snap_page
-	db.schema_root_page = snap_h.schema_root
-
-	wal_update_header(db)
-	fmt.printf("Restored to snapshot %d (schema root %d)\n", snapshot_id, snap_h.schema_root)
+	adopt_snapshot(db, snap_page, snapshot_id, snap_h.schema_root, "Restored")
 	return .None
 }
 
@@ -180,12 +186,7 @@ rollforward :: proc(db: ^Database) -> DB_Error {
 		return .Snapshot_Failed
 	}
 
-	record_main_ref(db, prev_id)
-	db.latest_snapshot = target_page
-	db.schema_root_page = target_h.schema_root
-
-	wal_update_header(db)
-	fmt.printf("Rolled forward to snapshot %d (schema root %d)\n", prev_id, target_h.schema_root)
+	adopt_snapshot(db, target_page, prev_id, target_h.schema_root, "Rolled forward")
 	return .None
 }
 
@@ -195,33 +196,8 @@ rollforward :: proc(db: ^Database) -> DB_Error {
 // never drift apart.
 @(private)
 capture_snapshot :: proc(db: ^Database, op: snapshot.Snapshot_Operation) {
-	st := Schema_Tree(db)
-	schema_tables := schema.list_tables(&st, context.temp_allocator)
-	tables := make([dynamic]types.Table, context.temp_allocator)
-	for tbl in schema_tables {
-		append(&tables, types.Table{name = tbl.name, root_page = tbl.root_page})
-	}
-
-	manifest_page := snapshot.create_manifest(db.pager, tables[:])
-	defer if manifest_page != 0 {
-		pager.unpin_page(db.pager, manifest_page)
-	}
-
 	db.txn_snapshot_id += 1
-	snap_id := db.txn_snapshot_id
-	snap_page, snap_ok := snapshot.create(
-		db.pager,
-		snap_id,
-		db.latest_snapshot,
-		db.schema_root_page,
-		manifest_page,
-		op,
-	)
-	if snap_ok {
-		db.snapshot_index[snap_id] = snap_page
-		db.latest_snapshot = snap_page
-		record_main_ref(db, snap_id)
-	}
+	stage_snapshot(db, op)
 }
 
 // expire_snapshots keeps the newest keep_count snapshots, garbage-collects

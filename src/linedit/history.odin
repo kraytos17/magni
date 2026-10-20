@@ -144,8 +144,9 @@ history_get :: proc(h: ^History, i: int) -> string {
 }
 
 // history_set_path repoints persistence (cloned; the previous path string
-// is not freed here, unlike history_load which deletes first).
+// is freed first, like history_load).
 history_set_path :: proc(h: ^History, path: string) {
+	delete(h.path)
 	h.path = strings.clone(path)
 }
 

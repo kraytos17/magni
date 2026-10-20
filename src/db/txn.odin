@@ -2,6 +2,7 @@ package db
 
 import "core:log"
 import "core:sync"
+import "src:btree"
 import "src:executor"
 import "src:pager"
 import "src:schema"
@@ -27,45 +28,39 @@ begin_impl :: proc(db: ^Database) -> DB_Error {
 
 // commit_impl closes an active transaction in four steps: flush staged
 // roots into the catalog (one schema COW per dirty table/index, so DDL
-// published mid-txn survives), build a manifest and snapshot, record MAIN,
-// then WAL-commit (the durability point). Any failure returns before
-// wal_commit_txn, so the WAL txn is still open for a later rollback.
-// Ends with an auto-checkpoint decision.
-@(private)
-commit_impl :: proc(db: ^Database) -> DB_Error {
-	if db.txn_state != .Active {
-		log.warn("No active transaction to commit")
-		return .Transaction_Error
-	}
-
-	db.txn_snapshot_id += 1
-	snap_id := db.txn_snapshot_id
-	st := Schema_Tree(db)
-	// Flush staged data roots: one schema COW per dirty table (not per
-	// statement) against the current tree, so DDL published mid-txn is
-	// preserved and the snapshot below captures post-flush roots.
+// flush_pending_roots writes staged data/index roots into the schema tree
+// (one COW per dirty table) and adopts the new root. False when a write
+// fails; header persistence and pending-clear stay with the caller (commit
+// checkpoints the header, vacuum publishes without one). Public for the
+// admin vacuum path, which stages the same pending roots.
+flush_pending_roots :: proc(db: ^Database, st: ^btree.Tree) -> bool {
 	for name, root in db.txn_pending.roots {
-		new_r, flush_ok := schema.update_root_page_cow(&st, name, root)
+		new_r, flush_ok := schema.update_root_page_cow(st, name, root)
 		if !flush_ok {
-			return .IO_Error
+			return false
 		}
 		st.root = new_r
 	}
 	for name, stages in db.txn_pending.index_roots {
 		for stg in stages {
-			new_r, flush_ok := schema.update_index_root_cow(&st, name, stg.name, stg.root)
+			new_r, flush_ok := schema.update_index_root_cow(st, name, stg.name, stg.root)
 			if !flush_ok {
-				return .IO_Error
+				return false
 			}
 			st.root = new_r
 		}
 	}
-	if len(db.txn_pending.roots) > 0 || len(db.txn_pending.index_roots) > 0 {
-		db.schema_root_page = st.root
-		update_header(db)
-	}
+	return true
+}
 
-	executor.pending_clear(&db.txn_pending)
+// stage_snapshot builds a manifest over the current tables and records a
+// snapshot with op: create plus index/latest/ref publication under the
+// current (caller-bumped) id. False when the snapshot cannot be created
+// (the WAL txn stays open, so the caller maps the error and the path can
+// still roll back).
+@(private)
+stage_snapshot :: proc(db: ^Database, op: snapshot.Snapshot_Operation) -> (snap_id: u64, ok: bool) {
+	st := Schema_Tree(db)
 	schema_tables := schema.list_tables(&st, context.temp_allocator)
 	tables := make([dynamic]types.Table, context.temp_allocator)
 	for tbl in schema_tables {
@@ -79,25 +74,59 @@ commit_impl :: proc(db: ^Database) -> DB_Error {
 
 	snap_page, snap_ok := snapshot.create(
 		db.pager,
-		snap_id,
+		db.txn_snapshot_id,
 		db.latest_snapshot,
 		db.schema_root_page,
 		manifest_page,
-		.COMMIT,
+		op,
 	)
+	if !snap_ok {
+		return 0, false
+	}
+	db.snapshot_index[db.txn_snapshot_id] = snap_page
+	db.latest_snapshot = snap_page
+	record_main_ref(db, db.txn_snapshot_id)
+	return db.txn_snapshot_id, true
+}
+
+// published mid-txn survives), build a manifest and snapshot, record MAIN,
+// then WAL-commit (the durability point). Any failure returns before
+// wal_commit_txn, so the WAL txn is still open for a later rollback.
+// Ends with an auto-checkpoint decision.
+@(private)
+commit_impl :: proc(db: ^Database) -> DB_Error {
+	if db.txn_state != .Active {
+		log.warn("No active transaction to commit")
+		return .Transaction_Error
+	}
+
+	st := Schema_Tree(db)
+	// Flush staged data roots: one schema COW per dirty table (not per
+	// statement) against the current tree, so DDL published mid-txn is
+	// preserved and the snapshot below captures post-flush roots. The id
+	// bump precedes the flush so the header persists the post-bump
+	// counter, exactly as before.
+	db.txn_snapshot_id += 1
+	if !flush_pending_roots(db, &st) {
+		return .IO_Error
+	}
+	if len(db.txn_pending.roots) > 0 || len(db.txn_pending.index_roots) > 0 {
+		db.schema_root_page = st.root
+		update_header(db)
+	}
+
+	executor.pending_clear(&db.txn_pending)
+	snap_id, snap_ok := stage_snapshot(db, .COMMIT)
 	if !snap_ok {
 		return .Snapshot_Failed
 	}
 
-	db.latest_snapshot = snap_page
-	db.snapshot_index[snap_id] = snap_page
-	record_main_ref(db, snap_id)
 	if err := pager.wal_commit_txn(db.pager); err != .None {
 		return .IO_Error
 	}
 
 	db.txn_state = .None
-	log.infof("COMMIT transaction (snapshot %d)", db.txn_snapshot_id)
+	log.infof("COMMIT transaction (snapshot %d)", snap_id)
 	maybe_auto_checkpoint(db)
 	return .None
 }

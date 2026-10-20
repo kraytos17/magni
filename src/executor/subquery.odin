@@ -139,15 +139,6 @@ exec_subquery_data :: proc(
 	if stmt.is_distinct {
 		out = dedup_rows(out)
 	}
-	if limit, has_limit := stmt.limit.?; has_limit {
-		off := u64(0)
-		if o, has_off := stmt.offset.?; has_off {
-			off = o
-		}
-
-		start := int(min(off, u64(len(out))))
-		end := int(min(off + limit, u64(len(out))))
-		out = out[start:end]
-	}
+		out = apply_limit_offset(stmt.limit, stmt.offset, out)
 	return out, proj_cols, true
 }

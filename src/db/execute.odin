@@ -22,8 +22,9 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 		return .Parse_Error
 	}
 
+	kind := stmt_kind(stmt)
 	ctx := Exec_Ctx {
-		is_read = stmt_is_read(stmt),
+		is_read = kind.is_read,
 	}
 	if ctx.is_read {
 		sync.rw_mutex_shared_lock(&db.mu)
@@ -51,12 +52,12 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 	// still publishes immediately (its own path).
 	pending := &db.txn_pending if db.txn_state == .Active else nil
 	exec_ok, new_root, _ := executor.execute(&st, stmt, &result, &db.table_cache, pending)
-	if !ctx.as_of_override && !ctx.is_read && !stmt_defers_root(db, stmt) {
+	if !ctx.as_of_override && !ctx.is_read && !(db.txn_state == .Active && kind.defers_root) {
 		db.schema_root_page = new_root
 		update_header(db)
 	}
 	if exec_ok && !ctx.is_read {
-		maybe_snapshot(db, stmt, ctx)
+		maybe_snapshot(db, kind, ctx)
 	}
 	if exec_ok {
 		if result.is_select {
@@ -68,36 +69,43 @@ execute :: proc(db: ^Database, sql: string) -> DB_Error {
 }
 
 // Exec_Ctx carries one execute call's cross-stage decisions: whether the
-// statement only reads (shared lock), whether AS OF redirected the schema
-// tree (skip root publication), and which snapshot operation a write maps
-// to. Built once at dispatch, consumed by the commit tail.
+// statement only reads (shared lock) and whether AS OF redirected the
+// schema tree (skip root publication). Built once at dispatch, consumed
+// by the commit tail.
 Exec_Ctx :: struct {
 	is_read       : bool,
 	as_of_override: bool,
-	snap_op       : snapshot.Snapshot_Operation,
 }
 
-// stmt_defers_root reports whether a statement's schema-root publication is
-// staged in-txn (DML). DDL publishes immediately even inside a txn so later
-// statements resolve the new structure.
+// Stmt_Kind classifies a statement once for dispatch: lock mode, in-txn
+// root staging, and snapshot operation. One switch instead of three
+// parallel re-switches — adding a statement type touches one site.
+Stmt_Kind :: struct {
+	is_read:     bool, // shared lock (SELECT, compound)
+	defers_root: bool, // in-txn root publication staged (DML only)
+	snap_op:     snapshot.Snapshot_Operation, // snapshot op for writes
+}
+
+// stmt_kind maps a statement to its dispatch class. Reads and transactions
+// carry no snapshot op (UNKNOWN); the txn gate lives at the call site
+// (defers_root only matters when a txn is active).
 @(private = "file")
-stmt_defers_root :: proc(db: ^Database, stmt: parser.Statement) -> bool {
-	if db.txn_state != .Active {
-		return false
+stmt_kind :: proc(stmt: parser.Statement) -> Stmt_Kind {
+	#partial switch _ in stmt.type {
+	case parser.Select_Stmt, parser.Compound_Stmt:
+		return {is_read = true}
+	case parser.Insert_Stmt:
+		return {defers_root = true, snap_op = .INSERT}
+	case parser.Update_Stmt:
+		return {defers_root = true, snap_op = .UPDATE}
+	case parser.Delete_Stmt:
+		return {defers_root = true, snap_op = .DELETE}
+	case parser.Create_Stmt, parser.Create_Index_Stmt:
+		return {snap_op = .CREATE}
+	case parser.Drop_Stmt, parser.Drop_Index_Stmt:
+		return {snap_op = .DROP}
 	}
-
-	_, is_ins := stmt.type.(parser.Insert_Stmt)
-	_, is_upd := stmt.type.(parser.Update_Stmt)
-	_, is_del := stmt.type.(parser.Delete_Stmt)
-	return is_ins || is_upd || is_del
-}
-
-// stmt_is_read reports whether a statement takes the shared (read) lock.
-@(private = "file")
-stmt_is_read :: proc(stmt: parser.Statement) -> bool {
-	_, is_sel := stmt.type.(parser.Select_Stmt)
-	_, is_comp := stmt.type.(parser.Compound_Stmt)
-	return is_sel || is_comp
+	return {}
 }
 
 // dispatch_txn runs a transaction statement directly.
@@ -120,37 +128,13 @@ dispatch_txn :: proc(db: ^Database, stmt: parser.Statement) -> (bool, DB_Error) 
 	return true, .None
 }
 
-// snapshot_op maps a write statement to its snapshot operation.
-// Reads and transactions never reach here (guarded by is_read + dispatch);
-// UNKNOWN is the unreachable default.
-@(private = "file")
-snapshot_op :: proc(stmt: parser.Statement) -> snapshot.Snapshot_Operation {
-	#partial switch _ in stmt.type {
-	case parser.Insert_Stmt:
-		return .INSERT
-	case parser.Update_Stmt:
-		return .UPDATE
-	case parser.Delete_Stmt:
-		return .DELETE
-	case parser.Create_Stmt:
-		return .CREATE
-	case parser.Create_Index_Stmt:
-		return .CREATE
-	case parser.Drop_Stmt:
-		return .DROP
-	case parser.Drop_Index_Stmt:
-		return .DROP
-	}
-	return .UNKNOWN
-}
-
 // maybe_snapshot runs WAL + snapshot bookkeeping for a successful write:
 // batch counting, WAL framing, periodic manifest snapshots, and commit.
 // No-op inside transactions (txn owns its own commit) or under AS OF
 // (read-only view) — the same conditions the execute tail uses inline to
 // decide root publication.
 @(private = "file")
-maybe_snapshot :: proc(db: ^Database, stmt: parser.Statement, ctx: Exec_Ctx) {
+maybe_snapshot :: proc(db: ^Database, kind: Stmt_Kind, ctx: Exec_Ctx) {
 	if db.txn_state != .None || ctx.as_of_override {
 		return
 	}
@@ -168,7 +152,7 @@ maybe_snapshot :: proc(db: ^Database, stmt: parser.Statement, ctx: Exec_Ctx) {
 
 	pager.wal_begin_txn(db.pager)
 	if make_snapshot {
-		capture_snapshot(db, snapshot_op(stmt))
+		capture_snapshot(db, kind.snap_op)
 	}
 
 	pager.wal_commit_txn(db.pager)

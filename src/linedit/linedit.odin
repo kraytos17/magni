@@ -258,8 +258,11 @@ run_reverse_search :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 }
 
 // dot_commands lists dot-commands for Tab completion (prefix-matched).
-// Third copy of the list (print_help, repl DOT_COMMANDS) — adding a
-// dot-command requires updating all three.
+// Second copy of the list (repl DOT_COMMANDS dispatches; print_help
+// renders from it) — adding a dot-command requires updating both. A
+// shared table is impossible across the import cycle (main imports
+// linedit for the editor), and completion spellings differ anyway
+// (trailing spaces mark arg-taking commands).
 dot_commands :: []string {
 	".begin",
 	".checkpoint",

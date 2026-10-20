@@ -42,21 +42,8 @@ vacuum_publish_pending :: proc(database: ^db.Database, st: ^btree.Tree) -> db.DB
 	if len(database.txn_pending.roots) == 0 && len(database.txn_pending.index_roots) == 0 {
 		return .None
 	}
-	for name, root in database.txn_pending.roots {
-		nr, ok := schema.update_root_page_cow(st, name, root)
-		if !ok {
-			return .Corrupted
-		}
-		st.root = nr
-	}
-	for name, stages in database.txn_pending.index_roots {
-		for stg in stages {
-			nr, ok := schema.update_index_root_cow(st, name, stg.name, stg.root)
-			if !ok {
-				return .Corrupted
-			}
-			st.root = nr
-		}
+	if !db.flush_pending_roots(database, st) {
+		return .Corrupted
 	}
 
 	database.schema_root_page = st.root

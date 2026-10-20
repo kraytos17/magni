@@ -4,42 +4,12 @@
 package tests
 
 import "core:fmt"
-import "core:strings"
 import "core:testing"
 import "src:admin"
 import "src:db"
-import "src:executor"
 import "src:pager"
-import "src:parser"
 import "src:schema"
 import "src:snapshot"
-
-// drop_index_plan renders the EXPLAIN text for one SELECT through the same
-// resolvers execution uses (cf. test_index_explain's local helper).
-drop_index_plan :: proc(t: ^testing.T, d: ^db.Database, sql: string) -> string {
-	st := db.Schema_Tree(d)
-	stmt, parse_ok, _ := parser.parse(sql, context.temp_allocator)
-	if !parse_ok {
-		testing.expect(t, false, "explain parses")
-		return ""
-	}
-	res := executor.Result{}
-	exec_ok, _, _ := executor.execute(&st, stmt, &res, nil, nil)
-	if !exec_ok {
-		testing.expect(t, false, "explain executes")
-		return ""
-	}
-	if len(res.rows) != 1 || len(res.rows[0].values) != 1 {
-		testing.expect(t, false, "explain yields one plan row")
-		return ""
-	}
-	plan_text, is_text := res.rows[0].values[0].(string)
-	if !is_text {
-		testing.expect(t, false, "plan row is TEXT")
-		return ""
-	}
-	return strings.clone(plan_text, context.temp_allocator)
-}
 
 // expect_rowids compares two rowid lists element-wise (expect_value
 // needs comparable types; slices aren't).
@@ -87,13 +57,12 @@ test_drop_index :: proc(t: ^testing.T) {
 			"CREATE INDEX i_body ON docs (body);",
 		},
 	)
-	expect := make(map[string][dynamic]i64, context.allocator)
+	expect := workload_expect(t, d, INDEX_BODIES, 60)
 	defer destroy_expect(&expect)
-	index_workload(t, d, []string{"alpha", "bb", "alpha", "", "gamma"}, 60, &expect)
 
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
+		explain(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
 		"INDEX SCAN ON docs USING body (eq, covering)",
 	)
 	before := drop_index_ids(t, d, "SELECT id FROM docs WHERE body = 'alpha' ORDER BY id;")
@@ -136,7 +105,7 @@ test_drop_index :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(fetch.rows), len(expect["bb"]))
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
+		explain(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
 		"FULL SCAN ON docs",
 	)
 
@@ -274,12 +243,12 @@ test_drop_index_recreate :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM docs WHERE title = 't1';"),
+		explain(t, d, "EXPLAIN SELECT rowid FROM docs WHERE title = 't1';"),
 		"INDEX SCAN ON docs USING title (eq, covering)",
 	)
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
+		explain(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
 		"FULL SCAN ON docs",
 	)
 	got := drop_index_ids(t, d, "SELECT id FROM docs WHERE title = 't1' ORDER BY id;")
@@ -313,7 +282,7 @@ test_drop_index_in_txn :: proc(t: ^testing.T) {
 	must_db_execute(t, d, "DROP INDEX i_body;")
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
+		explain(t, d, "EXPLAIN SELECT rowid FROM docs WHERE body = 'alpha';"),
 		"FULL SCAN ON docs",
 	)
 	testing.expect(
@@ -429,7 +398,7 @@ test_index_gc_expire :: proc(t: ^testing.T) {
 	// Routed reads intact after the sweep.
 	testing.expect_value(
 		t,
-		drop_index_plan(t, d, "EXPLAIN SELECT rowid FROM t WHERE body = 'n7';"),
+		explain(t, d, "EXPLAIN SELECT rowid FROM t WHERE body = 'n7';"),
 		"INDEX SCAN ON t USING body (eq, covering)",
 	)
 	got := drop_index_ids(t, d, "SELECT rowid FROM t WHERE body = 'n7';")
