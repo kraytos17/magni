@@ -182,6 +182,24 @@ cond_real_rhs :: proc(cond: parser.Condition) -> (f64, bool) {
 	return v, true
 }
 
+// cond_blob_rhs extracts a condition's BLOB literal rhs: the shared
+// precondition behind the EQUALS, IN, and Range index arms on BLOB
+// indexes (non-[]u8 and non-literal rhs never route). Twin of
+// cond_text_rhs for blob bytes.
+@(private = "file")
+cond_blob_rhs :: proc(cond: parser.Condition) -> ([]u8, bool) {
+	val, is_val := cond.rhs.(types.Value)
+	if !is_val {
+		return nil, false
+	}
+
+	b, is_blob := val.([]u8)
+	if !is_blob {
+		return nil, false
+	}
+	return b, true
+}
+
 // index_use_of_cond classifies one raw COND against the indexed column of
 // the given type. Negated, column-comparison (rhs is a column ref, not a
 // Value), NULL and cross-class literals all fall through (same result via
@@ -254,6 +272,19 @@ index_use_of_cond :: proc(
 			}
 			return {}, false
 		case .BLOB:
+			// BLOB rides the TEXT fetch arms: the bytes travel as eq_text
+			// (same TEXT-kind pages, same byte order); col_type keeps
+			// them routed with TEXT at every paired switch.
+			if b, is_blob := cond_blob_rhs(cond); is_blob {
+				return Index_Plan {
+						use = .Eq,
+						root = index_root,
+						column = index_column,
+						col_type = col_type,
+						eq_text = transmute(string)b,
+					},
+					true
+			}
 			return {}, false
 		}
 	}
@@ -349,7 +380,27 @@ index_use_of_cond :: proc(
 				},
 				true
 		case .BLOB:
-			return {}, false
+			// Same TEXT fetch arms as Eq (bytes as in_texts members).
+			blobs := make([dynamic]string, 0, len(cond.in_values), context.temp_allocator)
+			for v in cond.in_values {
+				if b, is_blob := v.([]u8); is_blob {
+					append(&blobs, transmute(string)b)
+				}
+			}
+			if len(blobs) == 0 {
+				return {}, false
+			}
+			if len(blobs) > MAX_INDEX_IN_MEMBERS {
+				return {}, false
+			}
+			return Index_Plan {
+					use = .In,
+					root = index_root,
+					column = index_column,
+					col_type = col_type,
+					in_texts = blobs[:],
+				},
+				true
 		}
 	}
 	if cond.operator in RANGE_OPS {
@@ -417,6 +468,25 @@ index_use_of_cond :: proc(
 			}
 			return {}, false
 		case .BLOB:
+			// Same TEXT range fetch (bytes as lo/hi text bounds).
+			if b, is_blob := cond_blob_rhs(cond); is_blob {
+				rp := Index_Plan {
+					use      = .Range,
+					root     = index_root,
+					column   = index_column,
+					col_type = col_type,
+				}
+				if is_lo {
+					rp.range_has_lo = true
+					rp.range_lo_inc = inc
+					rp.range_lo_text = transmute(string)b
+				} else {
+					rp.range_has_hi = true
+					rp.range_hi_inc = inc
+					rp.range_hi_text = transmute(string)b
+				}
+				return rp, true
+			}
 			return {}, false
 		}
 	}
@@ -448,6 +518,9 @@ composite_cond_value :: proc(
 			return types.value(v), true
 		}
 	case .BLOB:
+		if b, is_blob := cond_blob_rhs(cond); is_blob {
+			return types.value(b), true
+		}
 	}
 	return {}, false
 }
@@ -471,7 +544,9 @@ composite_values_equal :: proc(col_type: types.Column_Type, a, b: types.Value) -
 		bf, bok := b.(f64)
 		return aok && bok && af == bf
 	case .BLOB:
-		return false
+		ab, aok := a.([]u8)
+		bb, bok := b.([]u8)
+		return aok && bok && slice.equal(ab, bb)
 	}
 	return false
 }
@@ -513,7 +588,12 @@ composite_bound_cmp :: proc(col_type: types.Column_Type, a, b: types.Value) -> i
 		}
 		return -1 if wa < wb else 1
 	case .BLOB:
-		return 0
+		ab, aok := a.([]u8)
+		bb, bok := b.([]u8)
+		if !aok || !bok {
+			return 0
+		}
+		return cell.bytes_compare(ab, bb)
 	}
 	return 0
 }
@@ -578,6 +658,7 @@ try_composite_in_expansion :: proc(
 		if !index_cond_column_ok(def.columns[0], cond.column, tbl_name, tbl_alias) {
 			continue
 		}
+
 		picked = ci
 		for v in cond.in_values {
 			switch def.col_types[0] {
@@ -594,6 +675,9 @@ try_composite_in_expansion :: proc(
 					append(&members, types.value(fv))
 				}
 			case .BLOB:
+				if b, is_blob := v.([]u8); is_blob {
+					append(&members, types.value(b))
+				}
 			}
 		}
 		break
@@ -615,6 +699,7 @@ try_composite_in_expansion :: proc(
 			operator = .EQUALS,
 			rhs      = m,
 		}
+
 		mconds := make([dynamic]parser.Condition, 0, len(rest) + 1, context.temp_allocator)
 		append(&mconds, mcond)
 		append(&mconds, ..rest[:])
@@ -1054,8 +1139,7 @@ range_val_cmp :: proc(
 		}
 		return -1 if wa < wb else 1
 	case .TEXT, .BLOB:
-		// BLOB bounds never construct (BLOB plans never route); sharing
-		// the TEXT arm keeps the shape exhaustive.
+		// Byte order serves both; BLOB bounds ride the TEXT arm.
 		return cell.bytes_compare(transmute([]u8)a_text, transmute([]u8)b_text)
 	}
 	return 0 // Defensive: the switch above is exhaustive.
@@ -1108,9 +1192,8 @@ range_value_ok :: proc(
 // intersect then filter by Range bounds (dropping the Ranges they imply),
 // and bare Ranges intersect to the tightest interval. Any other member
 // (Prefix) disables collapse — the group passes through to the intersect
-// path. Kind triage is an exhaustive switch (BLOB declines like Prefix —
-// unreached today since BLOB plans are never usable). Surviving strings
-// borrow the input plans' arena memory.
+// path. BLOB shares every TEXT arm (bytes travel as strings); Prefix stays
+// declined. Surviving strings borrow the input plans' arena memory.
 @(private = "file")
 collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: bool) {
 	col_type := group[0].col_type
@@ -1141,14 +1224,12 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 			} else if eq_real != sub.eq_real {
 				return nil, true
 			}
-		case .TEXT:
+		case .TEXT, .BLOB:
 			if !eq_set {
 				eq_set, eq_text = true, sub.eq_text
 			} else if eq_text != sub.eq_text {
 				return nil, true
 			}
-		case .BLOB:
-			return group, false
 		}
 	}
 	if eq_set {
@@ -1178,15 +1259,13 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 							break
 						}
 					}
-				case .TEXT:
+				case .TEXT, .BLOB:
 					for m in sub.in_texts {
 						if m == eq_text {
 							found = true
 							break
 						}
 					}
-				case .BLOB:
-					return group, false
 				}
 				if !found {
 					return nil, true
@@ -1243,7 +1322,7 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				}
 				keep_reals = next
 			}
-		case .TEXT:
+		case .TEXT, .BLOB:
 			if !had_in {
 				append(&keep_texts, ..sub.in_texts)
 			} else {
@@ -1258,8 +1337,6 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				}
 				keep_texts = next
 			}
-		case .BLOB:
-			return group, false
 		}
 		had_in = true
 	}
@@ -1287,7 +1364,7 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				}
 			}
 			keep_reals = next
-		case .TEXT:
+		case .TEXT, .BLOB:
 			next := make([dynamic]string, 0, len(keep_texts), context.temp_allocator)
 			for m in keep_texts {
 				if range_value_ok(col_type, m, 0, 0, sub) {
@@ -1295,8 +1372,6 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 				}
 			}
 			keep_texts = next
-		case .BLOB:
-			return group, false
 		}
 	}
 	if had_in {
@@ -1306,10 +1381,8 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 			empty = len(keep_ints) == 0
 		case .REAL:
 			empty = len(keep_reals) == 0
-		case .TEXT:
+		case .TEXT, .BLOB:
 			empty = len(keep_texts) == 0
-		case .BLOB:
-			return group, false
 		}
 		if empty {
 			return nil, true
@@ -1326,10 +1399,8 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 			kept.in_ints = keep_ints[:]
 		case .REAL:
 			kept.in_reals = keep_reals[:]
-		case .TEXT:
+		case .TEXT, .BLOB:
 			kept.in_texts = keep_texts[:]
-		case .BLOB:
-			return group, false
 		}
 
 		out := make([dynamic]Index_Plan, 0, 1, context.temp_allocator)
@@ -1419,8 +1490,50 @@ collapse_group :: proc(group: []Index_Plan) -> (plans: []Index_Plan, is_empty: b
 // intersect path. Single survivor returns directly so EXPLAIN names the
 // real shape ((range, fetch), not (and, fetch)).
 @(private = "file")
+// drop_subsumed_prefix removes composite-prefix subs covered by a
+// full-tuple sub: same codec frames both, so a byte-prefix match proves
+// the prefix run is a superset and the intersection only needs the
+// tighter sub. Tags disambiguate component types (TEXT vs BLOB frame
+// differently), so equal bytes mean equal leading values.
+drop_subsumed_prefix :: proc(subs: []Index_Plan) -> []Index_Plan {
+	has_full := false
+	for sub in subs {
+		if sub.use == .Composite && sub.comp_key != nil {
+			has_full = true
+			break
+		}
+	}
+	if !has_full {
+		return subs
+	}
+
+	kept := make([dynamic]Index_Plan, 0, len(subs), context.temp_allocator)
+	for sub in subs {
+		if sub.use == .Composite && sub.comp_prefix != nil {
+			subsumed := false
+			for full in subs {
+				if full.use != .Composite || full.comp_key == nil {
+					continue
+				}
+				if len(full.comp_key) >= len(sub.comp_prefix) &&
+				   slice.equal(full.comp_key[:len(sub.comp_prefix)], sub.comp_prefix) {
+					subsumed = true
+					break
+				}
+			}
+			if subsumed {
+				continue
+			}
+		}
+		append(&kept, sub)
+	}
+	return kept[:]
+}
+
+@(private = "file")
 collapse_and_subs :: proc(subs: []Index_Plan) -> (Index_Plan, bool) {
-	n := len(subs)
+	active := drop_subsumed_prefix(subs)
+	n := len(active)
 	assign := make([]int, n, context.temp_allocator)
 	roots := make([dynamic]u32, 0, n, context.temp_allocator)
 	cols := make([dynamic]string, 0, n, context.temp_allocator)
@@ -1428,14 +1541,14 @@ collapse_and_subs :: proc(subs: []Index_Plan) -> (Index_Plan, bool) {
 	for i in 0 ..< n {
 		found := -1
 		for g in 0 ..< ng {
-			if roots[g] == subs[i].root && cols[g] == subs[i].column {
+			if roots[g] == active[i].root && cols[g] == active[i].column {
 				found = g
 				break
 			}
 		}
 		if found < 0 {
-			append(&roots, subs[i].root)
-			append(&cols, subs[i].column)
+			append(&roots, active[i].root)
+			append(&cols, active[i].column)
 			found = ng
 			ng += 1
 		}
@@ -1447,7 +1560,7 @@ collapse_and_subs :: proc(subs: []Index_Plan) -> (Index_Plan, bool) {
 		grp := make([dynamic]Index_Plan, 0, 4, context.temp_allocator)
 		for i in 0 ..< n {
 			if assign[i] == g {
-				append(&grp, subs[i])
+				append(&grp, active[i])
 			}
 		}
 		if len(grp) == 1 {
@@ -1459,9 +1572,9 @@ collapse_and_subs :: proc(subs: []Index_Plan) -> (Index_Plan, bool) {
 		if is_empty {
 			return Index_Plan {
 					use = .Range,
-					root = subs[0].root,
-					column = subs[0].column,
-					col_type = subs[0].col_type,
+					root = active[0].root,
+					column = active[0].column,
+					col_type = active[0].col_type,
 					range_empty = true,
 				},
 				true
@@ -1473,8 +1586,8 @@ collapse_and_subs :: proc(subs: []Index_Plan) -> (Index_Plan, bool) {
 	}
 	return Index_Plan {
 			use = .And,
-			column = subs[0].column,
-			col_type = subs[0].col_type,
+			column = active[0].column,
+			col_type = active[0].col_type,
 			subs = merged[:],
 		},
 		true

@@ -1,9 +1,9 @@
 // Package cell — secondary-text index key codec.
 //
-// Keys are single-column, BINARY-collated TEXT: only string values encode;
-// every other storage class (int, real, blob, Null) reports ok=false so the
-// caller skips the entry instead of failing the row. The tag byte reserves
-// space for future composite keys.
+// Keys are single-column, BINARY-collated TEXT: string and []u8 (BLOB)
+// values encode; every other storage class (int, real, Null) reports
+// ok=false so the caller skips the entry instead of failing the row. The
+// tag byte reserves space for future composite keys.
 //
 // Wire format (all multi-byte ints big-endian):
 //   [0x54 'T'][len:u32be][text bytes][rowid:u64be sign-biased]
@@ -31,10 +31,25 @@ TEXT_INDEX_ROWID_LEN  :: 8
 TEXT_INDEX_MIN_LEN    :: TEXT_INDEX_PREFIX_LEN + TEXT_INDEX_ROWID_LEN
 #assert(TEXT_INDEX_MIN_LEN == 13)
 
+// text_key_bytes borrows a value's indexable bytes: strings transmute to
+// their byte window, []u8 (BLOB) borrows directly. Shared entry gate
+// behind the encode/length arms so the two can never disagree on which
+// storage classes index.
+@(private = "file")
+text_key_bytes :: proc "contextless" (val: types.Value) -> ([]u8, bool) {
+	if s, ok := val.(string); ok {
+		return transmute([]u8)s, true
+	}
+	if b, ok := val.([]u8); ok {
+		return b, true
+	}
+	return nil, false
+}
+
 // text_index_encoded_len returns the wire length for a TEXT value, or 0 for
 // any non-TEXT value (not indexed — caller skips). Pure observer.
 text_index_encoded_len :: #force_inline proc "contextless" (val: types.Value) -> int {
-	s, ok := val.(string)
+	s, ok := text_key_bytes(val)
 	if !ok {
 		return 0
 	}
@@ -54,7 +69,7 @@ text_index_encode :: proc "contextless" (
 	int,
 	bool,
 ) {
-	s, ok := val.(string)
+	s, ok := text_key_bytes(val)
 	if !ok {
 		return 0, false
 	}

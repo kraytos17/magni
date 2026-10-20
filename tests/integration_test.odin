@@ -770,3 +770,42 @@ test_from_subquery_empty :: proc(t: ^testing.T) {
 		testing.expect_value(t, n, i64(0))
 	}
 }
+
+// Rowid-gap pin: deleted rowids are never reused (SQLite max+1 semantics).
+// Applies to auto rowids and INTEGER PK aliases alike; a reused rowid
+// would corrupt stable references, so this is a correctness gate, not
+// a behavior choice.
+@(test)
+test_integration_rowid_gaps_never_reused :: proc(t: ^testing.T) {
+	d := setup_db(t, "rowidgap")
+	defer teardown_db(d, "rowidgap")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (v TEXT);",
+			"CREATE TABLE p (id INT PRIMARY KEY, v TEXT);",
+			"INSERT INTO t VALUES ('a'), ('b'), ('c');",
+			"INSERT INTO p VALUES (1, 'a'), (2, 'b'), (3, 'c');",
+			"DELETE FROM t WHERE rowid = 2;",
+			"DELETE FROM p WHERE id = 2;",
+			"INSERT INTO t VALUES ('d');",
+			"INSERT INTO p VALUES (4, 'd');",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT rowid FROM t ORDER BY rowid;",
+		[]i64{1, 3, 4},
+		"auto rowid takes max+1, gap not reused",
+	)
+	check_col(
+		t,
+		d,
+		"SELECT id FROM p ORDER BY id;",
+		[]i64{1, 3, 4},
+		"integer pk takes max+1, gap not reused",
+	)
+}

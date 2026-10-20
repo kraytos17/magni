@@ -221,9 +221,9 @@ exec_create_index :: proc(
 	}
 
 	col_type := table.columns[col_idx].type
-	if col_type != .TEXT && col_type != .INTEGER && col_type != .REAL {
+	if col_type != .TEXT && col_type != .INTEGER && col_type != .REAL && col_type != .BLOB {
 		log.errorf(
-			"Error: Secondary index requires a TEXT, INTEGER, or REAL column, got %s.%s",
+			"Error: Secondary index requires a TEXT, INTEGER, REAL, or BLOB column, got %s.%s",
 			stmt.table_name,
 			stmt.columns[0],
 		)
@@ -242,13 +242,15 @@ exec_create_index :: proc(
 	defer pager.unpin_page(t.pager, root_page.page_num)
 	init_ok := false
 	switch col_type {
-	case .TEXT:
+	case .TEXT, .BLOB:
+		// BLOB rides the TEXT codec and TEXT-kind pages (byte order is
+		// byte order); def.col_type stays .BLOB so col_type switches
+		// keep routing it with TEXT.
 		init_ok = btree.init_text_leaf_page(root_page.data, root_page.page_num)
 	case .INTEGER:
 		init_ok = btree.init_int_leaf_page(root_page.data, root_page.page_num)
 	case .REAL:
 		init_ok = btree.init_real_leaf_page(root_page.data, root_page.page_num)
-	case .BLOB:
 	}
 
 	if !init_ok {
@@ -291,6 +293,19 @@ exec_create_index :: proc(
 				}
 				append(&tpairs, Text_Bulk_Pair{text = owned, rid = c.rowid})
 			}
+		case .BLOB:
+			// BLOB rides the TEXT build (byte order is byte order):
+			// cloned bytes stored through the text pair, transmuted
+			// back at sort/build like every other site.
+			if b, is_blob := c.values[col_idx].([]u8); is_blob {
+				owned, c_err := slice.clone(b, context.temp_allocator)
+				if c_err != .None {
+					cell.destroy(&c, context.temp_allocator)
+					btree.cursor_advance(&cursor)
+					continue
+				}
+				append(&tpairs, Text_Bulk_Pair{text = transmute(string)owned, rid = c.rowid})
+			}
 		case .INTEGER:
 			if v, is_int := c.values[col_idx].(i64); is_int {
 				append(&ipairs, Int_Bulk_Pair{val = v, rid = c.rowid})
@@ -299,8 +314,6 @@ exec_create_index :: proc(
 			if v, ok := index_col_real(table^, stmt.columns[0], c.values); ok {
 				append(&rpairs, Real_Bulk_Pair{val = v, rid = c.rowid})
 			}
-		case .BLOB:
-		// BLOB columns never reach backfill; no arm.
 		}
 
 		cell.destroy(&c, context.temp_allocator)
@@ -312,9 +325,10 @@ exec_create_index :: proc(
 	// pre-stamped root above, so text, int, and real share the build tail.
 	if len(tpairs) + len(ipairs) + len(rpairs) > 0 {
 		raws := make([][]u8, max(len(tpairs), len(ipairs), len(rpairs)), context.temp_allocator)
+
 		rids := make([]types.Row_ID, len(raws), context.temp_allocator)
 		switch col_type {
-		case .TEXT:
+		case .TEXT, .BLOB:
 			slice.sort_by(tpairs[:], proc(a, b: Text_Bulk_Pair) -> bool {
 				if c := cell.bytes_compare(transmute([]u8)a.text, transmute([]u8)b.text); c != 0 {
 					return c < 0
@@ -332,6 +346,7 @@ exec_create_index :: proc(
 				}
 				return a.rid < b.rid
 			})
+
 			words := make([][8]u8, len(ipairs), context.temp_allocator)
 			for p, i in ipairs {
 				endian.unchecked_put_u64be(words[i][:], cell.int_bias_word(p.val))
@@ -354,9 +369,6 @@ exec_create_index :: proc(
 				raws[i] = words[i][:]
 				rids[i] = p.rid
 			}
-		case .BLOB:
-		// Unreachable (collect skips everything for BLOB, so the len guard
-		// above never enters); present only for exhaustiveness.
 		}
 
 		built_root, build_ok := build_backfilled_index(
@@ -389,7 +401,7 @@ exec_create_index :: proc(
 
 // exec_create_composite_index implements `CREATE INDEX name ON table (a, b,
 // ...)` — the multi-column twin of exec_create_index. Validates every
-// column (present, indexable kind — BLOB fails naming the column),
+// column (present, indexable kind — BLOB rides the TEXT codec),
 // allocates an empty composite root, bulk-backfills framed tuples, then
 // publishes root + joined columns atomically. Same immediate-publish
 // contract as exec_create_index. Tuples with any unindexable component
@@ -414,9 +426,9 @@ exec_create_composite_index :: proc(
 		}
 
 		ct := table.columns[col_idx].type
-		if ct != .TEXT && ct != .INTEGER && ct != .REAL {
+		if ct != .TEXT && ct != .INTEGER && ct != .REAL && ct != .BLOB {
 			log.errorf(
-				"Error: Secondary index requires a TEXT, INTEGER, or REAL column, got %s.%s",
+				"Error: Secondary index requires a TEXT, INTEGER, REAL, or BLOB column, got %s.%s",
 				stmt.table_name,
 				col,
 			)
@@ -1080,7 +1092,13 @@ collect_bulk_pairs :: proc(
 			}
 		}
 	case .BLOB:
-		// BLOB columns never index; callers keep the empty root.
+		// BLOB raws borrow infos like the text twins (byte order is byte
+		// order — no word packing needed).
+		for info in infos {
+			if b, ok := index_col_blob(table, column, info.values); ok {
+				append(&pairs, Bulk_Pair{raw = b, rid = info.row_id})
+			}
+		}
 	}
 
 	slice.sort_by(pairs[:], proc(a, b: Bulk_Pair) -> bool {
@@ -1194,7 +1212,10 @@ composite_row_raw :: proc(
 				return nil, false
 			}
 		case .BLOB:
-			return nil, false
+			if _, is_blob := v.([]u8); !is_blob {
+				return nil, false
+			}
+			tuple[i] = v
 		}
 	}
 
@@ -2548,6 +2569,35 @@ index_col_text :: proc(
 	return s, true
 }
 
+// index_col_blob extracts the indexed BLOB value of a row: (nil, false)
+// when the column is missing, short, or not a blob (NULLs and mismatched
+// classes never reach the index either way). Twin of index_col_text for
+// []u8 values; blobs ride the TEXT codec and TEXT-kind pages.
+@(private = "file")
+index_col_blob :: proc(
+	table: types.Table,
+	index_col: string,
+	values: []types.Value,
+) -> (
+	[]u8,
+	bool,
+) {
+	if len(index_col) == 0 {
+		return nil, false
+	}
+
+	col_idx, col_ok := schema.find_column_index(table.columns, index_col)
+	if !col_ok || col_idx < 0 || col_idx >= len(values) {
+		return nil, false
+	}
+
+	b, is_blob := values[col_idx].([]u8)
+	if !is_blob {
+		return nil, false
+	}
+	return b, true
+}
+
 // index_col_int extracts the indexed INTEGER value of a row: (0, false)
 // when the column is missing, short, or not an integer (NULLs and
 // mismatched classes never reach the index either way).
@@ -2644,6 +2694,9 @@ fanout_insert_row :: proc(
 		if r, rok := index_col_real(table, def.column, values); rok {
 			return fanout_insert(t, table, index_root, r, rowid)
 		}
+		if b, bok := index_col_blob(table, def.column, values); bok {
+			return fanout_insert(t, table, index_root, b, rowid)
+		}
 		return index_root, true
 	}
 	return fanout_insert(t, table, index_root, text, rowid)
@@ -2665,6 +2718,33 @@ fanout_delete_text :: proc(
 ) {
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, del_err := btree.delete_cow(&idx_tree, transmute([]u8)text, rowid)
+	if del_err != .None {
+		if del_err == .Cell_Not_Found {
+			log.infof("Index entry already absent for row %d.", rowid)
+			return index_root, true
+		}
+
+		log_deindex_row_fail(rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
+// fanout_delete_blob removes one blob entry, tolerating absence like
+// fanout_delete_text. Twin for BLOB indexes riding the TEXT codec.
+@(private = "file")
+fanout_delete_blob :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	blob: []u8,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, del_err := btree.delete_cow(&idx_tree, blob, rowid)
 	if del_err != .None {
 		if del_err == .Cell_Not_Found {
 			log.infof("Index entry already absent for row %d.", rowid)
@@ -2764,6 +2844,7 @@ fanout_delete :: proc {
 	fanout_delete_text,
 	fanout_delete_int,
 	fanout_delete_real,
+	fanout_delete_blob,
 }
 
 // fanout_delete_rowid removes one row's index entry, looked up by rowid.
@@ -2803,6 +2884,9 @@ fanout_delete_rowid :: proc(
 		}
 		if r, rok := index_col_real(table, def.column, old.values); rok {
 			return fanout_delete(t, table, index_root, r, rowid)
+		}
+		if b, bok := index_col_blob(table, def.column, old.values); bok {
+			return fanout_delete(t, table, index_root, b, rowid)
 		}
 		return index_root, true
 	}
@@ -2858,12 +2942,16 @@ fanout_update_row :: proc(
 	new_int, new_is_int := index_col_int(table, def.column, new_values)
 	old_real, old_is_real := index_col_real(table, def.column, old_values)
 	new_real, new_is_real := index_col_real(table, def.column, new_values)
+	old_blob, old_is_blob := index_col_blob(table, def.column, old_values)
+	new_blob, new_is_blob := index_col_blob(table, def.column, new_values)
 	if old_is_text == new_is_text &&
 	   old_is_int == new_is_int &&
 	   old_is_real == new_is_real &&
+	   old_is_blob == new_is_blob &&
 	   (!old_is_text || old_text == new_text) &&
 	   (!old_is_int || old_int == new_int) &&
-	   (!old_is_real || old_real == new_real) {
+	   (!old_is_real || old_real == new_real) &&
+	   (!old_is_blob || slice.equal(old_blob, new_blob)) {
 		return index_root, true
 	}
 
@@ -2889,6 +2977,13 @@ fanout_update_row :: proc(
 		}
 		cur = nr
 	}
+	if old_is_blob {
+		nr, ok := fanout_delete(t, table, cur, old_blob, rowid)
+		if !ok {
+			return index_root, false
+		}
+		cur = nr
+	}
 	if new_is_text {
 		nr, ok := fanout_insert(t, table, cur, new_text, rowid)
 		if !ok {
@@ -2905,6 +3000,13 @@ fanout_update_row :: proc(
 	}
 	if new_is_real {
 		nr, ok := fanout_insert(t, table, cur, new_real, rowid)
+		if !ok {
+			return index_root, false
+		}
+		cur = nr
+	}
+	if new_is_blob {
+		nr, ok := fanout_insert(t, table, cur, new_blob, rowid)
 		if !ok {
 			return index_root, false
 		}
@@ -2954,6 +3056,29 @@ fanout_insert_text :: proc(
 ) {
 	idx_tree := btree.init(t.pager, index_root)
 	new_root, ins_err := btree.insert_cow(&idx_tree, transmute([]u8)text, rowid)
+	if ins_err != .None {
+		log_index_row_fail(rowid, table.name)
+		return index_root, false
+	}
+	return new_root, true
+}
+
+// fanout_insert_blob inserts one blob index entry by explicit bytes (the
+// update path's new side). Twin of fanout_insert_text for BLOB indexes,
+// which ride the TEXT codec and TEXT-kind pages.
+@(private = "file")
+fanout_insert_blob :: proc(
+	t: ^btree.Tree,
+	table: types.Table,
+	index_root: u32,
+	blob: []u8,
+	rowid: types.Row_ID,
+) -> (
+	u32,
+	bool,
+) {
+	idx_tree := btree.init(t.pager, index_root)
+	new_root, ins_err := btree.insert_cow(&idx_tree, blob, rowid)
 	if ins_err != .None {
 		log_index_row_fail(rowid, table.name)
 		return index_root, false
@@ -3028,10 +3153,11 @@ fanout_insert_composite :: proc(
 	return new_root, true
 }
 
-// fanout_insert selects the text/int/real twin by the value's static type.
+// fanout_insert selects the text/int/real/blob twin by the value's static type.
 @(private = "file")
 fanout_insert :: proc {
 	fanout_insert_text,
 	fanout_insert_int,
 	fanout_insert_real,
+	fanout_insert_blob,
 }

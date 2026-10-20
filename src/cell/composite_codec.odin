@@ -73,6 +73,9 @@ composite_comp_len :: #force_inline proc "contextless" (
 			return COMPOSITE_COMP_HDR_LEN + 8
 		}
 	case .BLOB:
+		if b, ok := val.([]u8); ok {
+			return COMPOSITE_COMP_HDR_LEN + len(b)
+		}
 	}
 	return 0
 }
@@ -169,12 +172,17 @@ composite_encode_raw :: proc "contextless" (
 			)
 			payload = buf[pos + COMPOSITE_COMP_HDR_LEN:pos + COMPOSITE_COMP_HDR_LEN + 8]
 		case .BLOB:
-			return 0, false
+			if b, is_blob := v.([]u8); is_blob {
+				tag = COMPOSITE_BLOB_TAG
+				payload = b
+			} else {
+				return 0, false
+			}
 		}
 
 		buf[pos] = tag
 		endian.unchecked_put_u32be(buf[pos + 1:pos + 5], u32(len(payload)))
-		if col_types[i] == .TEXT {
+		if col_types[i] == .TEXT || col_types[i] == .BLOB {
 			copy(buf[pos + COMPOSITE_COMP_HDR_LEN:], payload)
 		}
 		pos += COMPOSITE_COMP_HDR_LEN + len(payload)

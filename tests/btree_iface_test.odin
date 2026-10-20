@@ -174,16 +174,23 @@ test_text_codec_roundtrip_and_order :: proc(t: ^testing.T) {
 	testing.expect(t, !gok, "trailing garbage fails")
 
 	// Non-TEXT storage classes are not indexed (NULL-not-indexed extended).
+	// []u8 (BLOB) rides the TEXT codec and encodes like a string.
 	blob := make([]u8, 2, context.temp_allocator)
 	testing.expect_value(t, cell.text_index_encoded_len(types.value(1)), 0)
 	testing.expect_value(t, cell.text_index_encoded_len(types.value()), 0)
 	testing.expect_value(t, cell.text_index_encoded_len(types.value(1.5)), 0)
-	testing.expect_value(t, cell.text_index_encoded_len(types.value(blob)), 0)
+	testing.expect(t, cell.text_index_encoded_len(types.value(blob)) > 0, "blob encodes")
 	scratch: [64]u8
 	_, iok := cell.text_index_encode(types.value(1), 1, scratch[:])
 	testing.expect(t, !iok, "int does not encode into text index")
 	_, nok := cell.text_index_encode(types.value(), 1, scratch[:])
 	testing.expect(t, !nok, "Null does not encode")
+	bn, bok := cell.text_index_encode(types.value(blob), 9, scratch[:])
+	testing.expect(t, bok, "blob encodes into text index")
+	bds, bdr, bdok := cell.text_index_decode(scratch[:bn])
+	testing.expect(t, bdok, "blob key decodes")
+	testing.expect(t, bds == transmute(string)blob, "blob bytes round-trip")
+	testing.expect_value(t, bdr, types.Row_ID(9))
 
 	// Order: text BINARY first, rowid tiebreak second (incl negatives).
 	enc := proc(s: string, r: i64) -> []u8 {

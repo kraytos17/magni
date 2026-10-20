@@ -388,8 +388,7 @@ try_index_nlj :: proc(
 	defer delete(probe.outer_idx)
 	// Strict key-type gate over every outer key up front: a mid-loop
 	// mismatch could not fall back (rows already emitted), so any
-	// heterogeneous-or-foreign key declines the whole probe. BLOB indexes
-	// stay out (no probe overload expresses them).
+	// heterogeneous-or-foreign key declines the whole probe.
 	for outer_row in rows {
 		for comp, i in probe.outer_idx {
 			key := outer_row.values[comp]
@@ -713,7 +712,8 @@ join_key_matches_index :: proc(key: types.Value, col_type: types.Column_Type) ->
 		_, ok := key.(string)
 		return ok
 	case .BLOB:
-		return false
+		_, ok := key.([]u8)
+		return ok
 	}
 	return false
 }
@@ -739,7 +739,8 @@ probe_index_key :: proc(
 		s, _ := key.(string)
 		return btree.find_rowids(idx_tree, def.root, transmute([]u8)s)
 	case .BLOB:
-		return nil, .None
+		b, _ := key.([]u8)
+		return btree.find_rowids(idx_tree, def.root, b)
 	}
 	return nil, .None
 }

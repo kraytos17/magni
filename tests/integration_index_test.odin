@@ -193,7 +193,7 @@ test_create_index_errors :: proc(t: ^testing.T) {
 	context = restore_logger(saved)
 	testing.expect(t, neg_table != .None, "unknown table rejected")
 	testing.expect(t, neg_col != .None, "unknown column rejected")
-	testing.expect(t, neg_blob != .None, "BLOB column rejected")
+	testing.expect(t, neg_blob == .None, "BLOB column accepted")
 	testing.expect(
 		t,
 		db.execute(d, "CREATE INDEX i_score ON docs (score);") == .None,
@@ -219,7 +219,7 @@ test_create_index_errors :: proc(t: ^testing.T) {
 @(test)
 test_create_composite_index :: proc(t: ^testing.T) {
 	// Multi-column DDL validates every component (present, indexable —
-	// BLOB fails naming the column), backfills framed tuples with the def
+	// BLOB rides the TEXT codec), backfills framed tuples with the def
 	// tagged per-component, and SQL stays on the scan path (planner
 	// untouched this phase).
 	d := setup_db(t, "idxcompcreate")
@@ -279,10 +279,12 @@ test_create_composite_index :: proc(t: ^testing.T) {
 	dup := db.execute(d, "CREATE INDEX i_ab ON t (a, b);")
 	context = restore_logger(saved)
 	testing.expect(t, neg_col != .None, "unknown component rejected")
-	testing.expect(t, neg_blob != .None, "BLOB component rejected")
+	testing.expect(t, neg_blob == .None, "BLOB component accepted")
 	testing.expect(t, dup != .None, "duplicate composite name rejected")
 
-	// Routed SQL answers through the new index.
+	// Routed SQL answers through the new index. The i_bl prefix sub is
+	// subsumed by the i_ab full tuple (same leading framed bytes), so
+	// the plan stays a single composite fetch.
 	testing.expect_value(
 		t,
 		explain(t, d, "EXPLAIN SELECT a, b FROM t WHERE a = 10 AND b = 'x';"),
@@ -3918,4 +3920,98 @@ test_index_unique_group_persists_across_reopen :: proc(t: ^testing.T) {
 	dup := db.execute(d2, "INSERT INTO t VALUES (1, 'x', 20);")
 	context = restore_logger(saved)
 	testing.expect(t, dup != .None, "reopened table still rejects dup tuples")
+}
+
+// BLOB index P0 pins: CREATE INDEX on a BLOB column must succeed and Eq
+// lookups must return indexed rows — via backfill (index after data) and
+// the per-row path (index before inserts). Red today (DDL gate rejects
+// BLOB); the probe and range pins below extend the same coverage.
+@(test)
+test_blob_index_backfill :: proc(t: ^testing.T) {
+	d := setup_db(t, "blobidxfill")
+	defer teardown_db(d, "blobidxfill")
+
+	must_db_execute(t, d, "CREATE TABLE t (id INT, b BLOB);")
+	must_db_execute(t, d, "INSERT INTO t VALUES (1, X'DEADBEEF');")
+	must_db_execute(t, d, "INSERT INTO t VALUES (2, X'deadbeef');")
+	must_db_execute(t, d, "INSERT INTO t VALUES (3, X'');")
+	must_db_execute(t, d, "INSERT INTO t VALUES (4, NULL);")
+	testing.expect(
+		t,
+		db.execute(d, "CREATE INDEX i_b ON t (b);") == .None,
+		"create blob index succeeds",
+	)
+	check_col(
+		t,
+		d,
+		"SELECT id FROM t WHERE b = X'DEADBEEF' ORDER BY id;",
+		[]i64{1, 2},
+		"blob eq finds backfilled rows (hex case-insensitive)",
+	)
+	check_col(
+		t,
+		d,
+		"SELECT id FROM t WHERE b = X'' ORDER BY id;",
+		[]i64{3},
+		"empty blob finds backfilled row",
+	)
+}
+
+@(test)
+test_blob_index_per_row_and_range :: proc(t: ^testing.T) {
+	d := setup_db(t, "blobidxrow")
+	defer teardown_db(d, "blobidxrow")
+
+	must_db_execute(t, d, "CREATE TABLE t (id INT, b BLOB);")
+	must_db_execute(t, d, "CREATE INDEX i_b ON t (b);")
+	must_db_execute(t, d, "INSERT INTO t VALUES (1, X'00FF');")
+	must_db_execute(t, d, "INSERT INTO t VALUES (2, X'FF00');")
+	must_db_execute(t, d, "INSERT INTO t VALUES (3, X'0F0F');")
+	check_col(
+		t,
+		d,
+		"SELECT id FROM t WHERE b = X'FF00' ORDER BY id;",
+		[]i64{2},
+		"blob eq finds per-row indexed row",
+	)
+	check_col(
+		t,
+		d,
+		"SELECT id FROM t WHERE b IN (X'00FF', X'FFFF') ORDER BY id;",
+		[]i64{1},
+		"blob in finds indexed row",
+	)
+	// Byte order: 00FF < 0F0F < FF00.
+	check_col(
+		t,
+		d,
+		"SELECT id FROM t WHERE b >= X'0F0F' ORDER BY id;",
+		[]i64{2, 3},
+		"blob range follows byte order",
+	)
+}
+
+@(test)
+test_blob_index_join_probe :: proc(t: ^testing.T) {
+	d := setup_db(t, "blobidxjoin")
+	defer teardown_db(d, "blobidxjoin")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT, b BLOB);",
+			"CREATE TABLE c (b BLOB, v TEXT);",
+			"INSERT INTO a VALUES (1, X'AA'), (2, X'BB');",
+			"INSERT INTO c VALUES (X'AA', 'hit'), (X'AA', 'hit2'), (X'CC', 'miss');",
+			"CREATE INDEX i_c_b ON c (b);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a INNER JOIN c ON a.b = c.b ORDER BY v;",
+		[]string{"hit", "hit2"},
+		"blob join probe matches with fan-out",
+	)
 }
