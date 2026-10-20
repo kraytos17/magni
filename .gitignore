@@ -6,11 +6,8 @@ target
 __pycache__
 
 # AFL++ fuzzing seeds (generated; single source of truth is the generator
-# script in fuzz/generators/)
+# scripts in fuzz/generators/ — hand seeds plus promoted tables).
 fuzz/corpus/*
-!fuzz/corpus/promoted_seeds.py
-# Exec corpus dir holds only generated output now; its promoted table lives
-# in fuzz/generators/promoted_exec_seeds.py (created by `corpus generate --exec`)
 fuzz/corpus_exec/
 
 # AFL++ runtime outputs (generated)

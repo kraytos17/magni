@@ -11,12 +11,7 @@ from pathlib import Path
 
 from . import config
 from .corpus import parse_seed_tables
-from .promote import (
-    append_to_promoted_pool,
-    corpus_promote_pool,
-    load_existing_pool,
-    minimize_merged_pool,
-)
+from .promote import append_to_promoted_pool, corpus_promote_pool
 
 GEN_EXEC_CORPUS = config.GEN_EXEC_CORPUS
 EXEC_PROMOTED = config.EXEC_PROMOTED
@@ -25,16 +20,6 @@ EXEC_PROMOTED = config.EXEC_PROMOTED
 def parse_exec_tables() -> dict[str, tuple[str, bytes]]:
     """Load EXEC_SEEDS + EXEC_PROMOTED via exec. Returns {md5: (name, bytes)}."""
     return parse_seed_tables(GEN_EXEC_CORPUS, *config.EXEC_POOL.seed_tables)
-
-
-def minimize_merged_exec(seen: dict[str, tuple[bytes, str]]) -> dict[str, tuple[bytes, str]]:
-    """Reduce merged queue items with afl-cmin against the exec target."""
-    return minimize_merged_pool(config.EXEC_POOL, seen)
-
-
-def load_existing_exec() -> dict[str, tuple[str, bytes]]:
-    """Existing scripts: tables plus on-disk files. Returns {md5: (name, bytes)}."""
-    return load_existing_pool(config.EXEC_POOL)
 
 
 def append_to_promoted(

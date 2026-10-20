@@ -485,13 +485,7 @@ from promoted_exec_seeds import EXEC_PROMOTED
 
 def main():
     """Rewrite the exec corpus deterministically (hand + promoted scripts)."""
-    os.makedirs(CORPUS, exist_ok=True)
-    names = seedgen.managed_names(EXEC_SEEDS) | seedgen.managed_names(EXEC_PROMOTED)
-    seedgen.clear_managed(CORPUS, names)
-
-    written = seedgen.write_entries(CORPUS, EXEC_SEEDS + EXEC_PROMOTED)
-
-    print(f"wrote {written} exec seeds to {CORPUS}")
+    seedgen.regenerate(CORPUS, EXEC_SEEDS + EXEC_PROMOTED, label="exec seeds")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """Minimize a seed corpus: cmin → monster purge → rewrite promoted set.
 
-Parser pool regenerates fuzz/corpus/promoted_seeds.py; exec pool
+Parser pool regenerates fuzz/generators/promoted_seeds.py; exec pool
 (`corpus minimize --exec`) regenerates
 fuzz/generators/promoted_exec_seeds.py.
 Hand seeds in the generator scripts are never touched. Aborts (leaving
@@ -95,6 +95,14 @@ def rewrite_promoted_seeds(
         log("keep-set/entry mismatch; aborting without changes")
         log(f"  on disk: {len(disk_promoted)}, in file: {len(entry_names)}")
         sys.exit(1)
+    current_entries = [
+        line
+        for line in promoted_path.read_text(encoding="utf-8").split("\n")
+        if re.match(r'^    \("([^"]+)",', line)
+    ]
+    if current_entries == kept_entries:
+        log(f"  {promoted_path.name} already minimal ({len(kept_entries)} entries); no changes")
+        return
     stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     table_name = "EXEC_PROMOTED" if pool.is_exec else "PROMOTED_SEEDS"
     gen_cmd = (
@@ -137,23 +145,18 @@ def regenerate_and_drop_stale(pool: config.CorpusPool) -> None:
     corpus_generate(exec_scripts=pool.is_exec)
     # The generator only removes files it knows about; drop stale seeds
     # left behind by the minimization (names no longer in the tables).
-    sys.path.insert(0, str(pool.corpus_dir))
+    # Generators resolve their promoted tables via their own dir.
+    sys.path.insert(0, str(pool.gen_script.parent))
     try:
         spec = importlib.util.spec_from_file_location(pool.gen_script.stem, str(pool.gen_script))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:
-        sys.path.remove(str(pool.corpus_dir))
+        sys.path.remove(str(pool.gen_script.parent))
     live = set(config.DEEP_GUARD_SEEDS) | {
         pool.gen_script.name,
         "__pycache__",
     }
-    if not pool.is_exec:
-        # Parser pool only: its promoted table still lives inside the
-        # output dir (fuzz/corpus/promoted_seeds.py). The exec pool's
-        # table moved to fuzz/generators/, so a .py in corpus_exec/
-        # is stale and must go.
-        live.add("promoted_seeds.py")
     for table in pool.seed_tables:
         live |= {name for name, _ in getattr(mod, table)}
     stale = [f.name for f in pool.corpus_dir.iterdir() if f.is_file() and f.name not in live]

@@ -60,18 +60,8 @@ def minimize_merged_pool(
         return out
 
 
-def minimize_merged(seen: dict[str, tuple[bytes, str]]) -> dict[str, tuple[bytes, str]]:
-    """Reduce merged queue items with afl-cmin. Returns {md5: (bytes, meta)}."""
-    return minimize_merged_pool(config.PARSER_POOL, seen)
-
-
 def load_existing_pool(pool: config.CorpusPool) -> dict[str, tuple[str, bytes]]:
-    """Existing entries: gen-script tables plus on-disk files. Returns {md5: (name, bytes)}.
-
-    The file scan uses is_staged_seed for both pools. (The parser scan
-    previously also picked up promoted_seeds.py itself as a phantom entry;
-    its md5 can never equal a real seed, so the diff is unaffected.)
-    """
+    """Existing entries: gen-script tables plus on-disk files. Returns {md5: (name, bytes)}."""
     existing = parse_seed_tables(pool.gen_script, *pool.seed_tables)
     for f in pool.corpus_dir.iterdir():
         if config.is_staged_seed(f):
@@ -80,11 +70,6 @@ def load_existing_pool(pool: config.CorpusPool) -> dict[str, tuple[str, bytes]]:
             if h not in existing:
                 existing[h] = (f.name, content)
     return existing
-
-
-def load_existing() -> dict[str, tuple[str, bytes]]:
-    """Existing seeds: SEEDS table plus on-disk files. Returns {md5: (name, bytes)}."""
-    return load_existing_pool(config.PARSER_POOL)
 
 
 def next_promoted_entries(new_seeds: list, existing_names: set[str]) -> list[str]:
@@ -111,23 +96,6 @@ def next_promoted_entries(new_seeds: list, existing_names: set[str]) -> list[str
         comment = f"  # {metadata}" if metadata else ""
         entries.append(f'    ("{name}", {content!r}),{comment}')
     return entries
-
-
-def append_to_gen_corpus(new_seeds: list, existing_names: set[str]) -> None:
-    """Append new (content, metadata) seeds as promoted_NNNN entries."""
-    new_entries = next_promoted_entries(new_seeds, existing_names)
-
-    text = config.GEN_CORPUS.read_text()
-    lines = text.split("\n")
-    insert_pos = len(lines) - 1
-    for i in range(len(lines) - 1, -1, -1):
-        stripped = lines[i].strip()
-        if stripped.startswith("(") and stripped.endswith(("),", "),")):
-            insert_pos = i + 1
-            break
-    for entry in reversed(new_entries):
-        lines.insert(insert_pos, entry)
-    config.GEN_CORPUS.write_text("\n".join(lines))
 
 
 def corpus_promote_pool(
@@ -168,10 +136,7 @@ def corpus_promote_pool(
         return
 
     log(f"[5/5] Appending {len(new_seeds)} {pool.label}s to {pool.promoted_path}...")
-    if pool.is_exec:
-        append_to_promoted_pool(pool, new_seeds, {name for name, _ in existing.values()})
-    else:
-        append_to_gen_corpus(new_seeds, {name for name, _ in existing.values()})
+    append_to_promoted_pool(pool, new_seeds, {name for name, _ in existing.values()})
     log(f"  Done. Total {pool.label}s: {len(existing) + len(new_seeds)}")
 
     if test_after:
@@ -185,10 +150,9 @@ def append_to_promoted_pool(
     existing_names: set[str],
     promoted_path: Path | None = None,
 ) -> None:
-    """Append new entries to a trailing-list promoted file (exec pool layout).
+    """Append new entries to a pool's trailing-list promoted file.
 
-    Insert position is the close of the trailing [...] block — unlike the
-    parser GEN_CORPUS, where entries land after the last tuple mid-file.
+    Insert position is the close of the trailing [...] block.
     promoted_path defaults to the pool's file (tests inject a temp file).
     """
     new_entries = next_promoted_entries(new_seeds, existing_names)
@@ -206,5 +170,5 @@ def append_to_promoted_pool(
 
 
 def corpus_promote(minimize: bool, dry_run: bool, test_after: bool = False) -> None:
-    """Merge AFL++ worker queues, dedup, diff, and append new seeds to gen_corpus.py."""
+    """Merge AFL++ worker queues, dedup, diff, and append new seeds to the promoted file."""
     corpus_promote_pool(config.PARSER_POOL, minimize, dry_run, test_after)

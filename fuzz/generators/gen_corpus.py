@@ -18,7 +18,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.normpath(os.path.join(_HERE, "..")))  # fuzz/: seedgen
 CORPUS = os.path.normpath(os.path.join(_HERE, "..", "corpus"))
-sys.path.insert(0, CORPUS)  # corpus dir: promoted_seeds
+sys.path.insert(0, _HERE)  # generators dir: promoted_seeds
 import seedgen
 
 HAND_SEEDS = [
@@ -197,40 +197,19 @@ def deep_parens_not(levels):
 def main():
     """Rewrite the corpus deterministically: hand + promoted seeds, then
     the guard-boundary probes (under/over nesting limits)."""
-    seed_names = seedgen.managed_names(SEEDS)
-    seed_names |= {
-        "deep_subquery_under_guard",
-        "deep_subquery_over_guard",
-        "deep_parens",
-        "deep_parens_511",
-        "deep_parens_513",
-        "deep_parens_not",
-        "deep_check_nested",
-    }
-
-    # Clear managed names first so removed/renamed generator entries don't
-    # leave orphan seeds behind.
-    seedgen.clear_managed(CORPUS, seed_names)
-
-    written = seedgen.write_entries(CORPUS, SEEDS)
-
-    with open(os.path.join(CORPUS, "deep_subquery_under_guard"), "w") as f:
-        f.write(deep_subquery(500))
-    with open(os.path.join(CORPUS, "deep_subquery_over_guard"), "w") as f:
-        f.write(deep_subquery(600))
-    with open(os.path.join(CORPUS, "deep_parens"), "w") as f:
-        f.write(deep_parens(300))
-    with open(os.path.join(CORPUS, "deep_parens_511"), "w") as f:
-        f.write(deep_parens(511))
-    with open(os.path.join(CORPUS, "deep_parens_513"), "w") as f:
-        f.write(deep_parens(513))
-    with open(os.path.join(CORPUS, "deep_parens_not"), "w") as f:
-        f.write(deep_parens_not(200))
-    with open(os.path.join(CORPUS, "deep_check_nested"), "w") as f:
-        f.write("CREATE TABLE t (a INT CHECK (" + "(" * 300 + "a>0" + ")" * 300 + "));")
-    written += 7
-
-    print(f"wrote {written} seeds to {CORPUS}")
+    guards = [
+        ("deep_subquery_under_guard", deep_subquery(500)),
+        ("deep_subquery_over_guard", deep_subquery(600)),
+        ("deep_parens", deep_parens(300)),
+        ("deep_parens_511", deep_parens(511)),
+        ("deep_parens_513", deep_parens(513)),
+        ("deep_parens_not", deep_parens_not(200)),
+        (
+            "deep_check_nested",
+            "CREATE TABLE t (a INT CHECK (" + "(" * 300 + "a>0" + ")" * 300 + "));",
+        ),
+    ]
+    seedgen.regenerate(CORPUS, SEEDS, guards)
 
 
 if __name__ == "__main__":

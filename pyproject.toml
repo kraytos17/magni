@@ -6,7 +6,6 @@ line-length = 100
 # (otherwise every promote re-dirties the tree).
 exclude = [
     "fuzz/generators/*.py",
-    "fuzz/corpus/promoted_seeds.py",
 ]
 
 [tool.ruff.lint]

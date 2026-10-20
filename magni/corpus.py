@@ -56,7 +56,7 @@ def parse_seed_tables(script: Path, *tables: str) -> dict[str, tuple[str, bytes]
     Shared by the parser corpus (SEEDS) and the exec pool (EXEC_SEEDS +
     EXEC_PROMOTED). The gen script calls sys.exit(main()) — ignored, like any
     corrupt-script failure (falls back to an empty set; the on-disk scan in
-    load_existing still applies).
+    load_existing_pool still applies).
     """
     ns = {"__name__": "seed_parsing", "__file__": str(script)}
     try:
@@ -78,18 +78,6 @@ def parse_seed_tables(script: Path, *tables: str) -> dict[str, tuple[str, bytes]
     return seeds
 
 
-def parse_seeds() -> dict[str, tuple[str, bytes]]:
-    """Load SEEDS from gen_corpus.py via exec. Returns {md5: (name, content)}."""
-    return parse_seed_tables(config.GEN_CORPUS, "SEEDS")
-
-
-def purge_pycache(corpus_dir: Path) -> None:
-    """Remove a corpus dir's __pycache__ (regenerators leave it behind)."""
-    pycache = corpus_dir / "__pycache__"
-    if pycache.exists():
-        shutil.rmtree(pycache)
-
-
 def parse_afl_metadata(filename: str) -> str:
     """Extract useful AFL metadata from queue filename for a comment."""
     parts, meta = filename.split(","), []
@@ -108,23 +96,11 @@ def corpus_generate(exec_scripts: bool = False) -> None:
     if exec_scripts:
         gen_exec = config.GEN_EXEC_CORPUS
         run([sys.executable, str(gen_exec)])
-        purge_pycache(config.EXEC_CORPUS_DIR)
-        # NOTE: counts every non-.py file, including any future promoted file.
-        n = sum(
-            1
-            for f in config.EXEC_CORPUS_DIR.iterdir()
-            if f.is_file() and f.suffix != ".py" and f.name != "__pycache__"
-        )
+        n = sum(1 for f in config.EXEC_CORPUS_DIR.iterdir() if config.is_staged_seed(f))
         log(f"exec corpus: {n} seeds in {config.EXEC_CORPUS_DIR}/")
         return
     run([sys.executable, str(config.GEN_CORPUS)])
-    purge_pycache(config.CORPUS_DIR)
-    # NOTE: intentionally counts promoted_seeds.py as well (historical quirk).
-    n = sum(
-        1
-        for f in config.CORPUS_DIR.iterdir()
-        if f.is_file() and f.name != "gen_corpus.py" and f.name != "__pycache__"
-    )
+    n = sum(1 for f in config.CORPUS_DIR.iterdir() if config.is_staged_seed(f))
     size = subprocess.run(["du", "-sh", str(config.CORPUS_DIR)], capture_output=True, text=True)  # noqa: PLW1510 - du failure yields "?" size, not fatal
     sz = size.stdout.split()[0] if size.stdout else "?"
     log(f"corpus: {n} seeds in {config.CORPUS_DIR}/ ({sz})")

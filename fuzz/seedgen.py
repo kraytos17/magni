@@ -31,3 +31,17 @@ def write_entries(corpus_dir, entries):
             f.write(data)
         written += 1
     return written
+
+
+def regenerate(corpus_dir, entries, extra=(), label="seeds"):
+    """Clear managed names and rewrite entries plus extra files deterministically.
+
+    entries is the seed table; extra holds generated-but-untabled files
+    (the parser deep-guard probes). Returns the file count. Main functions
+    must not return this (they run under sys.exit).
+    """
+    names = managed_names(entries) | managed_names(extra)
+    clear_managed(corpus_dir, names)
+    written = write_entries(corpus_dir, list(entries) + list(extra))
+    print(f"wrote {written} {label} to {corpus_dir}")
+    return written
