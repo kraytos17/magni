@@ -304,9 +304,19 @@ resolve_join_source :: proc(
 	return false
 }
 
+// PROBE_MAX_OUTER_ROWS caps probe-first routing: per-row index lookups
+// beat hash only for small outers (crossover matrix, 30k inner at 10x
+// fan-out: probe wins 0.55x/0.66x/0.86x at 100/256/512 outer rows, loses
+// 1.26x/4.25x at 1k/10k). Larger outers go straight to the materializing
+// paths. Both orders are row-identical by construction (probe verifies
+// every pair), so this is plan choice only. Follow-up: fit a cost model
+// with NDV selectivity instead of a flat cap.
+PROBE_MAX_OUTER_ROWS :: 256
+
 // execute_single_join runs one JOIN clause: tries the index nested-loop
-// probe first (no inner materialization), then materializes the right
-// side and picks hash vs nested-loop. Returns the combined rows.
+// probe first for small outers (no inner materialization), otherwise
+// materializes the right side and picks hash vs nested-loop. Returns the
+// combined rows.
 @(private = "file")
 execute_single_join :: proc(
 	t: ^btree.Tree,
@@ -318,7 +328,7 @@ execute_single_join :: proc(
 	cache: ^schema.Table_Cache = nil,
 ) -> []Row_Entry {
 	new_rows := make([dynamic]Row_Entry, context.temp_allocator)
-	if try_index_nlj(jb, jc, info_idx, rows, &new_rows) {
+	if len(rows) <= PROBE_MAX_OUTER_ROWS && try_index_nlj(jb, jc, info_idx, rows, &new_rows) {
 		return new_rows[:]
 	}
 

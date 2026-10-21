@@ -264,6 +264,7 @@ run_reverse_search :: proc(ed: ^Editor, lb: ^Line_Buffer) {
 // linedit for the editor), and completion spellings differ anyway
 // (trailing spaces mark arg-taking commands).
 dot_commands :: []string {
+	".analyze",
 	".begin",
 	".checkpoint",
 	".commit",

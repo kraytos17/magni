@@ -888,6 +888,10 @@ index_insert_cow :: proc(
 		return 0, k_err
 	}
 
+	// Any insert can change the distinct count; the root may also move on
+	// split (the new id misses and recomputes, the old id's entry goes
+	// stale-but-bounded until eviction clears it).
+	stats_index_ndv_reset(tree_stats(t), t.root)
 	root_node, load_err := load_node(t, t.root)
 	if load_err != .None {
 		return 0, load_err
@@ -1981,6 +1985,10 @@ index_delete_cow :: proc(
 	if k_err != .None {
 		return 0, k_err
 	}
+
+	// Same invalidation as the insert core: any delete can change the
+	// distinct count (including deleting the last row of a key).
+	stats_index_ndv_reset(tree_stats(t), t.root)
 
 	delete_cow_recursive :: proc(
 		t: ^Tree,

@@ -18,6 +18,7 @@ import "src:pager"
 Stats :: struct {
 	row_counts     : [dynamic]int, // index = page id; -1 = uncached
 	page_int_ranges: [dynamic]Maybe(pager.Page_Int_Range), // index = page id; nil = uncached
+	index_ndv      : [dynamic]int, // index = index root page id; -1 = unknown
 }
 
 // tree_stats returns the pager-attached Stats (non-nil: btree.init attaches it).
@@ -38,6 +39,7 @@ attach_stats :: proc(t: ^Tree) {
 	s := new(Stats, p.allocator)
 	s.row_counts = make([dynamic]int, 0, 64, p.allocator)
 	s.page_int_ranges = make([dynamic]Maybe(pager.Page_Int_Range), 0, 64, p.allocator)
+	s.index_ndv = make([dynamic]int, 0, 64, p.allocator)
 	p.stats = s
 	p.on_evict = on_evict_stats
 	p.free_stats = free_stats_proc
@@ -120,6 +122,40 @@ stats_range_reset :: proc(s: ^Stats, page_id: u32) {
 	stat_reset(&s.page_int_ranges, page_id, nil)
 }
 
+// index_ndv_get returns the cached distinct-key count for an index root, if
+// known. Public: tests and the future cost model read through it; unknown
+// (never analyzed, or invalidated by a write) reports ok=false so callers
+// fall back to today's behavior.
+index_ndv_get :: proc(p: ^pager.Pager, root: u32) -> (int, bool) {
+	if p.stats == nil {
+		return 0, false
+	}
+
+	s := cast(^Stats)p.stats
+	if int(root) >= len(s.index_ndv) {
+		return 0, false
+	}
+
+	ndv := s.index_ndv[root]
+	return ndv, ndv >= 0
+}
+
+// stats_index_ndv_set caches a distinct-key count for an index root,
+// growing the array (new slots initialized to the -1 sentinel) as needed.
+@(private)
+stats_index_ndv_set :: proc(s: ^Stats, root: u32, ndv: int) {
+	idx := stat_grow(&s.index_ndv, root, -1)
+	s.index_ndv[idx] = ndv
+}
+
+// stats_index_ndv_reset marks an index root's count unknown (bounds-guarded;
+// never grows — resetting an untracked root is a no-op). Called on every
+// index mutation: any insert or delete can change the distinct count.
+@(private)
+stats_index_ndv_reset :: proc(s: ^Stats, root: u32) {
+	stat_reset(&s.index_ndv, root, -1)
+}
+
 // on_evict_stats clears a page's cached stats when the pager evicts or frees
 // it, so a later reuse of the same page id never reads stale values.
 @(private = "file")
@@ -131,6 +167,7 @@ on_evict_stats :: proc(data: rawptr, page_num: u32) {
 	s := cast(^Stats)data
 	stats_row_count_reset(s, page_num)
 	stats_range_reset(s, page_num)
+	stats_index_ndv_reset(s, page_num)
 }
 
 // free_stats_proc releases a Stats instance (pager close hook).
@@ -143,6 +180,7 @@ free_stats_proc :: proc(data: rawptr) {
 	s := cast(^Stats)data
 	delete(s.row_counts)
 	delete(s.page_int_ranges)
+	delete(s.index_ndv)
 	mem.free(s)
 }
 

@@ -124,6 +124,40 @@ vacuum :: proc(database: ^db.Database) -> db.DB_Error {
 	return .None
 }
 
+// analyze computes distinct full-key counts for every secondary index and
+// caches them for the future cost model (unknown until analyzed, stale
+// after any index write — reads fall back to today's behavior either
+// way). Read-only over user data (no WAL txn, no root publication);
+// exclusive lock like the other admin paths. Reports per index.
+analyze :: proc(database: ^db.Database) -> db.DB_Error {
+	db.db_check(database) or_return
+	sync.lock(&database.mu)
+	defer sync.unlock(&database.mu)
+
+	st := db.Schema_Tree(database)
+	tables := schema.list_tables(&st, context.temp_allocator)
+	n := 0
+	for table in tables {
+		for def in table.indexes {
+			if def.root == 0 {
+				continue
+			}
+
+			idx_tree := btree.init(database.pager, def.root)
+			ndv, ndv_err := btree.index_ndv_store(&idx_tree, def.root)
+			if ndv_err != .None {
+				return .Corrupted
+			}
+
+			fmt.printf("Index %s.%s: %d distinct keys\n", table.name, def.name, ndv)
+			n += 1
+		}
+	}
+
+	fmt.printf("Analyzed %d indexes.\n", n)
+	return .None
+}
+
 // integrity_check verifies page 1, the schema root, and every table's
 // B-tree (tree_verify_if_enabled — a no-op unless built with
 // -define:VERIFY_TREE=true, so a default build only checks readability).

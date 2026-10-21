@@ -4015,3 +4015,147 @@ test_blob_index_join_probe :: proc(t: ^testing.T) {
 		"blob join probe matches with fan-out",
 	)
 }
+
+// ANALYZE NDV P0 pins: .analyze computes distinct full-key counts per
+// index (NULLs unindexed, duplicates collapsed), empty indexes read 0,
+// and any index write invalidates back to unknown. Red until the stats
+// array, walk, invalidation, and dot-command land.
+@(test)
+test_analyze_ndv_single_col :: proc(t: ^testing.T) {
+	d := setup_db(t, "ndvsingle")
+	defer teardown_db(d, "ndvsingle")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (id INT, s TEXT);",
+			"INSERT INTO t VALUES (1, 'alpha'), (2, 'alpha'), (3, 'alpha'), (4, 'beta'), (5, NULL), (6, NULL);",
+			"CREATE INDEX i_s ON t (s);",
+		},
+	)
+	testing.expect(t, admin.analyze(d) == .None, "analyze succeeds")
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	root := index_root_of(t, tbl, "i_s")
+	ndv, ok := btree.index_ndv_get(d.pager, root)
+	testing.expect(t, ok, "ndv known after analyze")
+	testing.expect_value(t, ndv, 2)
+}
+
+@(test)
+test_analyze_ndv_empty :: proc(t: ^testing.T) {
+	d := setup_db(t, "ndvempty")
+	defer teardown_db(d, "ndvempty")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (id INT, s TEXT);",
+			"CREATE INDEX i_s ON t (s);",
+		},
+	)
+	testing.expect(t, admin.analyze(d) == .None, "analyze succeeds")
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	root := index_root_of(t, tbl, "i_s")
+	ndv, ok := btree.index_ndv_get(d.pager, root)
+	testing.expect(t, ok, "ndv known after analyze")
+	testing.expect_value(t, ndv, 0)
+}
+
+@(test)
+test_analyze_ndv_composite :: proc(t: ^testing.T) {
+	d := setup_db(t, "ndvcomp")
+	defer teardown_db(d, "ndvcomp")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (1, 'x'), (1, 'x'), (1, 'y'), (2, 'x');",
+			"CREATE INDEX i_ab ON t (a, b);",
+		},
+	)
+	testing.expect(t, admin.analyze(d) == .None, "analyze succeeds")
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	root := index_root_of(t, tbl, "i_ab")
+	ndv, ok := btree.index_ndv_get(d.pager, root)
+	testing.expect(t, ok, "ndv known after analyze")
+	testing.expect_value(t, ndv, 3)
+}
+
+@(test)
+test_analyze_ndv_invalidated_on_write :: proc(t: ^testing.T) {
+	d := setup_db(t, "ndvinval")
+	defer teardown_db(d, "ndvinval")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (id INT, s TEXT);",
+			"INSERT INTO t VALUES (1, 'alpha');",
+			"CREATE INDEX i_s ON t (s);",
+		},
+	)
+	testing.expect(t, admin.analyze(d) == .None, "analyze succeeds")
+	st := db.Schema_Tree(d)
+	tbl, found := schema.find_table(&st, "t", context.temp_allocator)
+	testing.expect(t, found, "table found")
+	if !found {
+		return
+	}
+	root := index_root_of(t, tbl, "i_s")
+	_, ok := btree.index_ndv_get(d.pager, root)
+	testing.expect(t, ok, "ndv known after analyze")
+
+	must_db_execute(t, d, "INSERT INTO t VALUES (2, 'beta');")
+	// Re-resolve: the insert's COW split may have moved the index root.
+	st2 := db.Schema_Tree(d)
+	tbl2, found2 := schema.find_table(&st2, "t", context.temp_allocator)
+	testing.expect(t, found2, "table found after insert")
+	if !found2 {
+		return
+	}
+	root2 := index_root_of(t, tbl2, "i_s")
+	_, still_ok := btree.index_ndv_get(d.pager, root2)
+	testing.expect(t, !still_ok, "insert invalidates ndv")
+	if root != root2 {
+		// Root moved on split: the old page must also read unknown,
+		// proving the entry reset fired (not just a new-page miss).
+		_, old_ok := btree.index_ndv_get(d.pager, root)
+		testing.expect(t, !old_ok, "old root entry reset on split")
+	}
+
+	testing.expect(t, admin.analyze(d) == .None, "re-analyze succeeds")
+	ndv, ok2 := btree.index_ndv_get(d.pager, root2)
+	testing.expect(t, ok2, "ndv known after re-analyze")
+	testing.expect_value(t, ndv, 2)
+
+	must_db_execute(t, d, "DELETE FROM t WHERE id = 1;")
+	st3 := db.Schema_Tree(d)
+	tbl3, found3 := schema.find_table(&st3, "t", context.temp_allocator)
+	testing.expect(t, found3, "table found after delete")
+	if !found3 {
+		return
+	}
+	root3 := index_root_of(t, tbl3, "i_s")
+	_, ok3 := btree.index_ndv_get(d.pager, root3)
+	testing.expect(t, !ok3, "delete invalidates ndv")
+}
