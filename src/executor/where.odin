@@ -371,6 +371,7 @@ resolve_condition :: proc(
 					rc.in_mem.values[ri] = subq_rows[ri].values[0]
 				}
 			}
+			rc.in_mem.fps = build_fp_index(rc.in_mem.values, allocator)
 		}
 	}
 	return rc, true
@@ -439,9 +440,13 @@ membership_test :: proc(rc: Resolved_Condition, schema_tree: ^btree.Tree, v: typ
 		}
 		return false
 	case .Subquery:
-		for c in rc.in_mem.values {
-			if !types.is_null(v) && compare_values(v, c) == 0 {
-				return true
+		// Same fingerprint prefilter as .Values (built at resolve time);
+		// verify hits exactly. An empty index falls back to the scan.
+		if fp_index_hit(rc.in_mem.fps, types.hash(v)) {
+			for c in rc.in_mem.values {
+				if !types.is_null(v) && compare_values(v, c) == 0 {
+					return true
+				}
 			}
 		}
 		return false

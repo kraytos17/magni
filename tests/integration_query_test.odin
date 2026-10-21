@@ -1653,3 +1653,196 @@ test_integration_join_self_join_aliased :: proc(t: ^testing.T) {
 		"aliased self-join routes through the probe",
 	)
 }
+
+// Semi-join P0 pins: IN-subquery results across the tricky shapes
+// (duplicates, NULLs both sides, empty membership, NOT IN, ON-clause).
+// Green on today's materialize/fallback paths; P1–P3 must preserve every
+// row below exactly (NULL semantics especially — pinned, not redefined).
+@(test)
+test_in_subquery_shapes :: proc(t: ^testing.T) {
+	d := setup_db(t, "insubshapes")
+	defer teardown_db(d, "insubshapes")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (id INT, name TEXT);",
+			"INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (NULL, 'n');",
+			"CREATE TABLE m (id INT);",
+			"INSERT INTO m VALUES (1), (1), (3), (NULL);",
+			"CREATE TABLE e (id INT);",
+		},
+	)
+	// Duplicate members collapse; NULL outer never matches.
+	check_col(
+		t,
+		d,
+		"SELECT name FROM t WHERE id IN (SELECT id FROM m) ORDER BY name;",
+		[]string{"a", "c"},
+		"dup members collapse, null outer excluded",
+	)
+	// Empty membership matches nothing.
+	q := db.query(d, "SELECT name FROM t WHERE id IN (SELECT id FROM e);")
+	testing.expect(t, q.ok, "empty in-subquery succeeds")
+	testing.expect_value(t, len(q.rows), 0)
+}
+
+@(test)
+test_in_subquery_null_semantics :: proc(t: ^testing.T) {
+	d := setup_db(t, "insubnull")
+	defer teardown_db(d, "insubnull")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (id INT, name TEXT);",
+			"INSERT INTO t VALUES (1, 'a'), (2, 'b');",
+			"CREATE TABLE m (id INT);",
+			"INSERT INTO m VALUES (1), (NULL);",
+			"CREATE TABLE clean (id INT);",
+			"INSERT INTO clean VALUES (1);",
+		},
+	)
+	// Pin current behavior verbatim: NULL members are skipped (not
+	// strict three-valued emptiness) — redefinition is out of scope.
+	q1 := db.query(d, "SELECT name FROM t WHERE id NOT IN (SELECT id FROM m) ORDER BY name;")
+	testing.expect(t, q1.ok, "not-in with null member succeeds")
+	n1 := len(q1.rows)
+	q2 := db.query(d, "SELECT name FROM t WHERE id NOT IN (SELECT id FROM clean) ORDER BY name;")
+	testing.expect(t, q2.ok, "not-in clean succeeds")
+	n2 := len(q2.rows)
+	testing.expect_value(t, n1, 1)
+	testing.expect_value(t, n2, 1)
+	if n1 == 1 {
+		v, is_str := q1.rows[0][0].(string)
+		testing.expect(t, is_str && v == "b", "null member skips, non-member survives")
+	}
+	if n2 == 1 {
+		v, is_str := q2.rows[0][0].(string)
+		testing.expect(t, is_str && v == "b", "only non-member survives")
+	}
+}
+
+@(test)
+test_in_subquery_on_clause :: proc(t: ^testing.T) {
+	d := setup_db(t, "insubon")
+	defer teardown_db(d, "insubon")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT, w TEXT);",
+			"CREATE TABLE b (id INT, v TEXT);",
+			"CREATE TABLE m (id INT);",
+			"INSERT INTO a VALUES (1, 'a1'), (2, 'a2');",
+			"INSERT INTO b VALUES (1, 'b1'), (2, 'b2');",
+			"INSERT INTO m VALUES (1);",
+		},
+	)
+	// ON-clause IN-subquery resolves per pair today (the P2 hoist target).
+	check_col(
+		t,
+		d,
+		"SELECT v FROM a JOIN b ON a.id = b.id AND b.id IN (SELECT id FROM m) ORDER BY v;",
+		[]string{"b1"},
+		"on-clause in-subquery filters pairs",
+	)
+}
+
+// Join-order P0 pins: multi-INNER chains must return identical rows
+// regardless of arm order (written pessimal-first today; the reorder must
+// preserve every row). LEFT arms pin position — mixed chains keep written
+// order semantics exactly.
+@(test)
+test_join_order_three_inner :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinord3")
+	defer teardown_db(d, "joinord3")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE big (id INT, v TEXT);",
+			"CREATE TABLE med (id INT, bid INT, w TEXT);",
+			"CREATE TABLE small (id INT, m INT);",
+			"INSERT INTO big VALUES (1, 'b1'), (2, 'b2');",
+			"INSERT INTO med VALUES (10, 1, 'm1'), (20, 2, 'm2');",
+			"INSERT INTO small VALUES (100, 10), (200, 20);",
+			"CREATE INDEX i_med_bid ON med (bid);",
+			"CREATE INDEX i_small_m ON small (m);",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT v FROM big JOIN med ON big.id = med.bid JOIN small ON med.id = small.m ORDER BY v;",
+		[]string{"b1", "b2"},
+		"pessimal-order three-inner chain matches",
+	)
+}
+
+@(test)
+test_join_order_left_pins_position :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinordleft")
+	defer teardown_db(d, "joinordleft")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE a (id INT);",
+			"CREATE TABLE b (id INT, aid INT);",
+			"CREATE TABLE c (bid INT, v TEXT);",
+			"INSERT INTO a VALUES (1), (2);",
+			"INSERT INTO b VALUES (10, 1);",
+			"INSERT INTO c VALUES (10, 'x'), (99, 'orphan');",
+			"CREATE INDEX i_c_bid ON c (bid);",
+		},
+	)
+	q := db.query(
+		d,
+		"SELECT v FROM a LEFT JOIN b ON a.id = b.aid JOIN c ON b.id = c.bid ORDER BY v;",
+	)
+	testing.expect(t, q.ok, "mixed chain succeeds")
+	testing.expect_value(t, len(q.rows), 1)
+	if len(q.rows) == 1 {
+		v, is_str := q.rows[0][0].(string)
+		testing.expect(t, is_str && v == "x", "left then inner keeps semantics")
+	}
+}
+
+// Join-order star pin: arms referencing only FROM+self may reorder (small
+// first); row-identical either way. Chain arms referencing earlier arms
+// must NOT reorder (covered by test_join_order_three_inner).
+@(test)
+test_join_order_star_schema :: proc(t: ^testing.T) {
+	d := setup_db(t, "joinordstar")
+	defer teardown_db(d, "joinordstar")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE fact (a INT, b INT);",
+			"CREATE TABLE d1 (id INT, x TEXT);",
+			"CREATE TABLE d2 (id INT, y TEXT);",
+			"INSERT INTO fact VALUES (1, 10), (2, 20);",
+			"INSERT INTO d1 VALUES (1, 'p'), (2, 'q'), (3, 'r'), (4, 's'), (5, 't'), (6, 'u');",
+			"INSERT INTO d2 VALUES (10, 'u'), (20, 'v');",
+			"CREATE INDEX i_d1 ON d1 (id);",
+			"CREATE INDEX i_d2 ON d2 (id);",
+		},
+	)
+	// d1 (6 rows) sorts after d2 (2 rows): the reorder fires (verified
+	// separately) and rows stay identical.
+	check_col(
+		t,
+		d,
+		"SELECT x FROM fact JOIN d1 ON fact.a = d1.id JOIN d2 ON fact.b = d2.id ORDER BY x;",
+		[]string{"p", "q"},
+		"star schema reorders with identical rows",
+	)
+}

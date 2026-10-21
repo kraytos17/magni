@@ -328,7 +328,7 @@ execute_single_join :: proc(
 	cache: ^schema.Table_Cache = nil,
 ) -> []Row_Entry {
 	new_rows := make([dynamic]Row_Entry, context.temp_allocator)
-	if len(rows) <= PROBE_MAX_OUTER_ROWS && try_index_nlj(jb, jc, info_idx, rows, &new_rows) {
+	if len(rows) <= PROBE_MAX_OUTER_ROWS && try_index_nlj(jb, jc, t, info_idx, rows, &new_rows) {
 		return new_rows[:]
 	}
 
@@ -349,7 +349,7 @@ execute_single_join :: proc(
 
 	hash_used := try_hash_join(jb, jc, info_idx, rows, right_rows, &new_rows)
 	if !hash_used {
-		nested_loop_join(jb, jc, info_idx, rows, right_rows, &new_rows)
+		nested_loop_join(jb, jc, t, info_idx, rows, right_rows, &new_rows)
 	}
 	return new_rows[:]
 }
@@ -369,6 +369,7 @@ execute_single_join :: proc(
 try_index_nlj :: proc(
 	jb: ^Join_Build,
 	jc: parser.Join_Clause,
+	t: ^btree.Tree,
 	info_idx: int,
 	rows: []Row_Entry,
 	new_rows: ^[dynamic]Row_Entry,
@@ -411,7 +412,7 @@ try_index_nlj :: proc(
 		}
 	}
 
-	filter, filter_ok := init_join_filter(jb, jc)
+	filter, filter_ok := init_join_filter(jb, jc, t)
 	if !filter_ok {
 		return false
 	}
@@ -839,17 +840,20 @@ try_hash_join :: proc(
 // init_join_filter resolves the ON clause once (not per pair). Absent ON
 // matches everything (nil filter); unresolvable ON matches nothing —
 // signalled by ok=false so the caller can null-extend every outer row
-// (same fail-closed convention as evaluate_where).
+// (same fail-closed convention as evaluate_where). The schema tree lets
+// IN-subqueries materialize once here instead of per pair (nil tree keeps
+// the old per-row fallback — only callers without a tree may pass nil).
 @(private = "file")
 init_join_filter :: proc(
 	jb: ^Join_Build,
 	jc: parser.Join_Clause,
+	t: ^btree.Tree = nil,
 ) -> (
 	filter: Maybe(Where_Eval_Ctx),
 	ok: bool,
 ) {
 	if on_cl, has := jc.on_clause.?; has {
-		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, nil, context.temp_allocator)
+		filter = init_where_ctx(&on_cl, jb.cols, jb.ranges, t, context.temp_allocator)
 		if _, fok := filter.?; !fok {
 			return nil, false
 		}
@@ -927,6 +931,7 @@ emit_unmatched_right :: proc(
 nested_loop_join :: proc(
 	jb: ^Join_Build,
 	jc: parser.Join_Clause,
+	t: ^btree.Tree,
 	info_idx: int,
 	rows: []Row_Entry,
 	right_rows: []Row_Entry,
@@ -941,7 +946,7 @@ nested_loop_join :: proc(
 	// Resolve the ON filter once, not per pair. Unresolvable ON matches
 	// nothing (same fail-closed convention as evaluate_where); absent ON
 	// matches everything.
-	filter, filter_ok := init_join_filter(jb, jc)
+	filter, filter_ok := init_join_filter(jb, jc, t)
 	if !filter_ok {
 		emit_unmatched_outer(
 			is_left,
@@ -1001,6 +1006,161 @@ resolve_join_tables :: proc(
 	return true
 }
 
+// order_inner_joins sorts an all-INNER join chain's arms by ascending
+// table row count (FROM stays first — only JOIN arms move), so small
+// drivers build first and the probe meets small outers. Exact counts via
+// tree_count_rows (cached or single walk each). Any non-INNER arm,
+// non-table source, or count failure keeps written order (fail-closed:
+// reordering is plan choice only). Stable on ties (deterministic), and a
+// no-op when already ordered.
+@(private = "file")
+order_inner_joins :: proc(
+	t: ^btree.Tree,
+	stmt: parser.Select_Stmt,
+	cache: ^schema.Table_Cache = nil,
+) -> (
+	ordered: []parser.Join_Clause,
+	ok: bool,
+) {
+	if len(stmt.joins) < 2 {
+		return nil, false
+	}
+
+	from_names := make([]string, 2, context.temp_allocator)
+	if from_tbl, is_table := stmt.from.(string); is_table {
+		from_names[0] = from_tbl
+	}
+
+	from_names[1] = stmt.from_alias
+	counts := make([]int, len(stmt.joins), context.temp_allocator)
+	for jc, i in stmt.joins {
+		if jc.join_type != .INNER {
+			return nil, false
+		}
+
+		name, is_table := jc.source.(string)
+		if !is_table {
+			return nil, false
+		}
+
+		alias := jc.alias
+		if !arm_orderable(from_names, name, alias, jc) {
+			return nil, false
+		}
+
+		info, found := schema.find_table_cached(t, name, cache)
+		if !found {
+			return nil, false
+		}
+
+		tree := btree.init(t.pager, info.root_page)
+		n, count_err := btree.tree_count_rows(&tree)
+		if count_err != .None {
+			return nil, false
+		}
+		counts[i] = n
+	}
+
+	perm := make([]int, len(stmt.joins), context.temp_allocator)
+	for i in 0 ..< len(perm) {
+		perm[i] = i
+	}
+	for i in 1 ..< len(perm) {
+		j := i
+		for j > 0 && counts[perm[j]] < counts[perm[j - 1]] {
+			perm[j], perm[j - 1] = perm[j - 1], perm[j]
+			j -= 1
+		}
+	}
+
+	moved := false
+	for p, i in perm {
+		if p != i {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		return nil, false
+	}
+
+	ordered = make([]parser.Join_Clause, len(stmt.joins), context.temp_allocator)
+	for p, i in perm {
+		ordered[i] = stmt.joins[p]
+	}
+	return ordered, true
+}
+
+// arm_orderable reports whether an INNER arm may move anywhere among
+// reordered arms: every ON column reference must name FROM or the arm's
+// own table/alias, so pairwise evaluation never reads a table not yet in
+// the pair (out-of-range reads fail closed to "no match" — reordering
+// past an unjoined table would silently drop matches). Bare columns and
+// non-COND structure veto (unprovable statically); CROSS (no ON) always
+// qualifies. Operators don't matter here, only references.
+@(private = "file")
+arm_orderable :: proc(
+	from_names: []string,
+	arm_table: string,
+	arm_alias: string,
+	jc: parser.Join_Clause,
+) -> bool {
+	on_cl, has_on := jc.on_clause.?
+	if !has_on {
+		return true
+	}
+	if on_cl.root == nil {
+		return false
+	}
+
+	nodes: []^parser.Where_Node
+	single := make([]^parser.Where_Node, 1, context.temp_allocator)
+	if on_cl.root.kind == .COND {
+		single[0] = on_cl.root
+		nodes = single
+	} else if on_cl.root.kind == .AND {
+		multi := make([dynamic]^parser.Where_Node, 0, 4, context.temp_allocator)
+		for child in on_cl.root.children {
+			if child.kind != .COND {
+				return false
+			}
+			append(&multi, child)
+		}
+		nodes = multi[:]
+	} else {
+		return false
+	}
+
+	known := make(map[string]bool, 4, context.temp_allocator)
+	for n in from_names {
+		if n != "" {
+			known[n] = true
+		}
+	}
+	if arm_table != "" {
+		known[arm_table] = true
+	}
+	if arm_alias != "" {
+		known[arm_alias] = true
+	}
+	for node in nodes {
+		sides := make([]string, 2, context.temp_allocator)
+		sides[0] = node.cond.column
+		rhs_str, is_col := node.cond.rhs.(string)
+		if !is_col {
+			continue
+		}
+
+		sides[1] = rhs_str
+		for s in sides {
+			qual, _, has_qual := split_qualifier(s)
+			if !has_qual || !known[qual] {
+				return false
+			}
+		}
+	}
+	return true
+}
 // assemble_combined_cols lays every table's columns into one array at their
 // range offsets. Returns the array and the total column count.
 @(private = "file")
@@ -1101,7 +1261,11 @@ build_join_result :: proc(
 	table_count := 1 + len(stmt.joins)
 	table_ctxs := make([]Table_Context, table_count, context.temp_allocator)
 	table_ranges := make([]Table_Col_Range, table_count, context.temp_allocator)
-	if !resolve_join_tables(t, stmt, table_ctxs, table_ranges, cache) {
+	ordered_stmt := stmt
+	if ordered, reordered := order_inner_joins(t, stmt, cache); reordered {
+		ordered_stmt.joins = ordered
+	}
+	if !resolve_join_tables(t, ordered_stmt, table_ctxs, table_ranges, cache) {
 		return {}
 	}
 
@@ -1123,7 +1287,7 @@ build_join_result :: proc(
 		resolver = build_column_resolver(combined_cols, table_ranges),
 	}
 
-	jb.rows = run_join_chain(t, stmt, &jb, rows, join_filters, cache)
+	jb.rows = run_join_chain(t, ordered_stmt, &jb, rows, join_filters, cache)
 	jb.total_cols = total_cols
 	jb.ok = true
 	return jb
