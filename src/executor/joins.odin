@@ -304,14 +304,17 @@ resolve_join_source :: proc(
 	return false
 }
 
-// PROBE_MAX_OUTER_ROWS caps probe-first routing: per-row index lookups
-// beat hash only for small outers (crossover matrix, 30k inner at 10x
-// fan-out: probe wins 0.55x/0.66x/0.86x at 100/256/512 outer rows, loses
-// 1.26x/4.25x at 1k/10k). Larger outers go straight to the materializing
-// paths. Both orders are row-identical by construction (probe verifies
-// every pair), so this is plan choice only. Follow-up: fit a cost model
-// with NDV selectivity instead of a flat cap.
-PROBE_MAX_OUTER_ROWS :: 256
+// PROBE_MAX_OUTER_ROWS caps probe-first routing by driver size, and
+// PROBE_MAX_EST_MATCHES by expected output: per-row index lookups beat
+// hash only for small outers with few matches (fit matrix, 30k inner:
+// probe wins to 512 outer at low fan-out, loses past 1k outer or past
+// ~6k matches at any size; misses cost per outer regardless). matches
+// estimate outer*inner/ndv when NDV is known, unknown counts as small
+// (today's behavior). Both orders are row-identical by construction
+// (probe verifies every pair), so this is plan choice only. The outer
+// cap also bounds per-row temp growth on huge drivers.
+PROBE_MAX_OUTER_ROWS  :: 512
+PROBE_MAX_EST_MATCHES :: 6000
 
 // execute_single_join runs one JOIN clause: tries the index nested-loop
 // probe first for small outers (no inner materialization), otherwise
@@ -328,7 +331,7 @@ execute_single_join :: proc(
 	cache: ^schema.Table_Cache = nil,
 ) -> []Row_Entry {
 	new_rows := make([dynamic]Row_Entry, context.temp_allocator)
-	if len(rows) <= PROBE_MAX_OUTER_ROWS && try_index_nlj(jb, jc, t, info_idx, rows, &new_rows) {
+	if try_index_nlj(jb, jc, t, info_idx, rows, &new_rows) {
 		return new_rows[:]
 	}
 
@@ -397,6 +400,10 @@ try_index_nlj :: proc(
 	}
 
 	defer delete(probe.outer_idx)
+	inner_tree := &jb.ctxs[info_idx].info.tree
+	if !probe_cost_ok(inner_tree, probe.def, len(rows)) {
+		return false
+	}
 	// Strict key-type gate over every outer key up front: a mid-loop
 	// mismatch could not fall back (rows already emitted), so any
 	// heterogeneous-or-foreign key declines the whole probe.
@@ -417,7 +424,6 @@ try_index_nlj :: proc(
 		return false
 	}
 
-	inner_tree := &jb.ctxs[info_idx].info.tree
 	idx_tree := btree.init(inner_tree.pager, probe.def.root)
 	for outer_row in rows {
 		if probe_row_has_null(outer_row, probe.outer_idx[:]) {
@@ -454,6 +460,31 @@ try_index_nlj :: proc(
 		}
 	}
 	return true
+}
+
+// probe_cost_ok applies the fitted routing rule: probe only for small
+// drivers with few expected matches. est_matches = outer*inner/ndv when
+// NDV is known; unknown NDV skips the matches test (today's behavior —
+// the outer cap alone decides). Count errors fail open (the probe loop
+// fails closed on unreadable pages, so no correctness depends on this).
+@(private = "file")
+probe_cost_ok :: proc(inner_tree: ^btree.Tree, def: types.Index_Def, outer: int) -> bool {
+	if outer > PROBE_MAX_OUTER_ROWS {
+		return false
+	}
+
+	ndv, ndv_ok := btree.index_ndv_get(inner_tree.pager, def.root)
+	if !ndv_ok {
+		return true
+	}
+
+	inner_count, count_err := btree.tree_count_rows(inner_tree)
+	if count_err != .None {
+		return true
+	}
+
+	est := u64(outer) * u64(inner_count) / u64(max(ndv, 1))
+	return est <= PROBE_MAX_EST_MATCHES
 }
 
 // Join_Key_Pair is one equi-conjunct oriented outer→inner: the absolute
