@@ -1846,3 +1846,34 @@ test_join_order_star_schema :: proc(t: ^testing.T) {
 		"star schema reorders with identical rows",
 	)
 }
+
+// Equality-split pin (widen-vs-coerce ruling A): WHERE filters compare
+// numerics across classes but JOIN verification is strict per-class.
+// INTEGER 1 matches REAL 1.0 in WHERE, never joins it. Both halves are
+// deliberate — changing either side reopens the ruling.
+@(test)
+test_equality_split_where_vs_join :: proc(t: ^testing.T) {
+	d := setup_db(t, "eqsplit")
+	defer teardown_db(d, "eqsplit")
+
+	run_db_setup(
+		t,
+		d,
+		{
+			"CREATE TABLE t (a INT, b TEXT);",
+			"INSERT INTO t VALUES (1, 'x'), (2, 'y');",
+			"CREATE TABLE u (a REAL, b TEXT);",
+			"INSERT INTO u VALUES (1.0, 'p'), (2.5, 'q');",
+		},
+	)
+	check_col(
+		t,
+		d,
+		"SELECT b FROM t WHERE a = 1.0 ORDER BY b;",
+		[]string{"x"},
+		"where cross-numeric matches",
+	)
+	q := db.query(d, "SELECT t.b FROM t JOIN u ON t.a = u.a ORDER BY t.b;")
+	testing.expect(t, q.ok, "cross-type join succeeds")
+	testing.expect_value(t, len(q.rows), 0)
+}

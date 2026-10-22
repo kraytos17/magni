@@ -166,6 +166,15 @@ values_delete :: proc(values: []Value, allocator := context.allocator) {
 
 // value_compare reports equality with type tags: INTEGER 1, REAL 1.0, and
 // TEXT "1" never compare equal; NULL equals only NULL.
+//
+// Equality-semantics map (widen-vs-coerce):
+//   - strict (here): join verification, hash/dedup keys, index probes.
+//     Cross-class pairs never match, so the probe's type gate mirrors
+//     this exactly.
+//   - cross-numeric ordering (aggregates.compare_values): WHERE filters,
+//     IN membership, ORDER BY placement. INTEGER 1 equals REAL 1.0 there.
+//   - TEXT/BLOB split: strict here, interchangeable fallthrough in
+//     compare_values. Deliberate on both sides.
 value_compare :: proc(a, b: Value) -> bool {
 	#partial switch va in a {
 	case Null:

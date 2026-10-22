@@ -203,15 +203,18 @@ cond_blob_rhs :: proc(cond: parser.Condition) -> ([]u8, bool) {
 // index_use_of_cond classifies one raw COND against the indexed column of
 // the given type. Negated, column-comparison (rhs is a column ref, not a
 // Value), NULL and cross-class literals all fall through (same result via
-// the full scan, one code path). IN over a literal list routes on members
-// of the index's type: other members provably never match (compare_values
-// ranks storage classes apart) and NULL members never match
-// (membership_test guards the row side), so the member lookups are
-// complete. Subquery IN stays on the scan path (its membership materializes
-// per resolve, not per lookup). LIKE routes TEXT indexes only — prefixes
-// are meaningless on integers. Ordered comparisons route as open-ended
-// Range plans (fetch-only — keys unknown, like Prefix); != stays on the
-// scan path (a complement, not a contiguous run).
+// the full scan, one code path). The cross-class decline is deliberate
+// (widen-vs-coerce): verification is strict per-class, so a
+// widened plan would find rows the verifier rejects. IN over a literal
+// list routes on members of the index's type: other members provably
+// never match (compare_values ranks storage classes apart) and NULL
+// members never match (membership_test guards the row side), so the
+// member lookups are complete. Subquery IN stays on the scan path (its
+// membership materializes per resolve, not per lookup). LIKE routes TEXT
+// indexes only — prefixes are meaningless on integers. Ordered
+// comparisons route as open-ended Range plans (fetch-only — keys unknown,
+// like Prefix); != stays on the scan path (a complement, not a
+// contiguous run).
 @(private)
 index_use_of_cond :: proc(
 	index_root: u32,
